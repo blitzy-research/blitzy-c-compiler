@@ -35,25 +35,27 @@
 // Only the submodules whose files exist in the checkout are declared. A `mod` declaration is
 // not a plan — it is a compile-time assertion that the file is there, so declaring a module
 // whose file has not been written yet makes this file, and every file that reaches it, fail to
-// compile with `E0583: file not found for module`. Six such declarations would be six
+// compile with `E0583: file not found for module`. Three such declarations would be three
 // compilation errors in a checkpoint that claims to compile.
 //
-// The remaining submodules the harness will grow — `classify`, `compare`, `findings`,
-// `flagprobe`, `report` and `ubaudit` — are therefore each declared by the change that adds the
-// corresponding file, in the same commit, so the declaration and the file it names can never
-// disagree. The module documentation above describes the completed design; this list describes
-// what is present.
+// The remaining submodules the harness will grow — `classify`, `findings` and `report` — are
+// therefore each declared by the change that adds the corresponding file, in the same commit, so
+// the declaration and the file it names can never disagree. The module documentation above
+// describes the completed design; this list describes what is present.
 //
 // Declaring them here and satisfying the declarations by creating `Cargo.toml` and
 // `tests/conformance.rs` is not an option: the plan places `Cargo.toml` in the read-only set
 // and states that the layout is designed so that no manifest change is required at all, which
 // is how the "do not modify the compiler's source code" constraint is honoured without
 // qualification. `tests/conformance.rs` is likewise the deliverable of a later boundary.
+pub mod compare;
 pub mod compile;
 pub mod env;
 pub mod execute;
+pub mod flagprobe;
 pub mod manifest;
 pub mod sandbox;
+pub mod ubaudit;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
