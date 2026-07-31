@@ -38,18 +38,20 @@
 // compile with `E0583: file not found for module`. Six such declarations would be six
 // compilation errors in a checkpoint that claims to compile.
 //
-// The remaining submodules the harness will grow — `classify`, `compare`, `compile`, `execute`,
-// `findings`, `flagprobe`, `report` and `ubaudit` — are therefore each declared by the change
-// that adds the corresponding file, in the same commit, so the declaration and the file it names
-// can never disagree. The module documentation above describes the completed design; this list
-// describes what is present.
+// The remaining submodules the harness will grow — `classify`, `compare`, `findings`,
+// `flagprobe`, `report` and `ubaudit` — are therefore each declared by the change that adds the
+// corresponding file, in the same commit, so the declaration and the file it names can never
+// disagree. The module documentation above describes the completed design; this list describes
+// what is present.
 //
 // Declaring them here and satisfying the declarations by creating `Cargo.toml` and
 // `tests/conformance.rs` is not an option: the plan places `Cargo.toml` in the read-only set
 // and states that the layout is designed so that no manifest change is required at all, which
 // is how the "do not modify the compiler's source code" constraint is honoured without
 // qualification. `tests/conformance.rs` is likewise the deliverable of a later boundary.
+pub mod compile;
 pub mod env;
+pub mod execute;
 pub mod manifest;
 pub mod sandbox;
 
