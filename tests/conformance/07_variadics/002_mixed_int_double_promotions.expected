@@ -1,12 +1,6 @@
-# Expectation record for 07_variadics/002_mixed_int_double_promotions.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 002_mixed_int_double_promotions
 area               = 07_variadics
-description        = Default argument promotions for float and the narrow integer types
+description        = Default argument promotions across the variadic boundary: float to double and narrow integers to int, folded and volatile-runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,14 +12,87 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Arguments are supplied in the unpromoted types and retrieved in the promoted ones, so
-va_arg always names the type actually present in the list: naming the type written at the
-call site would be undefined behaviour, and a divergence on an undefined program would
-prove nothing about either compiler.  No list is read past the argument count and each is
-ended exactly once.  Every floating literal is a dyadic rational exactly representable in
-IEEE binary32 and binary64, so the printed text is exact.  <stdarg.h> is included because a
-variadic function cannot be written without it and it is in both compilers' freestanding
-sets; printf is still hand-declared, because bcc ships no stdio.h.
+Header exception: this program includes <stdarg.h>. That is the one sanctioned header
+exception for area 07, because variadic functions cannot be written at all without
+va_list, va_start, va_arg, va_end and va_copy. stdarg.h is in bcc's own bundled
+freestanding set (docs/technical-specifications.md line 208) and is also a freestanding
+header supplied by the reference compiler, so it compiles identically under both oracles
+and the program remains a single-file reproducer. No other header is included. stdio.h
+is not included because bcc ships none, and stdbool.h is not included because _Bool is a
+C11 keyword written directly. printf is hand-declared.
+Promoted retrieval types, the central correctness rule of this program: an argument of
+type float undergoes the default argument promotions when passed through an ellipsis and
+arrives as double, so it is retrieved with va_arg(ap, double) and never with
+va_arg(ap, float). Arguments of type signed char, unsigned char, short, unsigned short
+and _Bool are promoted to int, so they are retrieved with va_arg(ap, int) and never with
+their unpromoted types. Retrieving a variadic argument with a type other than its
+promoted type is undefined behaviour and would invalidate both differential oracles,
+because a divergence between two compilers on an undefined program proves nothing about
+either. Every narrow-integer value is produced by an explicit cast, and the cast sits in a
+different place in each variant: at the call site in the folded variant, and in the
+initializer of the volatile source object in the runtime variant, from which the value
+reaches the call through a same-type assignment. No implicit narrowing occurs anywhere.
+Variadic discipline: va_start names count in sum_doubles and sum_promoted_ints, and
+names n_flt in mixed_args, in each case the last named parameter. Each helper retrieves
+exactly as many arguments as its call site supplies, so no va_list is read past its
+arguments. Each va_start has exactly one matching va_end in the same function. No
+va_copy and no va_list forwarding appear here.
+Arithmetic: no signed overflow is possible. The narrow-integer totals are 57196 for the
+folded variant and 32895 for the runtime one, both far inside the 32-bit int range. The
+folded variant uses interior values, while the runtime operands are deliberately the exact
+minimum and maximum values of their narrow types - -128, 255, -32768 and 65535 - which is
+where a sign- or width-extension defect in the promotion path would show, and every one of
+them is representable in int. Floating addition is on
+dyadic rationals only. There is no shift, no division, no aliasing violation, no read of
+uninitialized storage, no object modified twice between sequence points, and no
+dependence on padding or on the addresses of unrelated objects.
+Evaluation order: main stores each returning helper's result in a named temporary before
+printing it, so no call has more than one side-effecting argument. In the runtime
+variants each volatile object is read by a single simple assignment into a plain local of
+the same type before the call, so the arguments in the call expression are pure reads of
+plain locals and the unspecified argument-evaluation order is unobservable. Keeping the
+volatile object and the plain local at the same type means the assignment performs no
+conversion, and the promotion happens at the call, which is exactly what is under test.
+Warning gate: no deviation is claimed and no ub_audit_flags key is present, which is the
+way this format spells "the full default gate applies". That is not a convenience: the
+program was put through the whole gate, -Wall -Wextra -pedantic -Wconversion
+-Wsign-conversion -Wshadow -Werror, at every optimization level of its sweep and with the
+native driver and all three cross drivers, and it produced no diagnostic at all. The
+sanitizer gate, -fsanitize=undefined,address -fno-sanitize-recover=all, was also built and
+run, and it terminated cleanly with an empty diagnostic stream and the stdout recorded
+below. Since a deviation is expressed only as a removal from that fixed gate, and this
+program needs no removal, stating the gate here would assert a narrowing that was never
+made.
+END
+impl_defined_notes <<END
+Why the unsigned narrow types promote to int rather than unsigned int: int is 32 bits on
+all four targets. That width is measured with each target's own reference driver rather
+than assumed, because the repository's per-target table records pointer, long, ELF class
+and endianness but not the width of int. With a 32-bit int the whole value range of
+unsigned char (0 to 255) and of unsigned short (0 to 65535) is representable in int, so
+the integer promotions convert both to int and va_arg(ap, int) is the correct retrieval
+type on every target. Using va_arg(ap, unsigned int) would be wrong on all four.
+Width normalization: the types long and unsigned long are never used, because sizeof(long)
+and sizeof(void *) are 4 on i686 and 8 on x86-64, AArch64 and RISC-V 64 - the widths the
+per-target table in docs/technical-specifications.md lines 457 to 462 records, confirmed
+here by measurement. Only int, signed char, unsigned char, short, unsigned short, _Bool,
+float and double appear, and the printf conversions are limited to %s, %d and %.6f. No
+address, no pointer value and no sizeof result is printed.
+Plain char signedness: plain char is signed on x86-64 and i686 and unsigned on AArch64
+and RISC-V 64. This program therefore never uses bare char as a value type. It uses
+explicit signed char and unsigned char, so the measured difference cannot affect the
+output. Character pointers appear only as const char * tag strings.
+Floating determinism: every floating literal in the program is a dyadic rational exactly
+representable in IEEE binary32 and in binary64 - the argument values 1.5, 2.25, 4.125,
+0.25, 8.5, 3.0625, 1.25, 2.5 and 0.75, together with the accumulator seed 0.0 - so every
+sum is computed exactly and no rounding difference can arise between backends. All
+floating output is printed at fixed precision with %.6f, so the rendered text is
+byte-identical on all four backends.
+Cross-backend comparability: integer and double variadic argument passing was measured to
+produce byte-identical results on all four targets at all three optimization levels, so
+no target is restricted and all three oracles are enabled. This record therefore narrows
+nothing, and these notes are recorded as the reasoning behind that, not as the reason for
+an exclusion.
 END
 expected_stdout    <<END
 fflt[0]=1.500000

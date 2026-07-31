@@ -1,12 +1,6 @@
-# Expectation record for 08_gcc_extensions/003_computed_goto.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 003_computed_goto
 area               = 08_gcc_extensions
-description        = Indirect jump through an array of label addresses
+description        = GCC computed goto through arrays of label addresses, folded constant index and volatile runtime index
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -19,21 +13,64 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
 ub_notes           <<END
-Every jump target is the address of a label in the same function, taken from a fully
-initialized array that is only ever indexed inside its bounds, so no jump is made through
-an indeterminate target.  No jump enters the scope of a variably-modified type, because no
-variable-length array is declared, and no jump bypasses an initialisation that is later
-read.  Every dispatch loop terminates and every accumulator stays inside the range of int.
-No label address is printed: distinctness is shown by comparison alone.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
+gcc 13.3.0.
+
+UB-FREEDOM ARGUMENT. Every value is a small int; the largest computation is 10 * 3, far
+from INT_MIN and INT_MAX, so there is no signed overflow. No shift operator is used. No
+aliasing violation exists, since every object is accessed only through its own declared
+type. Every object is initialized before it is read. No object is modified twice between
+sequence points. Every printf call receives at most one side-effecting argument. Nothing
+depends on padding bytes or on the addresses of unrelated objects.
+
+Every index used in a goto * expression is provably in range: the folded chain uses the
+literal indices 0, 1 and 2 into a three-element table; the runtime chain sets the
+volatile index to exactly 0, then 1, then 2 into a three-element table; and the loop
+dispatch selects 0 or 1 into a two-element table via a conditional expression that can
+yield no other value. Each table is initialized with the address of a label that is
+defined in the same function, so every jump target is valid.
+
+Every path terminates. The folded chain is the straight line f_a to f_b to f_end. The
+runtime chain is r_a to r_b to r_end. The loop is bounded: lp_i starts at 0 and is
+incremented exactly once per pass, and the dispatch selects lp_exit as soon as lp_i
+reaches 5, so it runs exactly five iterations. No label address is ever dereferenced as
+data and none is printed.
 END
 impl_defined_notes <<END
-The warning gate drops -pedantic for this program.  The subject under test is a GCC
-extension, which is by definition not standard C, and -pedantic exists precisely to reject
-such constructs: with it in force the program could not be compiled at all and the feature
-would go untested, which constraint C3 forbids.  Every other member of the gate is
-retained, including -Werror, so no other class of defect in this program is downgraded.
+Nothing implementation-defined is observed, so no target restriction is needed and all
+four targets are compared. The label-address arrays are declared static void *const
+INSIDE main rather than at file scope, because &&label has no meaning outside the
+function that owns the label and so cannot appear in a file-scope initializer. Placing
+them in main also avoids the documented GCC hazard in which a static label-address array
+inside an inlinable function can be initialized from a different clone's labels: main is
+never inlined or cloned.
+
+Label addresses are compared for distinctness only and the result is printed as the
+boolean 1; no address or pointer value is ever printed, because addresses differ per
+build and per target and would destroy byte-exact comparison. Comparing two label
+addresses for inequality is well defined and target-independent.
+
+Only int values are printed, so the measured width differences cannot be reached:
+sizeof(long) and sizeof(void *) are 4 on i686 and 8 on x86_64, aarch64 and riscv64.
+Plain char is never used, so the measured char-signedness difference is not reached
+either: char is signed on x86_64 and i686 but unsigned on aarch64 and riscv64.
+
+The runtime chain and the loop are indexed by volatile ints so that the optimizer cannot
+resolve the dispatch statically and must emit a genuine indirect branch at -O1 and -O2,
+while the folded chain uses literal indices the optimizer may lower to direct jumps. That
+contrast is the point of the program: this is the two-variant rule applied to control
+flow. The indirect-branch path is also the construct most likely to interact with the
+indirect-branch hardening risk recorded as Partially mitigated in the project guide risk
+register; that risk is the motivation for this program and is NOT an expected-divergence
+basis, so this program carries no marker.
+
+Output is identical on all four targets at all three optimization levels.
 END
 expected_stdout    <<END
 cg_folded_acc=30

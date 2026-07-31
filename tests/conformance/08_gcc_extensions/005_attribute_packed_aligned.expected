@@ -1,12 +1,6 @@
-# Expectation record for 08_gcc_extensions/005_attribute_packed_aligned.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 005_attribute_packed_aligned
 area               = 08_gcc_extensions
-description        = Packing and alignment attributes and their observable effect on layout
+description        = GCC __attribute__((packed)) and __attribute__((aligned)) and their observable effect on aggregate size, alignment and member offsets
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -17,12 +11,81 @@ expect_exit        = 0
 oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
+ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
 ub_notes           <<END
-Each aggregate member is written and read back through the same member, so no padding byte
-is ever observed and no type punning is relied upon.  Offsets are obtained with the offset
-builtin rather than by pointer subtraction across subobjects.  Every value stored is inside
-the range of its member's type, and no address is printed.  No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
+gcc 13.3.0.
+
+UB-FREEDOM ARGUMENT. There is no signed overflow: the largest magnitude used is
+-2000000000, well inside the int range, and it is never negated, doubled or otherwise
+grown. No shift operator is used. There is no aliasing violation, because every member is
+read and written only through its own declared type. Every member of every object is
+assigned before it is read, and the two objects with static storage duration are
+zero-initialized before their explicit assignments in any case. No one-past-end pointer is
+formed. No object is modified twice between sequence points. Every printf call receives at
+most one side-effecting argument.
+
+NO PADDING BYTE IS EVER READ. Reading padding is unspecified, so the program inspects only
+members it has written and never examines the bytes between them. It also never depends on
+the addresses of unrelated objects.
+
+MEMBER OFFSETS COME EXCLUSIVELY FROM __builtin_offsetof, which is a compile-time constant
+and takes no address at run time. Measured with gcc 13.3.0: taking the address of a packed
+member produces "error: taking address of packed member of 'struct p' may result in an
+unaligned pointer value [-Werror=address-of-packed-member]", because
+-Waddress-of-packed-member is on by default and -Werror makes it fatal. The program
+therefore never forms a pointer to a packed member and never computes an offset by
+subtracting member addresses. __builtin_offsetof is also required because the corpus
+includes no header, so offsetof from stddef.h is unavailable.
+
+Every character-sized member is explicitly signed char, never plain char, and the
+round-trip prints it as int. char was measured as signed on x86_64 and i686 but unsigned
+on aarch64 and riscv64, so the negative value -7 would print as 249 on a target where
+plain char is unsigned. The explicit signedness avoids that trap.
+END
+impl_defined_notes <<END
+Nothing target-restricting is observed, so all four targets are compared. The printed
+layout values are identical on x86_64, i686, aarch64 and riscv64 because on all four int
+is 4 bytes with 4-byte alignment, short is 2 with 2, and signed char is 1 with 1:
+
+  plain_s   { signed char; int; short }                     a@0, 3 bytes padding, b@4,
+            c@8, natural size 10 rounded up to the 4-byte alignment => size 12, align 4
+  packed_s  packed                                          no padding at all => a@0, b@1,
+            c@5, size 7, align 1. Packing is alignment-independent BY CONSTRUCTION, so
+            this layout is identical on every target.
+  aligned_s { signed char; int } aligned(16)                a@0, 3 bytes padding, b@4,
+            natural size 8 rounded up to 16 => size 16, align 16
+  both_s    packed + aligned(8)                             a@0, b@1, c@5, packed size 7
+            rounded up to 8 => size 8, align 8
+  attr_packed_saves = 12 - 7 = 5
+
+No address is ever printed. The alignment claim is expressed as a RESIDUE,
+addr % 16 == 0, printed as the boolean 1, because an address differs per build and per
+target and would destroy byte-exact comparison. The AAP determinism rule permits pointer
+facts only as differences, comparisons and alignment residues.
+
+The pointer cast is unsigned long, NOT unsigned long long. unsigned long is exactly
+pointer-width on all four targets: 4 bytes under ILP32 on i686 and 8 bytes under LP64 on
+x86_64, aarch64 and riscv64. This removes any possibility of a pointer-size cast
+diagnostic on i686, which could not be compiled in the authoring sandbox.
+
+Every sizeof and _Alignof result is cast to unsigned before being passed to %u, because
+size_t width differs across targets and an uncast size_t would be a genuine format
+mismatch on LP64 as well as a -Wformat error under -Werror. All the values are small, so
+no cast truncates anything.
+
+Both packed and aligned are documented as supported: the supported attribute set at
+docs/technical-specifications.md line 506 is packed, aligned, section, unused, deprecated,
+visibility, format. This program therefore tests documented functionality and carries NO
+expected-divergence marker.
+
+Output is identical on all four targets at all three optimization levels.
 END
 expected_stdout    <<END
 attr_plain_size=12

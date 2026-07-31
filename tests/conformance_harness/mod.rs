@@ -35,14 +35,14 @@
 // Only the submodules whose files exist in the checkout are declared. A `mod` declaration is
 // not a plan — it is a compile-time assertion that the file is there, so declaring a module
 // whose file has not been written yet makes this file, and every file that reaches it, fail to
-// compile with `E0583: file not found for module`. Nine such declarations would be nine
+// compile with `E0583: file not found for module`. Six such declarations would be six
 // compilation errors in a checkpoint that claims to compile.
 //
 // The remaining submodules the harness will grow — `classify`, `compare`, `compile`, `execute`,
-// `findings`, `flagprobe`, `report`, `sandbox` and `ubaudit` — are therefore each declared by
-// the change that adds the corresponding file, in the same commit, so the declaration and the
-// file it names can never disagree. The module documentation above describes the completed
-// design; this list describes what is present.
+// `findings`, `flagprobe`, `report` and `ubaudit` — are therefore each declared by the change
+// that adds the corresponding file, in the same commit, so the declaration and the file it names
+// can never disagree. The module documentation above describes the completed design; this list
+// describes what is present.
 //
 // Declaring them here and satisfying the declarations by creating `Cargo.toml` and
 // `tests/conformance.rs` is not an option: the plan places `Cargo.toml` in the read-only set
@@ -51,6 +51,7 @@
 // qualification. `tests/conformance.rs` is likewise the deliverable of a later boundary.
 pub mod env;
 pub mod manifest;
+pub mod sandbox;
 
 use std::fmt;
 use std::path::{Path, PathBuf};

@@ -1,12 +1,6 @@
-# Expectation record for 11_literals_and_strings/004_format_specifier_conformance.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 004_format_specifier_conformance
 area               = 11_literals_and_strings
-description        = Width-normalized format specifiers producing identical output on every target
+description        = Width-normalized printf conversions, flags, field widths and precisions producing identical output on every target
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,12 +12,67 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-No conversion whose argument width varies by target is used: no long length modifier, no
-size_t modifier, no pointer conversion and no long double modifier appears.  Every integer
-argument is an int, an unsigned int, a long long or an unsigned long long, and each matches
-the conversion it is passed to after the default argument promotions, so no argument is of
-the wrong type.  Every floating value is exactly representable.  No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Free of undefined and unspecified behaviour by construction:
+- Every conversion specification exactly matches the type of its argument after the
+  default argument promotions. Integer arguments are int, unsigned int, long long or
+  unsigned long long, with the matching conversion; the short and signed char
+  arguments are promoted to int by the variadic call and converted back by their
+  length modifiers, which is exactly what those modifiers are defined to do; the float
+  argument is cast to double explicitly, making the promotion visible rather than
+  implicit.
+- No signed integer overflow. Every value is a literal or an initialized object whose
+  value is representable in its declared type: short holds -300, signed char holds
+  -100, long long holds -9007199254740993, unsigned long long holds the 64-bit
+  maximum, unsigned int holds 4000000000 and 4294967295.
+- No shift operations of any kind, so no shift count can be out of range.
+- No array indexing and no pointer arithmetic. The only pointer values passed are
+  string literal addresses consumed by the string conversion, and no pointer value is
+  printed.
+- No string literal is modified; every literal is read only.
+- No aliasing violation and no uninitialized read: every object is initialized at its
+  declaration, and the volatile objects have static initializers.
+- No object is modified twice between sequence points; no argument to any call has a
+  side effect; nothing depends on padding bytes or on the addresses of unrelated
+  objects.
+- Floating-point values are printed at fixed precision with margin, using only finite
+  values, with no reliance on any default precision, so no rounding difference can be
+  observed. No not-a-number and no infinity is produced or assumed.
+- Verified empirically: the default strict warning gate (-Wall -Wextra -pedantic
+  -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero diagnostics, which
+  includes the format-versus-argument checking that -Wall enables, and
+  -fsanitize=undefined,address -fno-sanitize-recover=all runs to completion with no
+  output and exit status 0.
+END
+impl_defined_notes <<END
+Every format specification in this program is width-normalized, and this is what makes
+the output identical on all four targets. The measured target differences are handled
+by construction, never by a marker:
+
+1. sizeof(long) and sizeof(void *) are 4 on i686 and 8 on x86_64, aarch64 and
+   riscv64. No long, no size_t and no pointer is printed, and no long length modifier,
+   size_t length modifier or pointer conversion is used anywhere. The only sizeof
+   results printed are sizeof(int) and sizeof(long long), which are 4 and 8 on all
+   four targets, and each is cast to int before printing.
+2. long double has three different representations across the four targets (measured
+   16, 12, 16 and 16 bytes, x87 80-bit versus IEEE binary128). No long double value is
+   produced and no long double length modifier is used. That type is covered instead
+   by 13_floating_point/004_long_double_target_restricted, which is the only program
+   permitted to restrict a comparison on its account.
+3. Plain char signedness is implementation-defined (signed on x86_64 and i686,
+   unsigned on aarch64 and riscv64). The only char datum printed is the literal 'Q',
+   whose value 81 is positive on every target.
+4. unsigned int is 32-bit on all four targets, so the unsigned, octal and hexadecimal
+   lines, including the all-ones runtime values, are invariant. short is 2 bytes and
+   signed char is explicitly signed on all four targets, so the short and signed char
+   lines are invariant.
+5. All four targets are little-endian, and in any case no byte-order-sensitive value
+   is printed.
+
+Escape handling, hexadecimal and octal formatting and character-literal values were
+measured byte-identical across all four targets at every optimization level, and the
+floating-point results were measured byte-identical across all twelve target and
+optimization configurations, so this program is fully cross-comparable and all three
+oracles are enabled.
 END
 expected_stdout    <<END
 d=-42 i=-42

@@ -1,12 +1,6 @@
-# Expectation record for 10_declarations_and_types/005_struct_copy_and_return.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 005_struct_copy_and_return
 area               = 10_declarations_and_types
-description        = By-value aggregate copy, parameter passing and return across two sizes
+description        = By-value aggregate copy, parameter passing and return on both sides of the by-register and by-memory threshold, folded and runtime variants, every member read back individually
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,15 +12,50 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every member is assigned before it is read, so no indeterminate value and no padding byte
-is ever observed; aggregates are compared member by member rather than by object
-representation.  All member values stay inside the range of their types.  How either
-aggregate travels is the ABI's decision, and both sizes are printed rather than assumed so
-they are compared as well.  Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Every member of every aggregate is assigned before it is read. make_small assigns both
+members of its local before returning it, and make_large assigns all eight members of its
+local before returning it, so no returned aggregate carries an indeterminate member. doubled
+receives its parameter by value, and a by-value parameter is a fully initialized copy of the
+argument, so reading and then modifying v is well defined. consume_first and consume_last
+likewise read only members of a fully initialized by-value copy. The plain assignment copy of
+sf into copy copies an object whose members were both written by make_small. All arithmetic is
+on small int values far from the int range edges, so there is no signed overflow: the largest
+intermediate value is 26. No shift is performed and no pointer arithmetic is performed. No
+object is modified twice between sequence points, and no printf call receives a side-effecting
+argument, so unspecified evaluation order cannot affect the output. There is no aliasing
+violation: every object is accessed only through an lvalue of its own declared type, and the
+two struct types are never mixed or reinterpreted. No padding byte is read or compared,
+because neither aggregate contains any padding at all -- see the implementation-defined notes.
+END
+impl_defined_notes <<END
+NO PADDING BY CONSTRUCTION. Every member of struct small2 and struct large8 is an int, so both
+aggregates are exact multiples of sizeof(int) with no internal or trailing padding on any of
+the four targets. This is deliberate rather than incidental: padding byte contents are
+unspecified by the standard, so a program that printed or compared them would generate
+divergences that say nothing about compiler correctness. No member is char, short or double
+for exactly this reason.
+
+WIDTH NORMALIZATION. Both printed sizes are of all-int aggregates: sizeof(struct small2) is
+two ints (8 bytes) and sizeof(struct large8) is eight ints (32 bytes). Both are identical on
+x86_64, i686, aarch64 and riscv64, because int is 4 bytes on all four. No sizeof of long,
+pointer, double, long long or any aggregate containing them is printed, so the measured i686
+difference (4-byte long and pointer versus 8 bytes elsewhere) cannot surface. No address or
+pointer value is printed. Plain char is not used, so the measured char signedness difference
+(signed on x86_64 and i686, unsigned on aarch64 and riscv64) is irrelevant. The only printf
+conversion specifier used in the program is %d.
+
+BOTH SIDES OF THE ABI THRESHOLD. struct small2 at 8 bytes and struct large8 at 32 bytes sit on
+opposite sides of the by-register versus by-memory threshold on x86_64, aarch64 and riscv64,
+where that threshold is 16 bytes, so on those three backends both aggregate-passing code paths
+are exercised. On i686 the two sit on the same side of it: that ABI passes every aggregate on
+the stack and returns one through a hidden pointer whatever its size, which was measured here
+rather than assumed, so both sizes travel i686's single memory path. Nothing is excluded on any
+target either way, because what the oracles compare is the member values that come back out and
+not the route they took. Every member is read back individually rather than summarized, so a
+single wrong member localizes to a single wrong field. The passthrough line is the most
+diagnostic in the program: it asserts both that the callee's mutation appeared in its return
+value and that the caller's original object was left unchanged, which a backend passing the
+aggregate by reference instead of by value would violate visibly.
 END
 expected_stdout    <<END
 small_folded=1 2

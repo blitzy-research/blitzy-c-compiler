@@ -1,12 +1,6 @@
-# Expectation record for 11_literals_and_strings/001_character_escapes.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 001_character_escapes
 area               = 11_literals_and_strings
-description        = Simple, octal and hexadecimal character escapes printed as explicit integer values
+description        = Character escape sequences: simple, octal and hexadecimal forms, read through unsigned char, folded and volatile-runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,11 +12,49 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every escape result is printed as an integer value read through unsigned char, so no
-plain-char signedness difference can be observed and no raw control byte is written to
-stdout.  Every octal and hexadecimal escape denotes a value representable in unsigned char,
-so no escape is out of range.  The source file is pure US-ASCII.  No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Free of undefined and unspecified behaviour by construction:
+- No signed integer overflow. Every printed value originates from an unsigned char
+  element (range 0..255) widened to int, or from a character constant whose value is
+  at most 127. All loop counters are int and bounded by a small array size.
+- No shift operations of any kind, so no shift count can be out of range.
+- No out-of-bounds access. Each loop runs from 0 to (sizeof array - 1) exclusive,
+  which visits exactly the non-null elements. The three runtime accesses index
+  (sizeof array - 2), the last non-null element. No one-past-end pointer is formed
+  and nothing beyond an array is read.
+- No aliasing violation. Each array is declared as unsigned char and is read only
+  through that declared type.
+- No uninitialized read. Every array has a static const initializer and idx_zero has
+  a static initializer.
+- No string literal is modified. The arrays are distinct objects initialized from
+  string literals as C11 6.7.9p14 permits, and each is additionally const-qualified.
+- No object is modified twice between sequence points; no argument to any call has a
+  side effect; nothing depends on padding bytes or on the addresses of unrelated
+  objects; no address or pointer value is printed.
+- Verified empirically: the default strict warning gate (-Wall -Wextra -pedantic
+  -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero diagnostics, and
+  -fsanitize=undefined,address -fno-sanitize-recover=all runs to completion with no
+  output and exit status 0.
+END
+impl_defined_notes <<END
+Plain char is never used to hold or print an escape value. Every character datum is
+read through unsigned char, so the measured plain-char signedness difference (plain
+char is signed on x86_64 and i686 but unsigned on aarch64 and riscv64) cannot be
+observed in this program's output. Handled by construction, not by a marker.
+
+High-valued escapes (\200, \376, \377, \x80, \xfe, \xff) appear only inside string
+literals that initialize static const unsigned char arrays, and are then indexed.
+They are never written as plain character constants, because a plain character
+constant of value 255 evaluates to -1 on the signed-char targets and to 255 on the
+unsigned-char targets. Character constants are used only for values at most 127,
+where every target agrees.
+
+Only int-typed values are printed, always with %d. No long, no size_t and no pointer
+is printed, so the measured i686 width difference (sizeof(long) and sizeof(void *)
+are 4 on i686 and 8 on the other three targets) has no effect on the output.
+
+Escape decoding, octal formatting and hexadecimal formatting were measured
+byte-identical across all four targets at every optimization level, so this program
+is fully cross-comparable and all three oracles are enabled.
 END
 expected_stdout    <<END
 simple_count=11

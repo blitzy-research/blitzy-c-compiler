@@ -1,12 +1,6 @@
-# Expectation record for 07_variadics/003_struct_and_pointer_args.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 003_struct_and_pointer_args
 area               = 07_variadics
-description        = Aggregates and pointers passed through the variadic path
+description        = Aggregates and pointers through the variadic path, spanning each target's by-register and by-memory threshold, folded and volatile-runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,14 +12,84 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Aggregates are not subject to the default argument promotions, so va_arg names exactly the
-type supplied.  Because the pointer retrieval type is pointer-to-const-int and int and
-const int are not compatible types, every pointer argument is written with an explicit cast
-to the retrieval type, so no argument of the wrong type is ever retrieved.  Only the
-pointee value is printed, never a pointer.  No list is read past its argument count and
-each is ended exactly once.  <stdarg.h> is included because a variadic function cannot be
-written without it and it is in both compilers' freestanding sets; printf is still
-hand-declared, because bcc ships no stdio.h.
+Header exception: this program includes stdarg.h, and that is the one sanctioned header
+exception for area 07, because a variadic function cannot be written at all without
+va_list, va_start, va_arg and va_end. stdarg.h belongs to bcc's own bundled freestanding
+set (docs/technical-specifications.md line 208, the row that also lists va_copy) and is a
+freestanding header the reference compiler supplies, so it resolves the same way under
+both oracles and the program stays a single-file reproducer. No other header is included;
+in particular stdio.h is not, because bcc ships none, so including it would manufacture a
+divergence caused by the test rather than by the compiler. printf is hand-declared as
+int printf(const char *, ...); and no other library function is declared at all.
+Pointer type compatibility: int * and const int * are not compatible types, and va_arg
+requires the retrieval type to be compatible with the type of the argument actually
+supplied. sum_via_pointers retrieves with va_arg(ap_pt, const int *), so every pointer
+argument is written at the call site with an explicit (const int *) cast. A bare address
+of an int object would supply an int * where a const int * is retrieved, which is
+undefined behaviour and would silently invalidate both differential oracles.
+Aggregates are not promoted: an aggregate passed through an ellipsis undergoes no default
+argument promotion, so va_arg(ap_sm, struct small), va_arg(ap_md, struct mid) and
+va_arg(ap_lg, struct large) retrieve exactly the types the caller supplied.
+Variadic discipline: va_start names count, the last named parameter, in all four helpers.
+Each helper retrieves exactly count arguments and each call site supplies exactly that
+many, so no va_list is ever read past its arguments. Each va_start has exactly one
+matching va_end in the same function. No va_copy and no va_list forwarding appear here;
+those belong to 004_va_copy_multiple_passes and 005_va_list_forwarding.
+Object lifetime and initialization: every folded struct object names every member, and
+every runtime struct object has every member assigned from volatile storage before it is
+passed, so there is no read of uninitialized storage and no missing field initializer.
+Every element of both volatile source arrays is written before any of them is read. Every
+index into the eight-element array member stays within 0 to 7. All pointed-to objects are
+locals of main whose lifetime spans the entire call, so no dangling pointer is formed.
+Arithmetic: every value and every partial sum is a small integer far inside the 32-bit int
+range - the largest printed is 3672 - so no signed overflow is possible. There is no
+shift, no division, no aliasing violation, no object modified twice between sequence
+points, and no dependence on padding bytes or on the addresses of unrelated objects.
+Evaluation order: main stores each helper's return value in a named temporary before
+printing it, so no call carries more than one side-effecting argument and the print order
+is fixed however the arguments are evaluated. In the runtime variants the volatile source
+is read into plain objects by statements that precede the call, so the arguments of each
+call expression are pure reads of plain objects and the unspecified order in which they
+are evaluated is unobservable.
+Warning gate: this program passes the full default gate - -Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror - with no diagnostic, which is why no
+ub_audit_flags key appears above. That key exists to declare a deviation, a deviation is
+modelled as a removal from the fixed gate, and a value naming the entire gate would
+deviate in nothing; omitting the key is therefore how a program that satisfies the gate in
+full records that it does. Area 07 sanctions no deviation and none is needed.
+END
+impl_defined_notes <<END
+Aggregate sizes, and why they are identical on every target: every member of every struct
+is an int, and int is 4 bytes on all four targets - measured with each target's own
+reference driver rather than assumed. sizeof(struct small) is therefore 8, sizeof(struct
+mid) is 16 and sizeof(struct large) is 32 on x86-64, i686, AArch64 and RISC-V 64 alike,
+which was measured on all four as well. No struct contains a pointer, a long, a double or
+a bitfield: the documented target table (docs/technical-specifications.md lines 457 to
+462) records a pointer and long width of 4 bytes on i686 against 8 on the other three, so
+a pointer or long member would make one declaration a different size on i686 and the
+retrieved values could no longer be compared across backends.
+Why these three sizes: they sit below, exactly at, and above the by-register versus
+by-memory boundary the four ABIs use for aggregates. On x86-64 System V
+(docs/technical-specifications.md line 546) an argument is classified INTEGER, SSE or
+MEMORY, and an aggregate small enough to occupy at most two eightbytes is passed in
+integer registers while a larger one is MEMORY class and passed on the stack, so small and
+mid travel by register and large travels by memory. On i686 cdecl (line 553) every
+argument is pushed on the stack whatever its size, which is the sharpest contrast in the
+matrix. AArch64 AAPCS64 (line 559) offers x0 to x7 and RISC-V 64 LP64D (line 565) offers
+a0 to a7, and each passes a large composite indirectly. Which value travels where is the
+ABI's decision and not this program's: only the retrieved values are compared, so a
+correct backend agrees with the other three however it routes the arguments.
+No addresses printed: the pointer group prints only the dereferenced value. No address, no
+pointer value, no sizeof result and no signedness-dependent plain char value reaches
+stdout, so nothing width-dependent or signedness-dependent can enter the golden record. The
+only printf conversions used are %s and %d, and every %s argument is an ASCII string
+literal whose bytes are identical on every target.
+Nothing here narrows coverage: all four targets, all three optimization levels and all
+three oracles are declared, and no expected-divergence marker applies, area 07 having
+none. These notes therefore record why the comparison is sound rather than an exclusion
+from it. A cross-backend difference in this program is a genuine ABI-level finding rather
+than a documented implementation-defined difference, which is exactly why the
+cross-backend oracle is enabled here.
 END
 expected_stdout    <<END
 fsmall[0]=1,2

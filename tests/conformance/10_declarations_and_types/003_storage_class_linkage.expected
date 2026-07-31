@@ -1,12 +1,6 @@
-# Expectation record for 10_declarations_and_types/003_storage_class_linkage.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 003_storage_class_linkage
 area               = 10_declarations_and_types
-description        = static, extern and block-scope static with observable linkage and storage duration
+description        = Storage class and linkage in one translation unit: file-scope static, extern declared then defined here, block-scope static persistence, static function, static-duration zero initialization
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,12 +12,37 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every object with static storage duration is initialized by a constant expression or
-implicitly zero-initialized, so no indeterminate value is read, and the block-scope static
-accumulator is read only after its first assignment.  Each extern declaration is defined in
-this same translation unit, so no undefined reference is relied upon.  All arithmetic stays
-inside the range of int.  No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Every object read is either explicitly initialized or has static storage duration and is
+therefore zero initialized by the standard. zero_init_probe is a static-duration int with no
+initializer, so reading it is well defined and yields zero; it is never left in an
+indeterminate state. shared_counter, file_static and the block-scope static total all have
+static storage duration and explicit initializers. All arithmetic is on small int values far
+from the int range edges, so there is no signed overflow: the largest intermediate value is
+103. No shift and no pointer arithmetic is performed. No object is modified twice between
+sequence points. Critically, the three accumulate calls each mutate the block-scope static
+object total, so they are made on three separate statements and assigned to three distinct
+locals before any printf runs -- no printf call receives more than one side-effecting
+argument, so the output cannot depend on unspecified evaluation order. The internal_triple
+call inside a printf is pure and mutates nothing. There is no aliasing violation: every
+object is accessed only through an lvalue of its own declared type. No padding byte is read.
+END
+impl_defined_notes <<END
+This program prints no size and no alignment at all, so the measured i686 width differences
+(4-byte long and pointer versus 8 bytes on x86_64, aarch64 and riscv64) cannot surface. All
+printed values are small int quantities. No address or pointer value is printed. Plain char
+is not used, so the measured char signedness difference (signed on x86_64 and i686, unsigned
+on aarch64 and riscv64) is irrelevant. The only printf conversion specifier used in the
+program is %d.
+
+Single translation unit note: the suite compiles exactly one source file per cell, so there
+is no second translation unit to link against. External linkage is therefore exercised the
+only standard-conforming way available in one file -- extern int shared_counter; is declared
+first and then satisfied by the definition int shared_counter = 41; later in the same
+translation unit. Block-scope static storage duration is exercised by calling accumulate
+three times and observing that the value persists: total starts at 100, becomes 101, then
+103, then stays 103 because the third call adds zero. The repeated 103 in the golden output
+is the assertion that the object persisted rather than being re-initialized on each entry; a
+compiler that re-initialized it would print 101 102 100 instead.
 END
 expected_stdout    <<END
 file_static=7

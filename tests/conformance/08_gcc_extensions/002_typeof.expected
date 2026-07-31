@@ -1,12 +1,6 @@
-# Expectation record for 08_gcc_extensions/002_typeof.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 002_typeof
 area               = 08_gcc_extensions
-description        = typeof and __typeof__ applied to expressions and used in declarations
+description        = GCC typeof and __typeof__ applied to expressions and declarations, folded and volatile-runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -19,22 +13,42 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
 ub_notes           <<END
-Every object declared through typeof is assigned before it is read.  The operand of typeof
-is not evaluated, so no side effect is duplicated or lost by it.  Each swap and sum stays
-inside the range of the deduced type, so no signed overflow occurs, and the rank probes
-report a type without depending on any width that varies by target.
-Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
+gcc 13.3.0.
+
+UB-FREEDOM ARGUMENT. All arithmetic is on small int and unsigned int values far from
+INT_MIN, INT_MAX and UINT_MAX, so there is no signed overflow; the unsigned multiplies
+are modular by definition and do not wrap here in any case. No shift operator is used.
+The only pointers are fp and fq, both of which point at the live local fa; they are
+dereferenced only while fa is in scope, no one-past-end pointer is formed, and no
+pointer value is ever printed. There is no aliasing violation, since fa is accessed
+only as int. Every object is initialized before it is read, including the swap
+temporary. No object is modified twice between sequence points: TO_SWAP performs its
+three assignments as separate full statements inside a do/while(0). Every printf call
+receives at most one side-effecting argument. Nothing depends on padding bytes or on the
+addresses of unrelated objects. Macro locals sw_t and ad_t are uniquely prefixed and
+neither macro is nested inside itself, so -Wshadow is not tripped.
 END
 impl_defined_notes <<END
-The warning gate drops -pedantic for this program.  The subject under test is a GCC
-extension, which is by definition not standard C, and -pedantic exists precisely to reject
-such constructs: with it in force the program could not be compiled at all and the feature
-would go untested, which constraint C3 forbids.  Every other member of the gate is
-retained, including -Werror, so no other class of defect in this program is downgraded.
+Nothing implementation-defined is observed, so no target restriction is needed and all
+four targets are compared. The four rank checks are deliberately expressed as
+SELF-REFERENTIAL RELATIONS rather than absolute widths: each compares sizeof of the type
+typeof produced against sizeof of the type it should have produced, so each is trivially
+1 on every target. This matters because sizeof(long) and sizeof(void *) were measured as
+4 on i686 and 8 on x86_64, aarch64 and riscv64; printing sizeof(long) directly would give
+8 on three targets and 4 on i686, and asserting sizeof(long) > sizeof(int) would be true
+on three targets and false on i686. Either would make oracle (b) report a divergence
+caused by the test rather than the compiler. The relational form is target-independent,
+including on i686 where long and int are the same width. Plain char is never used, so the
+measured char-signedness difference is not reached: char is signed on x86_64 and i686 but
+unsigned on aarch64 and riscv64. Only the pointed-to value is printed, never a pointer.
+Output is identical on all four targets at all three optimization levels.
 END
 expected_stdout    <<END
 to_folded_b=2

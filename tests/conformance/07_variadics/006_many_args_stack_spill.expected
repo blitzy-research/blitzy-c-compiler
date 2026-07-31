@@ -1,12 +1,6 @@
-# Expectation record for 07_variadics/006_many_args_stack_spill.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 006_many_args_stack_spill
 area               = 07_variadics
-description        = Argument counts that exhaust every target's argument registers and force stack spill
+description        = Variadic calls sized to exhaust every argument register on every target and force stack spill, including an interleaved integer and floating case that spills both register classes
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,14 +12,93 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Each group passes far more arguments of one class than any ABI under test documents
-argument registers for, so the paths those ABIs use once their registers are exhausted are
-exercised.  Every va_arg names exactly the type supplied, no list is read past its argument
-count, and each is ended exactly once.  All sums stay inside the range of their type and
-every floating value is exactly representable.  One line is printed per retrieved argument,
-so a single divergent line identifies the exact argument mishandled.  <stdarg.h> is included
-because a variadic function cannot be written without it and it is in both compilers'
-freestanding sets; printf is still hand-declared, because bcc ships no stdio.h.
+Header exception: this program includes <stdarg.h>. That is the one sanctioned header
+exception for area 07, because variadic functions cannot be written at all without
+va_list, va_start, va_arg, va_end and va_copy. stdarg.h is in bcc's own bundled
+freestanding set (docs/technical-specifications.md line 208) and is also a freestanding
+header supplied by the reference compiler, so it compiles identically under both oracles
+and the program remains a single-file reproducer. No other header is included; in
+particular stdio.h is not included, because bcc ships none. printf is hand-declared.
+Argument counts match retrieval counts exactly, which is the critical precondition here
+because the calls are large. The int group declares count 20 and supplies exactly 20 int
+arguments. The long long group declares count 12 and supplies exactly 12 long long
+arguments, each written with the LL suffix. The double group declares count 16 and
+supplies exactly 16 double arguments. The interleaved group declares pairs 10 and supplies
+exactly 20 arguments, strictly alternating int then double and beginning with an int, and
+the consumer retrieves an int then a double in that same order in each of its 10
+iterations. No va_list is ever read past the number of arguments actually supplied.
+Variadic discipline: va_start names count in the three homogeneous helpers and pairs in
+the interleaved helper, in each case the last named parameter. Each va_start has exactly
+one matching va_end in the same function. There is no va_copy and no va_list forwarding in
+this program.
+Retrieval types: int, long long and double are not subject to the default argument
+promotions, so va_arg(ap, int), va_arg(ap, long long) and va_arg(ap, double) retrieve
+exactly the types supplied. va_arg(ap, float) and va_arg(ap, long) never appear.
+Arithmetic: no signed overflow is possible anywhere. The int group is accumulated into a
+long long, which is a widening same-signedness conversion needing no cast, and its totals
+are 20190 and 40190. The long long totals are 12000000000066 and 36000000000066, far
+inside the 64-bit range. Floating addition is on dyadic rationals only. No int is added to
+a double accumulator or the reverse. Every implicit conversion that -Wconversion could
+flag is written as an explicit cast, specifically (long long)k in the long long generator
+and (double)k and (double)(k + 1) in the two floating generators. There is no shift, no
+division, no aliasing violation, no object modified twice between sequence points, and no
+dependence on padding or on the addresses of unrelated objects.
+No uninitialized reads: every element of every volatile source array is written by a first
+loop before a second loop reads it back into plain storage, and every array index stays
+inside its declared bound of 20, 12, 16 or 10.
+Evaluation order: main stores each returning helper's result in a named temporary before
+printing it, so no call has more than one side-effecting argument. In the runtime variants
+the volatile source arrays are written and then read back into plain arrays before the
+call, so the twenty arguments in the call expression are pure reads of a plain array and
+the unspecified argument-evaluation order is unobservable. This is also what prevents an
+optimizer from constant-propagating the arguments and hiding a spill-slot addressing
+defect, which is the whole reason the runtime variant exists.
+Warning gate: this program carries no ub_audit_flags key, and that absence is a positive
+statement rather than an omission. It passes the full default gate
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror unmodified, which
+was verified by running that gate over this source, and area 07 sanctions no deviation.
+The key exists only to record a deviation, so restating the full gate would claim a
+narrowing that was never made and would demand a recorded reason for it.
+END
+impl_defined_notes <<END
+Why these argument counts. The measured argument-register capacity of each supported ABI is
+recorded in docs/technical-specifications.md: x86-64 System V AMD64 at line 546 provides six
+integer registers rdi, rsi, rdx, rcx, r8 and r9 and eight SSE registers xmm0 to xmm7, and
+for a variadic call the al register must carry the number of vector registers used; i686
+cdecl at line 553 passes every argument on the stack with right-to-left push and caller
+cleanup; AArch64 AAPCS64 at line 559 provides x0 to x7 and v0 to v7; RISC-V 64 LP64D at
+line 565 provides a0 to a7 and fa0 to fa7. The worst-case capacity across the four is
+therefore eight integer plus eight floating-point registers, and every group in this program
+exceeds it: twenty int arguments, twelve long long arguments, sixteen double arguments, and
+ten interleaved int and double pairs.
+The interleaved group is the decisive case. Two named parameters consume the first two
+integer argument registers on x86-64, leaving only rdx, rcx, r8 and r9, so four of the ten
+integers travel in registers and six spill to the stack, while eight of the ten doubles
+travel in xmm0 to xmm7 and two spill. Both register classes overflow in the same call,
+which is the condition under which a variadic argument-area defect is most likely to
+appear, and on x86-64 it additionally exercises the al vector-count register.
+Width normalization: the types long and unsigned long are never used, because sizeof(long)
+and sizeof(void *) are 4 on i686 and 8 on x86-64, AArch64 and RISC-V 64
+(docs/technical-specifications.md lines 457 to 462). long long is 64 bits on all four targets
+and is used in its place. Only int, long long and double appear, and the printf
+conversions are limited to %s, %d, %lld and %.6f. No address, no pointer value, no sizeof
+result and no plain char value is printed.
+Floating determinism: every floating value is a multiple of 0.25 or 0.5 and is therefore a
+dyadic rational exactly representable in IEEE binary64, and all floating output is printed
+at fixed precision with %.6f, so the rendered text is byte-identical on all four backends.
+Line count and structure of the golden record: twenty int lines plus one sum, twenty
+runtime int lines plus one sum, twelve long long lines plus one sum, twelve runtime long
+long lines plus one sum, sixteen double lines plus one sum, sixteen runtime double lines
+plus one sum, ten interleaved lines plus two sums, and ten runtime interleaved lines plus
+two sums, for exactly 126 lines. One line per retrieved argument or pair is what makes a
+spill defect diagnosable rather than merely detectable, because a single divergent line
+identifies the exact argument slot the backend mishandled.
+Cross-backend comparability: integer and double variadic argument passing was measured to
+produce byte-identical results on all four targets at all three optimization levels, so no
+target is restricted and all three oracles are enabled. Any cross-backend difference in
+this program is a genuine ABI-level finding rather than a documented implementation-defined
+difference, and it must be reported as a finding with its minimized reproducer and exact
+reproduction commands rather than patched.
 END
 expected_stdout    <<END
 fint[0]=1000

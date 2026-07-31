@@ -1,12 +1,6 @@
-# Expectation record for 10_declarations_and_types/006_enum_definitions.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 006_enum_definitions
 area               = 10_declarations_and_types
-description        = Enumerator value assignment, gaps and negative enumerators
+description        = Enumerator value assignment, gaps, negative enumerators and the int range edges, with switch lowering over a sparse label set
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,14 +12,47 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every enumerator value is kept inside the range of int, because an enumeration's underlying
-type is otherwise implementation-defined, so no printed value can depend on that choice.
-All arithmetic over enumerator values stays inside the range of int, and the size relation
-is printed as a 0/1 comparison rather than as a width.  Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+No signed overflow occurs anywhere, including at the int range edges. B_LOW is written as
+-2147483647 - 1 rather than as -2147483648 precisely so that every intermediate value is an
+int-typed constant within int range: the literal 2147483648 would not fit in int and would
+acquire a wider type, whereas 2147483647 fits and subtracting 1 from its negation reaches the
+int minimum with no step outside the range. B_HIGH is the int maximum written directly. Both
+edge values are only printed, never used as arithmetic operands, so no computation approaches
+either edge. The arithmetic that is performed uses only small enumerators: COLOR_BLUE plus S_B
+is 13 and S_D minus S_A is 11, both far from the range edges. The cast (enum sparse)selector
+converts the value 20, which is exactly the enumerator S_C and therefore within the
+enumeration's value range, so the conversion is value preserving. classify handles all four
+enumerators with case labels and additionally returns -1 after the switch, so its control flow
+is well defined for any argument value and control can never fall off the end of the function.
+Every object read is initialized: selector has an initializer and folded, runtime and arith are
+all assigned at their declarations. No shift and no pointer arithmetic is performed. No object
+is modified twice between sequence points, and no printf call receives a side-effecting
+argument -- both classify results are assigned to locals on separate statements first, so
+unspecified evaluation order cannot affect the output. There is no aliasing violation and no
+padding byte is read.
+END
+impl_defined_notes <<END
+ENUMERATOR VALUES ARE ALL WITHIN INT RANGE, BY REQUIREMENT. C11 permits an implementation to
+choose any integer type capable of representing all of an enumeration's values as that
+enumeration's compatible type. Once an enumerator exceeds int range that choice becomes
+implementation-defined, and the four backends could then legitimately differ -- which would
+produce a cross-backend divergence that is not a defect and would poison oracle (b). Every
+enumerator in this program is therefore kept strictly inside int range. The extremes are
+exactly the int minimum (B_LOW) and the int maximum (B_HIGH), and no other enumerator comes
+near either.
+
+NO RAW ENUM SIZE IS PRINTED. The compatible type of an enumeration is implementation-defined
+even for values within int range, so the program prints only the relation sizeof(enum color)
+== sizeof(int) as a 0 or 1 value, never a raw size. Every enumerator is also explicitly cast
+to int before printing, which normalizes the printed value and keeps the %d conversion correct
+on every target regardless of the compatible type chosen.
+
+REMAINING WIDTH NORMALIZATION. No sizeof of long, pointer, double, long long or any aggregate
+containing them is printed, so the measured i686 difference (4-byte long and pointer versus 8
+bytes on x86_64, aarch64 and riscv64) cannot surface. No address or pointer value is printed.
+Plain char is not used, so the measured char signedness difference (signed on x86_64 and i686,
+unsigned on aarch64 and riscv64) is irrelevant. The only printf conversion specifier used in
+the program is %d.
 END
 expected_stdout    <<END
 color=0 1 2
