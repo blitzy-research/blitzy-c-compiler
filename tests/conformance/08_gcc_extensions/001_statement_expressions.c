@@ -1,4 +1,3 @@
-/* Area 08 - GCC extensions: statement expressions in value position. */
 int printf(const char *, ...);
 
 #define SE_MAX(a, b)   ({ int mx_a = (a); int mx_b = (b); mx_a > mx_b ? mx_a : mx_b; })

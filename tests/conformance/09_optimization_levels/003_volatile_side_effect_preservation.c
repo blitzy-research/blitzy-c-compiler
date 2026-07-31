@@ -1,17 +1,13 @@
-/* 003_volatile_side_effect_preservation.c -- Area 09, conformance suite.
- *
- * Claim under test: the sequence of observable side effects on volatile objects
- * is IDENTICAL at -O0, -O1 and -O2.  This is the only program in the area whose
- * correctness depends on the optimizer NOT doing something: volatile accesses
- * may not be elided, may not be reordered relative to one another, and may not
- * be coalesced.  The printed sequence is therefore the assertion.
- */
+/* Each counter is written and then read back, and every value read is printed
+ * immediately, so the printed trace records the individual accesses rather than
+ * only a final result.  That trace is the assertion: it must be the same at -O0,
+ * -O1 and -O2. */
 
 int printf(const char *, ...);
 
-/* A genuine volatile object at file scope.  Every read and every write below
-   is an observable side effect that no optimization level may elide, reorder
-   relative to another volatile access, or coalesce with another access. */
+/* Both counters are volatile and at file scope, and every access to them below is
+   written as its own full expression, so the printed trace pins down the order in
+   which the accesses happen and not just the value they end on. */
 static volatile int g_counter = 0;
 static volatile int g_sink = 0;
 

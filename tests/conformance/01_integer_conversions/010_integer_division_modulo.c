@@ -1,9 +1,5 @@
-/* Area 01 / program 010 - integer division and remainder: truncation toward
- * zero, and a remainder that takes the sign of the dividend.
- *
- * No divisor is ever zero, and the one undefined signed case - the most
- * negative value divided by -1 - is deliberately never formed.  The division
- * identity (a/b)*b + a%b == a is asserted for every signed combination.
+/* No divisor is ever zero, and the one undefined signed case - the most negative
+ * value divided by -1 - is deliberately never formed.
  */
 int printf(const char *, ...);
 
@@ -20,7 +16,6 @@ int main(void)
     volatile long long l_neg7 = -7;
     volatile long long l_two = 2;
 
-    /* Folded variant: constant expressions only. */
     printf("fold_pos_pos=%d %d\n", 7 / 2, 7 % 2);
     printf("fold_neg_pos=%d %d\n", -7 / 2, -7 % 2);
     printf("fold_pos_neg=%d %d\n", 7 / -2, 7 % -2);
@@ -32,7 +27,8 @@ int main(void)
     printf("fold_identity=%d\n",
            (int)((-7 / 2) * 2 + (-7 % 2) == -7 && (7 / -2) * -2 + (7 % -2) == 7));
 
-    /* Runtime variant: volatile operands force real divide instructions. */
+    /* Runtime variant: the operands are volatile, so each quotient and remainder
+     * is computed from values read at run time rather than folded. */
     printf("run_pos_pos=%d %d\n", a_pos / b_pos, a_pos % b_pos);
     printf("run_neg_pos=%d %d\n", a_neg / b_pos, a_neg % b_pos);
     printf("run_pos_neg=%d %d\n", a_pos / b_neg, a_pos % b_neg);

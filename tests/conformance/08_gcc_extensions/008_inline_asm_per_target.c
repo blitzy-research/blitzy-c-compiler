@@ -1,7 +1,6 @@
-/* Area 08 - GCC extensions: inline assembly with operand constraints,
-   guarded per architecture. Every branch performs the SAME logical
-   32-bit integer operation, so printed output is identical on all four
-   backends and oracle (b) can compare it directly. */
+/* Each architecture branch is written to perform the same logical 32-bit integer
+ * operation, so the printed result does not depend on which branch the
+ * preprocessor selected. */
 int printf(const char *, ...);
 
 /* Sum of two ints. Exercises a read-write ("+r") output operand. */

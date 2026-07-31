@@ -1,20 +1,10 @@
-/* 003_switch_basic_fallthrough.c -- Area 06 control flow.
- * Deliberate fallthrough between switch labels: stacked labels sharing one
- * statement group, statement-carrying labels that flow into the next label,
- * fallthrough through a default that is not last, fallthrough out of default,
- * and negative case labels.  Each switch is driven once by a compile-time
- * constant and once by a value read from volatile storage.
- *
- * The fall-through comments are consumed by the preprocessor and are never
- * seen by the compiler proper; they exist so the reference compiler's
- * implicit-fallthrough diagnostic recognises each fallthrough as deliberate.
- */
+/* Every deliberate fallthrough below carries the canonical "fall through" comment
+ * that GCC's -Wimplicit-fallthrough recognises, which is what marks it as
+ * intentional rather than a missing break.  Removing one of those annotations
+ * makes the strict warning gate fail. */
 
 int printf(const char *, ...);
 
-/* Stacked labels: no statement stands between them, so several values share
- * one statement group.
- */
 static int stacked(int v)
 {
     int r;
@@ -36,7 +26,6 @@ static int stacked(int v)
     return r;
 }
 
-/* Each label contributes, then control flows on to the next label. */
 static int accumulate(int v)
 {
     int r = 0;
@@ -64,7 +53,6 @@ static int accumulate(int v)
     return r;
 }
 
-/* default is not the last label, and control falls through it. */
 static int through_default(int v)
 {
     int r = 0;
@@ -86,7 +74,6 @@ static int through_default(int v)
     return r;
 }
 
-/* Negative and zero case labels. */
 static int signed_labels(int v)
 {
     int r;
@@ -108,7 +95,6 @@ static int signed_labels(int v)
     return r;
 }
 
-/* break inside a block nested in a case still ends only the switch. */
 static int break_from_nested_block(int v)
 {
     int r = 0;

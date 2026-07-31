@@ -1,6 +1,3 @@
-/* Area 01 / program 002 - integer promotions of narrow types in expressions
- * and as operands, folded and volatile-runtime variants.
- */
 int printf(const char *, ...);
 
 /* Unary + applies the integer promotions, and a _Generic controlling
@@ -52,7 +49,6 @@ int main(void)
     volatile short          sh = -300;
     volatile unsigned char  zero = 0;
 
-    /* Folded variant: the promotion is applied to constant expressions. */
     printf("fold_uchar_product=%d\n", (unsigned char)200 * (unsigned char)200);
     printf("fold_ushort_product=%d\n", (unsigned short)300 * (unsigned short)300);
     printf("fold_uchar_complement=%d\n", ~(unsigned char)0);
@@ -61,7 +57,8 @@ int main(void)
     printf("fold_uchar_shift=%d\n", (unsigned char)1 << 20);
     printf("fold_schar_widen=%d\n", (signed char)(-128) - 1);
 
-    /* Runtime variant: volatile operands force real instruction selection. */
+    /* Runtime variant: volatile operands are read at run time, so none of these
+     * values is available for compile-time substitution. */
     printf("run_uchar_product=%d\n", uc * uc);
     printf("run_ushort_product=%d\n", us * us);
     printf("run_uchar_complement=%d\n", ~zero);
@@ -70,7 +67,6 @@ int main(void)
     printf("run_uchar_shift=%d\n", (zero + 1) << 20);
     printf("run_schar_widen=%d\n", sc - 1);
 
-    /* Types produced by the integer promotions. */
     printf("promo_uchar=%s\n", promo_uchar());
     printf("promo_schar=%s\n", promo_schar());
     printf("promo_ushort=%s\n", promo_ushort());

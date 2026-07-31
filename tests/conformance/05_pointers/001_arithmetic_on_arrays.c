@@ -1,13 +1,3 @@
-/* Area 05 - Pointer arithmetic and function pointers
- * 001_arithmetic_on_arrays: increment, decrement and indexing scaled by
- * element size, in both a folded (constant-index) and a runtime
- * (volatile-index) variant.
- *
- * No header is included; printf is hand-declared.  No address or pointer
- * value is ever printed: pointer facts appear only as differences and
- * comparisons, and every difference is cast to long long before printing.
- */
-
 int printf(const char *, ...);
 
 struct pair {
@@ -30,7 +20,6 @@ int main(void)
     int k;
     int step;
 
-    /* ---- folded variant: every index is a compile-time constant ---- */
     ip = i_arr;
     printf("folded_index=%d %d %d %d\n", ip[0], ip[1], ip[4], ip[7]);
 
@@ -57,21 +46,28 @@ int main(void)
     pp = p_arr + 2;
     printf("folded_struct=%d %d %d %d\n", pp[-2].a, pp[-2].b, pp[1].a, pp[1].b);
 
-    /* element-size scaling made observable as a byte distance; sizeof short,
-     * int, double and this two-int struct are 2, 4, 8 and 8 on all four
-     * supported targets, so these values are target independent. */
+    /* Element-size scaling is printed rather than assumed: a byte distance
+     * derived as an element-pointer difference taken WITHIN one array object,
+     * multiplied by that array's element size.  It is deliberately not derived
+     * by subtracting two `char *` views of distinct element subobjects: those
+     * converted pointers do not point into one character array object, so their
+     * difference would be undefined and a divergence in it would prove nothing
+     * about either compiler.  sizeof short, int, double and this two-int struct
+     * are 2, 4, 8 and 8 on all four supported targets, so every value below is
+     * target independent. */
     printf("folded_scale_short=%lld\n",
-           (long long)((const char *)&s_arr[1] - (const char *)&s_arr[0]));
+           (long long)(&s_arr[1] - &s_arr[0]) * (long long)sizeof s_arr[0]);
     printf("folded_scale_int=%lld\n",
-           (long long)((const char *)&i_arr[1] - (const char *)&i_arr[0]));
+           (long long)(&i_arr[1] - &i_arr[0]) * (long long)sizeof i_arr[0]);
     printf("folded_scale_double=%lld\n",
-           (long long)((const char *)&d_arr[1] - (const char *)&d_arr[0]));
+           (long long)(&d_arr[1] - &d_arr[0]) * (long long)sizeof d_arr[0]);
     printf("folded_scale_struct=%lld\n",
-           (long long)((const char *)&p_arr[1] - (const char *)&p_arr[0]));
+           (long long)(&p_arr[1] - &p_arr[0]) * (long long)sizeof p_arr[0]);
     printf("folded_scale_int_span=%lld\n",
-           (long long)((const char *)&i_arr[6] - (const char *)&i_arr[2]));
+           (long long)(&i_arr[6] - &i_arr[2]) * (long long)sizeof i_arr[0]);
 
-    /* ---- runtime variant: volatile operands defeat constant folding ---- */
+    /* Runtime variant: every index is read from volatile storage, so none of it
+     * is available for compile-time substitution. */
     vidx = 3;
     k = vidx;
     ip = i_arr;
@@ -97,11 +93,10 @@ int main(void)
     vidx = 1;
     k = vidx;
     printf("runtime_scale_int=%lld\n",
-           (long long)((const char *)&i_arr[k] - (const char *)&i_arr[0]));
+           (long long)(&i_arr[k] - &i_arr[0]) * (long long)sizeof i_arr[0]);
     printf("runtime_scale_double=%lld\n",
-           (long long)((const char *)&d_arr[k] - (const char *)&d_arr[0]));
+           (long long)(&d_arr[k] - &d_arr[0]) * (long long)sizeof d_arr[0]);
 
-    /* a scan driven entirely by a volatile bound */
     {
         int total = 0;
         int n;

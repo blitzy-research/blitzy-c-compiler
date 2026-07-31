@@ -1,8 +1,7 @@
-/* Area 11 / 004 - width-normalized printf format specifiers.
-   No conversion whose argument width varies by target is used: no long
-   length modifier, no size_t length modifier, no pointer conversion and
-   no long double length modifier.  Every integer argument is an int, an
-   unsigned int, a long long or an unsigned long long. */
+/* No conversion whose argument width varies by target is used: no long length
+   modifier, no size_t length modifier, no pointer conversion and no long double
+   length modifier.  Every integer argument is an int, an unsigned int, a long
+   long or an unsigned long long. */
 int printf(const char *, ...);
 
 static volatile int         rt_i  = -12345;

@@ -1,6 +1,3 @@
-/* Area 01 / program 001 - usual arithmetic conversions across mixed
- * signedness and rank, folded and volatile-runtime variants.
- */
 int printf(const char *, ...);
 
 /* Result-type probes.  A _Generic controlling expression is never evaluated,
@@ -48,21 +45,20 @@ int main(void)
     volatile unsigned char c_two = 2;
     volatile long long l_neg = -1;
 
-    /* Folded variant: every operand is a constant expression. */
     printf("fold_uint_common=%u\n", 2147483647 * 2u);
     printf("fold_ushort_promotes=%d\n", -1 * (unsigned short)2);
     printf("fold_uchar_promotes=%d\n", -1 * (unsigned char)2);
     printf("fold_llong_wins=%lld\n", -1LL / 2u);
     printf("fold_ullong_wins=%llu\n", 2u + 3uLL);
 
-    /* Runtime variant: volatile operands force real instruction selection. */
+    /* Runtime variant: volatile operands are read at run time, so none of these
+     * values is available for compile-time substitution. */
     printf("run_uint_common=%u\n", (i_nonneg & 0x7fffffff) * u_two);
     printf("run_ushort_promotes=%d\n", -1 * s_two);
     printf("run_uchar_promotes=%d\n", -1 * c_two);
     printf("run_llong_wins=%lld\n", l_neg / u_two);
     printf("run_ullong_wins=%llu\n", u_two + 3uLL);
 
-    /* Result types produced by the usual arithmetic conversions. */
     printf("type_int_uint=%s\n", type_int_uint());
     printf("type_ushort_int=%s\n", type_ushort_int());
     printf("type_uint_llong=%s\n", type_uint_llong());

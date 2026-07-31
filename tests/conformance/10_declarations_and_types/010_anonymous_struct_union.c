@@ -1,7 +1,6 @@
-/* Area 10 / 010 -- anonymous struct and union members and their name lookup.
- * Each anonymous-union member is written and read back through the SAME
- * member, so no type punning is relied upon. All members are int or short, so
- * both aggregate sizes are identical on all four targets. */
+/* Each anonymous-union member is written and read back through the same member, so
+ * no type punning is relied upon.  Both aggregate sizes are printed rather than
+ * assumed, so they are compared like every other value. */
 
 int printf(const char *, ...);
 

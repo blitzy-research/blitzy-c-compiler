@@ -1,162 +1,144 @@
 //! Parser for the `.expected` expectation-record format, corpus discovery, and
 //! expected-divergence-marker enumeration.
 //!
-//! Every C program in the corpus is paired with a sibling `<program>.expected` record that
-//! holds the program's cell matrix, the literal command templates that build and run it, the
-//! expected exit status, the written undefined-behaviour-freedom argument, and the golden
-//! stdout. That single file is what makes the requirement "source file, build commands, and
-//! expected output recorded together" literally true: a maintainer can reproduce any cell
-//! from the `.c` file plus its record with no harness, no Cargo and no Rust toolchain at all.
-//! It is also what supplies oracle (c), the golden-record regression that catches the one
-//! failure mode pure differential testing structurally cannot detect — both compilers
-//! changing behaviour in the same direction at the same time, where the reference-compiler
-//! oracle still reports agreement.
-//!
-//! # Why this module is hand-written
-//!
-//! The project's rules for feature addition state that the `[dependencies]` section of the
-//! package manifest must remain completely empty at all times, that every piece of
-//! functionality must be implemented using only the Rust standard library, that no
-//! build-dependency or development-dependency entries for external crates are permitted, and
-//! that the constraint is absolute and admits no exceptions. A serialization crate was
-//! considered for exactly this parser and rejected under that rule, so this module is its
-//! mandated substitute: a deliberately minimal, line-oriented parser over `std` alone. It is
-//! not, and must not become, a general-purpose configuration library.
+//! Every corpus program is paired with a sibling `<program>.expected` record holding its cell
+//! matrix, the literal command templates that build and run it, the expected exit status, the
+//! written undefined-behaviour-freedom argument, and the golden stdout. A maintainer can
+//! therefore reproduce any cell from the `.c` file plus its record with no harness at all, and
+//! the recorded stdout is what supplies oracle (c) — the one comparison that still fails when
+//! both compilers change behaviour in the same direction, where oracle (a) reports agreement.
 //!
 //! # Grammar
 //!
-//! The format is line-oriented so that it is trivial to parse by hand and trivial for a human
-//! to read and edit. Lines are split with [`str::lines`], which accepts both `"\n"` and
-//! `"\r\n"` as terminators, so a record authored on a system that writes carriage returns
-//! parses identically to one that does not — a property that matters because a single stray
-//! byte per line would fail every golden-record comparison while saying nothing whatsoever
-//! about the compiler.
+//! - **Comment** — a line whose first non-whitespace character is `#`. A `#` inside a value is
+//!   data.
+//! - **Scalar** — `key = value`, split on the first `=`, both sides trimmed.
+//! - **Heredoc** — `key <<END`, then body lines captured verbatim, then a line that is exactly
+//!   `END`. Inside a heredoc nothing is trimmed, no `#` is a comment and no `=` is a separator,
+//!   which is what lets a golden stdout reproduce program output byte for byte including
+//!   leading spaces and lines that begin with `#`.
+//! - A line opens a heredoc when `<<` appears before any `=`, so a scalar value may contain
+//!   `<<` and an opener needs no `=`.
+//! - Keys are case-sensitive and drawn from `[a-z0-9_.]`; the dot serves the
+//!   `expected_divergence.*` family.
 //!
-//! - **Comment** — a line whose first non-whitespace character is `#`. Ignored. A `#` inside a
-//!   value is data, never a comment.
-//! - **Blank line** — ignored outside a heredoc. Inside a heredoc it is a body line.
-//! - **Scalar** — `key = value`. Split on the first `=`; whitespace is trimmed from both the
-//!   key and the value.
-//! - **Heredoc** — `key <<END` opens a block. Every subsequent line is captured verbatim
-//!   until a line that is exactly `END`. Inside a heredoc nothing is trimmed, no `#` is a
-//!   comment and no `=` is a separator, which is what lets a golden stdout reproduce program
-//!   output byte for byte including leading spaces and lines that begin with `#` or contain
-//!   `=`.
-//! - A line is read as a heredoc opener when `<<` appears before any `=`, so a scalar value
-//!   may legitimately contain `<<` and a heredoc opener needs no `=`.
-//! - Keys are case-sensitive, lower-snake, and drawn from the alphabet `[a-z0-9_.]`; the dot
-//!   exists for the `expected_divergence.*` family.
+//! Lines are split with [`str::lines`], so a record terminated with `"\r\n"` parses
+//! identically to one terminated with `"\n"`. A stray carriage return per line would otherwise
+//! fail every golden-record comparison while saying nothing about the compiler.
 //!
 //! ## Trailing-newline convention
 //!
-//! **A heredoc value is the concatenation of its body lines with a newline appended to each.**
-//! A body of `["a", "b"]` therefore parses to `"a\nb\n"`, and an empty body parses to `""`.
+//! **A heredoc value is the concatenation of its body lines with a newline appended to each**, so
+//! a body of `["a", "b"]` parses to `"a\nb\n"` and an empty body parses to `""`.
 //!
-//! This convention is stated here in full because it is the single highest-risk detail in the
-//! format. Oracle (c) compares a recorded stdout against captured stdout byte for byte across
-//! every cell of the matrix; a one-byte disagreement in this rule would fail the entire suite
-//! while telling a reader nothing about the compiler. Three consequences follow, and they are
-//! the reason the rule is written this way rather than the other way:
+//! This is the format's highest-risk detail, because oracle (c) compares a recorded stdout
+//! against a captured stream byte for byte. The rule runs in this direction so that a captured
+//! stream — which always ends in a newline, since every corpus program's last `printf` does — is
+//! byte-identical to the parsed value, and so that the maintenance regeneration script can write
+//! a stream verbatim between the opener and `END` with no fix-ups. A stream that does not end in
+//! a newline cannot be represented at all; that is a stated limitation rather than a silent
+//! truncation, and a program producing one is outside the corpus by construction.
 //!
-//! - Every corpus program's final `printf` ends with a newline, so a captured stdout stream
-//!   ends with a newline, so the value the parser produces is byte-identical to the stream.
-//! - The maintenance regeneration script may write a captured stream verbatim between the
-//!   opener and the closing `END` line, and the record round-trips under this rule with no
-//!   fix-ups.
-//! - A stdout stream that does **not** end in a newline cannot be represented by a
-//!   line-oriented format at all. That is a stated limitation rather than a silent
-//!   truncation: the corpus authoring rules require one printed line per semantic property
-//!   claimed, so such a program is outside the corpus by construction.
+//! # The templates are a claim about the cell, so they are validated structurally
 //!
-//! # Key table
+//! A record does not merely mention its command lines; it asserts that those lines rebuild and
+//! rerun any cell of its matrix. Validation therefore checks structure and not just the
+//! presence of a placeholder somewhere in the line, because each of the following, if
+//! unchecked, lets a record describe a cell other than the one the matrix says it runs:
 //!
-//! | Key | Form | Presence | Obligation |
-//! | --- | --- | --- | --- |
-//! | `program` | scalar | required | Must equal the record's file stem. |
-//! | `area` | scalar | required | Must equal the containing directory and name a real feature area. |
-//! | `description` | scalar | required | One line, used verbatim in report rows. |
-//! | `targets` | scalar, comma list | required | Defines the cell matrix. A restricted list requires `impl_defined_notes`. |
-//! | `opt_levels` | scalar, comma list | required | `-O0`, `-O1`, `-O2` only; anything higher is documented as out of scope. |
-//! | `shared_flags` | scalar, space list | required | Subset of the verified shared set, and nothing forbidden in a differential invocation. |
-//! | `bcc_command` | scalar | required | Template over `$BCC`, `<triple>`, `<opt>`, `<src>`, `<out>`. |
-//! | `ref_command` | scalar | required | Template over `$REF_CC_<TRIPLE>`, `<opt>`, `<src>`, `<out>`. No target flag exists. |
-//! | `run_command` | scalar | required | Template over `<runner>`, `<out>`. |
-//! | `expect_exit` | scalar, integer | required | Within `0..=125`. |
-//! | `oracle_a`, `oracle_b`, `oracle_c` | scalar toggle | required | `enabled` or `disabled`. A disabled oracle requires `impl_defined_notes`. |
-//! | `ub_audit_flags` | scalar, space list | optional | A deviation from the default warning gate; requires `impl_defined_notes`. |
-//! | `ub_notes` | heredoc | required | The written undefined-behaviour-freedom argument. Non-empty. |
-//! | `impl_defined_notes` | heredoc | conditional | Required by a restricted target list, a disabled oracle, or a warning-gate deviation. |
-//! | `expected_stdout` | heredoc | required | The golden record. Non-empty. |
-//! | `expected_divergence.id` | scalar | optional | Marker identifier, for example `XD-GCCEXT-CASE-RANGES-001`. |
-//! | `expected_divergence.class` | scalar | with marker | One of the six divergence classes. |
-//! | `expected_divergence.scope` | scalar | with marker | Which oracles, targets and optimization levels the marker covers. |
-//! | `expected_divergence.basis` | scalar | with marker | A repository-relative file path, a comma, then the section it cites. |
-//! | `expected_divergence.observed` | heredoc | with marker | The divergence as observed. Non-empty. |
-//!
-//! Presence of any `expected_divergence.*` key requires all five: a partial marker is a hard
-//! error, because a marker missing its basis is an assertion with no documented authority
-//! behind it.
+//! - the compiler-under-test line must select the cell's target with `--target <triple>`, or a
+//!   record claiming four targets would record one line that builds only the default;
+//! - both build lines must carry `<opt>`, or a record claiming a three-level sweep would record
+//!   one line that builds only the default level, and a literal level written in its place is
+//!   rejected for the same reason;
+//! - both build lines must write `-o <out>`, with the placeholder immediately after the flag,
+//!   and must carry `-static`, because the harness executes the artifact at the path it asked
+//!   for and the three emulated targets need static linkage to run at all;
+//! - the reference line must name a per-target driver, because on that side the driver binary
+//!   *is* the target selection; the bare `$REF_CC` names no target and is rejected;
+//! - the run line must be exactly `<runner> <out>`, or a cross-target cell would be recorded as
+//!   executing a foreign binary directly instead of through its emulator;
+//! - every flag either line passes must appear in `shared_flags`, and every flag `shared_flags`
+//!   declares must appear in both lines. The first direction stops an unverified flag being
+//!   smuggled past the shared-flag discipline by writing it into a template; the second stops a
+//!   record documenting an invocation that never happens.
 //!
 //! # Failure posture
 //!
-//! An unterminated heredoc, a duplicate key, an unrecognised key, a key used in the wrong
-//! surface form, a malformed line, or any violated obligation above is a hard error naming
-//! the file path, the one-based line number, the key, and what was expected. Nothing is ever
-//! ignored silently: a quietly dropped `expected_stdout` would turn oracle (c) into a no-op,
-//! and a quietly dropped obligation would let a narrowing of coverage pass without the
-//! recorded reason that makes it reviewable.
+//! Every malformed line and every violated obligation is a hard error naming the path, the
+//! one-based line number and what was expected. Nothing is dropped silently: a quietly ignored
+//! `expected_stdout` would turn oracle (c) into a no-op, and a quietly ignored obligation would
+//! let coverage narrow without the recorded reason that makes the narrowing reviewable.
 //!
-//! # This module is read-only with respect to the corpus
+//! The same posture governs the *shape* of a value, not only its presence. An empty element in
+//! a comma-separated list is rejected rather than dropped, because dropping it shrinks the
+//! matrix or widens a marker scope without saying so. Likewise nothing that could carry a
+//! program is passed over during discovery: a dot-prefixed entry, a nested directory, a symbolic
+//! link and an unrecognised extension are each a hard error, because each is a way for a
+//! committed program to be absent from the matrix while the run still reports success.
 //!
-//! There is deliberately no writer, no fixer and no update-in-place helper anywhere in this
-//! module. Golden records are regenerated only through the maintenance script under
-//! `tests/conformance/tools/`, never automatically during a test run, so a wrong answer can
-//! never quietly become the new expectation. The module also spawns no process and opens no
-//! socket: it reads a program's source path and its expectation record and nothing else, and
-//! it is free of global mutable state so that concurrently executing feature areas may parse
-//! records at the same time with no lock.
+//! # Corpus containment
 //!
-//! # Compatibility
+//! Every path this module reads is checked before a byte is read, through the harness root's
+//! shared check: it must be an absolute path to a regular, non-symbolic-link file that resolves
+//! beneath the canonical corpus root, and a symbolic link is refused rather than followed. That
+//! matters most for records, because a record dictates the command templates a cell executes and
+//! the golden output it is judged against, so one read from outside the corpus would decide what
+//! gets compiled and what counts as correct while every report still showed the corpus path. The
+//! resolved path is what the manifest carries onward. [`parse_str`] is deliberately exempt
+//! because it touches no filesystem at all; keeping it pure is what lets every rejection above be
+//! exercised without laying a file down.
 //!
-//! Edition 2021, minimum supported Rust 1.70. No standard-library API newer than 1.70 is used.
+//! # Read-only with respect to the corpus
+//!
+//! There is deliberately no writer, fixer or update-in-place helper here. Golden records are
+//! regenerated only through the maintenance script under `tests/conformance/tools/`, never during
+//! a test run, so a wrong answer cannot quietly become the new expectation.
 
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use super::{
-    comma_separated, corpus_root, is_forbidden_in_differential, joined_target_names, manifest_dir,
-    AreaSpec, CellKey, DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Target,
-    AREAS, SHARED_FLAGS_VERIFIED,
+    canonical_corpus_root, comma_separated, corpus_root, ensure_within, is_forbidden_for_side,
+    is_ub_audit_gate_member, is_ub_audit_gate_removable, joined_target_names, manifest_dir,
+    must_escape_for_report, posix_command_line, require_contained_corpus_file,
+    require_regular_file, sanitize_text_for_report, AreaSpec, CellKey, CompilerSide,
+    DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Target, AREAS, BCC_TARGET_FLAG,
+    BCC_TARGET_SELECTORS, DIFFERENTIAL_FLAGS_MINIMAL, EXTENSION_AREA, SHARED_FLAGS_VERIFIED,
+    UB_AUDIT_GATE_DEFAULT, UB_AUDIT_GATE_MANDATORY, UB_AUDIT_GATE_REMOVABLE, UB_GATE_DEFAULT,
+    UB_GATE_WITHOUT_CONVERSION, UB_GATE_WITHOUT_PEDANTIC,
 };
 
-// ---------------------------------------------------------------------------
-// Format constants
-// ---------------------------------------------------------------------------
-
-/// Token that opens a heredoc block, written immediately before the terminator.
 const HEREDOC_OPENER: &str = "<<";
 
-/// The one accepted heredoc terminator. A body line whose trimmed text is this token but which
-/// is not exactly this token is reported at that line rather than left to surface as a
-/// baffling unterminated-heredoc error at end of file, because invisible trailing whitespace
-/// is otherwise one of the hardest editing mistakes to see.
+/// The one accepted heredoc terminator.
+///
+/// A body line whose *trimmed* text is this token but which is not exactly this token is
+/// reported at that line, rather than left to surface as an unterminated-heredoc error at end of
+/// file, because invisible trailing whitespace is hard to see in an editor.
 const HEREDOC_TERMINATOR: &str = "END";
 
-/// Extension of a corpus program.
 const SOURCE_EXTENSION: &str = "c";
 
-/// Extension of an expectation record.
 const RECORD_EXTENSION: &str = "expected";
 
-/// Extensions that may appear inside a feature-area directory without being a program: the
-/// expectation records themselves, area notes, the fixture header, and shell tooling.
+/// Extensions a regular file may carry inside a feature-area directory without being a program.
 ///
-/// Any other regular file in an area directory is a hard error. That is not pedantry: it is
-/// what mechanically enforces the rule that the corpus tree contains no `.rs` file anywhere,
-/// which is in turn what keeps the corpus invisible to the build system and the suite free of
-/// any package-manifest change.
+/// Any other extension is a hard error, which catches a `.rs` file dropped into the top level of
+/// an area directory: the corpus has to stay invisible to the build system for the suite to need
+/// no package-manifest change. [`discover_area`] does not descend into nested directories, so
+/// this check reaches the top level of each area and no further.
 const AREA_COMPANION_EXTENSIONS: &[&str] = &[RECORD_EXTENSION, "md", "h", "sh"];
+
+/// The only dot-prefixed entry names an area directory may contain.
+///
+/// Whitelisted by exact name rather than by pattern, and deliberately short. A blanket skip of
+/// every dot-prefixed entry would mean that renaming a program to a dot-prefixed name silently
+/// deleted twelve cells from the matrix while the run still reported success, so the general rule
+/// is rejection and this is the single, named exception: the placeholder that lets an
+/// otherwise-empty directory be tracked by version control.
+const AREA_PLACEHOLDER_NAMES: &[&str] = &[".gitkeep"];
 
 /// Highest exit status a record may expect.
 ///
@@ -165,59 +147,172 @@ const AREA_COMPANION_EXTENSIONS: &[&str] = &[RECORD_EXTENSION, "md", "h", "sh"];
 /// asserting something the platform cannot deliver.
 const EXIT_STATUS_MAX: i32 = 125;
 
-/// Value of an enabled per-oracle toggle.
 const TOGGLE_ENABLED: &str = "enabled";
 
-/// Value of a disabled per-oracle toggle.
 const TOGGLE_DISABLED: &str = "disabled";
 
-/// Shared flags that legitimately carry an attached value, so that `-DNAME=1` is recognised as
-/// the verified `-D` rather than rejected as an unknown spelling.
+/// The only flags a record's `shared_flags` may name.
+///
+/// This is deliberately narrower than [`SHARED_FLAGS_VERIFIED`], and the difference is the whole
+/// point. The verified set answers "which flags mean the same thing to both compilers", which is
+/// a question about the *compilers*. This set answers "which of those may a data file choose",
+/// which is a question about *authority*, and the two answers are not the same:
+///
+/// - Every entry here is a **switch**: it carries no value, names no path, and cannot be made to
+///   name one. A record can therefore change how a program is optimized and linked, and nothing
+///   else.
+/// - Every flag excluded from here is excluded because it takes a value. A value is either a
+///   path or a macro definition, and a record that could supply one could choose where the
+///   artifact is written ([`VALUE_TAKING_SHARED_FLAGS`]), which header directory is searched, or
+///   what the preprocessor believes — none of which is a decision the expectation record layer
+///   is entitled to make, because the harness already derives the output path from the cell's
+///   workspace and the source path from the cell itself.
+/// - `-c` is excluded for a different reason: it stops the pipeline before a runnable artifact
+///   exists, and all three oracles compare the behaviour of a program that ran. A record naming
+///   it would describe a cell no oracle could judge.
+const RECORD_SHARED_FLAGS_PERMITTED: &[&str] = &["-O0", "-O1", "-O2", "-g", "-static", "-fPIC"];
+
+/// The flag every record must name, because every artifact in the corpus is linked statically.
+///
+/// Static linkage is not a preference: it is the one linkage mode both compilers spell
+/// identically, and it is what lets an emulated target execute with no sysroot and no dynamic
+/// loader configuration. A record that omitted it would silently describe a dynamically linked
+/// artifact whose cross-target cells could not run at all.
+const MANDATORY_SHARED_FLAG: &str = FLAG_STATIC;
+
+/// Verified shared flags that take a value, listed so a record naming one can be refused with a
+/// diagnostic that explains which half of the problem it is.
+///
+/// Both spellings are refused. The **bare** spelling is refused because it consumes the
+/// following argument vector element, so `-o` at the end of a flag list silently swallows the
+/// next flag the harness appends and redirects the build; the **attached** spelling is refused
+/// because it carries the value inline, so `-o../../outside` names a path outside the cell's
+/// workspace directly.
 const VALUE_TAKING_SHARED_FLAGS: &[&str] = &["-o", "-I", "-D", "-U", "-L", "-l"];
+
+/// The output-selection flag, and the first member of [`DIFFERENTIAL_FLAGS_MINIMAL`].
+///
+/// It is structural rather than stylistic: the harness executes the artifact at the path it
+/// asked for, so a template that does not write the artifact there describes a cell that
+/// cannot be run.
+const FLAG_OUTPUT: &str = "-o";
+
+/// The static-linkage flag, and the second member of [`DIFFERENTIAL_FLAGS_MINIMAL`].
+///
+/// Static linkage is the one linkage mode both compilers spell identically, and it is what
+/// lets an emulated target execute with no sysroot and no dynamic-loader configuration. A
+/// record that omitted it would describe a cell whose three non-native targets could not run.
+const FLAG_STATIC: &str = "-static";
+
+/// The compiler-under-test's target-selection flag.
+///
+/// This flag is legitimate in the compiler-under-test template and nowhere else. The
+/// cross-backend oracle compares the compiler against itself, so "both compilers honour the
+/// flag with the same meaning" is trivially satisfied there; the reference compiler has no
+/// target-selection flag at all, which is why its cross arm selects a driver binary instead.
+///
+/// An alias for the harness root's spelling rather than a second literal: the flag table there is
+/// the single authority for what the selector is called, and two literals could drift apart.
+const FLAG_TARGET_SELECT: &str = BCC_TARGET_FLAG;
+
+/// Flags that stop a build short of a runnable executable.
+///
+/// The whole corpus is judged by executing what was built, so a record declaring one of these
+/// as a shared flag would describe cells that produce an object file, an assembly listing or
+/// preprocessed text and can never be run. `-S` and `-E` are additionally rejected as
+/// forbidden in a differential invocation; listing all three here keeps this check independent
+/// of the contents of that table rather than relying on it.
+const FLAGS_WITHOUT_EXECUTABLE: &[&str] = &["-c", "-S", "-E"];
+
+// The three sanctioned warning gates and the one area permitted to drop `-pedantic` are defined
+// in the harness root, so that the audit module, which runs the gate, and this module, which
+// validates a record's claim about it, read one authority rather than two that could drift apart.
+
+/// Largest expectation record the parser will read, in bytes.
+///
+/// A record holds a handful of scalar fields and a golden stdout measured in hundreds of bytes;
+/// the largest plausible record is far below this bound, so the limit costs the corpus nothing
+/// and denies an adversarial or corrupt file the ability to exhaust memory. The size is checked
+/// against the file's metadata *before* it is opened and enforced again on the reader, because a
+/// file can grow between the two.
+const RECORD_BYTES_MAX: u64 = 256 * 1024;
+
+/// Longest single line the parser accepts, in bytes.
+///
+/// Every line of the format is a key, a short scalar, or one line of a golden stdout. A line
+/// longer than this is not a record the corpus could contain, and accepting one would let a
+/// single line defeat the whole-file bound by arriving as one enormous field.
+const RECORD_LINE_BYTES_MAX: usize = 8 * 1024;
+
+/// Largest value a single field may hold, in bytes.
+const FIELD_BYTES_MAX: usize = 64 * 1024;
+
+/// Most lines a single heredoc body may hold.
+const HEREDOC_LINES_MAX: usize = 4096;
+
+/// Characters a command template's literal text may never contain.
+///
+/// Every one of these is grammar to a POSIX shell rather than data: the list operators, the
+/// redirections, the command and parameter expansions, the quoting characters, the pattern
+/// characters, the comment character and the tilde. A template is not a shell script — the
+/// harness executes it as an argument vector with no shell involved — so a template containing
+/// any of them is either a mistake or an attempt to make a reproduction script do something the
+/// harness itself never did. Either way it is refused at parse time, which is strictly better
+/// than quoting it at emit time: quoting would faithfully reproduce a command line nobody meant
+/// to write.
+///
+/// The dollar sign is included even though it introduces the compiler placeholders, because a
+/// placeholder is recognised as a **whole token** before this check is reached: by the time a
+/// token is being examined as literal text, a dollar sign in it can only be a shell expansion or
+/// a misspelled placeholder, and both must be refused rather than quoted. The angle brackets are
+/// included for exactly the same reason.
+const TEMPLATE_FORBIDDEN_CHARACTERS: &[char] = &[
+    '|', '&', ';', '<', '>', '(', ')', '{', '}', '[', ']', '*', '?', '!', '`', '"', '\'', '\\',
+    '#', '~', '$', '\n', '\r', '\t',
+];
 
 /// Target-selection spellings that must never appear in the reference-compiler template.
 ///
-/// The reference compiler has no target-selection flag at all: the `--target=` spelling
-/// belongs to a different compiler family and was measured to be rejected outright, which is
-/// why the cross arm of the reference-compiler oracle selects a cross-driver binary instead.
-const REFERENCE_FORBIDDEN_SPELLINGS: &[&str] = &["--target", "--sysroot"];
+/// This harness resolves oracle (a)'s cross arm by selecting a cross-driver binary per target,
+/// so a template that also selected a target with a flag would be selecting it twice and could
+/// disagree with the driver it was handed. The `--target=` spelling belongs to a different
+/// compiler family and the GCC drivers reject it outright.
+///
+/// Borrowed from the harness root rather than restated, because the same two spellings are the
+/// ones the compiler-under-test side requires. Two tables would be two authorities on one fact,
+/// and the moment they disagreed one side of the split would be enforced and the other would not.
+const REFERENCE_FORBIDDEN_SPELLINGS: &[&str] = BCC_TARGET_SELECTORS;
 
-/// Placeholder for the compiler under test.
 const PLACEHOLDER_BCC: &str = "$BCC";
 
-/// Generic placeholder for the reference compiler driver of the cell's target.
 const PLACEHOLDER_REFERENCE_TEMPLATED: &str = "$REF_CC_<TRIPLE>";
 
-/// Bare placeholder for the reference compiler driver, accepted as a synonym of the templated
-/// spelling so a record may write either.
+/// Bare placeholder for the reference compiler driver.
+///
+/// [`render_command_argv`] expands it as a synonym of the templated spelling, so a command line
+/// lifted out of a findings artifact and edited by hand still renders. A record's `ref_command` is
+/// held to a per-target driver instead — the canonical templated spelling, or the concrete one
+/// where the record declares that single target — because the target suffix, the reference
+/// compiler having no target-selection flag, is the only thing that selects a cross driver. This
+/// constant is what lets `validate_templates` ask whether a template names the reference compiler
+/// at all before insisting on how it is spelled.
 const PLACEHOLDER_REFERENCE_BARE: &str = "$REF_CC";
 
-/// Placeholder for the cell's target triple.
 const PLACEHOLDER_TRIPLE: &str = "<triple>";
 
-/// Placeholder for the cell's optimization-level flag.
 const PLACEHOLDER_OPT: &str = "<opt>";
 
-/// Placeholder for the program source path.
 const PLACEHOLDER_SOURCE: &str = "<src>";
 
-/// Placeholder for the built artifact path.
 const PLACEHOLDER_OUTPUT: &str = "<out>";
 
 /// Placeholder for the execution runner, which is empty on a natively executing target and the
 /// target's emulator otherwise.
 const PLACEHOLDER_RUNNER: &str = "<runner>";
 
-// ---------------------------------------------------------------------------
-// Key registry
-// ---------------------------------------------------------------------------
-
-/// Which surface form a key's value takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FieldKind {
-    /// `key = value`, on one line.
     Scalar,
-    /// `key <<END`, then the value's lines, then a closing `END` line.
     Heredoc,
 }
 
@@ -236,10 +331,8 @@ impl FieldKind {
     }
 }
 
-/// Whether a key must appear in every record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Presence {
-    /// Every record must carry it; absence is a hard error.
     Required,
     /// Carried only when a documented condition applies, and then mandatory. The conditions
     /// are a restricted target list, a disabled oracle, and a warning-gate deviation.
@@ -249,24 +342,19 @@ enum Presence {
     Optional,
 }
 
-/// One recognised key: its spelling, the surface form it requires, and whether every record
-/// must carry it.
+/// One recognised key.
 ///
-/// The table is the single authority on what a record may contain. An unrecognised key is
-/// rejected against it rather than ignored, because an unknown key is almost always a typo,
-/// and a typo that is ignored silently disables the very check the key exists to perform.
+/// [`KEYS`] is the single authority on what a record may contain. An unrecognised key is rejected
+/// against it rather than ignored, because an unknown key is almost always a typo, and a typo
+/// that is ignored silently disables the check the key exists to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KeySpec {
-    /// The key's exact spelling.
     name: &'static str,
-    /// The surface form the key's value must take.
     kind: FieldKind,
-    /// Whether every record must carry the key.
     presence: Presence,
 }
 
 impl KeySpec {
-    /// Private table constructor, used only to build [`KEYS`].
     const fn new(name: &'static str, kind: FieldKind, presence: Presence) -> KeySpec {
         KeySpec {
             name,
@@ -276,19 +364,14 @@ impl KeySpec {
     }
 }
 
-/// Marker key holding the identifier.
 const KEY_MARKER_ID: &str = "expected_divergence.id";
 
-/// Marker key holding the divergence class.
 const KEY_MARKER_CLASS: &str = "expected_divergence.class";
 
-/// Marker key holding the scope the marker covers.
 const KEY_MARKER_SCOPE: &str = "expected_divergence.scope";
 
-/// Marker key holding the documented basis.
 const KEY_MARKER_BASIS: &str = "expected_divergence.basis";
 
-/// Marker key holding the divergence as observed.
 const KEY_MARKER_OBSERVED: &str = "expected_divergence.observed";
 
 /// The five marker keys. Either all of them are present or none of them is.
@@ -330,12 +413,10 @@ const KEYS: [KeySpec; 22] = [
     KeySpec::new(KEY_MARKER_OBSERVED, FieldKind::Heredoc, Presence::Optional),
 ];
 
-/// Look a key up by exact spelling.
 fn lookup_key(name: &str) -> Option<&'static KeySpec> {
     KEYS.iter().find(|spec| spec.name == name)
 }
 
-/// Every recognised key spelling, as one comma-separated line for a diagnostic.
 fn known_key_names() -> String {
     let names: Vec<&str> = KEYS.iter().map(|spec| spec.name).collect();
     comma_separated(&names)
@@ -347,28 +428,19 @@ fn known_key_names() -> String {
 /// to in order to fix the value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RawField {
-    /// The value: trimmed for a scalar, verbatim for a heredoc.
     value: String,
-    /// One-based line number of the key.
     line: usize,
 }
 
 /// A heredoc that has been opened and is accumulating body lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingHeredoc {
-    /// The key the block belongs to.
     spec: &'static KeySpec,
-    /// One-based line number of the opener.
     line: usize,
     /// Body lines captured so far, each of which contributes its own newline to the value.
     body: Vec<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Diagnostics
-// ---------------------------------------------------------------------------
-
-/// Build an error that names the record, the one-based line and the key.
 fn key_error(origin: &Path, line: usize, key: &str, cause: impl Into<String>) -> HarnessError {
     HarnessError::new(
         format!(
@@ -400,30 +472,53 @@ fn record_error(origin: &Path, cause: impl Into<String>) -> HarnessError {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Value tokenizers
-// ---------------------------------------------------------------------------
-
-/// Split a comma-separated value, trimming each item and dropping empty ones.
+/// Split a comma-separated value into trimmed items, rejecting an empty item.
 ///
-/// Empty items are dropped rather than rejected so that a trailing comma is harmless; the
-/// caller still rejects a list that ends up empty, which is the case that actually matters.
-fn comma_items(value: &str) -> Vec<&str> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .collect()
+/// An empty item is a defect in the record, not a harmless typo, so it is reported rather than
+/// dropped. Dropping it silently changes the cell matrix without saying so: `targets =
+/// x86_64,, aarch64` would parse as two targets and `opt_levels = -O0,,` as one level, in both
+/// cases producing exactly the quiet coverage reduction the requirements forbid. A rejection
+/// names the record, the line and the key, so the author sees which list is malformed rather
+/// than discovering later that a cell never ran.
+///
+/// A value that is entirely empty yields an empty vector rather than an error, because "the list
+/// is empty" is a different fault with a more specific message that each caller is better placed
+/// to phrase.
+fn comma_items<'a>(
+    origin: &Path,
+    line: usize,
+    key: &str,
+    value: &'a str,
+) -> HarnessResult<Vec<&'a str>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut items: Vec<&'a str> = Vec::new();
+    for (index, raw) in trimmed.split(',').enumerate() {
+        let item = raw.trim();
+        if item.is_empty() {
+            return Err(key_error(
+                origin,
+                line,
+                key,
+                format!(
+                    "element {} of the comma-separated list {trimmed:?} is empty; an empty \
+                     element is silently dropped by a permissive parser and so would shrink the \
+                     matrix without recording that it had shrunk. Remove the stray comma rather \
+                     than relying on it being ignored",
+                    index + 1
+                ),
+            ));
+        }
+        items.push(item);
+    }
+    Ok(items)
 }
 
-/// Split a whitespace-separated value into tokens.
 fn whitespace_items(value: &str) -> Vec<&str> {
     value.split_whitespace().collect()
 }
-
-// ---------------------------------------------------------------------------
-// Line parser
-// ---------------------------------------------------------------------------
 
 /// True when `key` is drawn from the key alphabet: lower-case ASCII letters, digits,
 /// underscore, and the dot that the marker family uses.
@@ -497,8 +592,111 @@ fn push_field(
             ),
         ));
     }
+    require_field_within_size(origin, &field, spec.name)?;
+    require_report_safe_value(origin, &field, spec)?;
     fields.push((spec, field));
     Ok(())
+}
+
+/// Reject a field whose value exceeds the per-field byte bound.
+///
+/// The whole-file and per-line bounds already cap the total, so this bound exists for the one
+/// shape they do not cover: a heredoc of many acceptable lines accumulating into one enormous
+/// value. Checking all three is what makes the parser's memory use a function of the format
+/// rather than of the file it is handed.
+fn require_field_within_size(origin: &Path, field: &RawField, key: &str) -> HarnessResult<()> {
+    if field.value.len() <= FIELD_BYTES_MAX {
+        return Ok(());
+    }
+    Err(key_error(
+        origin,
+        field.line,
+        key,
+        format!(
+            "the value is {} bytes, above the {FIELD_BYTES_MAX}-byte limit for a single field; \
+             every field of the format is a short scalar or a golden stdout measured in hundreds \
+             of bytes, so a value this large is a corrupt or adversarial record rather than one \
+             the corpus could contain",
+            field.value.len()
+        ),
+    ))
+}
+
+/// Reject a field value carrying a character that cannot appear literally in a report.
+///
+/// Every field of every record is written verbatim into a Markdown report row, a tab-separated
+/// summary column, a findings manifest, or a diagnostic. A control character in any of them is
+/// not data: a tab forges a column and can therefore relabel a verdict, a carriage return erases
+/// the line it ends, an escape introducer begins a terminal sequence that can hide a FINDING or
+/// repaint it as a PASS, and a NUL truncates the value for any consumer that treats it as a
+/// C string.
+///
+/// The rule is therefore rejection rather than escaping, and it is enforced at parse time so no
+/// consumer can forget it. [`must_escape_for_report`] is the shared predicate the harness root
+/// owns, so this check and the report-rendering escape can never disagree about which characters
+/// must not appear literally.
+///
+/// The **single** exception is the line feed inside a heredoc value, where it is the format's own
+/// line joiner and therefore structural rather than smuggled. A scalar value can never contain
+/// one, because the parser reads scalars a line at a time.
+///
+/// This strictness costs the corpus nothing, and that was measured rather than assumed: every one
+/// of the corpus programs emits only printable ASCII and the line feed, so no legitimate golden
+/// record needs a character this check refuses.
+fn require_report_safe_value(
+    origin: &Path,
+    field: &RawField,
+    spec: &'static KeySpec,
+) -> HarnessResult<()> {
+    let newline_is_structural = spec.kind == FieldKind::Heredoc;
+    for (offset, character) in field.value.char_indices() {
+        if !must_escape_for_report(character) {
+            continue;
+        }
+        if newline_is_structural && character == '\n' {
+            continue;
+        }
+        let shown = sanitize_text_for_report(&field.value);
+        return Err(key_error(
+            origin,
+            field.line,
+            spec.name,
+            format!(
+                "the value carries {} at byte offset {offset}, which cannot appear literally in a \
+                 report. Every field is written verbatim into a report row, a tab-separated \
+                 summary column and a findings manifest, where such a character forges a column, \
+                 erases a line, begins a terminal escape sequence, or reorders how the line \
+                 renders — none of which says anything about the compiler. The value reads \
+                 {shown:?} once made safe{}",
+                describe_character(character),
+                if newline_is_structural {
+                    "; inside a heredoc the line feed is the format's own joiner and is the one \
+                     character permitted here"
+                } else {
+                    ""
+                }
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Name one offending character precisely enough for a maintainer to find it in an editor.
+fn describe_character(character: char) -> String {
+    let code_point = u32::from(character);
+    let name = match character {
+        '\0' => Some("NUL"),
+        '\t' => Some("a tab"),
+        '\n' => Some("a line feed"),
+        '\r' => Some("a carriage return"),
+        '\u{1b}' => Some("an escape introducer"),
+        '\u{7f}' => Some("the delete character"),
+        _ => None,
+    };
+    match name {
+        Some(name) => format!("{name} (U+{code_point:04X})"),
+        None => format!("the control or formatting character U+{code_point:04X}"),
+    }
 }
 
 /// Borrow a parsed field by key spelling.
@@ -536,6 +734,19 @@ fn parse_fields(text: &str, origin: &Path) -> HarnessResult<Vec<(&'static KeySpe
 
     for (index, raw_line) in text.lines().enumerate() {
         let number = index + 1;
+        if raw_line.len() > RECORD_LINE_BYTES_MAX {
+            return Err(line_error(
+                origin,
+                number,
+                format!(
+                    "the line is {} bytes, above the {RECORD_LINE_BYTES_MAX}-byte limit; every \
+                     line of the format is a key, a short scalar, or one line of a golden stdout, \
+                     so a line this long would let a single line defeat the whole-file bound by \
+                     arriving as one enormous field",
+                    raw_line.len()
+                ),
+            ));
+        }
 
         if let Some(mut open) = pending.take() {
             if raw_line == HEREDOC_TERMINATOR {
@@ -561,6 +772,19 @@ fn parse_fields(text: &str, origin: &Path) -> HarnessResult<Vec<(&'static KeySpe
                          surrounding whitespace; the terminator must be a line containing \
                          exactly `{HEREDOC_TERMINATOR}`, because a value's lines are captured \
                          verbatim and cannot be trimmed"
+                    ),
+                ));
+            }
+            if open.body.len() >= HEREDOC_LINES_MAX {
+                return Err(key_error(
+                    origin,
+                    number,
+                    open.spec.name,
+                    format!(
+                        "the heredoc body has reached {HEREDOC_LINES_MAX} lines without a closing \
+                         `{HEREDOC_TERMINATOR}`; the longest golden stdout in the corpus is a \
+                         handful of lines, so a body this long is an unterminated heredoc \
+                         swallowing the rest of the file rather than a value"
                     ),
                 ));
             }
@@ -670,29 +894,20 @@ fn parse_fields(text: &str, origin: &Path) -> HarnessResult<Vec<(&'static KeySpe
     Ok(fields)
 }
 
-// ---------------------------------------------------------------------------
-// Command templates
-// ---------------------------------------------------------------------------
-
 /// Everything one cell needs in order to turn a command template into a literal command line.
 ///
 /// The fields are public because this is a plain carrier with no invariant to protect, which
 /// matches how the harness root models its own cell and outcome records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSubstitutions {
-    /// The compiler under test, substituted for `$BCC`.
     pub bcc: PathBuf,
     /// The reference compiler driver for this cell's target, substituted for every accepted
-    /// `$REF_CC` spelling. For the native arm this is the native driver; for a cross arm it is
-    /// the matching cross driver, because the reference compiler has no target-selection flag.
+    /// `$REF_CC` spelling: the native driver for the native arm, the matching GCC cross driver
+    /// for a cross arm.
     pub reference_compiler: PathBuf,
-    /// The cell's target, substituted for `<triple>` as its canonical triple.
     pub target: Target,
-    /// The cell's optimization level, substituted for `<opt>` as its command-line flag.
     pub opt: OptLevel,
-    /// The program source, substituted for `<src>`.
     pub source: PathBuf,
-    /// The artifact to build, substituted for `<out>`.
     pub output: PathBuf,
     /// The execution runner, substituted for `<runner>`. `None` on a natively executing target,
     /// where the placeholder and one following space are removed so the rendered line begins
@@ -700,59 +915,174 @@ pub struct CommandSubstitutions {
     pub runner: Option<PathBuf>,
 }
 
+/// The concrete reference-driver spelling for one target, for example `$REF_CC_AARCH64`.
+///
+/// Derived from the target rather than tabulated, so the accepted spellings and the target table
+/// cannot drift apart, and so the spellings keep mirroring the environment-variable names that
+/// select the drivers.
+fn concrete_reference_placeholder(target: Target) -> String {
+    format!(
+        "{PLACEHOLDER_REFERENCE_BARE}_{}",
+        target.short_name().to_ascii_uppercase()
+    )
+}
+
 /// Expand a command template into a literal command line.
 ///
-/// Accepted placeholders, and the reason each spelling is accepted:
+/// Accepted placeholders:
 ///
 /// - `$BCC` — the compiler under test.
-/// - `$REF_CC_<TRIPLE>` — the reference driver for this cell's target. This is the spelling the
-///   reference record uses, and it is deliberately not a target *flag*: the reference compiler
-///   has none, so the triple selects a **driver binary**.
+/// - `$REF_CC_<TRIPLE>` — the reference driver for this cell's target. The triple selects a
+///   *driver binary* rather than a target flag, matching how this harness resolves oracle (a)'s
+///   cross arm.
 /// - `$REF_CC_X86_64`, `$REF_CC_I686`, `$REF_CC_AARCH64`, `$REF_CC_RISCV64` — the concrete
 ///   spellings, accepted because a target-restricted record may legitimately name its one
 ///   driver directly, and because they mirror the environment-variable names that select the
-///   drivers.
-/// - `$REF_CC` — the bare synonym.
+///   drivers. Only the spelling that matches this cell's target is expanded. A record naming a
+///   different architecture's driver is describing a comparison other than the one being run, so
+///   its token is deliberately left unexpanded for [`residual_placeholder`] to catch rather than
+///   quietly rewritten to this cell's driver, which would compare the wrong pair of binaries
+///   while every artifact still read as if it had compared the right one.
+/// - `$REF_CC` — the bare synonym, matched only where it is a whole token, so it cannot consume
+///   the prefix of a concrete spelling.
 /// - `<triple>`, `<opt>`, `<src>`, `<out>`, `<runner>` — the cell's triple, optimization-level
 ///   flag, source path, artifact path and execution runner.
 ///
-/// The result is what makes a cell reproducible by hand with no harness at all, so substitution
-/// is faithful and unquoted: the rendered line is the literal line a maintainer runs, and the
-/// corpus and workspace paths are free of whitespace by construction. Use
-/// [`render_command_checked`] wherever the rendered line is going to be shown to a human or
-/// written into a findings artifact, since a half-expanded command line is worse than none.
-pub fn render_command(template: &str, subs: &CommandSubstitutions) -> String {
-    let bcc = subs.bcc.display().to_string();
-    let reference = subs.reference_compiler.display().to_string();
-    let source = subs.source.display().to_string();
-    let output = subs.output.display().to_string();
-
-    let mut rendered = String::from(template);
-    rendered = rendered.replace(PLACEHOLDER_REFERENCE_TEMPLATED, &reference);
+/// Rendering is deliberately more permissive than record validation. Anything that expands to a
+/// correct command line is safe to render, whereas a record's `ref_command` must *begin* with a
+/// per-target driver — the canonical `$REF_CC_<TRIPLE>`, or the concrete spelling where the
+/// record declares that one target — because on that side the driver binary is the target
+/// selection, and a bare name would silently mean the native one. [`validate_templates`]
+/// enforces that, along with the ten other placeholders a record cannot do without.
+///
+/// # Why the result is an argument vector rather than a string
+///
+/// A command template is expanded into an **argument vector**, one element per template token,
+/// and never into a single string that is later split. The distinction is the whole of this
+/// function's safety argument.
+///
+/// A path can contain a space, and on a build machine it very often does. Substituting such a
+/// path into a flat string yields a line that *looks* right and, when a maintainer pastes it into
+/// a shell, silently becomes two arguments — so the reproduction command reproduces something
+/// other than the cell. Worse, a path containing a semicolon, a backquote or a `$(` would not
+/// merely be mis-split but *executed*, which is the difference between a reproduction script and
+/// a command-injection primitive. Neither problem can be fixed at emit time by a consumer who has
+/// already lost the token boundaries.
+///
+/// Keeping the boundaries means:
+///
+/// - the harness executes each element as one argument with no shell involved at all, so shell
+///   grammar in a path has nothing to act on;
+/// - a reproduction line is produced by quoting each element with [`posix_command_line`], so the
+///   line a maintainer pastes decomposes into exactly the elements the harness used;
+/// - a placeholder contributes exactly one element even when its value contains whitespace, and
+///   `<runner>` on a natively executing target contributes exactly zero rather than leaving an
+///   empty word behind.
+///
+/// A token that is not a placeholder is literal text, and it is validated at parse time by
+/// [`validate_templates`] against [`TEMPLATE_FORBIDDEN_CHARACTERS`], so no shell metacharacter
+/// can reach this function from a record in the first place.
+fn substitute_token(token: &str, subs: &CommandSubstitutions) -> Option<String> {
+    if token == PLACEHOLDER_BCC {
+        return Some(subs.bcc.display().to_string());
+    }
+    if token == PLACEHOLDER_REFERENCE_TEMPLATED || token == PLACEHOLDER_REFERENCE_BARE {
+        return Some(subs.reference_compiler.display().to_string());
+    }
     for target in Target::ALL {
         let concrete = format!(
             "{PLACEHOLDER_REFERENCE_BARE}_{}",
             target.short_name().to_ascii_uppercase()
         );
-        rendered = rendered.replace(&concrete, &reference);
-    }
-    rendered = rendered.replace(PLACEHOLDER_REFERENCE_BARE, &reference);
-    rendered = rendered.replace(PLACEHOLDER_BCC, &bcc);
-    rendered = rendered.replace(PLACEHOLDER_TRIPLE, subs.target.triple());
-    rendered = rendered.replace(PLACEHOLDER_OPT, subs.opt.flag());
-    rendered = rendered.replace(PLACEHOLDER_SOURCE, &source);
-    rendered = rendered.replace(PLACEHOLDER_OUTPUT, &output);
-    match &subs.runner {
-        Some(runner) => {
-            rendered = rendered.replace(PLACEHOLDER_RUNNER, &runner.display().to_string());
-        }
-        None => {
-            let with_space = format!("{PLACEHOLDER_RUNNER} ");
-            rendered = rendered.replace(&with_space, "");
-            rendered = rendered.replace(PLACEHOLDER_RUNNER, "");
+        if token == concrete {
+            return Some(subs.reference_compiler.display().to_string());
         }
     }
-    String::from(rendered.trim())
+    if token == PLACEHOLDER_TRIPLE {
+        return Some(String::from(subs.target.triple()));
+    }
+    if token == PLACEHOLDER_OPT {
+        return Some(String::from(subs.opt.flag()));
+    }
+    if token == PLACEHOLDER_SOURCE {
+        return Some(subs.source.display().to_string());
+    }
+    if token == PLACEHOLDER_OUTPUT {
+        return Some(subs.output.display().to_string());
+    }
+    None
+}
+
+/// True when `token` is one of the accepted placeholder spellings.
+///
+/// Used by template validation so that a placeholder token is exempted from the literal-text
+/// character rules, which is what lets `<out>` and `$REF_CC_<TRIPLE>` contain angle brackets and
+/// a dollar sign while a literal token may not.
+fn is_placeholder_token(token: &str) -> bool {
+    if token == PLACEHOLDER_RUNNER {
+        return true;
+    }
+    let probe = CommandSubstitutions {
+        bcc: PathBuf::from("bcc"),
+        reference_compiler: PathBuf::from("cc"),
+        target: Target::X86_64,
+        opt: OptLevel::O0,
+        source: PathBuf::from("s"),
+        output: PathBuf::from("o"),
+        runner: None,
+    };
+    substitute_token(token, &probe).is_some()
+}
+
+/// Expand a command template into an argument vector, one element per token.
+///
+/// See [`substitute_token`] for why the result is a vector rather than a string. The `<runner>`
+/// placeholder contributes one element on an emulated target and **no** element on a natively
+/// executing one, so the vector begins with the artifact itself rather than with an empty word.
+pub fn render_command_argv(
+    template: &str,
+    subs: &CommandSubstitutions,
+) -> HarnessResult<Vec<String>> {
+    let mut argv: Vec<String> = Vec::new();
+    for token in template.split_whitespace() {
+        if token == PLACEHOLDER_RUNNER {
+            if let Some(runner) = &subs.runner {
+                argv.push(runner.display().to_string());
+            }
+            continue;
+        }
+        match substitute_token(token, subs) {
+            Some(value) => argv.push(value),
+            None => argv.push(String::from(token)),
+        }
+    }
+    if argv.is_empty() {
+        return Err(HarnessError::new(
+            format!("rendering the command template {template:?}"),
+            String::from(
+                "the template expands to no argument at all, so there is no command to run; a \
+                 template names a program and its arguments, and an empty expansion means every \
+                 token was a placeholder that contributed nothing",
+            ),
+        ));
+    }
+    for element in &argv {
+        if let Some(residual) = residual_placeholder(element) {
+            return Err(HarnessError::new(
+                format!("rendering the command template {template:?}"),
+                format!(
+                    "the element {element:?} still contains the placeholder {residual}; a \
+                     half-expanded command line cannot reproduce a cell, so it is rejected rather \
+                     than recorded. A placeholder is substituted only as a whole token, which is \
+                     what keeps one placeholder equal to one argument. The accepted placeholders \
+                     are {PLACEHOLDER_BCC}, {PLACEHOLDER_REFERENCE_TEMPLATED}, \
+                     {PLACEHOLDER_REFERENCE_BARE}, {PLACEHOLDER_TRIPLE}, {PLACEHOLDER_OPT}, \
+                     {PLACEHOLDER_SOURCE}, {PLACEHOLDER_OUTPUT} and {PLACEHOLDER_RUNNER}"
+                ),
+            ));
+        }
+    }
+    Ok(argv)
 }
 
 /// The first placeholder-shaped token still present in a rendered command line, if any.
@@ -782,36 +1112,26 @@ pub fn residual_placeholder(rendered: &str) -> Option<String> {
     None
 }
 
-/// Expand a command template and reject a result that still contains a placeholder.
+/// Expand a command template into a single shell line, each element quoted by
+/// [`posix_command_line`].
 ///
-/// This is the entry point the harness uses. An unexpanded placeholder means the template names
-/// something the substitutions do not supply, which would put a command line into a reproduction
-/// script that cannot reproduce anything — so it is a hard error naming both the template and
-/// the offending token rather than a line that merely looks plausible.
+/// This is the entry point for every line that is shown to a human or written into a findings
+/// artifact, and it is the reason requirement four's "exact reproduction commands" is literally
+/// true rather than approximately true: the line is produced from the same argument vector the
+/// harness executed, with each element quoted so that pasting it into a shell reconstructs that
+/// vector element for element. A path containing a space, a semicolon or a `$(` therefore
+/// reproduces as data instead of splitting into two arguments or being executed.
+///
+/// An ordinary command line is unchanged by the quoting, because a word of alphanumerics, path
+/// separators and flag punctuation needs none — so the common case stays readable and the
+/// dangerous case stays safe.
 pub fn render_command_checked(
     template: &str,
     subs: &CommandSubstitutions,
 ) -> HarnessResult<String> {
-    let rendered = render_command(template, subs);
-    match residual_placeholder(&rendered) {
-        None => Ok(rendered),
-        Some(residual) => Err(HarnessError::new(
-            format!("rendering the command template {template:?}"),
-            format!(
-                "the rendered line {rendered:?} still contains the placeholder {residual}; a \
-                 half-expanded command line cannot reproduce a cell, so it is rejected rather \
-                 than recorded. The accepted placeholders are \
-                 {PLACEHOLDER_BCC}, {PLACEHOLDER_REFERENCE_TEMPLATED}, \
-                 {PLACEHOLDER_REFERENCE_BARE}, {PLACEHOLDER_TRIPLE}, {PLACEHOLDER_OPT}, \
-                 {PLACEHOLDER_SOURCE}, {PLACEHOLDER_OUTPUT} and {PLACEHOLDER_RUNNER}"
-            ),
-        )),
-    }
+    let argv = render_command_argv(template, subs)?;
+    Ok(posix_command_line(&argv))
 }
-
-// ---------------------------------------------------------------------------
-// Expected-divergence marker
-// ---------------------------------------------------------------------------
 
 /// Which oracles, targets and optimization levels an expected-divergence marker covers.
 ///
@@ -824,11 +1144,8 @@ pub fn render_command_checked(
 pub struct MarkerScope {
     /// The scope exactly as the record wrote it, retained for reports and artifacts.
     pub raw: String,
-    /// Oracles the marker covers.
     pub oracles: Vec<Oracle>,
-    /// Targets the marker covers.
     pub targets: Vec<Target>,
-    /// Optimization levels the marker covers.
     pub opt_levels: Vec<OptLevel>,
 }
 
@@ -850,14 +1167,11 @@ pub struct ExpectedDivergence {
     /// Marker identifier, by convention `XD-<AREA>-<TOPIC>-<NNN>`, for example
     /// `XD-GCCEXT-CASE-RANGES-001`. Unique across the corpus.
     pub id: String,
-    /// The shape the divergence takes.
     pub class: DivergenceClass,
-    /// Which oracles, targets and optimization levels the marker covers.
     pub scope: MarkerScope,
     /// The documented basis, verbatim: a repository-relative path, a comma, then the section or
     /// description that authorises the marker.
     pub basis: String,
-    /// The repository-relative path portion of the basis.
     pub basis_path: PathBuf,
     /// The divergence as observed, so a reader can recognise it without reproducing the run.
     pub observed: String,
@@ -916,20 +1230,13 @@ impl fmt::Display for ExpectedDivergence {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Manifest
-// ---------------------------------------------------------------------------
-
 /// One program's fully validated expectation record.
 ///
-/// The fields are private and reached through accessors, which is a deliberate departure from
-/// how the harness root models its plain carriers. A manifest is not a plain carrier: it holds
-/// invariants that the parser established and that the rest of the suite relies on — that the
-/// program and area agree with the record's own location, that the expected exit status is one
-/// the platform can deliver, that no flag forbidden in a differential invocation reached the
-/// shared set, and that every narrowing of coverage carries a recorded reason. Exposing the
-/// fields would make an unvalidated manifest constructible, and an unvalidated manifest is
-/// exactly the thing whose absence lets a divergence be read as evidence about the compiler.
+/// The fields are private because they carry invariants the parser established and the rest of
+/// the suite relies on: the program and area agree with the record's own location, the expected
+/// exit status is one the platform can deliver, no flag forbidden in a differential invocation
+/// reached the shared set, and every narrowing of coverage carries a recorded reason. Public
+/// fields would make an unvalidated manifest constructible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     path: PathBuf,
@@ -952,31 +1259,29 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Absolute path to the `.expected` record this manifest was parsed from.
+    /// The `.expected` record this manifest came from, as the path it was loaded by.
     pub fn path(&self) -> &Path {
         self.path.as_path()
     }
 
-    /// Absolute path to the sibling `.c` program the record governs.
+    /// The sibling `.c` program the record governs, derived from [`Manifest::path`] by swapping
+    /// the extension.
     ///
-    /// Derived rather than stored, because the pairing is the format's own rule: a record and
-    /// its program differ only in extension, which is what lets either one be found from the
-    /// other with no index and no configuration.
+    /// Derived rather than stored, because the pairing is the format's own rule: a record and its
+    /// program differ only in extension, which is what lets either be found from the other with
+    /// no index and no configuration.
     pub fn source_path(&self) -> PathBuf {
         self.path.with_extension(SOURCE_EXTENSION)
     }
 
-    /// The program stem, for example `004_narrowing_conversions`.
     pub fn program(&self) -> &str {
         &self.program
     }
 
-    /// The feature-area directory name, for example `01_integer_conversions`.
     pub fn area(&self) -> &str {
         &self.area
     }
 
-    /// The one-line description used verbatim in report rows.
     pub fn description(&self) -> &str {
         &self.description
     }
@@ -996,22 +1301,18 @@ impl Manifest {
         &self.shared_flags
     }
 
-    /// The template that builds this program with the compiler under test.
     pub fn bcc_command(&self) -> &str {
         &self.bcc_command
     }
 
-    /// The template that builds this program with the reference compiler.
     pub fn ref_command(&self) -> &str {
         &self.ref_command
     }
 
-    /// The template that executes a built artifact.
     pub fn run_command(&self) -> &str {
         &self.run_command
     }
 
-    /// The exit status every cell of this program is expected to produce.
     pub fn expect_exit(&self) -> i32 {
         self.expect_exit
     }
@@ -1044,18 +1345,30 @@ impl Manifest {
             .collect()
     }
 
-    /// The per-program warning-gate flags when this program deviates from the default gate, and
-    /// `None` when it uses the default.
+    /// The per-program warning-gate flags when the record states them, and `None` when it leaves
+    /// the default gate implicit.
     ///
-    /// The default gate itself is not defined here: the audit module owns it, and duplicating it
-    /// would create two authorities that could drift apart.
+    /// The value is always a subset of the harness root's canonical gate, in gate order, so two
+    /// records expressing the same deviation compare equal regardless of the order their authors
+    /// typed. The gate tables are defined once at the harness root — [`UB_AUDIT_GATE_DEFAULT`] and
+    /// its two sanctioned reductions — rather than here or in the audit module: the audit module
+    /// runs whichever gate applies and this module validates the record's claim against the same
+    /// table, so one authority has two consumers rather than two that could drift apart.
     pub fn ub_audit_flags(&self) -> Option<&[String]> {
         self.ub_audit_flags.as_deref()
     }
 
-    /// True when this program deviates from the default warning gate.
+    /// True when this program's gate actually differs from the default gate.
+    ///
+    /// A record that restates the default gate explicitly is not deviating from it, so this is a
+    /// comparison against the table rather than a test for the key's presence: reporting an
+    /// explicit restatement as a deviation would put a narrowing in the summary where none
+    /// exists.
     pub fn has_ub_audit_deviation(&self) -> bool {
-        self.ub_audit_flags.is_some()
+        match &self.ub_audit_flags {
+            Some(gate) => !is_same_flag_set(gate, UB_GATE_DEFAULT),
+            None => false,
+        }
     }
 
     /// The written undefined-behaviour-freedom argument: the human half of the requirement whose
@@ -1080,12 +1393,10 @@ impl Manifest {
         self.expected_stdout.as_bytes()
     }
 
-    /// True when this program carries an expected-divergence marker.
     pub fn has_marker(&self) -> bool {
         self.marker.is_some()
     }
 
-    /// This program's expected-divergence marker, when it carries one.
     pub fn marker(&self) -> Option<&ExpectedDivergence> {
         self.marker.as_ref()
     }
@@ -1104,7 +1415,6 @@ impl Manifest {
         self.opt_levels.len() < OptLevel::ALL.len()
     }
 
-    /// Number of cells this program's declared matrix contains.
     pub fn cell_count(&self) -> usize {
         self.targets.len() * self.opt_levels.len()
     }
@@ -1131,19 +1441,36 @@ impl Manifest {
         cells
     }
 
-    /// Render this program's compiler-under-test command line for one cell.
     pub fn render_bcc_command(&self, subs: &CommandSubstitutions) -> HarnessResult<String> {
         render_command_checked(&self.bcc_command, subs)
     }
 
-    /// Render this program's reference-compiler command line for one cell.
     pub fn render_ref_command(&self, subs: &CommandSubstitutions) -> HarnessResult<String> {
         render_command_checked(&self.ref_command, subs)
     }
 
-    /// Render this program's execution command line for one cell.
     pub fn render_run_command(&self, subs: &CommandSubstitutions) -> HarnessResult<String> {
         render_command_checked(&self.run_command, subs)
+    }
+
+    /// Build this program's compiler-under-test invocation as an argument vector.
+    ///
+    /// This is the form the harness **executes**: one element per template token, spawned with no
+    /// shell, so no character in a path can be interpreted as grammar. The string renderers above
+    /// exist for reports and reproduction scripts and are derived from this same vector, which is
+    /// what keeps the line a maintainer reads identical to the command that actually ran.
+    pub fn render_bcc_argv(&self, subs: &CommandSubstitutions) -> HarnessResult<Vec<String>> {
+        render_command_argv(&self.bcc_command, subs)
+    }
+
+    /// Build this program's reference-compiler invocation as an argument vector.
+    pub fn render_ref_argv(&self, subs: &CommandSubstitutions) -> HarnessResult<Vec<String>> {
+        render_command_argv(&self.ref_command, subs)
+    }
+
+    /// Build this program's execution invocation as an argument vector.
+    pub fn render_run_argv(&self, subs: &CommandSubstitutions) -> HarnessResult<Vec<String>> {
+        render_command_argv(&self.run_command, subs)
     }
 }
 
@@ -1170,10 +1497,6 @@ impl fmt::Display for Manifest {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Field validation
-// ---------------------------------------------------------------------------
 
 /// The surface form a key requires, for a diagnostic about the key's absence.
 fn required_form_of(name: &str) -> String {
@@ -1202,7 +1525,6 @@ fn required_field<'fields>(
     })
 }
 
-/// Reject an empty value, explaining what the value is for.
 fn require_non_empty(origin: &Path, raw: &RawField, key: &str, purpose: &str) -> HarnessResult<()> {
     if raw.value.trim().is_empty() {
         return Err(key_error(
@@ -1215,7 +1537,6 @@ fn require_non_empty(origin: &Path, raw: &RawField, key: &str, purpose: &str) ->
     Ok(())
 }
 
-/// Reject a template that omits a placeholder it cannot do without.
 fn require_placeholders(
     origin: &Path,
     raw: &RawField,
@@ -1240,10 +1561,9 @@ fn require_placeholders(
     Ok(())
 }
 
-/// Parse and canonicalize the target list that defines this program's cell matrix.
 fn parse_targets(origin: &Path, raw: &RawField) -> HarnessResult<Vec<Target>> {
     let mut declared: Vec<Target> = Vec::new();
-    for item in comma_items(&raw.value) {
+    for item in comma_items(origin, raw.line, "targets", &raw.value)? {
         let target = Target::parse(item).ok_or_else(|| {
             key_error(
                 origin,
@@ -1290,10 +1610,20 @@ fn is_out_of_scope_opt_level(item: &str) -> bool {
     }
 }
 
-/// Parse and canonicalize the optimization-level sweep.
+/// Parse and canonicalize the optimization-level sweep, which every record must declare in full.
+///
+/// Unlike the target list, the sweep carries no restriction clause anywhere in the requirements:
+/// the build matrix fixes it at three levels per program, and the two-variant authoring rule
+/// exists precisely so that sweeping them discriminates between the constant folder's answer and
+/// the backend's. A record that declared fewer would still parse, still run and still report PASS
+/// while never exercising the level where a miscompilation lives — a silent coverage reduction,
+/// which is the one outcome the requirements rule out unconditionally. Reducing the sweep for fast
+/// local iteration is a run-time decision made by the environment and stamped on the report as
+/// reduced coverage; it is deliberately not something a committed record may do on its own
+/// authority.
 fn parse_opt_levels(origin: &Path, raw: &RawField) -> HarnessResult<Vec<OptLevel>> {
     let mut declared: Vec<OptLevel> = Vec::new();
-    for item in comma_items(&raw.value) {
+    for item in comma_items(origin, raw.line, "opt_levels", &raw.value)? {
         let level = OptLevel::parse(item).ok_or_else(|| {
             let cause = if is_out_of_scope_opt_level(item) {
                 format!(
@@ -1327,25 +1657,79 @@ fn parse_opt_levels(origin: &Path, raw: &RawField) -> HarnessResult<Vec<OptLevel
             origin,
             raw.line,
             "opt_levels",
-            "the optimization-level sweep is empty; sweeping the levels is what turns output \
-             equality into a semantic-preservation test, so a program must declare at least one",
+            format!(
+                "the optimization-level sweep is empty; sweeping the levels is what turns output \
+                 equality into a semantic-preservation test, so every program declares all {}: {}",
+                OptLevel::ALL.len(),
+                comma_separated(&OptLevel::ALL.map(OptLevel::flag))
+            ),
         ));
     }
-    Ok(canonical(&OptLevel::ALL, &declared))
+    let levels = canonical(&OptLevel::ALL, &declared);
+    if levels.len() != OptLevel::ALL.len() {
+        let missing: Vec<&str> = OptLevel::ALL
+            .iter()
+            .copied()
+            .filter(|level| !levels.contains(level))
+            .map(OptLevel::flag)
+            .collect();
+        return Err(key_error(
+            origin,
+            raw.line,
+            "opt_levels",
+            format!(
+                "the sweep omits {}; every program in the corpus is compared at all {} levels, \
+                 because behaviour at multiple optimization levels is itself a mandated property \
+                 and the coverage target pins the sweep at three levels per program with no \
+                 restriction clause. A shorter sweep is a silent narrowing of coverage rather \
+                 than a recordable exclusion: a level that is never compiled cannot diverge, so \
+                 a miscompilation confined to it would simply never be seen. Reducing the matrix \
+                 for a fast local iteration is a run-time choice that is reported as reduced \
+                 coverage, never a property of a record. Declare {}",
+                comma_separated(&missing),
+                OptLevel::ALL.len(),
+                comma_separated(&OptLevel::ALL.map(OptLevel::flag))
+            ),
+        ));
+    }
+    Ok(levels)
 }
 
-/// True when a flag is either exactly a verified shared flag or one of the verified flags that
-/// legitimately carries an attached value.
-fn is_verified_shared_flag(flag: &str) -> bool {
-    if SHARED_FLAGS_VERIFIED.contains(&flag) {
-        return true;
-    }
+/// The value-taking flag a token names, in either the bare or the attached spelling.
+///
+/// Returns the flag itself for a bare `-o`, and the flag for an attached `-o/tmp/x` or `-DNAME=1`.
+/// A record may name neither spelling — see [`VALUE_TAKING_SHARED_FLAGS`] — so this function
+/// exists to *recognise* one in order to refuse it with a diagnostic that explains which of the
+/// two problems it is, rather than to accept it.
+fn value_taking_flag_named(token: &str) -> Option<&'static str> {
     VALUE_TAKING_SHARED_FLAGS
         .iter()
-        .any(|prefix| match flag.strip_prefix(prefix) {
-            Some(remainder) => !remainder.is_empty(),
-            None => false,
-        })
+        .copied()
+        .find(|prefix| token == *prefix || token.starts_with(prefix))
+}
+
+/// Flags that are verified as shared yet must not appear in a record's shared set, because the
+/// command templates already supply them per cell.
+///
+/// Each entry states the field that owns it:
+///
+/// - `-o` — owned by the `<out>` placeholder of every template. Listing it here as well would
+///   pass it twice, and the second occurrence would silently decide the output path.
+/// - `-c` — stops the pipeline before a runnable artifact exists, which makes all three oracles
+///   inapplicable, since every one of them compares the behaviour of a program that ran.
+const TEMPLATE_OWNED_SHARED_FLAGS: &[&str] = &["-o", "-c"];
+
+/// True when a token is an optimization-level selector in any spelling.
+///
+/// Used to keep a fixed level out of the shared set: the level is swept per cell and supplied
+/// through the `<opt>` placeholder, so a record that pinned one would either fight the sweep or
+/// silently win it, and in both cases the three cells of a program would no longer differ in
+/// the one dimension they exist to differ in.
+fn is_opt_level_selector(item: &str) -> bool {
+    match item.strip_prefix("-O") {
+        Some(remainder) => remainder.is_empty() || remainder.chars().all(|c| c.is_ascii_digit()),
+        None => matches!(item, "-Os" | "-Ofast" | "-Og" | "-Oz"),
+    }
 }
 
 /// Parse the flags passed identically to both compilers, enforcing the shared-flag discipline at
@@ -1356,6 +1740,39 @@ fn is_verified_shared_flag(flag: &str) -> bool {
 /// only at the invocation site is deliberate: a maintainer cannot smuggle a
 /// reference-compiler-only flag into a differential invocation by editing a record, because the
 /// record itself will refuse to load.
+///
+/// Admissibility is judged from the **reference side**, and that decides the shape of everything
+/// below. This key holds the flags passed identically to both compilers, so a flag the reference
+/// compiler cannot honour can never be part of a set both compilers honour with the same meaning.
+/// That is why the target selectors are rejected here even though the compiler under test not only
+/// accepts one of them but *requires* it for every non-native cell: they are inadmissible as
+/// *shared* arguments, not inadmissible as such. The compiler-under-test side is validated
+/// separately, against the `bcc_command` template, where the selection is required rather than
+/// forbidden.
+///
+/// # The rules, and the authority each protects
+///
+/// 1. **`-static` is mandatory.** Every artifact in the corpus is linked statically, and a record
+///    that omitted it would describe a dynamically linked artifact whose emulated cells could not
+///    execute without a sysroot the suite deliberately does not configure. Requiring the presence
+///    of the flag — rather than merely permitting it — is what makes the linkage mode a
+///    property of the corpus instead of a per-record accident.
+/// 2. **No flag may take a value.** A value is a path or a macro definition, and both are outside
+///    a data file's authority: the harness derives the artifact path from the cell's workspace and
+///    the source path from the cell itself, so a record able to supply either could redirect the
+///    build out of its workspace. Both spellings are refused, because they fail differently and
+///    both fail: a **bare** `-o` consumes whatever argument the harness appends after it, and an
+///    **attached** `-o../../outside` names an escaping path outright. This is the rule that closes
+///    the argument-vector-consumption and path-escape problems together.
+/// 3. **The permitted set is a set of switches.** After rules one and two, what remains is
+///    [`RECORD_SHARED_FLAGS_PERMITTED`]: the three optimization levels, debug information, static
+///    linkage and position independence. A record can therefore change how a program is optimized
+///    and linked, and nothing else.
+/// 4. **A flag the templates already own, or one that pins the sweep, is still rejected.** `-o`
+///    and `-c` belong to the templates, and an optimization level — although a switch, and
+///    therefore permitted by rule three on its own — is supplied per cell through the `<opt>`
+///    placeholder, so naming one here would collapse the three cells of a program into one.
+/// 5. **The list is a set.** A duplicate is a partly edited record rather than an intention.
 fn parse_shared_flags(origin: &Path, raw: &RawField) -> HarnessResult<Vec<String>> {
     let items = whitespace_items(&raw.value);
     if items.is_empty() {
@@ -1363,47 +1780,174 @@ fn parse_shared_flags(origin: &Path, raw: &RawField) -> HarnessResult<Vec<String
             origin,
             raw.line,
             "shared_flags",
-            "the shared-flag list is empty; every artifact in the corpus is built statically, \
-             which is the one linkage mode both compilers spell identically and what lets an \
-             emulated target run with no sysroot configuration",
+            format!(
+                "the shared-flag list is empty; every artifact in the corpus is built statically, \
+                 which is the one linkage mode both compilers spell identically and what lets an \
+                 emulated target run with no sysroot configuration, so the list must name at \
+                 least {MANDATORY_SHARED_FLAG}"
+            ),
         ));
     }
-    let mut flags = Vec::with_capacity(items.len());
+    let mut flags: Vec<String> = Vec::with_capacity(items.len());
     for item in items {
-        if is_forbidden_in_differential(item) {
+        if is_forbidden_for_side(item, CompilerSide::Reference) {
             return Err(key_error(
                 origin,
                 raw.line,
                 "shared_flags",
                 format!(
-                    "{item:?} must never appear in a differential invocation: it is either \
-                     reference-compiler-only, compiler-under-test-only, or accepted by both with \
-                     a different default scope. Diagnostic and sanitizer flags belong to the \
-                     undefined-behaviour audit gate, which drives the reference compiler alone, \
-                     and target selection belongs to the cross-backend oracle, where both sides \
-                     are the same compiler"
+                    "{item:?} must never appear in the SHARED argument set: it is either \
+                     reference-compiler-only, compiler-under-test-only, or accepted by both with a \
+                     different default scope. Diagnostic and sanitizer flags belong to the \
+                     undefined-behaviour audit gate, which drives the reference compiler alone and \
+                     never the compiler under test. Target selection belongs to the \
+                     compiler-under-test side alone, where `{BCC_TARGET_FLAG} <triple>` is \
+                     REQUIRED for every non-native cell of every oracle because that compiler has \
+                     no cross drivers; the reference compiler has no target-selection flag at all \
+                     and selects a target by using the matching cross-driver binary, which is why \
+                     the selection cannot be a shared argument"
                 ),
             ));
         }
-        if !is_verified_shared_flag(item) {
+        if TEMPLATE_OWNED_SHARED_FLAGS.contains(&item) {
             return Err(key_error(
                 origin,
                 raw.line,
                 "shared_flags",
                 format!(
-                    "{item:?} is not a verified shared flag; a flag may be passed to both \
-                     compilers only once an observable consequence of it has been verified for \
-                     both. The verified set is: {}",
-                    comma_separated(SHARED_FLAGS_VERIFIED)
+                    "{item:?} is a verified shared flag but must not be listed here, because the \
+                     command templates already supply it per cell. `-o` is owned by the `<out>` \
+                     placeholder, and listing it twice would let the second occurrence silently \
+                     decide the output path; `-c` stops the pipeline before a runnable artifact \
+                     exists, which makes all three oracles inapplicable because every one of them \
+                     compares the behaviour of a program that ran"
+                ),
+            ));
+        }
+        if is_opt_level_selector(item) {
+            return Err(key_error(
+                origin,
+                raw.line,
+                "shared_flags",
+                format!(
+                    "{item:?} pins an optimization level, which the shared set must not do: the \
+                     level is swept per cell and supplied through the `<opt>` placeholder of each \
+                     template. A pinned level would either fight the sweep or silently win it, and \
+                     either way the three cells of this program would stop differing in the one \
+                     dimension they exist to differ in — which is what turns output equality into \
+                     a semantic-preservation test"
+                ),
+            ));
+        }
+        if let Some(flag) = value_taking_flag_named(item) {
+            let bare = item == flag;
+            return Err(key_error(
+                origin,
+                raw.line,
+                "shared_flags",
+                format!(
+                    "{item:?} names the value-taking flag {flag:?}, which a record may not carry \
+                     in either spelling. {} The harness derives the artifact path from the cell's \
+                     workspace and the source path from the cell itself, so choosing a path, an \
+                     include directory or a macro definition is not a decision this record layer \
+                     is entitled to make. A record may name only switches: {}",
+                    if bare {
+                        "The bare spelling consumes the next element of the argument vector, so it \
+                         would silently swallow whatever the harness appends after it and redirect \
+                         the build."
+                    } else {
+                        "The attached spelling carries its value inline, so it can name a path \
+                         outside the cell's workspace directly."
+                    },
+                    comma_separated(RECORD_SHARED_FLAGS_PERMITTED)
+                ),
+            ));
+        }
+        if !RECORD_SHARED_FLAGS_PERMITTED.contains(&item) {
+            let verified_elsewhere = SHARED_FLAGS_VERIFIED.contains(&item);
+            return Err(key_error(
+                origin,
+                raw.line,
+                "shared_flags",
+                format!(
+                    "{item:?} is not a flag a record may name. A record may name only the \
+                     value-free switches {}. {}",
+                    comma_separated(RECORD_SHARED_FLAGS_PERMITTED),
+                    if verified_elsewhere {
+                        format!(
+                            "It is a verified shared flag — the full verified set is {} — but \
+                             verification answers which flags mean the same thing to both \
+                             compilers, not which of them a data file may choose. This one is \
+                             withheld from records because it stops the pipeline before a runnable \
+                             artifact exists, and all three oracles compare the behaviour of a \
+                             program that ran",
+                            comma_separated(SHARED_FLAGS_VERIFIED)
+                        )
+                    } else {
+                        format!(
+                            "It is not in the verified shared set either: a flag may be passed to \
+                             both compilers only once an observable consequence of it has been \
+                             verified for both, and the verified set is {}",
+                            comma_separated(SHARED_FLAGS_VERIFIED)
+                        )
+                    }
+                ),
+            ));
+        }
+        if flags.iter().any(|known| known == item) {
+            return Err(key_error(
+                origin,
+                raw.line,
+                "shared_flags",
+                format!(
+                    "{item:?} is named twice; a repeated switch says nothing the single \
+                     occurrence does not, and a duplicate is a partly edited record rather than \
+                     an intention"
+                ),
+            ));
+        }
+        if FLAGS_WITHOUT_EXECUTABLE.contains(&item) {
+            return Err(key_error(
+                origin,
+                raw.line,
+                "shared_flags",
+                format!(
+                    "{item:?} stops the build short of a runnable executable; every cell in the \
+                     corpus is judged by executing what was built and comparing its stdout bytes \
+                     and exit status, so no program passes merely by compiling. A record carrying \
+                     this flag would describe cells that can never be run"
                 ),
             ));
         }
         flags.push(String::from(item));
     }
+    if !flags.iter().any(|flag| flag == MANDATORY_SHARED_FLAG) {
+        return Err(key_error(
+            origin,
+            raw.line,
+            "shared_flags",
+            format!(
+                "the list does not name {MANDATORY_SHARED_FLAG}; every artifact in the corpus is \
+                 linked statically, because that is the one linkage mode both compilers spell \
+                 identically and the only one an emulated target can execute with no sysroot and \
+                 no dynamic loader configuration. A record omitting it would describe cells that \
+                 cannot run on three of the four targets"
+            ),
+        ));
+    }
     Ok(flags)
 }
 
-/// Parse a per-program deviation from the default warning gate.
+/// True when a token names an optimization level literally rather than through the per-cell
+/// placeholder.
+///
+/// The capital letter is what separates the family from `-o`, which selects the output path.
+fn is_literal_opt_level(token: &str) -> bool {
+    token.starts_with("-O")
+}
+
+/// Parse a per-program deviation from the default warning gate, as a **closed subset** of that
+/// gate.
 ///
 /// These flags are deliberately **not** checked against the forbidden-in-a-differential-
 /// invocation set. The audit gate drives the reference compiler and never the compiler under
@@ -1411,32 +1955,220 @@ fn parse_shared_flags(origin: &Path, raw: &RawField) -> HarnessResult<Vec<String
 /// carry; conflating the two sets would make the two genuine deviations in the corpus —
 /// dropping strict-conformance diagnostics where an extension is the subject, and dropping
 /// conversion diagnostics where a narrowing conversion is the subject — impossible to express.
-fn parse_ub_audit_flags(origin: &Path, raw: &RawField) -> HarnessResult<Vec<String>> {
+///
+/// It does not follow that the key may hold anything. The gate is what establishes the
+/// precondition under which every oracle in this suite is sound: a divergence between two
+/// compilers is evidence about a compiler only when the program that provoked it is free of
+/// undefined and unspecified behaviour.
+///
+/// # A deviation is a removal from a fixed gate, never a compiler invocation
+///
+/// The rule this replaces accepted any token beginning with a hyphen, which is not a constraint
+/// at all: these flags are passed to a real compiler, so such a rule let a record hand the
+/// reference compiler an option that loads a shared object into the compiler process
+/// (`-fplugin=`), substitutes the assembler or the compiler proper (`-B`), replaces the driver's
+/// built-in specification (`-specs=`), changes what is compiled or where the output lands (`-I`,
+/// `-include`, `-D`, `-o`, a bare filename), or simply turned the audit off while leaving it
+/// apparently configured (`-w`, `-fsyntax-only`, or any `-Wno-` spelling). An audit that can be
+/// disabled by the record it is auditing is not an audit, and since the audit is what establishes
+/// that a program is free of undefined behaviour, disabling it silently removes the precondition
+/// under which any divergence this suite reports means anything at all.
+///
+/// Modelling a deviation as a set of removals closes all of that at once — not by listing the
+/// dangerous spellings, which would be a race against the compiler's option table, but by making
+/// it impossible to name any spelling that is not one of seven known diagnostic switches:
+///
+/// - **Subset**: every named flag must be an entry of [`UB_AUDIT_GATE_DEFAULT`], so no option
+///   outside those seven can be named.
+/// - **No duplicates**: a repeated flag is a partly edited record, not an intention.
+/// - **Retains [`UB_AUDIT_GATE_MANDATORY`]**: a gate that merely warns is not a gate, because the
+///   audit's entire purpose is to make a diagnostic stop the run.
+/// - **Strict**: the value must differ from the full gate. A record naming the entire gate is
+///   declaring a deviation that deviates in nothing, which means it should simply omit the key —
+///   and leaving that spelling acceptable would let a record appear to justify a narrowing it
+///   never made, while also demanding an `impl_defined_notes` reason for nothing.
+/// - **Only an authorized removal**: every member the value omits must be one of
+///   [`UB_AUDIT_GATE_REMOVABLE`].
+/// - **Only a sanctioned gate**: what remains must be exactly [`UB_GATE_WITHOUT_CONVERSION`],
+///   where a narrowing conversion is the behaviour under test, or [`UB_GATE_WITHOUT_PEDANTIC`] in
+///   [`EXTENSION_AREA`] alone, where the subject is non-standard by definition and that
+///   diagnostic exists precisely to reject it. The set of gates the suite runs is closed, so a
+///   record may neither combine two removals nor invent a third reduction.
+///
+/// Flags may be written in any order; the accepted value is returned in gate order, so two records
+/// expressing the same deviation compare equal and read alike.
+fn parse_ub_audit_flags(origin: &Path, raw: &RawField, area: &str) -> HarnessResult<Vec<String>> {
     let items = whitespace_items(&raw.value);
     if items.is_empty() {
         return Err(key_error(
             origin,
             raw.line,
             "ub_audit_flags",
-            "the key is present but names no flag; a deviation from the default warning gate must \
-             state the gate it wants, and an empty deviation would silently disable the gate \
-             altogether",
+            format!(
+                "the key is present but names no flag; a deviation from the default warning gate \
+                 must state the gate it wants, and an empty deviation would silently disable the \
+                 gate altogether. The gate that must be retained in full unless a documented \
+                 deviation applies is: {}",
+                comma_separated(UB_AUDIT_GATE_DEFAULT)
+            ),
         ));
     }
+
+    let mut declared: Vec<String> = Vec::with_capacity(items.len());
     for item in &items {
-        if !item.starts_with('-') {
+        if !is_ub_audit_gate_member(item) {
             return Err(key_error(
                 origin,
                 raw.line,
                 "ub_audit_flags",
-                format!("{item:?} is not a flag; every item of the warning gate begins with `-`"),
+                format!(
+                    "{item:?} is not an entry of the default warning gate, so it may not appear \
+                     here. A deviation is expressed as a REMOVAL from the fixed gate {}, never as \
+                     a compiler invocation of its own: these flags are passed to a real compiler, \
+                     and accepting arbitrary options would let a record load a plugin into the \
+                     compiler process, substitute a subprogram, replace the driver \
+                     specification, add a search path, name an output, or suppress the very \
+                     diagnostics the gate exists to raise. The audit is what establishes that a \
+                     program is free of undefined behaviour, so a record able to weaken it could \
+                     remove the precondition that makes every divergence this suite reports \
+                     meaningful",
+                    comma_separated(UB_AUDIT_GATE_DEFAULT)
+                ),
             ));
         }
+        if declared.iter().any(|known| known == item) {
+            return Err(key_error(
+                origin,
+                raw.line,
+                "ub_audit_flags",
+                format!(
+                    "{item:?} is named twice; a repeated diagnostic switch says nothing the single \
+                     occurrence does not, and a duplicate is a partly edited record rather than an \
+                     intention"
+                ),
+            ));
+        }
+        declared.push(String::from(*item));
     }
-    Ok(items.into_iter().map(String::from).collect())
+
+    if !declared.iter().any(|flag| flag == UB_AUDIT_GATE_MANDATORY) {
+        return Err(key_error(
+            origin,
+            raw.line,
+            "ub_audit_flags",
+            format!(
+                "the deviation drops {UB_AUDIT_GATE_MANDATORY}, which it may never drop; a gate \
+                 that merely warns is not a gate, because the audit's whole purpose is to make a \
+                 diagnostic stop the run. Remove the diagnostics the program genuinely cannot \
+                 satisfy and keep this one"
+            ),
+        ));
+    }
+
+    if declared.len() >= UB_AUDIT_GATE_DEFAULT.len() {
+        return Err(key_error(
+            origin,
+            raw.line,
+            "ub_audit_flags",
+            format!(
+                "the deviation names the entire default gate {}, so it deviates in nothing; a \
+                 program that passes the full gate simply omits this key, and recording a \
+                 no-op deviation would demand a recorded reason for a narrowing that was never \
+                 made",
+                comma_separated(UB_AUDIT_GATE_DEFAULT)
+            ),
+        ));
+    }
+
+    // Every member the deviation omits must be one of the authorized removals. Expressed as
+    // "which omissions are not permitted" rather than "which flags are banned", so the rule
+    // stays closed: the set it draws from is fixed by the gate itself.
+    let unauthorized: Vec<&'static str> = UB_AUDIT_GATE_DEFAULT
+        .iter()
+        .copied()
+        .filter(|member| !declared.iter().any(|flag| flag == member))
+        .filter(|member| !is_ub_audit_gate_removable(member))
+        .collect();
+    if !unauthorized.is_empty() {
+        return Err(key_error(
+            origin,
+            raw.line,
+            "ub_audit_flags",
+            format!(
+                "the deviation drops {}, which no program may drop. Only {} are authorized \
+                 removals — strict-conformance diagnostics, for the supported-extension area, \
+                 where an extension is non-standard by definition and that diagnostic exists \
+                 precisely to reject one; and the conversion diagnostics, for the deliberate \
+                 narrowing programs, where a narrowing conversion is the behaviour under test \
+                 rather than a mistake. Every other member is non-negotiable",
+                comma_separated(&unauthorized),
+                comma_separated(UB_AUDIT_GATE_REMOVABLE)
+            ),
+        ));
+    }
+
+    // Canonicalize to gate order so two records expressing the same deviation compare equal and
+    // read alike, regardless of the order their authors happened to type.
+    let canonical_gate: Vec<String> = UB_AUDIT_GATE_DEFAULT
+        .iter()
+        .filter(|flag| declared.iter().any(|declared| declared == *flag))
+        .map(|flag| String::from(*flag))
+        .collect();
+
+    // An authorized removal is not by itself a sanctioned gate: the set of gates the suite runs is
+    // closed at two reductions, so a record may not combine both removals or invent a third.
+    if is_same_flag_set(&canonical_gate, UB_GATE_WITHOUT_CONVERSION) {
+        return Ok(canonical_gate);
+    }
+    if is_same_flag_set(&canonical_gate, UB_GATE_WITHOUT_PEDANTIC) {
+        if area != EXTENSION_AREA {
+            return Err(key_error(
+                origin,
+                raw.line,
+                "ub_audit_flags",
+                format!(
+                    "this gate drops `-pedantic`, which is sanctioned only in the \
+                     `{EXTENSION_AREA}` area, where the subject under test is by definition \
+                     non-standard and `-pedantic` exists precisely to reject it. This record is \
+                     in {area:?}, where a standard-conformance diagnostic is a genuine defect in \
+                     the test program rather than a property of the feature under test"
+                ),
+            ));
+        }
+        return Ok(canonical_gate);
+    }
+    Err(key_error(
+        origin,
+        raw.line,
+        "ub_audit_flags",
+        format!(
+            "{:?} is neither sanctioned reduction of the default warning gate. The \
+             `{EXTENSION_AREA}` area may drop `-pedantic`, giving `{}`; a program whose subject is \
+             a deliberate narrowing conversion may drop the conversion diagnostics, giving `{}`; \
+             and a program that passes the full gate `{}` omits this key altogether. No other gate \
+             is accepted, because this gate is what establishes the undefined-behaviour freedom \
+             that makes a divergence evidence about the compiler, and a record that could choose \
+             its own gate could exempt itself from the check it depends on",
+            raw.value.trim(),
+            UB_GATE_WITHOUT_PEDANTIC.join(" "),
+            UB_GATE_WITHOUT_CONVERSION.join(" "),
+            UB_GATE_DEFAULT.join(" ")
+        ),
+    ))
 }
 
-/// Parse one per-oracle toggle.
+/// True when a declared flag list holds exactly the sanctioned flags, in any order.
+///
+/// Comparison is by set membership and length rather than by sequence, so a record may write
+/// the gate in whatever order reads best while still being unable to add or drop a flag: a
+/// repeated flag shortens the set it covers and is caught by the membership test.
+fn is_same_flag_set(declared: &[String], sanctioned: &[&str]) -> bool {
+    declared.len() == sanctioned.len()
+        && sanctioned
+            .iter()
+            .all(|flag| declared.iter().any(|item| item == flag))
+}
+
 fn parse_toggle(origin: &Path, raw: &RawField, key: &str) -> HarnessResult<bool> {
     let value = raw.value.trim();
     if value.eq_ignore_ascii_case(TOGGLE_ENABLED) {
@@ -1454,6 +2186,79 @@ fn parse_toggle(origin: &Path, raw: &RawField, key: &str) -> HarnessResult<bool>
              cannot be read would silently decide whether an oracle runs, so it is rejected"
         ),
     ))
+}
+
+/// Require that the enabled oracles can actually reach a verdict about this program.
+///
+/// The three toggles are independent, and that independence is load-bearing: it is what keeps a
+/// construct whose value legitimately differs between architectures under test, by letting a
+/// record disable cross-backend value equality alone while the program remains fully compared
+/// against its same-target reference and its golden record. Narrowing an exclusion to one oracle
+/// is permitted; what is not permitted is narrowing it to nothing.
+///
+/// Independence without a floor was the defect. Nothing required any oracle to be enabled, so a
+/// record could disable all three and the program would still compile, still link, still run —
+/// and be compared against nothing whatsoever, while the summary counted its cells and
+/// reported them as passing. That is precisely the "passes merely by compiling" outcome the
+/// requirements forbid, and it is worse than an omitted program, because an omitted program is
+/// visibly absent whereas this one is visibly present and silently meaningless.
+///
+/// Two conditions therefore hold of every record:
+///
+/// - **Oracle (c) is mandatory.** The golden record applies to every cell of every program, and it
+///   is the only oracle that catches both compilers changing behaviour in the same direction at
+///   once — the one failure mode differential comparison structurally cannot see, because oracle
+///   (a) reports it as agreement.
+/// - **At least one differential oracle is mandatory.** A golden record alone would assert only
+///   that the output has not changed since a maintainer recorded it, which cannot distinguish a
+///   correct answer from a wrong answer that was wrong when it was recorded. An independent
+///   authority — the reference compiler, or bcc's other three backends — is what turns
+///   "unchanged" into "correct".
+fn require_judgeable_oracles(
+    fields: &[(&'static KeySpec, RawField)],
+    origin: &Path,
+    enabled: &[Oracle],
+) -> HarnessResult<()> {
+    let golden_key = format!("oracle_{}", Oracle::GoldenRecord.letter());
+    if !enabled.contains(&Oracle::GoldenRecord) {
+        let line = field(fields, &golden_key).map(|raw| raw.line);
+        let cause = format!(
+            "the golden-record oracle ({}) is disabled, and it may never be: it applies to every \
+             cell of every program, and it is the only oracle that detects both compilers changing \
+             behaviour in the same direction at the same time — the one failure mode \
+             differential comparison structurally cannot see, because a reference comparison \
+             reports it as agreement. Narrow an exclusion to the oracle that genuinely cannot \
+             judge this program, and record the reason in `impl_defined_notes`",
+            Oracle::GoldenRecord.label()
+        );
+        return Err(match line {
+            Some(line) => key_error(origin, line, &golden_key, cause),
+            None => record_error(origin, cause),
+        });
+    }
+
+    let differential: Vec<Oracle> = [Oracle::ReferenceCompiler, Oracle::CrossBackend]
+        .into_iter()
+        .filter(|oracle| enabled.contains(oracle))
+        .collect();
+    if differential.is_empty() {
+        let labels: Vec<&str> = [Oracle::ReferenceCompiler, Oracle::CrossBackend]
+            .iter()
+            .map(|oracle| oracle.label())
+            .collect();
+        return Err(record_error(
+            origin,
+            format!(
+                "both differential oracles are disabled, leaving only the golden record. A golden \
+                 record alone asserts that the output has not changed since a maintainer wrote it \
+                 down, which cannot tell a correct answer from one that was already wrong when it \
+                 was recorded — so the program would run without ever being compared against an \
+                 independent authority. At least one of {} must remain enabled",
+                comma_separated(&labels)
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Parse the expected exit status, bounded by what the platform can actually deliver.
@@ -1496,8 +2301,6 @@ fn canonical<T: Copy + PartialEq>(all: &[T], chosen: &[T]) -> Vec<T> {
         .collect()
 }
 
-/// Parse every item of one scope clause with the same dimension's parser, or report that the
-/// clause does not belong to that dimension.
 fn parse_uniform<T: Copy + PartialEq>(
     items: &[&str],
     parse: fn(&str) -> Option<T>,
@@ -1561,12 +2364,33 @@ fn parse_scope(origin: &Path, raw: &RawField) -> HarnessResult<MarkerScope> {
     let mut oracles: Option<Vec<Oracle>> = None;
     let mut targets: Option<Vec<Target>> = None;
     let mut opt_levels: Option<Vec<OptLevel>> = None;
+    let mut explicit_clauses = 0usize;
 
-    for clause in text
-        .split(';')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
+    for (position, clause) in text.split(';').map(str::trim).enumerate() {
+        // An empty clause is rejected at its position rather than filtered away. Filtering it was
+        // the defect: a scope of `;;;` produced no clause at all, every dimension then fell back
+        // to "all", and the marker silently covered every oracle, every target and every
+        // optimization level — the widest possible scope, reached by writing nothing. A marker's
+        // scope decides which divergences are excused, so widening it by accident is how a real
+        // defect on a target the marker was never meant to cover gets classified as expected.
+        if clause.is_empty() {
+            return Err(key_error(
+                origin,
+                raw.line,
+                KEY_MARKER_SCOPE,
+                format!(
+                    "clause {} of the scope is empty, which usually means a doubled, leading or \
+                     trailing `;`. An empty clause is refused rather than ignored, because \
+                     ignoring it lets a scope that constrains nothing fall back to every oracle, \
+                     every target and every optimization level — the widest scope there is, \
+                     reached by writing nothing. Remove the stray `;`, write each clause \
+                     explicitly, or use `all oracles`, `all targets` and `all opt levels` to say \
+                     so deliberately",
+                    position + 1
+                ),
+            ));
+        }
+        explicit_clauses += 1;
         let lowered = clause.to_ascii_lowercase();
         if let Some(dimension) = lowered.strip_prefix("all ") {
             match dimension.trim() {
@@ -1605,7 +2429,20 @@ fn parse_scope(origin: &Path, raw: &RawField) -> HarnessResult<MarkerScope> {
             continue;
         }
 
-        let items = comma_items(clause);
+        let items = comma_items(origin, raw.line, KEY_MARKER_SCOPE, clause)?;
+        if items.is_empty() {
+            return Err(key_error(
+                origin,
+                raw.line,
+                KEY_MARKER_SCOPE,
+                format!(
+                    "the clause {clause:?} lists no member; a clause that constrains a dimension \
+                     to nothing would make the marker match no cell at all, so the divergence it \
+                     describes could never be recognised and the marker would sit in the register \
+                     documenting a comparison that never happens"
+                ),
+            ));
+        }
         if let Some(parsed) = parse_uniform(&items, Oracle::parse) {
             set_dimension(
                 &mut oracles,
@@ -1652,12 +2489,146 @@ fn parse_scope(origin: &Path, raw: &RawField) -> HarnessResult<MarkerScope> {
         ));
     }
 
+    if explicit_clauses == 0 {
+        return Err(key_error(
+            origin,
+            raw.line,
+            KEY_MARKER_SCOPE,
+            "the scope constrains no dimension; a marker must state at least one clause, because \
+             a scope that constrains nothing would cover every oracle, every target and every \
+             optimization level, and a marker that excuses every cell of a program can no longer \
+             distinguish the divergence it documents from an unrelated defect",
+        ));
+    }
+
+    // A dimension the scope does not mention defaults to every member of that dimension, which is
+    // deliberate and safe now that at least one clause is guaranteed to be explicit: `oracle_b` on
+    // its own means "cross-backend comparison, on every target, at every optimization level",
+    // which is what a maintainer writing one clause means. What is no longer reachable is the
+    // case where NO clause was explicit and every dimension widened at once.
     Ok(MarkerScope {
         raw: String::from(text),
         oracles: oracles.unwrap_or_else(|| Oracle::ALL.to_vec()),
         targets: targets.unwrap_or_else(|| Target::ALL.to_vec()),
         opt_levels: opt_levels.unwrap_or_else(|| OptLevel::ALL.to_vec()),
     })
+}
+
+/// Reject a marker whose scope cannot match a single cell of the record that carries it.
+///
+/// A scope is written independently of the matrix, so the two can disagree, and a disagreement is
+/// invisible at run time in the worst possible way: the marker is never consulted, so nothing
+/// reports it as unused. It sits in the register as documented knowledge about a comparison this
+/// program never makes, and if the divergence it describes ever appears in a cell the scope
+/// excludes, the run fails as an unexplained divergence with the explanation sitting unread two
+/// lines above.
+///
+/// Because a scope defaults each unmentioned dimension to all of its members, a disagreement can
+/// only arise where the scope constrains a dimension explicitly — a target the record does not
+/// build, an optimization level it does not sweep, or an oracle it has switched off. Each is
+/// checked and each is named individually, because "the scope does not intersect" is not
+/// actionable whereas "the scope names aarch64 but the record builds x86_64 only" is.
+///
+/// The unexpected-success policy is the reason this must be an error rather than a warning: a
+/// marker whose divergence has disappeared already fails the run, so a marker that could never be
+/// consulted at all must not be allowed to look healthy.
+fn validate_marker_scope_intersects(
+    origin: &Path,
+    divergence: &ExpectedDivergence,
+    enabled_oracles: &[Oracle],
+    targets: &[Target],
+    opt_levels: &[OptLevel],
+) -> HarnessResult<()> {
+    let oracles: Vec<&str> = divergence
+        .scope
+        .oracles
+        .iter()
+        .filter(|oracle| enabled_oracles.contains(oracle))
+        .map(|oracle| oracle.label())
+        .collect();
+    if oracles.is_empty() {
+        let scoped: Vec<&str> = divergence
+            .scope
+            .oracles
+            .iter()
+            .map(|oracle| oracle.label())
+            .collect();
+        let enabled: Vec<&str> = enabled_oracles
+            .iter()
+            .map(|oracle| oracle.label())
+            .collect();
+        return Err(record_error(
+            origin,
+            format!(
+                "the marker {} is scoped to {} but this record enables only {}, so the marker \
+                 could never be consulted: it would document an expected divergence in a \
+                 comparison this program never makes, and were the divergence to appear in an \
+                 oracle the scope excludes the run would fail as unexplained with the explanation \
+                 sitting unread in the same file. Either widen the scope or enable the oracle it \
+                 describes",
+                divergence.id,
+                comma_separated(&scoped),
+                comma_separated(&enabled)
+            ),
+        ));
+    }
+
+    let matched_targets: Vec<&str> = divergence
+        .scope
+        .targets
+        .iter()
+        .filter(|target| targets.contains(target))
+        .map(|target| target.short_name())
+        .collect();
+    if matched_targets.is_empty() {
+        let scoped: Vec<&str> = divergence
+            .scope
+            .targets
+            .iter()
+            .map(|target| target.short_name())
+            .collect();
+        let declared: Vec<&str> = targets.iter().map(|target| target.short_name()).collect();
+        return Err(record_error(
+            origin,
+            format!(
+                "the marker {} is scoped to the targets {} but this record builds only {}, so the \
+                 marker could never be consulted. A target-restricted record and a marker scoped \
+                 to a different target describe two different experiments",
+                divergence.id,
+                comma_separated(&scoped),
+                comma_separated(&declared)
+            ),
+        ));
+    }
+
+    let matched_levels: Vec<&str> = divergence
+        .scope
+        .opt_levels
+        .iter()
+        .filter(|level| opt_levels.contains(level))
+        .map(|level| level.flag())
+        .collect();
+    if matched_levels.is_empty() {
+        let scoped: Vec<&str> = divergence
+            .scope
+            .opt_levels
+            .iter()
+            .map(|level| level.flag())
+            .collect();
+        let declared: Vec<&str> = opt_levels.iter().map(|level| level.flag()).collect();
+        return Err(record_error(
+            origin,
+            format!(
+                "the marker {} is scoped to the optimization levels {} but this record sweeps only \
+                 {}, so the marker could never be consulted",
+                divergence.id,
+                comma_separated(&scoped),
+                comma_separated(&declared)
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Parse a marker basis into its verbatim text and the repository-relative path it cites.
@@ -1850,17 +2821,11 @@ fn parse_marker(
     }))
 }
 
-// ---------------------------------------------------------------------------
-// Record assembly
-// ---------------------------------------------------------------------------
-
-/// Every feature-area directory name, as one comma-separated line for a diagnostic.
 fn known_area_names() -> String {
     let names: Vec<&str> = AREAS.iter().map(|area| area.directory).collect();
     comma_separated(&names)
 }
 
-/// The record's file stem, which the `program` key must match.
 fn record_stem(origin: &Path) -> HarnessResult<&str> {
     origin
         .file_stem()
@@ -1874,7 +2839,6 @@ fn record_stem(origin: &Path) -> HarnessResult<&str> {
         })
 }
 
-/// The name of the directory the record lives in, which the `area` key must match.
 fn record_directory(origin: &Path) -> HarnessResult<&str> {
     origin
         .parent()
@@ -1889,30 +2853,390 @@ fn record_directory(origin: &Path) -> HarnessResult<&str> {
         })
 }
 
-/// Validate the three command templates against each other and against the one fact that makes
+/// Reject a flag that takes a value but is not immediately followed by the placeholder that
+/// supplies it.
+///
+/// Adjacency is the property that matters: `-o <out>` writes the artifact where the harness will
+/// look for it, whereas `-o <src>` or a bare `-o` describes a cell that cannot be run even
+/// though every required placeholder is present somewhere in the line.
+fn require_followed_by(
+    origin: &Path,
+    raw: &RawField,
+    key: &str,
+    flag: &str,
+    expected: &str,
+    tokens: &[&str],
+) -> HarnessResult<()> {
+    let position = tokens.iter().position(|token| *token == flag);
+    match position {
+        Some(index) if tokens.get(index + 1) == Some(&expected) => Ok(()),
+        Some(_) => Err(key_error(
+            origin,
+            raw.line,
+            key,
+            format!(
+                "the template {:?} writes {flag} but does not follow it immediately with \
+                 {expected}; the value belongs to the flag, so a line that separates them does \
+                 not describe the cell the record claims",
+                raw.value
+            ),
+        )),
+        None => Err(key_error(
+            origin,
+            raw.line,
+            key,
+            format!(
+                "the template {:?} omits {flag}; write `{flag} {expected}` so the command line \
+                 names the cell it builds",
+                raw.value
+            ),
+        )),
+    }
+}
+
+/// Validate one build template's structure: the minimal differential flags, the adjacency of
+/// the output flag and its placeholder, the absence of a pinned optimization level, and exact
+/// agreement between the flags the line passes and the flags the record declares.
+///
+/// The bidirectional flag check is the point of this function. Requiring every flag in the line
+/// to be declared stops a record from smuggling an unverified flag past the shared-flag
+/// discipline by writing it into a template instead of into `shared_flags`; requiring every
+/// declared flag to appear in the line stops the reverse, a record that declares a flag it never
+/// passes and so documents an invocation that never happens. `extra_allowed_flags` carries the
+/// flags a particular side may pass without declaring them — only the compiler-under-test's
+/// target selection, which is legitimate precisely because the cross-backend oracle compares the
+/// compiler against itself.
+fn validate_build_template(
+    origin: &Path,
+    raw: &RawField,
+    key: &str,
+    shared_flags: &[String],
+    extra_allowed_flags: &[&str],
+) -> HarnessResult<()> {
+    let tokens = whitespace_items(&raw.value);
+    for flag in DIFFERENTIAL_FLAGS_MINIMAL {
+        if !tokens.contains(flag) {
+            return Err(key_error(
+                origin,
+                raw.line,
+                key,
+                format!(
+                    "the template {:?} omits {flag}; every cell is built with the minimal \
+                     differential set {}, which is what makes the artifact both findable and \
+                     executable on all four targets",
+                    raw.value,
+                    comma_separated(DIFFERENTIAL_FLAGS_MINIMAL)
+                ),
+            ));
+        }
+    }
+    require_followed_by(origin, raw, key, FLAG_OUTPUT, PLACEHOLDER_OUTPUT, &tokens)?;
+    for &token in tokens.iter().skip(1) {
+        if token.starts_with('$') {
+            return Err(key_error(
+                origin,
+                raw.line,
+                key,
+                format!(
+                    "the template {:?} names a compiler driver in {token:?} after its first \
+                     token; a build line invokes exactly one driver, and a second one would \
+                     silently decide which compiler produced the artifact",
+                    raw.value
+                ),
+            ));
+        }
+        if is_literal_opt_level(token) {
+            return Err(key_error(
+                origin,
+                raw.line,
+                key,
+                format!(
+                    "the template {:?} pins the optimization level with {token:?}; the level \
+                     comes from the {PLACEHOLDER_OPT} placeholder so that one record describes \
+                     every level of its sweep, and a pinned level would compile all three cells \
+                     identically while the report claimed a sweep",
+                    raw.value
+                ),
+            ));
+        }
+        if !token.starts_with('-') {
+            continue;
+        }
+        if extra_allowed_flags.contains(&token)
+            || DIFFERENTIAL_FLAGS_MINIMAL.contains(&token)
+            || shared_flags.iter().any(|flag| flag == token)
+        {
+            continue;
+        }
+        return Err(key_error(
+            origin,
+            raw.line,
+            key,
+            format!(
+                "the template passes {token:?}, which the record does not declare in \
+                 `shared_flags`. Every flag reaching a differential invocation is verified to be \
+                 honoured by both compilers with the same meaning, and that verification is keyed \
+                 to the declared list: a flag written straight into a template would bypass it. \
+                 The declared list is: {}",
+                comma_separated(
+                    &shared_flags
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<&str>>()
+                )
+            ),
+        ));
+    }
+    for flag in shared_flags {
+        if !tokens.iter().any(|token| token == flag) {
+            return Err(key_error(
+                origin,
+                raw.line,
+                key,
+                format!(
+                    "the record declares the shared flag {flag:?} but the template {:?} never \
+                     passes it; a declared flag that no invocation carries records an invocation \
+                     that never happens, which is exactly the kind of claim the reproduction \
+                     commands exist to make checkable",
+                    raw.value
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// True when a token selects the reference-compiler driver for the cell's own target.
+///
+/// The templated spelling and the four concrete per-target spellings each resolve to a driver
+/// *binary*, which is how the cross arm works at all: the reference compiler has no
+/// target-selection flag. The bare spelling is deliberately not accepted here — see
+/// [`validate_templates`].
+fn is_reference_driver_placeholder(token: &str) -> bool {
+    if token == PLACEHOLDER_REFERENCE_TEMPLATED {
+        return true;
+    }
+    Target::ALL.iter().any(|target| {
+        token
+            == format!(
+                "{PLACEHOLDER_REFERENCE_BARE}_{}",
+                target.short_name().to_ascii_uppercase()
+            )
+            .as_str()
+    })
+}
+
+/// Require that a command template is an argument vector and not a shell script.
+///
+/// A template is split on whitespace and every token must be either one of the accepted
+/// placeholder spellings or literal text free of [`TEMPLATE_FORBIDDEN_CHARACTERS`]. That is the
+/// parse-time half of the reproduction-command guarantee, and it pairs with the emit-time half in
+/// [`render_command_checked`] as follows:
+///
+/// - **Parse time refuses shell grammar in the template.** The harness spawns an argument vector
+///   with no shell, so a template containing `;`, `|`, a backquote or a `$(` describes something
+///   the harness will never do. Quoting it at emit time would faithfully reproduce a command line
+///   nobody meant to write; refusing it names the record and the offending token instead.
+/// - **Emit time quotes the substituted values.** A path is data the record does not control — it
+///   comes from the checkout and the workspace — so it cannot be refused, and it is made safe by
+///   quoting rather than by rejection.
+///
+/// Splitting the responsibility this way is what makes the whole path safe with no case left over:
+/// everything a record author writes is checked, and everything the environment supplies is quoted.
+///
+/// A placeholder token is exempt from the character rules, which is what lets `<out>` and
+/// `$REF_CC_<TRIPLE>` carry angle brackets and a dollar sign while a literal token may not. The
+/// exemption is safe precisely because it applies to a **whole token**: a placeholder is recognised
+/// only when the entire token matches, so `-o<out>` is literal text, is rejected for its angle
+/// brackets, and can never smuggle a placeholder into a fused argument.
+fn require_shell_free_template(origin: &Path, raw: &RawField, key: &str) -> HarnessResult<()> {
+    let template = raw.value.trim();
+    if template.is_empty() {
+        return Err(key_error(
+            origin,
+            raw.line,
+            key,
+            "the template is empty; a cell is reproduced by running this command, and an empty \
+             template describes no command at all",
+        ));
+    }
+    for token in template.split_whitespace() {
+        if is_placeholder_token(token) {
+            continue;
+        }
+        if let Some(offending) = token
+            .chars()
+            .find(|character| TEMPLATE_FORBIDDEN_CHARACTERS.contains(character))
+        {
+            return Err(key_error(
+                origin,
+                raw.line,
+                key,
+                format!(
+                    "the token {token:?} carries {}, which a template may not contain. A template \
+                     is an argument vector, not a shell script: the harness spawns each token as \
+                     one argument with no shell involved, so this character is either a mistake or \
+                     an attempt to make a reproduction script do something the harness itself \
+                     never did. Note that a placeholder is recognised only as a WHOLE token, so \
+                     a fused spelling such as `-o<out>` is literal text and is refused here — \
+                     write `-o <out>` as two tokens instead",
+                    describe_template_character(offending)
+                ),
+            ));
+        }
+        // Defence in depth. `push_field` already refuses every control and formatting character
+        // in every field value, so one cannot reach this point through the parser; the check is
+        // repeated here so that a future caller reaching this function by another route cannot
+        // place a character in an argument vector that a report would then have to escape.
+        if let Some(offending) = token
+            .chars()
+            .find(|character| must_escape_for_report(*character))
+        {
+            return Err(key_error(
+                origin,
+                raw.line,
+                key,
+                format!(
+                    "the token {token:?} carries {}, which cannot appear in an argument the \
+                     harness executes or in a reproduction line a maintainer reads",
+                    describe_character(offending)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Name an offending template character in a way a maintainer can act on.
+fn describe_template_character(character: char) -> String {
+    let role = match character {
+        '|' | '&' | ';' => "a shell list operator",
+        '<' | '>' => "a shell redirection or an angle bracket belonging to a placeholder",
+        '(' | ')' | '`' | '$' => "a shell command or parameter expansion",
+        '{' | '}' | '[' | ']' | '*' | '?' | '!' => "a shell pattern or expansion character",
+        '"' | '\'' | '\\' => "a shell quoting character",
+        '#' => "a shell comment introducer",
+        '~' => "a shell tilde expansion",
+        '\n' | '\r' | '\t' => "whitespace that is not a plain space",
+        _ => "a character reserved by the shell",
+    };
+    format!("{character:?}, {role}")
+}
+
+/// Validate the three command templates against each other, against the record's declared flag
+/// set, against the target matrix they will be rendered for, and against the one fact that makes
 /// the cross arm of the reference-compiler oracle work at all.
+///
+/// The templates are the whole of requirement 4's isolated reproducibility: a maintainer must be
+/// able to rebuild and rerun any cell from the program source and this record alone. That makes
+/// them a claim about the cell, and this function is what turns the claim into something
+/// checkable.
+///
+/// Eleven things are required outright, one for every part of a cell a template must be able to
+/// name: `$BCC`, `<triple>`, `<opt>`, `<src>` and `<out>` in the compiler-under-test template; a
+/// per-target reference driver, `<opt>`, `<src>` and `<out>` in the reference template; and
+/// `<runner>` and `<out>` in the run template. Ten are required by containment; the reference
+/// driver is required positionally, as the template's first token, which is stricter than
+/// containment because a driver named anywhere else is not the program the recorded line would
+/// run.
+///
+/// None of the eleven is stylistic, and none can be caught later by [`render_command_checked`],
+/// which only rejects a placeholder the template *did* write and the substitutions failed to
+/// expand. What it cannot notice is a template that never wrote the placeholder at all — and such
+/// a template still parses, while its cells still run with the missing part supplied by a default
+/// nobody chose, so the record describes a cell other than the one the matrix says it runs. That
+/// is a green run which compared nothing, the one failure mode a differential suite cannot
+/// afford. Every element below is therefore structural rather than cosmetic:
+///
+/// - The compiler-under-test line must select the cell's target with `--target <triple>`, or a
+///   record claiming four targets would record one command that builds only the default, silently
+///   comparing a host binary against a cross-compiled one.
+/// - Both build lines must carry the cell's optimization level (`<opt>`), or a record claiming a
+///   three-level sweep would record one command that builds only the default level, so a
+///   maintainer following the record would build something other than the cell whose divergence
+///   was reported.
+/// - Both build lines must write `-o <out>` with the placeholder immediately after the flag, and
+///   must carry `-static`, because the harness executes the artifact at the path it asked for and
+///   the three emulated targets need static linkage to run at all.
+/// - The reference line must name a per-target driver, not the bare synonym, because the driver
+///   *is* the target selection on that side and a bare name would silently mean the native one; a
+///   concrete per-target spelling is admissible only where the record declares that one target.
+/// - The run line must be exactly `<runner> <out>`, or a cross-target cell would be recorded as
+///   executing a foreign binary directly instead of through its emulator.
+/// - Every flag either build line passes must be declared in `shared_flags`, and every declared
+///   flag must appear in both lines.
 fn validate_templates(
     origin: &Path,
     bcc: &RawField,
     reference: &RawField,
     run: &RawField,
+    targets: &[Target],
+    shared_flags: &[String],
 ) -> HarnessResult<()> {
+    require_shell_free_template(origin, bcc, "bcc_command")?;
+    require_shell_free_template(origin, reference, "ref_command")?;
+    require_shell_free_template(origin, run, "run_command")?;
+
     require_placeholders(
         origin,
         bcc,
         "bcc_command",
-        &[PLACEHOLDER_BCC, PLACEHOLDER_SOURCE, PLACEHOLDER_OUTPUT],
+        &[
+            PLACEHOLDER_BCC,
+            PLACEHOLDER_TRIPLE,
+            PLACEHOLDER_OPT,
+            PLACEHOLDER_SOURCE,
+            PLACEHOLDER_OUTPUT,
+        ],
     )?;
     require_placeholders(
         origin,
         reference,
         "ref_command",
-        &[PLACEHOLDER_SOURCE, PLACEHOLDER_OUTPUT],
+        &[PLACEHOLDER_OPT, PLACEHOLDER_SOURCE, PLACEHOLDER_OUTPUT],
     )?;
-    require_placeholders(origin, run, "run_command", &[PLACEHOLDER_OUTPUT])?;
+    require_placeholders(
+        origin,
+        run,
+        "run_command",
+        &[PLACEHOLDER_RUNNER, PLACEHOLDER_OUTPUT],
+    )?;
 
-    // Every accepted reference-compiler spelling begins with the bare placeholder, so one
-    // containment test covers the templated form, the four concrete forms and the bare form.
+    let bcc_tokens = whitespace_items(&bcc.value);
+    if bcc_tokens.first() != Some(&PLACEHOLDER_BCC) {
+        return Err(key_error(
+            origin,
+            bcc.line,
+            "bcc_command",
+            format!(
+                "the template {:?} does not begin with {PLACEHOLDER_BCC}; the compiler under test \
+                 is invoked directly, so it is the first token of the line a maintainer runs",
+                bcc.value
+            ),
+        ));
+    }
+    require_followed_by(
+        origin,
+        bcc,
+        "bcc_command",
+        FLAG_TARGET_SELECT,
+        PLACEHOLDER_TRIPLE,
+        &bcc_tokens,
+    )?;
+    validate_build_template(
+        origin,
+        bcc,
+        "bcc_command",
+        shared_flags,
+        &[FLAG_TARGET_SELECT],
+    )?;
+
+    // Asked before the first-token test below, because "this template never names the reference
+    // compiler at all" is a different editing mistake from "it names it without the target
+    // suffix" and is worth its own diagnostic. Every accepted reference-compiler spelling begins
+    // with the bare placeholder, so this one containment test covers the templated form, the four
+    // concrete forms and the bare form; the first-token test then holds the record to a per-target
+    // spelling, and to naming that driver as the program the recorded line actually runs.
     if !reference.value.contains(PLACEHOLDER_REFERENCE_BARE) {
         return Err(key_error(
             origin,
@@ -1925,6 +3249,61 @@ fn validate_templates(
                 reference.value
             ),
         ));
+    }
+
+    let ref_tokens = whitespace_items(&reference.value);
+    let driver = ref_tokens.first().copied().unwrap_or_default();
+    if !is_reference_driver_placeholder(driver) {
+        return Err(key_error(
+            origin,
+            reference.line,
+            "ref_command",
+            format!(
+                "the template {:?} does not begin with a per-target reference-compiler driver; \
+                 write {PLACEHOLDER_REFERENCE_TEMPLATED}, or the concrete spelling for this \
+                 record's one target. The bare {PLACEHOLDER_REFERENCE_BARE} is not accepted: the \
+                 reference compiler has no target-selection flag, so on that side the driver \
+                 binary *is* the target, and a spelling that names no target would record the \
+                 native driver as the command for a cross cell — a line that either fails or, \
+                 worse, silently builds for the host while the report says otherwise",
+                reference.value
+            ),
+        ));
+    }
+
+    // A concrete `$REF_CC_<ARCH>` spelling names one driver, so it is admissible only where the
+    // record is restricted to that one target. Rendering is deliberately strict about this too:
+    // a foreign spelling is left unexpanded rather than rewritten to the cell's own driver, so
+    // that the fault surfaces as an unexpanded placeholder instead of as a comparison silently
+    // made against the wrong binary. Rejecting it here means the fault is caught once, at load
+    // time, naming the line — rather than once per cell, at render time.
+    for target in Target::ALL {
+        let concrete = concrete_reference_placeholder(target);
+        if !reference.value.contains(&concrete) {
+            continue;
+        }
+        if targets != [target] {
+            return Err(key_error(
+                origin,
+                reference.line,
+                "ref_command",
+                format!(
+                    "the template names {concrete}, the driver for {target} alone, but this record \
+                     declares the targets {}. A concrete driver spelling is admissible only in a \
+                     record restricted to that one target; for a multi-target record write \
+                     {PLACEHOLDER_REFERENCE_TEMPLATED}, which resolves to the driver for whichever \
+                     target the cell is being built for. Naming one architecture's driver while \
+                     sweeping several would compile every cell with the same driver and report \
+                     agreement about a comparison that was never made",
+                    comma_separated(
+                        &targets
+                            .iter()
+                            .map(|declared| declared.short_name())
+                            .collect::<Vec<&str>>()
+                    )
+                ),
+            ));
+        }
     }
     for spelling in REFERENCE_FORBIDDEN_SPELLINGS {
         if reference.value.contains(spelling) {
@@ -1964,16 +3343,51 @@ fn validate_templates(
             ),
         ));
     }
+    for &token in ref_tokens.iter().skip(1) {
+        if token.contains(PLACEHOLDER_TRIPLE) {
+            return Err(key_error(
+                origin,
+                reference.line,
+                "ref_command",
+                format!(
+                    "the template passes the cell's triple in {token:?}; the reference compiler \
+                     has no target-selection flag, so a triple appearing anywhere but inside the \
+                     driver placeholder would be handed to it as an argument it does not \
+                     understand"
+                ),
+            ));
+        }
+    }
+    validate_build_template(origin, reference, "ref_command", shared_flags, &[])?;
+
+    let run_tokens = whitespace_items(&run.value);
+    if run_tokens.as_slice() != [PLACEHOLDER_RUNNER, PLACEHOLDER_OUTPUT] {
+        return Err(key_error(
+            origin,
+            run.line,
+            "run_command",
+            format!(
+                "the template {:?} is not exactly `{PLACEHOLDER_RUNNER} {PLACEHOLDER_OUTPUT}`. \
+                 The runner placeholder is empty on the natively executing target and the \
+                 target's emulator otherwise, so it is what lets one recorded line run a cell on \
+                 any of the four targets; omitting it would record a cross cell as executing a \
+                 foreign binary directly. No further token is accepted either: every corpus \
+                 program reads its whole input from literals in its own source and is passed no \
+                 argument, no redirection and no environment, which is what makes a cell \
+                 reproducible from the source and this record alone",
+                run.value
+            ),
+        ));
+    }
     Ok(())
 }
 
 /// Turn parsed fields into a validated manifest.
 ///
-/// Validation is strict throughout, and every rejection is a corpus defect rather than a
-/// condition an environment can legitimately produce. That distinction is what the whole suite
-/// rests on: a divergence is evidence about the compiler only when the program that provoked it
-/// is known to be well formed, undefined-behaviour-free, and compared under oracles whose
-/// exclusions each carry a recorded reason.
+/// Every rejection here is a corpus defect rather than a condition an environment can legitimately
+/// produce, so none of them is tolerated: a divergence is evidence about the compiler only when
+/// the program that provoked it is well formed and compared under oracles whose exclusions each
+/// carry a recorded reason.
 fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> HarnessResult<Manifest> {
     for spec in KEYS
         .iter()
@@ -2052,7 +3466,14 @@ fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> Harness
     let bcc_field = required_field(&fields, origin, "bcc_command")?;
     let ref_field = required_field(&fields, origin, "ref_command")?;
     let run_field = required_field(&fields, origin, "run_command")?;
-    validate_templates(origin, bcc_field, ref_field, run_field)?;
+    validate_templates(
+        origin,
+        bcc_field,
+        ref_field,
+        run_field,
+        &targets,
+        &shared_flags,
+    )?;
 
     let expect_exit = parse_expect_exit(origin, required_field(&fields, origin, "expect_exit")?)?;
 
@@ -2064,9 +3485,10 @@ fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> Harness
             enabled_oracles.push(oracle);
         }
     }
+    require_judgeable_oracles(&fields, origin, &enabled_oracles)?;
 
     let ub_audit_flags = match field(&fields, "ub_audit_flags") {
-        Some(raw) => Some(parse_ub_audit_flags(origin, raw)?),
+        Some(raw) => Some(parse_ub_audit_flags(origin, raw, &area_field.value)?),
         None => None,
     };
 
@@ -2103,6 +3525,15 @@ fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> Harness
          empty golden record would turn the golden-record oracle into a no-op for this program",
     )?;
 
+    // Everything this record compares less than the full matrix, gathered so that a narrowing
+    // can never reach the corpus without its reason recorded beside it.
+    //
+    // The optimization-level dimension is deliberately absent from this list, and its absence is
+    // load-bearing rather than an omission: a record that declares fewer than all three levels is
+    // rejected outright by `parse_opt_levels`, which is strictly stronger than admitting the
+    // restriction and asking for a note. A level that is never compiled cannot diverge, so a
+    // miscompilation confined to it would never be seen at all — that is a hole in coverage rather
+    // than a documented exclusion, and no recorded reason would make it visible in the results.
     let mut narrowings: Vec<String> = Vec::new();
     if targets.len() < Target::ALL.len() {
         let names: Vec<&str> = targets.iter().map(|target| target.short_name()).collect();
@@ -2122,10 +3553,15 @@ fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> Harness
         let labels: Vec<&str> = disabled.iter().map(|oracle| oracle.label()).collect();
         narrowings.push(format!("{} disabled", comma_separated(&labels)));
     }
-    if ub_audit_flags.is_some() {
-        narrowings.push(String::from(
-            "the warning gate deviates from the default gate",
-        ));
+    if let Some(gate) = &ub_audit_flags {
+        // Only a gate that actually differs from the default is a narrowing. A record is free to
+        // restate the default gate explicitly, and doing so narrows nothing.
+        if !is_same_flag_set(gate, UB_GATE_DEFAULT) {
+            narrowings.push(format!(
+                "the warning gate deviates from the default gate ({})",
+                gate.join(" ")
+            ));
+        }
     }
     if !narrowings.is_empty() && impl_defined_notes.is_none() {
         return Err(record_error(
@@ -2144,6 +3580,15 @@ fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> Harness
 
     let source = origin.with_extension(SOURCE_EXTENSION);
     let marker = parse_marker(&fields, origin, &source)?;
+    if let Some(divergence) = &marker {
+        validate_marker_scope_intersects(
+            origin,
+            divergence,
+            &enabled_oracles,
+            &targets,
+            &opt_levels,
+        )?;
+    }
 
     Ok(Manifest {
         path: origin.to_path_buf(),
@@ -2166,10 +3611,6 @@ fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> Harness
     })
 }
 
-// ---------------------------------------------------------------------------
-// Public entry points
-// ---------------------------------------------------------------------------
-
 /// Parse and validate a record from text, touching no filesystem.
 ///
 /// `origin` is the path the text came from. It is not decoration: the identity checks that tie a
@@ -2187,19 +3628,113 @@ pub fn parse_str(text: &str, origin: &Path) -> HarnessResult<Manifest> {
 /// A record that cannot be read is a hard error. It is never a skip: a program whose expectations
 /// cannot be loaded is a program no oracle can judge, and quietly passing over it would remove a
 /// cell from the matrix without anyone being told.
+///
+/// The path is checked for containment before a byte is read, by the same
+/// [`require_contained_corpus_file`] the harness root uses to resolve a cell, so a record is read
+/// only when it is a regular, non-symbolic-link file that genuinely resolves inside the corpus.
+/// That matters more here than anywhere else in the module: a record dictates the command
+/// templates a cell executes and the golden output it is judged against, so a record read from
+/// outside the corpus would decide what gets compiled, with which arguments, and what counts as
+/// correct — while every report still named the corpus path. The resolved path is what the
+/// manifest carries onward, so the identity checks and every later diagnostic name the file that
+/// was actually read.
 pub fn load(expected_path: &Path) -> HarnessResult<Manifest> {
-    let text = fs::read_to_string(expected_path).map_err(|error| {
+    let context = format!("reading the expectation record {}", expected_path.display());
+    let resolved = require_contained_corpus_file(
+        &context,
+        "expectation record",
+        expected_path,
+        RECORD_EXTENSION,
+    )?;
+    let text = read_record_text(&resolved)?;
+    parse_str(&text, &resolved)
+}
+
+/// Read a record's text with every read bounded.
+///
+/// Three bounds apply, and each covers a shape the others do not:
+///
+/// 1. The file's recorded size is checked **before** the file is opened, so an oversized record is
+///    refused without a single byte being read into memory.
+/// 2. The reader is wrapped in [`std::io::Read::take`] at the same bound, because a file can grow
+///    between the metadata call and the read. This is the check that makes the first one honest
+///    rather than advisory — without it, the size test is a time-of-check-to-time-of-use gap.
+/// 3. The bytes are required to be valid UTF-8, and an invalid record is refused with its byte
+///    offset named rather than replaced with substitution characters. A record is written into
+///    reports and reproduction commands verbatim, so silently rewriting its bytes would mean the
+///    suite reported something the corpus does not contain.
+///
+/// The metadata is taken with [`std::fs::symlink_metadata`] so that the size belongs to the file
+/// itself rather than to whatever a link points at.
+fn read_record_text(path: &Path) -> HarnessResult<String> {
+    use std::io::Read;
+
+    let context = format!("reading the expectation record {}", path.display());
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
         HarnessError::new(
-            format!("reading the expectation record {}", expected_path.display()),
+            context.clone(),
             format!(
-                "{error}; every program in the corpus is paired with a sibling \
-                 `.{RECORD_EXTENSION}` record holding its command templates and its golden \
+                "{} could not be inspected: {error}; every program in the corpus is paired with a \
+                 sibling `.{RECORD_EXTENSION}` record holding its command templates and its golden \
                  output, and a record that cannot be read is a corpus defect rather than a reason \
-                 to skip the program"
+                 to skip the program",
+                path.display()
             ),
         )
     })?;
-    parse_str(&text, expected_path)
+    if metadata.len() > RECORD_BYTES_MAX {
+        return Err(HarnessError::new(
+            context,
+            format!(
+                "the record is {} bytes, above the {RECORD_BYTES_MAX}-byte limit; a record holds a \
+                 handful of short scalar fields and a golden stdout measured in hundreds of bytes, \
+                 so a file this large is corrupt or adversarial rather than one the corpus could \
+                 contain, and reading it would let a data file decide how much memory the suite \
+                 uses",
+                metadata.len()
+            ),
+        ));
+    }
+
+    let file = fs::File::open(path).map_err(|error| {
+        HarnessError::new(
+            context.clone(),
+            format!("{} could not be opened: {error}", path.display()),
+        )
+    })?;
+    let mut bytes: Vec<u8> = Vec::new();
+    // Bounded again on the reader: the size above was true when it was taken, and the file may
+    // have grown since. One extra byte is permitted so that exceeding the limit is detectable
+    // rather than silently truncating the record to exactly the limit.
+    let mut bounded = file.take(RECORD_BYTES_MAX + 1);
+    bounded.read_to_end(&mut bytes).map_err(|error| {
+        HarnessError::new(
+            context.clone(),
+            format!("{} could not be read: {error}", path.display()),
+        )
+    })?;
+    if bytes.len() as u64 > RECORD_BYTES_MAX {
+        return Err(HarnessError::new(
+            context,
+            format!(
+                "the record exceeded the {RECORD_BYTES_MAX}-byte limit while being read, so it \
+                 grew after its size was checked; the read is bounded independently for exactly \
+                 this reason, and the record is refused rather than partly parsed"
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        let offset = error.utf8_error().valid_up_to();
+        HarnessError::new(
+            context,
+            format!(
+                "the record is not valid UTF-8: the first invalid byte is at offset {offset}. A \
+                 record's text is written into reports and reproduction commands verbatim, so an \
+                 unreadable byte is refused rather than replaced with a substitution character, \
+                 which would make the suite report something the corpus does not contain"
+            ),
+        )
+    })
 }
 
 /// Load the record that governs a program, given the program's own path.
@@ -2210,10 +3745,11 @@ pub fn load(expected_path: &Path) -> HarnessResult<Manifest> {
 /// program without its half of that pairing cannot be reproduced by hand or judged by the
 /// golden-record oracle.
 pub fn load_for_source(c_path: &Path) -> HarnessResult<Manifest> {
+    let context = format!("resolving the expectation record for {}", c_path.display());
     let extension = c_path.extension().and_then(|value| value.to_str());
     if extension != Some(SOURCE_EXTENSION) {
         return Err(HarnessError::new(
-            format!("resolving the expectation record for {}", c_path.display()),
+            context,
             format!(
                 "the path is not a `.{SOURCE_EXTENSION}` program, so it has no sibling record; \
                  every corpus program is a `.{SOURCE_EXTENSION}` file paired with a \
@@ -2221,31 +3757,52 @@ pub fn load_for_source(c_path: &Path) -> HarnessResult<Manifest> {
             ),
         ));
     }
-    let record = c_path.with_extension(RECORD_EXTENSION);
-    if !record.is_file() {
-        return Err(HarnessError::new(
-            format!("resolving the expectation record for {}", c_path.display()),
+    // Resolve the program first, so a link or an escape is refused before it can be used to
+    // derive — and thereby legitimise — a record path outside the corpus. Deriving the record
+    // first and checking it later would let a path from outside the corpus name a sibling inside
+    // it, or the reverse, and either way the pair would not be the pair the corpus contains.
+    let resolved_source =
+        require_contained_corpus_file(&context, "program", c_path, SOURCE_EXTENSION)?;
+    let record = resolved_source.with_extension(RECORD_EXTENSION);
+    // `is_file` follows a symbolic link, so it would answer "yes" for a committed link pointing at
+    // any readable file on the machine — whose bytes would then be parsed and quoted back through
+    // parser diagnostics, which is a disclosure channel. `require_regular_file` inspects the link
+    // itself and refuses it, and `load` re-establishes both properties on the path it is handed.
+    require_regular_file(&context, &record).map_err(|error| {
+        HarnessError::new(
+            context.clone(),
             format!(
-                "the sibling record {} does not exist; a program without its record is a corpus \
-                 defect and is reported rather than skipped, because skipping it would silently \
-                 remove every one of its cells from the matrix",
-                record.display()
+                "{error}. A program without its record is a corpus defect and is reported rather \
+                 than skipped, because skipping it would silently remove every one of its cells \
+                 from the matrix"
             ),
-        ));
-    }
+        )
+    })?;
     load(&record)
 }
 
-/// Every program in one feature area, sorted so that run order is deterministic.
+/// Every program in one feature area, resolved and sorted so that run order is deterministic.
 ///
-/// The scan is strict about what an area directory may contain. Programs are the `.c` files;
-/// expectation records, area notes, the fixture header and shell tooling are recognised companions
-/// and ignored; dot-prefixed entries and nested directories are ignored. **Anything else is a hard
-/// error**, and that strictness is load-bearing rather than fussy: it is what mechanically
-/// enforces the rule that the corpus tree contains no `.rs` file anywhere, which is in turn what
-/// keeps the corpus invisible to the build system and the suite free of any package-manifest
-/// change. It also catches the mistake that would otherwise be invisible — a program misnamed with
-/// the wrong extension, silently absent from the matrix.
+/// The returned paths are resolved, matching [`load`] and the harness root's cell resolution, so
+/// that discovery, record loading and cell identity all agree on the path a program is known by.
+///
+/// The scan is strict about what an area directory may contain, and nothing that could carry a
+/// program is passed over silently. Programs are the `.c` files; the extensions in
+/// [`AREA_COMPANION_EXTENSIONS`] are recognised companions and ignored; the whitelisted names in
+/// [`AREA_PLACEHOLDER_NAMES`] are ignored by name rather than by pattern. Everything else — an
+/// unrecognised extension, a dot-prefixed entry, a nested directory, a symbolic link — is a hard
+/// error.
+///
+/// That strictness is load-bearing rather than fussy. It mechanically enforces the rule that the
+/// corpus tree contains no `.rs` file anywhere, which is what keeps the corpus invisible to the
+/// build system and the suite free of any package-manifest change. And each rejection closes a way
+/// for a program to disappear from the matrix without a word: an unrecognised extension catches a
+/// program misnamed; a dot-prefixed entry is rejected rather than skipped, because a blanket skip
+/// means renaming `007_x.c` to `.007_x.c` removes twelve cells from the matrix while the run still
+/// reports success; a nested directory is rejected because an area contains files and nothing else,
+/// the corpus's genuine subdirectories being siblings of the areas rather than inside one; and a
+/// symbolic link is rejected rather than followed, for the reason given in
+/// [`require_contained_corpus_file`].
 pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
     let name = area.trim();
     if AreaSpec::lookup(name).is_none() {
@@ -2257,6 +3814,8 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
             ),
         ));
     }
+    // Resolve the corpus root once, so containment is decided against a real path.
+    let root = canonical_corpus_root()?;
     let directory = corpus_root().join(name);
     let entries = fs::read_dir(&directory).map_err(|error| {
         HarnessError::new(
@@ -2294,20 +3853,81 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
                     ),
                 )
             })?;
-        if file_name.starts_with('.') {
+        if AREA_PLACEHOLDER_NAMES.contains(&file_name) {
             continue;
         }
-        let metadata = fs::metadata(&path).map_err(|error| {
+        if file_name.starts_with('.') {
+            return Err(HarnessError::new(
+                format!("discovering the programs of feature area {name:?}"),
+                format!(
+                    "{file_name:?} is a dot-prefixed entry, which an area directory may not \
+                     contain except for {}. Skipping such an entry silently is worse than \
+                     rejecting it: renaming a program to a dot-prefixed name — an editor backup, \
+                     a partial checkout, a stray copy — would remove every one of its cells from \
+                     the matrix while the run still reported success. Remove the entry or give it \
+                     its proper name",
+                    comma_separated(AREA_PLACEHOLDER_NAMES)
+                ),
+            ));
+        }
+        // `symlink_metadata` inspects the entry itself rather than what it points at. Following a
+        // link here would mean a committed link could introduce a program the corpus does not
+        // contain — a file that is then compiled AND EXECUTED — or an expectation record read
+        // from anywhere on the machine. A link is therefore refused outright rather than
+        // resolved, and the refusal is explicit rather than a silent skip, because a link that
+        // someone committed on purpose is a corpus defect that must be seen.
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
             HarnessError::new(
                 format!("discovering the programs of feature area {name:?}"),
                 format!("{} could not be inspected: {error}", path.display()),
             )
         })?;
-        if metadata.is_dir() {
-            continue;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            return Err(HarnessError::new(
+                format!("discovering the programs of feature area {name:?}"),
+                format!(
+                    "{file_name:?} is a symbolic link; an area directory holds only regular files \
+                     that genuinely live in the corpus. A link is refused rather than followed, \
+                     because every discovered program is compiled AND EXECUTED and every \
+                     discovered record is parsed and quoted into diagnostics, so following one \
+                     would let the corpus name a file it does not contain while every report and \
+                     every reproduction command still showed the corpus path"
+                ),
+            ));
+        }
+        if file_type.is_dir() {
+            return Err(HarnessError::new(
+                format!("discovering the programs of feature area {name:?}"),
+                format!(
+                    "{file_name:?} is a directory, and a feature area contains files and nothing \
+                     else. The corpus's genuine subdirectories — the findings tree, the fixture \
+                     support tree and the tooling tree — are siblings of the areas rather than \
+                     children, so no legitimate layout needs this. Skipping it instead would let a \
+                     whole tree of programs sit in the corpus, committed and never run"
+                ),
+            ));
+        }
+        if !file_type.is_file() {
+            return Err(HarnessError::new(
+                format!("discovering the programs of feature area {name:?}"),
+                format!(
+                    "{file_name:?} is neither a regular file nor a directory; a device node, \
+                     socket or FIFO cannot be a program or a record, and reading one can block \
+                     indefinitely"
+                ),
+            ));
         }
         match path.extension().and_then(|value| value.to_str()) {
-            Some(SOURCE_EXTENSION) => programs.push(path),
+            // The resolved path rather than the joined one, so that discovery, record loading and
+            // cell resolution all agree on the path a program is known by, and so the containment
+            // guarantee is visible in what this function returns rather than only asserted inside
+            // it. The decision is delegated to the same primitive every other consumer uses, so
+            // that discovery cannot develop its own idea of what "inside the corpus" means.
+            Some(SOURCE_EXTENSION) => {
+                let context = format!("discovering the programs of feature area {name:?}");
+                programs.push(ensure_within(&context, &root, &path)?);
+            }
             Some(companion) if AREA_COMPANION_EXTENSIONS.contains(&companion) => {}
             _ => {
                 return Err(HarnessError::new(

@@ -1,9 +1,6 @@
-/* Area 01 / program 008 - modular wraparound of unsigned integer types at and
- * across their maximum, folded and volatile-runtime variants.
- *
- * Unsigned arithmetic is defined to wrap modulo 2^N, so every expression here
- * is well defined; no signed type ever overflows.  Limits are spelled as
- * literals because no header is included.
+/* Unsigned arithmetic is defined to wrap modulo 2^N, so every expression here is
+ * well defined and no signed type ever overflows.  Limits are spelled as
+ * literals because <limits.h> is not included.
  */
 int printf(const char *, ...);
 
@@ -17,7 +14,6 @@ int main(void)
     volatile unsigned long long q_zero = 0uLL;
     volatile unsigned long long q_max = 18446744073709551615uLL;
 
-    /* Folded variant: constant expressions only. */
     printf("fold_uint_max=%u\n", 4294967295u);
     printf("fold_uint_complement=%u\n", ~0u);
     printf("fold_uint_underflow=%u\n", 0u - 1u);
@@ -30,7 +26,8 @@ int main(void)
     printf("fold_ullong_overflow=%llu\n", 18446744073709551615uLL + 1uLL);
     printf("fold_modular_identity=%d\n", (int)((0u - 1u) + 1u == 0u));
 
-    /* Runtime variant: volatile operands force real wrapping arithmetic. */
+    /* Runtime variant: the operands are volatile, so each wrap is computed from
+     * values read at run time rather than folded at compile time. */
     printf("run_uint_max=%u\n", u_max);
     printf("run_uint_complement=%u\n", ~u_zero);
     printf("run_uint_underflow=%u\n", u_zero - 1u);

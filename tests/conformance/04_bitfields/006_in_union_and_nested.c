@@ -1,16 +1,11 @@
-/* 006_in_union_and_nested.c -- bitfields declared inside unions and inside
- * nested aggregates, in a folded variant and in a volatile runtime variant.
- * Area 04 (bitfields).  No header is included; printf is declared by hand.
- * Every bitfield carries an explicit signed int / unsigned int base type.
- *
- * Every union access reads back the member that was last written.  No union is
- * ever written through one member and read through another, and no padding
- * byte or padding bit is ever observed. */
+/* Every union access reads back the member that was last written.  No union here is
+ * written through one member and read through another, and no padding byte or
+ * padding bit is ever observed. */
 
 int printf(const char *, ...);
 
-/* A union of three fully-covered 32-bit views.  Each view is written and read
- * on its own; the views are never mixed. */
+/* The three views are never mixed: each one is written and read on its own, so
+ * every read observes the member that was last stored. */
 union views {
     struct { unsigned int a : 3; unsigned int b : 5;
              unsigned int c : 9; unsigned int d : 15; } packed;
@@ -18,14 +13,11 @@ union views {
     unsigned int whole;
 };
 
-/* A union whose members are single bitfields of opposite signedness. */
 union onebit {
     unsigned int u5 : 5;
     signed   int s5 : 5;
 };
 
-/* Nested aggregates: a struct of bitfields inside a struct, and an array of
- * such structs inside a struct. */
 struct inner { unsigned int p : 6; signed int q : 10; };
 
 struct outer {
@@ -35,7 +27,6 @@ struct outer {
     signed int s : 12;
 };
 
-/* A union member nested inside a struct that itself has bitfields. */
 struct tagged {
     unsigned int tag : 4;
     union {
@@ -56,7 +47,6 @@ static volatile struct tagged vtg;
 
 int main(void)
 {
-    /* ---- sizes ---- */
     printf("size_views=%u align_views=%u\n",
            (unsigned)sizeof(union views), (unsigned)_Alignof(union views));
     printf("size_onebit=%u align_onebit=%u\n",
@@ -68,7 +58,6 @@ int main(void)
     printf("size_tagged=%u align_tagged=%u\n",
            (unsigned)sizeof(struct tagged), (unsigned)_Alignof(struct tagged));
 
-    /* ---- union view 1: write packed, read packed ---- */
     vw.packed.a = 5u; vw.packed.b = 21u;
     vw.packed.c = 300u; vw.packed.d = 20000u;
     printf("views_packed a=%u b=%u c=%u d=%u\n",
@@ -79,7 +68,6 @@ int main(void)
            (unsigned)vw.packed.a, (unsigned)vw.packed.b,
            (unsigned)vw.packed.c, (unsigned)vw.packed.d);
 
-    /* ---- union view 2: write halves, read halves ---- */
     vw.halves.lo = 4660u; vw.halves.hi = 22136u;
     printf("views_halves lo=%u hi=%u\n",
            (unsigned)vw.halves.lo, (unsigned)vw.halves.hi);
@@ -87,11 +75,9 @@ int main(void)
     printf("views_halves_after_lo lo=%u hi=%u\n",
            (unsigned)vw.halves.lo, (unsigned)vw.halves.hi);
 
-    /* ---- union view 3: write whole, read whole ---- */
     vw.whole = 3735928559u;
     printf("views_whole=%u\n", vw.whole);
 
-    /* ---- single-bitfield union, one member at a time ---- */
     ob.u5 = 31u;
     printf("onebit_u5=%u\n", (unsigned)ob.u5);
     ob.u5 = 17u;
@@ -101,7 +87,6 @@ int main(void)
     ob.s5 = 15;
     printf("onebit_s5_again=%d\n", (int)ob.s5);
 
-    /* ---- nested aggregates ---- */
     printf("outer_head p=%u q=%d\n", (unsigned)ot.head.p, (int)ot.head.q);
     printf("outer_r=%u\n", (unsigned)ot.r);
     printf("outer_tail0 p=%u q=%d\n",
@@ -120,7 +105,6 @@ int main(void)
            (unsigned)ot.tail[0].p, (int)ot.tail[0].q,
            (unsigned)ot.tail[1].p, (int)ot.tail[1].q, (int)ot.s);
 
-    /* ---- nested union inside a struct of bitfields: flat member ---- */
     tg.tag = 12u;
     tg.trailer = 21u;
     tg.body.flat = 100u;
@@ -130,7 +114,6 @@ int main(void)
     printf("tagged_flat_max tag=%u flat=%u trailer=%u\n",
            (unsigned)tg.tag, (unsigned)tg.body.flat, (unsigned)tg.trailer);
 
-    /* ---- nested union inside a struct of bitfields: pair member ---- */
     tg.body.pair.m = 5u;
     tg.body.pair.n = 9u;
     printf("tagged_pair tag=%u m=%u n=%u trailer=%u\n",
@@ -141,7 +124,6 @@ int main(void)
            (unsigned)tg.tag, (unsigned)tg.body.pair.m,
            (unsigned)tg.body.pair.n, (unsigned)tg.trailer);
 
-    /* ---- volatile runtime variant ---- */
     vvw.packed.a = 5u; vvw.packed.b = 21u;
     vvw.packed.c = 300u; vvw.packed.d = 20000u;
     printf("volatile_views_packed a=%u b=%u c=%u d=%u\n",

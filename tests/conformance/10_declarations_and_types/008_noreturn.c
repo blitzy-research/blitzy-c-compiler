@@ -1,7 +1,6 @@
-/* Area 10 / 008 -- _Noreturn declaration and its effect on reachable code.
- * The _Noreturn function genuinely never returns: it terminates the program by
- * calling exit, so control never falls off its end (which would be undefined
- * behaviour). The statement after the call site is therefore never observed. */
+/* The _Noreturn function really never returns: it terminates the program by
+ * calling exit, so control never falls off its end, which would be undefined
+ * behaviour. */
 
 int printf(const char *, ...);
 _Noreturn void exit(int);

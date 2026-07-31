@@ -1,22 +1,14 @@
-/* Area 05 - Pointer arithmetic and function pointers
- * 008_array_decay_parameters: array-to-pointer decay in parameter
- * position, including multidimensional arrays.
+/* A parameter declared as an array is adjusted to a pointer to its element type.
+ * For a multidimensional array that element type is itself an array, so the
+ * parameter becomes a pointer to an array and stepping it advances a whole row -
+ * which is why the row and plane strides below are printed as element counts.
  *
- * A parameter declared as an array is adjusted to a pointer to the element
- * type.  For a multidimensional array the element type is itself an array,
- * so the parameter becomes a pointer to an array and stepping it advances a
- * whole row.  All of that is made observable through element values and
- * element-count differences.
- *
- * sizeof of a decayed parameter is pointer width and therefore differs
- * between i686 and the other three targets, so it is never printed.  Only
- * element counts and element-count differences are printed, and every
- * difference is cast to long long.  No address or pointer value is printed.
- */
+ * sizeof a decayed parameter is pointer width, so it is never printed; only
+ * element counts and differences cast to long long are, which keeps the output
+ * independent of pointer width. */
 
 int printf(const char *, ...);
 
-/* one dimension: [] and * spellings must behave identically */
 static int sum_brackets(const int a[], int n)
 {
     int total = 0;
@@ -37,7 +29,6 @@ static int sum_pointer(const int *a, int n)
     return total;
 }
 
-/* a bound written in the parameter is ignored: it still decays */
 static int sum_sized(const int a[8], int n)
 {
     int total = 0;
@@ -48,14 +39,12 @@ static int sum_sized(const int a[8], int n)
     return total;
 }
 
-/* the parameter is a genuine pointer, so it can be advanced */
 static int first_after_step(const int a[], int step)
 {
     a += step;
     return *a;
 }
 
-/* two dimensions: parameter becomes a pointer to an array of 4 ints */
 static int sum_2d_brackets(const int a[][4], int rows)
 {
     int total = 0;
@@ -82,7 +71,6 @@ static int sum_2d_pointer(const int (*a)[4], int rows)
     return total;
 }
 
-/* stepping the 2-D parameter advances a whole row */
 static int row_first(const int (*a)[4], int row)
 {
     a += row;
@@ -99,7 +87,6 @@ static long long row_element_span(const int (*a)[4])
     return (long long)(&(*a)[4] - &(*a)[0]);
 }
 
-/* three dimensions: parameter becomes a pointer to a 3-by-2 array */
 static int sum_3d(const int a[][3][2], int planes)
 {
     int total = 0;
@@ -116,8 +103,6 @@ static int sum_3d(const int a[][3][2], int planes)
     return total;
 }
 
-/* indexing a 3-D array once yields a 2-D array, which decays to a pointer
- * to an array of 2 ints */
 static int sum_plane(const int (*a)[2], int rows)
 {
     int total = 0;
@@ -131,7 +116,6 @@ static int sum_plane(const int (*a)[2], int rows)
     return total;
 }
 
-/* an array of pointers decays to a pointer to pointer */
 static int sum_via_table(const int *const tab[], int n)
 {
     int total = 0;
@@ -142,7 +126,6 @@ static int sum_via_table(const int *const tab[], int n)
     return total;
 }
 
-/* a qualified parameter still decays */
 static int sum_const_ptr(const int *const a, int n)
 {
     int total = 0;
@@ -153,11 +136,30 @@ static int sum_const_ptr(const int *const a, int n)
     return total;
 }
 
-static int flat_index(const int (*a)[4], int row, int col)
+/* The flat, row-major element index of cell (row, col) in an array whose rows
+ * are four elements wide.
+ *
+ * The obvious spelling, &a[row][col] - &a[0][0], subtracts two pointers that
+ * designate elements of two DIFFERENT inner arrays whenever row is nonzero.
+ * Pointer subtraction is defined only when both operands point into, or one
+ * past the end of, a single array object, and the contiguity of the enclosing
+ * two-dimensional array does not extend that permission.  The index is
+ * therefore built from a difference taken in the OUTER array of rows, where
+ * a and a + row do designate elements of one and the same object, scaled by
+ * the row width taken from the parameter type and offset by the column.
+ *
+ * rows, row and col are bounded explicitly, so a + row is never advanced more
+ * than one element past the last row and the value returned always denotes a
+ * cell that exists.  Out-of-range arguments yield -1 rather than a pointer
+ * this function would not be permitted to form. */
+static int flat_index(const int (*a)[4], int rows, int row, int col)
 {
-    const int *base = &a[0][0];
-    const int *cell = &a[row][col];
-    return (int)(cell - base);
+    const int width = (int)(sizeof a[0] / sizeof a[0][0]);
+
+    if (rows <= 0 || row < 0 || row >= rows || col < 0 || col >= width) {
+        return -1;
+    }
+    return (int)((a + row) - a) * width + col;
 }
 
 static const int one_d[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
@@ -185,7 +187,6 @@ int main(void)
     printf("two_d_cols=%d\n", (int)(sizeof two_d[0] / sizeof two_d[0][0]));
     printf("three_d_planes=%d\n", (int)(sizeof three_d / sizeof three_d[0]));
 
-    /* ---- one dimension: all three spellings agree ---- */
     printf("sum_brackets=%d\n", sum_brackets(one_d, 8));
     printf("sum_pointer=%d\n", sum_pointer(one_d, 8));
     printf("sum_sized=%d\n", sum_sized(one_d, 8));
@@ -198,14 +199,12 @@ int main(void)
                (via_brackets == via_pointer) && (via_pointer == via_sized));
     }
 
-    /* passing an interior element address, and a partial range */
     printf("sum_from_interior=%d\n", sum_brackets(&one_d[4], 4));
     printf("sum_partial=%d\n", sum_brackets(one_d, 3));
     printf("sum_empty=%d\n", sum_brackets(one_d, 0));
     printf("step_param=%d\n", first_after_step(one_d, 5));
     printf("step_param_zero=%d\n", first_after_step(one_d, 0));
 
-    /* ---- two dimensions ---- */
     printf("sum_2d_brackets=%d\n", sum_2d_brackets(two_d, 3));
     printf("sum_2d_pointer=%d\n", sum_2d_pointer(two_d, 3));
     printf("sum_2d_partial=%d\n", sum_2d_brackets(two_d, 2));
@@ -214,15 +213,13 @@ int main(void)
     printf("row_first2=%d\n", row_first(two_d, 2));
     printf("row_stride=%lld\n", row_stride(two_d));
     printf("row_element_span=%lld\n", row_element_span(two_d));
-    printf("flat_index_00=%d\n", flat_index(two_d, 0, 0));
-    printf("flat_index_12=%d\n", flat_index(two_d, 1, 2));
-    printf("flat_index_23=%d\n", flat_index(two_d, 2, 3));
+    printf("flat_index_00=%d\n", flat_index(two_d, 3, 0, 0));
+    printf("flat_index_12=%d\n", flat_index(two_d, 3, 1, 2));
+    printf("flat_index_23=%d\n", flat_index(two_d, 3, 2, 3));
 
-    /* a row of a 2-D array decays to a pointer to int */
     printf("row_as_1d=%d\n", sum_brackets(two_d[1], 4));
     printf("row_as_1d_last=%d\n", sum_pointer(two_d[2], 4));
 
-    /* ---- three dimensions ---- */
     printf("sum_3d=%d\n", sum_3d(three_d, 2));
     printf("sum_3d_one_plane=%d\n", sum_3d(three_d, 1));
     printf("sum_3d_second_plane=%d\n", sum_3d(&three_d[1], 1));
@@ -230,12 +227,10 @@ int main(void)
     printf("plane1_as_2d=%d\n", sum_plane(three_d[1], 3));
     printf("plane_row_as_1d=%d\n", sum_brackets(three_d[1][2], 2));
 
-    /* ---- an array of pointers decays to a pointer to pointer ---- */
     printf("sum_via_table=%d\n", sum_via_table(ptr_tab, 4));
     printf("sum_via_table_partial=%d\n", sum_via_table(ptr_tab, 2));
     printf("table_count=%d\n", (int)(sizeof ptr_tab / sizeof ptr_tab[0]));
 
-    /* ---- runtime variant: volatile bounds and indices ---- */
     vidx = 8;
     k = vidx;
     printf("runtime_sum_1d=%d\n", sum_brackets(one_d, k));
@@ -245,7 +240,7 @@ int main(void)
     k = vidx;
     printf("runtime_sum_2d=%d\n", sum_2d_brackets(two_d, k));
     printf("runtime_row_first=%d\n", row_first(two_d, k - 1));
-    printf("runtime_flat_index=%d\n", flat_index(two_d, k - 1, k));
+    printf("runtime_flat_index=%d\n", flat_index(two_d, k, k - 1, k));
     printf("runtime_row_as_1d=%d\n", sum_brackets(two_d[k - 2], 4));
 
     vidx = 2;

@@ -1,37 +1,31 @@
-/* 007_struct_copy_invariance.c -- Area 09, differential conformance suite.
- *
- * Claim under test: aggregate construction, return by value, assignment copy and
- * pass by value produce IDENTICAL results at -O0, -O1 and -O2, and across all
- * four backends.  The aggregates straddle every target's by-register versus
- * by-memory threshold, and struct mixed deliberately spans two register classes
- * (integer plus floating point), which is the shape of a documented -O1/-O2
- * defect the project has already experienced once.  Every member is read back
- * individually so a single wrong slot is localized immediately.
- */
+/* Aggregate construction, return by value, assignment copy and pass by value must
+ * all produce the same values at every optimization level.  The four aggregates
+ * differ in size and in the kinds of members they hold, so the same four
+ * operations are exercised on several shapes; which of those shapes travel in
+ * registers and which in memory is the ABI's decision, not this program's, and
+ * only the retrieved member values are compared.  Every member is read back
+ * individually so a single wrong slot is localized immediately. */
 
 int printf(const char *, ...);
 
-/* Aggregates on both sides of every target's by-register / by-memory
-   parameter-passing threshold (16 bytes on x86-64, AArch64 and RISC-V 64;
-   i686 passes every aggregate in memory). */
-struct small {           /* 8 bytes: comfortably by register */
+struct small {
     int a;
     int b;
 };
 
-struct boundary {        /* 16 bytes: exactly at the threshold */
+struct boundary {
     int a;
     int b;
     int c;
     int d;
 };
 
-struct mixed {           /* 16 bytes, two register classes */
+struct mixed {
     int tag;
     double value;
 };
 
-struct large {           /* 40 bytes: by memory on every target */
+struct large {
     int v[8];
     int checksum;
     int flag;
@@ -104,9 +98,8 @@ int main(void)
     double val = v_val;
     int i;
 
-    /* Construct, return by value, copy by assignment, pass by value. */
     struct small s1 = make_small(base, base * 2);
-    struct small s2 = s1;                       /* assignment copy */
+    struct small s2 = s1;
     struct boundary b1 = make_boundary(base);
     struct boundary b2 = b1;
     struct mixed m1 = make_mixed(base, val);
@@ -114,8 +107,6 @@ int main(void)
     struct large l1 = make_large(base);
     struct large l2 = l1;
 
-    /* Every member is read back individually so a single wrong slot is
-       localized immediately. */
     printf("small a=%d b=%d\n", s1.a, s1.b);
     printf("small_copy a=%d b=%d\n", s2.a, s2.b);
     printf("small_byvalue=%d\n", sum_small(s2));

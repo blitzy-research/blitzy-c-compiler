@@ -1,17 +1,18 @@
-/* Area 05 - Pointer arithmetic and function pointers
- * 002_differences_and_comparisons: pointer differences and relational
- * comparisons, in a folded and a volatile-index runtime variant.
+/* A pointer one past the last element of an array is formed, compared and
+ * subtracted here but never dereferenced: forming and comparing it is defined,
+ * dereferencing it would not be.  Every loop terminates on a comparison against
+ * that sentinel, `p != end` or `p < end`, so it is only ever read as a value.
  *
- * UB-CRITICAL PROGRAM.  A one-past-the-end pointer is FORMED and COMPARED
- * but NEVER DEREFERENCED.  C permits forming a pointer one past the last
- * element of an array and permits comparing and subtracting it; only
- * dereferencing it would be undefined.  Every loop below terminates on
- * "p != end" so the sentinel is read as a value and never as an object.
+ * A pointer TWO past the end is not merely undereferenceable: forming it at all
+ * is undefined, so both strided walks below are written to make that
+ * unreachable, and the folded walk derives the overshoot a further stride would
+ * have produced from its last legal difference rather than by forming the
+ * out-of-range pointer.
  *
- * Every ptrdiff_t result is cast to long long before printing, so the
- * printed text is identical whether ptrdiff_t is 32 or 64 bits wide.
- * No address or pointer value is printed anywhere.
- */
+ * Each ptrdiff_t result is cast to long long before printing, so the printed text
+ * is identical whether ptrdiff_t is 32 or 64 bits wide.  The runtime walk strides
+ * by two over ten elements and so lands exactly on end, which is legal to form.
+ * No address or pointer value is printed anywhere. */
 
 int printf(const char *, ...);
 
@@ -35,12 +36,11 @@ int main(void)
     volatile int vidx;
     int k;
 
-    /* ---- folded variant ---- */
     begin = i_buf;
-    end = i_buf + 10;   /* one past the end: legal to form */
+    end = i_buf + 10;
     mid = i_buf + 4;
     begin_alias = i_buf;
-    end_alias = i_buf + 10;   /* a second one-past-end pointer, same value */
+    end_alias = i_buf + 10;
 
     printf("folded_span=%lld\n", (long long)(end - begin));
     printf("folded_head=%lld\n", (long long)(mid - begin));
@@ -80,17 +80,31 @@ int main(void)
         printf("folded_reverse_sum=%d\n", sum);
         printf("folded_reverse_stopped_at_begin=%d\n", p == begin);
     }
+    /* A stride of three over ten elements visits indexes 0, 3, 6 and 9; a fourth
+     * stride would land on index 12, two elements past the one-past-end pointer,
+     * and FORMING such a pointer is undefined even where it is never
+     * dereferenced.  The walk therefore advances only while three elements
+     * genuinely remain, and the distance by which the fourth stride would have
+     * passed end is computed with integer arithmetic from the last legal
+     * difference instead: the last visited element is 9 and end is at 10, so the
+     * overshoot is 3 - (end - p) = 3 - 1 = 2. */
     {
         int count = 0;
-        int *p;
-        for (p = begin; p < end; p += 3) {
+        int *p = begin;
+        long long overshoot = 0;
+        while (p < end) {
             ++count;
+            if ((end - p) >= 3) {
+                p += 3;
+            } else {
+                overshoot = 3 - (long long)(end - p);
+                break;
+            }
         }
         printf("folded_stride3_count=%d\n", count);
-        printf("folded_stride3_overshoot=%lld\n", (long long)(p - end));
+        printf("folded_stride3_overshoot=%lld\n", overshoot);
     }
 
-    /* differences over other element types: element count, not byte count */
     printf("folded_short_span=%lld\n", (long long)((s_buf + 6) - s_buf));
     printf("folded_double_span=%lld\n", (long long)((d_buf + 4) - d_buf));
     printf("folded_struct_span=%lld\n", (long long)((p_buf + 3) - p_buf));
@@ -98,7 +112,6 @@ int main(void)
     printf("folded_double_interior=%lld\n", (long long)(&d_buf[3] - &d_buf[1]));
     printf("folded_struct_interior=%lld\n", (long long)(&p_buf[2] - &p_buf[0]));
 
-    /* one-past-end for each of those arrays, formed and compared only */
     printf("folded_short_end_gt=%d\n", (s_buf + 6) > &s_buf[5]);
     printf("folded_double_end_gt=%d\n", (d_buf + 4) > &d_buf[3]);
     printf("folded_struct_end_gt=%d\n", (p_buf + 3) > &p_buf[2]);
@@ -107,13 +120,12 @@ int main(void)
     {
         int solo = 77;
         int *sb = &solo;
-        int *se = &solo + 1;      /* one past a single object: legal to form */
+        int *se = &solo + 1;
         printf("folded_solo_span=%lld\n", (long long)(se - sb));
         printf("folded_solo_lt=%d\n", sb < se);
         printf("folded_solo_value=%d\n", *sb);
     }
 
-    /* ---- runtime variant: volatile indices defeat constant folding ---- */
     vidx = 4;
     k = vidx;
     mid = i_buf + k;
@@ -127,7 +139,7 @@ int main(void)
     vidx = 10;
     k = vidx;
     {
-        int *rend = i_buf + k;    /* one past the end, computed at run time */
+        int *rend = i_buf + k;
         int sum = 0;
         int *p;
         printf("runtime_end_matches=%d\n", rend == end);

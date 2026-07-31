@@ -1,6 +1,7 @@
-/* Area 10 / 005 -- by-value aggregate copy, parameter passing and return, on
- * both sides of every target's by-register/by-memory threshold. All members
- * are int, so no padding exists and every size is identical on all targets. */
+/* Two aggregates of different sizes are constructed, copied, passed and returned
+ * by value.  How either of them travels is the ABI's decision, not this
+ * program's, and only the member values that come back out are compared.  Both
+ * sizes are printed rather than assumed, so they are compared as well. */
 
 int printf(const char *, ...);
 

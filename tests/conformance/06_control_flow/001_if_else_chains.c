@@ -1,9 +1,3 @@
-/* 001_if_else_chains.c -- Area 06 control flow.
- * Deep if/else-if chains, three-level nested conditions, an else attached to a
- * nested if, first-match-wins arm selection, and an if with no else -- each in
- * both a constant-folded and a volatile-runtime variant.
- */
-
 int printf(const char *, ...);
 
 static int classify(int v)
@@ -70,9 +64,6 @@ static int nested_else(int a, int b)
     return r;
 }
 
-/* Only the first arm whose condition holds runs, even when later ones also
- * hold: 6 satisfies both the %2 and the %3 test and must select arm 1.
- */
 static int first_match(int v)
 {
     int r;

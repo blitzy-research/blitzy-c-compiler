@@ -1,20 +1,14 @@
-/* Area 05 - Pointer arithmetic and function pointers
- * 007_casts_roundtrip: object-pointer casts round-tripped through a
- * sufficiently wide integer type.
+/* Converting a pointer to an integer and back is implementation-defined: the
+ * standard guarantees the result only for a round trip through `void *`.  What
+ * this program does guarantee is that no conversion narrows, because every
+ * carrier is at least as wide as `void *` and the bridge type back to a pointer
+ * is exactly pointer-width - and it checks both of those width relations at run
+ * time below rather than assuming them.  `uintptr_t` would be the natural
+ * carrier, but it is an optional typedef, so built-in integer types are used
+ * instead.
  *
- * WIDTH DISCIPLINE.  sizeof(void *) is 4 on i686 and 8 on the other three
- * supported targets, so the carrier type must be wide enough everywhere.
- * unsigned long long is 8 bytes on all four targets and is therefore always
- * wide enough; uintptr_t is not used because it would require stdint.h and
- * no header may be included.  The conversion back to a pointer goes through
- * unsigned long, which is exactly pointer width on all four targets (8 on
- * x86-64, AArch64 and RISC-V 64; 4 on i686), so no cast ever crosses a
- * width boundary and no value is ever truncated.
- *
- * Neither the pointer nor the integer carrier is ever printed.  The only
- * things printed are equality results, dereferenced object values and
- * pointer differences cast to long long.
- */
+ * Neither a pointer nor a carrier value is ever printed; only equality results,
+ * dereferenced object values and differences cast to long long are. */
 
 int printf(const char *, ...);
 
@@ -43,7 +37,6 @@ int main(void)
     printf("bridge_is_pointer_width=%d\n",
            sizeof(unsigned long) == sizeof(void *));
 
-    /* ---- int * round-trip ---- */
     {
         int *p = &obj;
         int *q;
@@ -54,7 +47,6 @@ int main(void)
         printf("int_roundtrip_same_object=%d\n", q == &obj);
     }
 
-    /* ---- double * round-trip ---- */
     {
         double *p = &dobj;
         double *q;
@@ -64,7 +56,6 @@ int main(void)
         printf("double_roundtrip_value=%.3f\n", *q);
     }
 
-    /* ---- char * round-trip, including an interior element ---- */
     {
         char *p = carr;
         char *q;
@@ -81,7 +72,6 @@ int main(void)
         printf("char_interior_offset=%lld\n", (long long)(q - carr));
     }
 
-    /* ---- struct * round-trip ---- */
     {
         struct pair *p = &sobj;
         struct pair *q;
@@ -91,7 +81,6 @@ int main(void)
         printf("struct_roundtrip_values=%d %d\n", q->a, q->b);
     }
 
-    /* ---- const int * round-trip preserving the qualifier ---- */
     {
         const int *p = &cobj;
         const int *q;
@@ -101,8 +90,6 @@ int main(void)
         printf("const_roundtrip_value=%d\n", *q);
     }
 
-    /* ---- a pointer into the middle of an array still supports arithmetic
-     *      after the round-trip ---- */
     {
         int *p = &iarr[3];
         int *q;
@@ -116,7 +103,6 @@ int main(void)
         printf("interior_diff_matches=%lld\n", (long long)(q - &iarr[0]));
     }
 
-    /* ---- a null pointer survives the round-trip as a null pointer ---- */
     {
         int *p = 0;
         int *q;
@@ -126,7 +112,6 @@ int main(void)
         printf("null_roundtrip_is_null=%d\n", q == 0);
     }
 
-    /* ---- void * as an intermediate type, no integer involved ---- */
     {
         int *p = &iarr[6];
         void *v = p;
@@ -136,7 +121,6 @@ int main(void)
         printf("void_roundtrip_offset=%lld\n", (long long)(q - iarr));
     }
 
-    /* ---- char * as an intermediate byte view, then back ---- */
     {
         int *p = &iarr[2];
         char *bytes = (char *)(void *)p;
@@ -145,7 +129,8 @@ int main(void)
         printf("bytes_roundtrip_value=%d\n", *q);
     }
 
-    /* ---- runtime variant: a volatile index defeats constant folding ---- */
+    /* Runtime variant: the index is read from volatile storage, so the pointer
+     * that is round-tripped is not known before the program runs. */
     vidx = 4;
     k = vidx;
     {
@@ -171,7 +156,6 @@ int main(void)
         printf("runtime_char_offset=%lld\n", (long long)(q - carr));
     }
 
-    /* ---- the round-trip is idempotent when repeated ---- */
     vidx = 1;
     k = vidx;
     {

@@ -1,5 +1,4 @@
-/* Area 10 / 009 -- _Generic selection across the type system. Every
- * association yields a small int tag, so the printed values are
+/* Every _Generic association yields a small int tag, so the printed values are
  * width-normalized even where the selected type's width is not. */
 
 int printf(const char *, ...);

@@ -1,16 +1,9 @@
-/* 006_short_circuit_evaluation.c -- Area 06 control flow.
- * Short-circuit evaluation of && and ||.  The property under test is an
- * ABSENCE: when the left operand already settles the result, the right operand
- * must NOT be evaluated.  Asserting an absence requires an observation the
- * optimizer is not permitted to elide, so every side effect is recorded in a
- * volatile counter and the counter is printed after each expression.  A plain
- * (non-volatile) counter could legally be removed by dead-code elimination at
- * -O1 and above, which would make the assertion vacuous.
- *
- * Each expression appears twice: once with a compile-time-constant left
- * operand (so the folder decides) and once with the left operand read from
- * volatile storage (so the backend must genuinely emit the branch).
- */
+/* The property under test is an absence: when the left operand already settles
+ * the result, the right operand is not evaluated.  That absence is made visible
+ * by recording each side effect in a volatile counter, so every recorded call is
+ * part of the program's observable behaviour, and printing the counter after each
+ * expression.  Each expression appears twice, once with a constant left operand
+ * and once with one read from volatile storage. */
 
 int printf(const char *, ...);
 
@@ -33,7 +26,6 @@ int main(void)
     vzero = 0;
     vone = 1;
 
-    /* Constant left operand: the result is settled at translation time. */
     rhs_calls = 0;
     r = (0 && bump(1));
     printf("const_and_false r=%d rhs_calls=%d\n", r, rhs_calls);
@@ -50,7 +42,6 @@ int main(void)
     r = (0 || bump(7));
     printf("const_or_false r=%d rhs_calls=%d\n", r, rhs_calls);
 
-    /* Runtime left operand read from volatile storage. */
     rhs_calls = 0;
     a = vzero;
     r = (a && bump(1));
@@ -71,7 +62,6 @@ int main(void)
     r = (a || bump(7));
     printf("runtime_or_false r=%d rhs_calls=%d\n", r, rhs_calls);
 
-    /* Chained operators stop at the first operand that settles the result. */
     rhs_calls = 0;
     a = vzero;
     r = (a && bump(1) && bump(1) && bump(1));
@@ -94,7 +84,6 @@ int main(void)
     r = (a || b || bump(0) || bump(5) || bump(1));
     printf("chain_or_stop_midway r=%d rhs_calls=%d\n", r, rhs_calls);
 
-    /* && binds tighter than ||; the grouping is written out explicitly. */
     rhs_calls = 0;
     a = vzero;
     b = vone;
@@ -112,7 +101,6 @@ int main(void)
     r = (a != 0 && (100 / a) > 3);
     printf("guarded_divide_one r=%d\n", r);
 
-    /* Short circuit in a controlling expression. */
     rhs_calls = 0;
     a = vzero;
     if (a && bump(1))
@@ -137,7 +125,6 @@ int main(void)
         a++;
     printf("while_short_circuit a=%d rhs_calls=%d\n", a, rhs_calls);
 
-    /* Both operators normalise their result to exactly 0 or 1. */
     a = vone;
     printf("normalisation not=%d notnot=%d and=%d or=%d\n",
            !a, !!a, (a && 5), (a || 0));

@@ -1,18 +1,6 @@
-/* Area 05 - Pointer arithmetic and function pointers
- * 006_function_pointer_tables: dispatch through an array of function
- * pointers.  The tables are file-scope "static const" and the runtime
- * variant indexes them with a volatile index, so the indirect branch
- * cannot be devirtualized into a direct call.
- *
- * This is the highest-yield program in the area: indirect dispatch through
- * a table is the construct most likely to interact with a backend's
- * indirect-branch lowering.  The suite passes no hardening flag, so the
- * default lowering is what is exercised.
- *
- * No header is included; printf is hand-declared.  No function address is
- * ever printed; table facts appear only as equality comparisons, as index
- * differences cast to long long, and as the results of the calls.
- */
+/* No function address is printed: which entry a call reached is observed through
+ * equality comparisons, through index differences cast to long long, and through
+ * the returned values. */
 
 int printf(const char *, ...);
 
@@ -81,7 +69,6 @@ static int nil_three(void)
     return 3;
 }
 
-/* the dispatch tables: file scope, static, const */
 static const binop bin_table[6] = {
     op_add, op_sub, op_mul, op_min, op_max, op_first
 };
@@ -90,13 +77,11 @@ static const unop un_table[3] = { un_neg, un_dbl, un_sq };
 
 static const nilop nil_table[3] = { nil_one, nil_two, nil_three };
 
-/* a two-dimensional table of function pointers */
 static const binop grid[2][3] = {
     { op_add, op_sub, op_mul },
     { op_min, op_max, op_first }
 };
 
-/* a table reached through a pointer parameter */
 static int dispatch(const binop *tab, int idx, int x, int y)
 {
     return tab[idx](x, y);
@@ -110,7 +95,6 @@ int main(void)
     int j;
     int folded_sweep_acc = 0;
 
-    /* ---- folded variant: constant table indices ---- */
     printf("bin0=%d\n", bin_table[0](12, 5));
     printf("bin1=%d\n", bin_table[1](12, 5));
     printf("bin2=%d\n", bin_table[2](12, 5));
@@ -139,7 +123,6 @@ int main(void)
     printf("grid11=%d\n", grid[1][1](7, 3));
     printf("grid12=%d\n", grid[1][2](7, 3));
 
-    /* the table decays to a pointer, and the pointer is stepped */
     {
         const binop *tp = bin_table;
         printf("decay_first=%d\n", (*tp)(30, 6));
@@ -151,22 +134,39 @@ int main(void)
         --tp;
         printf("decay_third=%d\n", (*tp)(30, 6));
         printf("decay_span=%lld\n", (long long)((bin_table + 6) - bin_table));
+        /* grid is an array of two rows, so grid and grid + 2 point into one
+         * and the same array object and their difference is well defined.
+         * The distance from the first cell of row 0 to the first cell of
+         * row 1 is NOT obtained as &grid[1][0] - &grid[0][0]: those two
+         * pointers designate elements of two different inner arrays, and
+         * pointer subtraction is defined only within a single array object.
+         * The contiguity of the enclosing two-dimensional array does not
+         * extend that permission.  The distance is therefore built from a
+         * legal row difference scaled by the row width taken from the type. */
         printf("decay_row_span=%lld\n", (long long)((grid + 2) - grid));
+        /* The distance from one row's first cell to the next row's first cell,
+         * expressed as a difference between ROW pointers -- which are elements
+         * of the same array object `grid` -- multiplied by the column count.
+         * Subtracting &grid[0][0] from &grid[1][0] instead would be undefined:
+         * those two pointers belong to two distinct row-array objects, and the
+         * rows being laid out contiguously does not make a difference across
+         * them meaningful. */
         printf("decay_cell_span=%lld\n",
-               (long long)(&grid[1][0] - &grid[0][0]));
+               (long long)((grid + 1) - grid)
+                   * (long long)(sizeof grid[0] / sizeof grid[0][0]));
     }
 
     printf("dispatch_param0=%d\n", dispatch(bin_table, 0, 40, 8));
     printf("dispatch_param2=%d\n", dispatch(bin_table, 2, 40, 8));
     printf("dispatch_param_row1=%d\n", dispatch(grid[1], 1, 40, 8));
 
-    /* a full sweep of the table with a constant loop bound */
     for (i = 0; i < 6; ++i) {
         folded_sweep_acc += bin_table[i](10, 4);
     }
     printf("folded_sweep=%d\n", folded_sweep_acc);
 
-    /* ---- runtime variant: a volatile index forces a real indirect call ---- */
+    /* Runtime variant: each index is read from volatile storage, so which table
+     * entry a call reaches is not decidable before the program runs. */
     vidx = 0;
     k = vidx;
     printf("runtime_bin=%d\n", bin_table[k](12, 5));
@@ -195,7 +195,6 @@ int main(void)
     printf("runtime_dispatch=%d\n", dispatch(grid[k], k, 40, 8));
     printf("runtime_dispatch_table=%d\n", dispatch(bin_table, k, 40, 8));
 
-    /* a full sweep with a volatile bound: every call is indirect */
     {
         int acc = 0;
         int n;
@@ -208,7 +207,6 @@ int main(void)
         printf("runtime_sweep_matches_folded=%d\n", acc == folded_sweep_acc);
     }
 
-    /* a nested sweep over the two-dimensional table, both bounds volatile */
     {
         int acc = 0;
         int rows;
@@ -225,7 +223,6 @@ int main(void)
         printf("runtime_grid_sweep=%d\n", acc);
     }
 
-    /* a table entry copied into a variable, then called */
     {
         binop chosen;
         vidx = 4;

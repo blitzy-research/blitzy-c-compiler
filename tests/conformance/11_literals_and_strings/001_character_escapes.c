@@ -1,7 +1,6 @@
-/* Area 11 / 001 - character escape sequences.  Every escape result is
-   printed as an explicit integer value read through unsigned char, so no
-   plain-char signedness difference can be observed and no raw control
-   byte is written to stdout.  Source file is pure US-ASCII. */
+/* Every escape result is printed as an explicit integer value read through
+   unsigned char, so no plain-char signedness difference can be observed and no
+   raw control byte is written to stdout.  The source file is pure US-ASCII. */
 int printf(const char *, ...);
 
 static const unsigned char simple_escapes[] =

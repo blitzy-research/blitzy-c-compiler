@@ -1,9 +1,7 @@
-/* Area 11 / 003 - wide, UTF-8, 16-bit and 32-bit string and character
-   literals.  No header is included and none of the three C11 character
-   type names is ever written: every literal is indexed in place and every
-   element is cast explicitly to long long or unsigned long long.  The
-   source file is pure US-ASCII; all non-ASCII characters appear only as
-   universal-character-name escapes. */
+/* No header is included here, so none of the three C11 character type names is
+   written: every literal is indexed in place and every element is cast explicitly
+   to long long or unsigned long long.  The source file is pure US-ASCII, and all
+   non-ASCII characters appear only as universal-character-name escapes. */
 int printf(const char *, ...);
 
 #define WIDE_LIT  L"A\u0024\u00A9\u0100\u07FF\u7FFFz"

@@ -1,14 +1,9 @@
-/* 007_conditional_operator.c -- Area 06 control flow.
- * The conditional operator: exactly one of the two branches is evaluated, and
- * the result type is the common type of the two branches after the usual
- * arithmetic conversions.  Single-branch evaluation is again an ABSENCE
- * assertion, so the same technique as 006 is used: side effects are recorded in
- * a volatile counter which the optimizer may not legally elide, and the counter
- * is printed after each expression.  Result typing is observed through sizeof,
- * which yields identical values on all four targets, and through two exactly
- * representable double values.  No address is ever printed; the pointer-typed
- * branches are observed only by comparison.
- */
+/* Exactly one branch of a conditional operator is evaluated - an absence, so each
+ * side effect is recorded in a volatile counter that is printed after the
+ * expression.  The result type is the common type of the two branches after the
+ * usual arithmetic conversions; the double values used are exactly
+ * representable, so the printed text is exact.  No address is printed: the
+ * pointer-typed branches are observed only by comparison. */
 
 int printf(const char *, ...);
 
@@ -32,7 +27,6 @@ int main(void)
     int y = 22;
     double d;
 
-    /* Exactly one branch is evaluated -- constant condition. */
     branch_calls = 0;
     r = (1 ? taken(10) : taken(20));
     printf("const_true_branch r=%d branch_calls=%d\n", r, branch_calls);
@@ -41,7 +35,6 @@ int main(void)
     r = (0 ? taken(10) : taken(20));
     printf("const_false_branch r=%d branch_calls=%d\n", r, branch_calls);
 
-    /* Exactly one branch is evaluated -- condition read from volatile. */
     vsel = 1;
     c = vsel;
     branch_calls = 0;
@@ -54,7 +47,6 @@ int main(void)
     r = (c ? taken(10) : taken(20));
     printf("runtime_false_branch r=%d branch_calls=%d\n", r, branch_calls);
 
-    /* Nested in both branch positions: still exactly one leaf is evaluated. */
     vsel = 1;
     c = vsel;
     branch_calls = 0;
@@ -99,7 +91,6 @@ int main(void)
     c = vsel;
     printf("pointer_branch_false=%d\n", (c ? &x : &y) == &y);
 
-    /* void-typed branches are legal and still evaluate exactly one side. */
     branch_calls = 0;
     vsel = 1;
     c = vsel;
@@ -112,7 +103,6 @@ int main(void)
     c ? (void)taken(1) : (void)taken(2);
     printf("void_branches_false branch_calls=%d\n", branch_calls);
 
-    /* The operator in argument position, and applied to a comparison. */
     vsel = 5;
     c = vsel;
     printf("in_argument=%d of_comparison=%d\n",
@@ -122,7 +112,6 @@ int main(void)
     printf("in_argument_other=%d of_comparison_other=%d\n",
            (c > 3 ? c * 2 : c * 3), (c > 3) ? 1 : 0);
 
-    /* The result used as the right operand of a compound assignment. */
     r = 0;
     vsel = 1;
     c = vsel;
@@ -132,7 +121,6 @@ int main(void)
     r += c ? 5 : 7;
     printf("compound_assignment=%d\n", r);
 
-    /* A conditional operator controlling a switch's controlling expression. */
     vsel = 1;
     c = vsel;
     switch (c ? 10 : 20) {

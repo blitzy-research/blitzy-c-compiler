@@ -1,4 +1,3 @@
-/* Area 08 - GCC extensions: case ranges (case LOW ... HIGH:). */
 int printf(const char *, ...);
 
 static int bucket_of(int v)

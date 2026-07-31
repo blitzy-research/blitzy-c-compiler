@@ -1,4 +1,3 @@
-/* Area 08 - GCC extensions: __attribute__((packed)) and __attribute__((aligned)). */
 int printf(const char *, ...);
 
 struct plain_s  { signed char a; int b; short c; };

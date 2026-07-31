@@ -1,6 +1,5 @@
-/* Area 10 / 006 -- enumerator value assignment, gaps, negative enumerators and
- * the int-range edges. Every enumerator value is kept inside int range, because
- * the underlying type is otherwise implementation-defined. */
+/* Every enumerator value is kept inside the int range, because an enumeration's
+ * underlying type is otherwise implementation-defined. */
 
 int printf(const char *, ...);
 

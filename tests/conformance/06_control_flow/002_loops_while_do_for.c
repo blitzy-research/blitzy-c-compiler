@@ -1,10 +1,5 @@
-/* 002_loops_while_do_for.c -- Area 06 control flow.
- * All three loop forms at their zero-iteration and single-iteration
- * boundaries, the do-while guarantee of one body execution, a for with an
- * omitted controlling expression exited by break, continue, and nested loops.
- * Every bound is read from volatile storage so the loop is genuinely emitted
- * rather than folded or fully evaluated at compile time.
- */
+/* Every loop bound is read from volatile storage, so no iteration count below is
+ * available for compile-time substitution. */
 
 int printf(const char *, ...);
 
@@ -16,7 +11,6 @@ int main(void)
     int sum;
     int count;
 
-    /* while: the condition is tested before the body, so zero iterations. */
     vlimit = 0;
     n = vlimit;
     count = 0;
@@ -24,7 +18,6 @@ int main(void)
         count++;
     printf("while_zero=%d\n", count);
 
-    /* while: exactly one iteration. */
     vlimit = 1;
     n = vlimit;
     count = 0;
@@ -32,7 +25,6 @@ int main(void)
         count++;
     printf("while_one=%d\n", count);
 
-    /* while: many iterations. */
     vlimit = 10;
     n = vlimit;
     sum = 0;
@@ -43,7 +35,6 @@ int main(void)
     }
     printf("while_sum=%d\n", sum);
 
-    /* do-while runs its body once even when the condition is false. */
     vlimit = 0;
     n = vlimit;
     count = 0;
@@ -52,7 +43,6 @@ int main(void)
     } while (count < n);
     printf("do_while_false_cond=%d\n", count);
 
-    /* do-while: one real iteration. */
     vlimit = 1;
     n = vlimit;
     count = 0;
@@ -61,7 +51,6 @@ int main(void)
     } while (count < n);
     printf("do_while_one=%d\n", count);
 
-    /* do-while: many iterations. */
     vlimit = 5;
     n = vlimit;
     sum = 0;
@@ -72,7 +61,6 @@ int main(void)
     } while (i < n);
     printf("do_while_squares=%d\n", sum);
 
-    /* for: zero iterations, and the loop variable retains its final value. */
     vlimit = 0;
     n = vlimit;
     count = 0;
@@ -80,7 +68,6 @@ int main(void)
         count++;
     printf("for_zero=%d i_after=%d\n", count, i);
 
-    /* for: one iteration. */
     vlimit = 1;
     n = vlimit;
     count = 0;
@@ -88,7 +75,6 @@ int main(void)
         count++;
     printf("for_one=%d i_after=%d\n", count, i);
 
-    /* for with all three clauses omitted, exited by break. */
     count = 0;
     for (;;) {
         count++;
@@ -97,7 +83,6 @@ int main(void)
     }
     printf("for_forever_break=%d\n", count);
 
-    /* for with an omitted increment clause. */
     vlimit = 3;
     n = vlimit;
     count = 0;
@@ -131,7 +116,6 @@ int main(void)
     }
     printf("while_continue_sum=%d\n", sum);
 
-    /* break leaves only the innermost loop. */
     vlimit = 4;
     n = vlimit;
     sum = 0;
@@ -175,7 +159,6 @@ int main(void)
     }
     printf("for_do_while_mix=%d\n", sum);
 
-    /* A loop that counts down, so the condition is false-on-entry for 0. */
     vlimit = 0;
     n = vlimit;
     count = 0;

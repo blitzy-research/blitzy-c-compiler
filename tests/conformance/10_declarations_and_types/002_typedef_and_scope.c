@@ -1,6 +1,6 @@
-/* Area 10 / 002 -- typedef declaration, block scope, and shadowing exercised
- * through the tag, member and label namespaces (ordinary-identifier shadowing
- * is rejected by the mandated -Wshadow -Werror gate). */
+/* Shadowing here is confined to the tag, member and label namespaces, because
+ * ordinary-identifier shadowing is rejected by the mandated -Wshadow -Werror
+ * gate. */
 
 int printf(const char *, ...);
 
@@ -25,7 +25,6 @@ int main(void)
     int sibling_second;
 
     {
-        /* Tag-namespace shadowing: a different struct point in this block. */
         struct point { int a; int b; int c; int d; };
         struct point deep;
         deep.a = 1;
@@ -36,7 +35,6 @@ int main(void)
     }
 
     {
-        /* Block-local typedef whose name is not used at file scope. */
         typedef short small_t;
         small_t narrow = 9;
         local_typedef_value = narrow + (int)sizeof(small_t);

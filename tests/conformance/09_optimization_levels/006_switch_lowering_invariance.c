@@ -1,13 +1,9 @@
-/* 006_switch_lowering_invariance.c -- Area 09, conformance suite.
- *
- * Claim under test: switch results are IDENTICAL at -O0, -O1 and -O2, and across
- * all four backends, whichever lowering strategy each compiler chooses.  Label
- * density is what selects the strategy, so this program deliberately contains a
- * DENSE contiguous label set (which invites a jump table), a SPARSE widely
- * separated label set (which invites a comparison chain or binary search) and a
- * fallthrough group with a shared body.  Selectors are derived from volatile
- * storage so no switch can be folded to a single constant return.
- */
+/* The printed results must not depend on how a compiler lowers these switches.
+ * Label density is one of the things a compiler may weigh when choosing a
+ * lowering, so the program deliberately contains a dense contiguous label set, a
+ * sparse widely separated one, and a fallthrough group with a shared body.  Every
+ * selector is derived from volatile storage, so no switch has a selector that is
+ * known at compile time. */
 
 int printf(const char *, ...);
 

@@ -1,6 +1,5 @@
-/* Area 10 / 004 -- const, volatile and restrict on objects and parameters.
- * The restrict-qualified parameters are used truthfully: dest_data and
- * source_data are distinct file-scope arrays that never alias. */
+/* The restrict-qualified parameters are used truthfully: dest_data and source_data
+ * are distinct file-scope arrays that never alias. */
 
 int printf(const char *, ...);
 

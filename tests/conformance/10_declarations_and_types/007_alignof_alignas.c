@@ -1,8 +1,21 @@
-/* Area 10 / 007 -- _Alignof and _Alignas observed through alignment RESIDUES
- * and 0/1 relations. No address is ever printed. Only char, short, int and
- * float alignments are printed raw, because those four are identical on all
- * targets; double, long long, long and pointer alignments differ (4 on i686
- * versus 8 elsewhere) and appear only as bounded relations. */
+/* Alignment is observed through residues and 0/1 relations, and no address is
+ * ever printed.  Only the char, short, int and float alignments are printed raw,
+ * because those four are identical on all four targets; they are printed as
+ * values rather than asserted here, so a target that disagreed would show up as a
+ * divergence on that line.  The alignments of double, long long, long and
+ * pointers do differ (4 on i686 versus 8 elsewhere) and so appear only as bounded
+ * relations.
+ *
+ * WIDTH DISCIPLINE.  Each address is converted in two steps: first to unsigned
+ * long, which is exactly pointer width on all four targets (8 on x86-64, AArch64
+ * and RISC-V 64; 4 on i686), and only then widened to unsigned long long, which
+ * is 8 bytes everywhere and so is always wide enough to hold the residue
+ * arithmetic below.  Casting a pointer straight to unsigned long long would cross
+ * a width boundary on i686 and is diagnosed as -Wpointer-to-int-cast, which the
+ * mandatory audit gate escalates to an error; the two-step form never crosses
+ * one.  This matches the carrier discipline used by
+ * 05_pointers/007_casts_roundtrip.c.  uintptr_t is not used because it would
+ * require stdint.h and no header may be included. */
 
 int printf(const char *, ...);
 
@@ -15,10 +28,14 @@ int main(void)
 {
     _Alignas(8) unsigned char local8[8];
     struct padded p;
-    unsigned long long a_buf = (unsigned long long)(const void *)buf16;
-    unsigned long long a_wide = (unsigned long long)(const void *)&wide_aligned;
-    unsigned long long a_local = (unsigned long long)(const void *)local8;
-    unsigned long long a_member = (unsigned long long)(const void *)&p.aligned_member;
+    unsigned long long a_buf =
+        (unsigned long long)(unsigned long)(const void *)buf16;
+    unsigned long long a_wide =
+        (unsigned long long)(unsigned long)(const void *)&wide_aligned;
+    unsigned long long a_local =
+        (unsigned long long)(unsigned long)(const void *)local8;
+    unsigned long long a_member =
+        (unsigned long long)(unsigned long)(const void *)&p.aligned_member;
 
     local8[0] = 1;
     p.c = 2;

@@ -1,29 +1,19 @@
-/* Area 01 / program 004 - narrowing integer conversions at the destination
- * range edge, in both a compile-time-folded and a volatile-runtime variant.
- *
- * Self-contained by mandate: no header is included and the only libc
- * prototype is hand-declared, because bcc ships no <stdio.h>.
- */
 int printf(const char *, ...);
 
 int main(void)
 {
-    /* Folded variant: the narrowing is applied to constant expressions, so a
-     * correct compiler resolves all three values in the constant folder.
-     * The casts are explicit because an *implicit* out-of-range constant
-     * conversion to a signed narrow type trips -Woverflow, which the
-     * sanctioned deviation for this program does not drop.
-     */
+    /* The casts are explicit because an *implicit* out-of-range constant
+     * conversion to a signed narrow type trips -Woverflow, which this
+     * program's recorded warning-gate deviation does not drop. */
     unsigned char  fold_u8  = (unsigned char)(-56);
     signed char    fold_i8  = (signed char)200;
     unsigned short fold_u16 = (unsigned short)(-200);
 
-    /* Runtime variant: the same three narrowings, expressed as *implicit*
-     * assignment conversions from volatile int sources.  volatile defeats
-     * constant propagation, so the backend must emit real truncations, and
-     * the implicit form is precisely what -Wconversion / -Wsign-conversion
-     * object to - which is why this program carries the recorded deviation.
-     */
+    /* The same three narrowings as *implicit* assignment conversions from
+     * volatile int sources, so the converted values are read at run time
+     * rather than substituted at compile time.  The implicit form is what
+     * -Wconversion and -Wsign-conversion object to, which is why this program
+     * carries the recorded deviation for both. */
     volatile int src_u8  = -56;
     volatile int src_i8  = 200;
     volatile int src_u16 = -200;

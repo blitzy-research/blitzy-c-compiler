@@ -1,7 +1,3 @@
-/* Area 10 / 001 -- complex declarators: arrays of pointers to functions
- * returning pointers, pointer-to-array, and a function returning a function
- * pointer. Folded and volatile-runtime variants of every call. */
-
 int printf(const char *, ...);
 
 typedef int (*int_fn_t)(int);

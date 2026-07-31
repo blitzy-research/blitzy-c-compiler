@@ -1,12 +1,7 @@
-/* 007_promotion_in_expressions.c -- integer promotion of a bitfield when it is
- * used as an operand, in a folded variant and in a volatile runtime variant.
- * Area 04 (bitfields).  No header is included; printf is declared by hand.
- * Every bitfield carries an explicit signed int / unsigned int base type.
- *
- * The decisive observable is that a bitfield narrower than int promotes to int
- * even when its declared base type is unsigned, so subtraction below zero
- * yields a negative int rather than a large unsigned value, while a 32-bit-wide
- * unsigned bitfield promotes to unsigned int and wraps modularly instead. */
+/* A bitfield narrower than int promotes to int even when its declared base type is
+ * unsigned, so subtracting below zero yields a negative int rather than a large
+ * unsigned value.  A 32-bit-wide unsigned bitfield promotes to unsigned int
+ * instead and wraps modularly.  That contrast is the whole point of the file. */
 
 int printf(const char *, ...);
 
@@ -56,10 +51,8 @@ static void report_volatile(const char *tag, volatile struct fields *p)
 
 int main(void)
 {
-    /* ---- folded variant, all narrow fields at zero ---- */
     report("folded", &folded);
 
-    /* ---- folded variant, narrow fields at their maxima ---- */
     folded.u5 = 31u; folded.u16 = 65535u;
     folded.u31 = 2147483647u; folded.u32 = 4294967295u;
     folded.s5 = 15; folded.s16 = 32767;
@@ -70,7 +63,6 @@ int main(void)
     printf("folded_max_s5_squared=%d\n", (int)(folded.s5 * folded.s5));
     printf("folded_max_s16_div=%d\n", (int)(folded.s16 / 3));
 
-    /* ---- promotion under division and mixed signedness ---- */
     folded.u5 = 1u;
     printf("folded_signed_div=%d\n", (int)((folded.u5 - 2) / 2));
     printf("folded_mixed_unsigned=%u\n", (unsigned)(folded.u5 + 1u));
@@ -78,18 +70,15 @@ int main(void)
     folded.u5 = 0u;
     printf("folded_conditional_zero=%d\n", (int)(folded.u5 ? 10 : 20));
 
-    /* ---- default argument promotion: the bitfield is passed with no cast ---- */
     folded.u5 = 21u; folded.s5 = -11; folded.u32 = 3000000000u;
     printf("folded_nocast_u5=%d\n", folded.u5);
     printf("folded_nocast_s5=%d\n", folded.s5);
     printf("folded_nocast_u32=%u\n", folded.u32);
 
-    /* ---- volatile runtime variant, all narrow fields at zero ---- */
     runtime.u5 = 0u; runtime.u16 = 0u; runtime.u31 = 0u; runtime.u32 = 0u;
     runtime.s5 = -16; runtime.s16 = -1000;
     report_volatile("runtime", &runtime);
 
-    /* ---- volatile runtime variant, narrow fields at their maxima ---- */
     runtime.u5 = 31u; runtime.u16 = 65535u;
     runtime.u31 = 2147483647u; runtime.u32 = 4294967295u;
     runtime.s5 = 15; runtime.s16 = 32767;

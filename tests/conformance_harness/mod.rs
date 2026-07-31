@@ -1,84 +1,36 @@
-//! Differential conformance harness — shared module root.
-//!
-//! This module is the foundation of the differential conformance suite driven by
-//! `tests/conformance.rs`. It declares the eleven sibling harness modules, owns the
-//! entire shared vocabulary (target, optimization level, oracle identity, divergence
-//! class, verdict, cell, outcome, error), owns the canonical command-line flag tables
-//! that keep `compile.rs` and `flagprobe.rs` from drifting apart, and owns the path
-//! roots from which every filesystem location the suite touches is derived.
+//! Shared vocabulary, flag tables and path roots for the differential conformance
+//! harness driven by `tests/conformance.rs`.
 //!
 //! # The three oracles
 //!
-//! The suite compiles and executes a hand-authored corpus of self-contained C programs
-//! and judges bcc's observable behaviour — stdout bytes and exit status, nothing else —
-//! against three mutually independent oracles:
+//! Each cell of the build matrix — one program, one target, one optimization level — is
+//! judged on stdout bytes and exit status alone:
 //!
-//! - Oracle (a), reference compiler: bcc versus an external reference C compiler, same
-//!   target and same optimization level. Detects a wrong answer that bcc produces
-//!   consistently across all four of its backends.
-//! - Oracle (b), cross backend: every non-baseline target versus the x86-64 baseline at
-//!   the same optimization level. Detects a wrong answer confined to a single backend,
-//!   which is where ABI, register-allocation and instruction-selection defects surface.
-//! - Oracle (c), golden record: every cell versus the `expected_stdout` recorded in the
-//!   program's own `.expected` file. Catches the single failure mode that pure
-//!   differential testing structurally cannot detect — both compilers changing behaviour
-//!   in the same direction at the same time, which oracle (a) still reports as agreement.
+//! - [`Oracle::ReferenceCompiler`] compares bcc against an external reference C compiler
+//!   at the same target and level.
+//! - [`Oracle::CrossBackend`] compares every non-baseline target against
+//!   [`Target::BASELINE`] at the same level.
+//! - [`Oracle::GoldenRecord`] compares a cell against the `expected_stdout` recorded in
+//!   the program's own `.expected` file.
 //!
-//! Standard error is captured for finding artifacts but is never compared: diagnostic
-//! wording legitimately differs between compilers, and comparing it would produce a
-//! flood of divergences that say nothing about code correctness.
+//! Standard error is captured for finding artifacts but never compared, because
+//! diagnostic wording legitimately differs between compilers.
 //!
-//! # Structural invariants
+//! # Invariants callers may rely on
 //!
-//! - **Pure standard library.** The project forbids third-party crates absolutely and
-//!   admits no exceptions, so every module here is written against `std` alone: no
-//!   serialization crate, no process-assertion crate, no temporary-directory crate, no
-//!   snapshot crate, no dynamic-test-case crate.
-//! - **No test functions live in this directory.** Every test of the suite lives in
-//!   `tests/conformance.rs`; these modules are pure infrastructure and add nothing to the
-//!   repository's test count. That is what keeps the documented suite-health numbers
-//!   intact, including the invariant count of thirteen ignored tests, which is the most
-//!   direct mechanical check that no existing test was skipped or weakened.
-//! - **This directory must never contain a `main.rs`.** Cargo turns `tests/<dir>/main.rs`
-//!   into an integration-test target; a nested directory holding neither a `main.rs` nor
-//!   any target entry point is never a target, so it may hold shared helper modules.
-//!   That single fact is why the suite requires no package-manifest change at all, and
-//!   needing one would mean the layout had been implemented incorrectly.
-//! - **The shared vocabulary is defined at this module root**, not in a nested types
-//!   module that would then have to be re-exported, so the driver writes
-//!   `conformance_harness::Verdict` and `conformance_harness::Outcome` directly and its
-//!   call sites stay short. A `pub use self::…` line re-exporting items that are already
-//!   defined here would be redundant and would raise an unused-import warning, which the
-//!   project's zero-warning gate escalates to an error; the submodule surface is
-//!   re-exported by the `pub mod` declarations below, so `conformance_harness::compile`
-//!   and friends resolve as well.
-//! - **Parallel safety by construction, not by locking.** `cargo test` runs tests
-//!   concurrently by default, so shared mutable resources are eliminated rather than
-//!   guarded: every cell owns a workspace whose path is a pure function of its identity
-//!   (see [`CellKey::slug`]), and every feature area writes only its own report file.
+//! - Only `std` is used; the project permits no third-party crate.
+//! - This directory contains no `#[test]` function and no `main.rs`, so Cargo treats it
+//!   as a plain module directory rather than a test target.
+//! - Nothing is written outside the Cargo build directory. The three write roots are
+//!   [`work_root`] (one workspace per cell, keyed by [`CellKey::slug`]),
+//!   [`report_root`] (one file per feature area, plus the run summary) and
+//!   [`findings_root`] (findings generated by the current run). The committed finding set
+//!   under [`corpus_root`] is a deliverable and is never written by a run.
+//! - No shared mutable state: a cell's workspace path is a pure function of its identity
+//!   and each area writes only its own report file, so `cargo test`'s default concurrency
+//!   needs no lock.
 //!
-//! # Artifact path contract
-//!
-//! Shared with the driver, the repository ignore rules and the continuous-integration
-//! job. Everything the suite writes lives beneath the Cargo build directory, and nothing
-//! is ever written outside it:
-//!
-//! - `target/conformance-work/<cell-slug>/` — one hermetic workspace per compile-and-run
-//!   cell, removed on success and retained on failure so a failing cell leaves behind
-//!   exactly the artifacts needed to investigate it.
-//! - `target/conformance-report/areas/<area>.md` and `.tsv` — per-area reports, one file
-//!   per area so concurrent areas never contend, plus `summary.md` and `summary.tsv` for
-//!   the run as a whole.
-//! - `target/conformance-findings/F-NNNN-<slug>/` — findings generated by the current
-//!   run.
-//!
-//! The curated, committed finding set under `tests/conformance/findings/` is a
-//! deliverable and is never written by a test run.
-//!
-//! # Compatibility
-//!
-//! Edition 2021, minimum supported Rust 1.70. No standard-library API newer than 1.70 is
-//! used anywhere in this module.
+//! Edition 2021, minimum supported Rust 1.70.
 
 pub mod classify;
 pub mod compare;
@@ -95,35 +47,19 @@ pub mod ubaudit;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-// ---------------------------------------------------------------------------
-// Coverage matrix
-// ---------------------------------------------------------------------------
-//
-// Coverage for this suite is stated as an enumerable matrix rather than a ratio.
-// Instrumenting line coverage would require a development dependency, which the project
-// forbids absolutely, so no ratio published here could be verified by anyone working in
-// this repository. Every number below is instead countable directly from the committed
-// file set and is re-reported by `report.rs` on every run, which makes the run summary
-// the suite's coverage evidence.
+// Expected size of the build matrix. `report.rs` re-reports these counts on every run
+// and treats a discovered count that disagrees with one of them as a corpus defect.
 
-/// Number of feature-area directories in the corpus: the nine areas the requirements
-/// mandate plus five supplementary areas carrying the widest cross-backend divergence
-/// surface.
 pub const AREA_COUNT: usize = 14;
 
-/// Total number of C programs in the corpus, one semantic concern per program.
 pub const PROGRAM_COUNT: usize = 108;
 
-/// Number of optimization levels swept per program. Exactly the levels both compilers
-/// honour with the same meaning.
 pub const OPT_LEVEL_COUNT: usize = OptLevel::ALL.len();
 
 /// Number of target architectures swept per program, unless a program restricts its own
 /// target list and records the reason for the restriction.
 pub const TARGET_COUNT: usize = Target::ALL.len();
 
-/// Compile-and-run cells executed with bcc: every program, on every target, at every
-/// optimization level.
 pub const BCC_CELL_COUNT: usize = PROGRAM_COUNT * TARGET_COUNT * OPT_LEVEL_COUNT;
 
 /// Reference-compiler cells on the native target, using the native driver.
@@ -135,8 +71,7 @@ pub const REFERENCE_NATIVE_CELL_COUNT: usize = PROGRAM_COUNT * OPT_LEVEL_COUNT;
 pub const REFERENCE_CROSS_CELL_COUNT_MAX: usize =
     PROGRAM_COUNT * OPT_LEVEL_COUNT * (TARGET_COUNT - 1);
 
-/// Oracle (a) comparisons: one per bcc cell that has a same-target reference cell to be
-/// compared against.
+/// Oracle (a) comparisons, assuming every cross driver is present.
 pub const ORACLE_A_COMPARISON_COUNT: usize =
     REFERENCE_NATIVE_CELL_COUNT + REFERENCE_CROSS_CELL_COUNT_MAX;
 
@@ -144,38 +79,31 @@ pub const ORACLE_A_COMPARISON_COUNT: usize =
 /// per optimization level.
 pub const ORACLE_B_COMPARISON_COUNT: usize = PROGRAM_COUNT * OPT_LEVEL_COUNT * (TARGET_COUNT - 1);
 
-/// Oracle (c) assertions: one golden-record assertion per bcc cell.
 pub const ORACLE_C_ASSERTION_COUNT: usize = BCC_CELL_COUNT;
 
-/// Total differential and golden assertions the full matrix performs.
 pub const TOTAL_ASSERTION_COUNT: usize =
     ORACLE_A_COMPARISON_COUNT + ORACLE_B_COMPARISON_COUNT + ORACLE_C_ASSERTION_COUNT;
 
-/// Floor on the number of programs in a mandated feature area. Supplementary areas carry
-/// no floor; `report.rs` applies this bound only where `AreaSpec::mandated` holds.
+/// Floor on the number of programs in a mandated feature area. `report.rs` applies this
+/// bound only where [`AreaSpec::mandated`] holds.
 pub const MIN_PROGRAMS_PER_MANDATED_AREA: usize = 6;
 
-/// One feature area of the corpus: its directory name, how many programs it is expected
-/// to contain, and whether the requirements mandate it or it is supplementary.
+/// One feature area of the corpus.
 ///
-/// The table is authoritative and read-only, which is why no public constructor is
-/// offered: `report.rs` and the driver look an area up by directory name with
-/// [`AreaSpec::lookup`] and read the fields.
+/// The [`AREAS`] table is the only source of values: there is no public constructor, so
+/// callers look an area up with [`AreaSpec::lookup`] and read the fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AreaSpec {
     /// Directory name beneath [`corpus_root`], for example `04_bitfields`. Also the stem
     /// of the area's report files and the suffix of the driver's area test name.
     pub directory: &'static str,
-    /// Number of programs the area is expected to contain. A discovered count that
-    /// disagrees with this number is a corpus defect, never something to paper over.
     pub program_count: usize,
-    /// True when the requirements name the area explicitly, false when it is one of the
-    /// five supplementary areas added for cross-backend divergence surface.
+    /// True when the requirements name the area explicitly, false when it is
+    /// supplementary.
     pub mandated: bool,
 }
 
 impl AreaSpec {
-    /// Private table constructor, used only to build [`AREAS`].
     const fn new(directory: &'static str, program_count: usize, mandated: bool) -> AreaSpec {
         AreaSpec {
             directory,
@@ -187,7 +115,7 @@ impl AreaSpec {
     /// Look an area up by its directory name, trimming surrounding whitespace.
     ///
     /// Returns `None` for a directory that is not part of the corpus, which the caller
-    /// must treat as a corpus defect and report loudly rather than skip.
+    /// must report rather than skip.
     pub fn lookup(directory: &str) -> Option<&'static AreaSpec> {
         let wanted = directory.trim();
         AREAS.iter().find(|area| area.directory == wanted)
@@ -209,11 +137,7 @@ impl fmt::Display for AreaSpec {
     }
 }
 
-/// The fourteen feature areas in numeric order, with the program count each is expected
-/// to contain. The counts sum to [`PROGRAM_COUNT`].
-///
-/// `report.rs` iterates this table to finalize the run summary once every area report
-/// exists, and the driver iterates it to dispatch its area tests.
+/// The feature areas in numeric order. The program counts sum to [`PROGRAM_COUNT`].
 pub const AREAS: [AreaSpec; AREA_COUNT] = [
     AreaSpec::new("01_integer_conversions", 10, true),
     AreaSpec::new("02_constant_expressions", 8, true),
@@ -231,95 +155,70 @@ pub const AREAS: [AreaSpec; AREA_COUNT] = [
     AreaSpec::new("14_abi_calling_convention", 6, false),
 ];
 
-// ---------------------------------------------------------------------------
-// Canonical flag tables
-// ---------------------------------------------------------------------------
+// The flag tables below are defined once and used twice: `compile.rs` enforces them when
+// it builds an argument vector, and `flagprobe.rs` verifies them against both compilers.
 //
-// The requirement these tables serve is "only pass command-line flags that both
-// compilers honour with the same meaning, and verify flag handling rather than assuming
-// it". `compile.rs` ENFORCES the tables when it builds an argument vector and
-// `flagprobe.rs` VERIFIES them by compiling a purpose-built program with both compilers
-// and asserting an observable consequence of each flag. Defining the tables exactly once,
-// here, is what stops the enforcer and the verifier from drifting apart.
-//
-// The discipline constrains oracle (a) only. Oracle (b) is bcc against bcc, so a bcc-only
-// target-selection flag trivially satisfies "both compilers honour it with the same
-// meaning" there, because both sides are the same compiler. That distinction is
-// load-bearing: without it, cross-backend testing would be impossible, since selecting a
-// target is precisely what oracle (b) requires.
+// The discipline governs the SHARED argument set — the flags passed identically to both
+// compilers — so it is the reference side that decides admissibility. The split is by
+// compiler side rather than by oracle, because the two sides select a target differently:
+// the reference compiler has no target-selection flag (the `--target=` spelling belongs to
+// another compiler family and was measured to be rejected, and `-m32` fails on the reference
+// host), so a target is selected there by choosing a different driver binary; the compiler
+// under test has no cross drivers, so `--target <triple>` is the only way it can reach a
+// non-native backend and is required for every non-native cell under oracle (a) exactly as
+// much as under oracle (b). [`is_forbidden_for_side`] is the one place that split is
+// expressed.
 
-/// Flags measured to be accepted by both compilers with identical meaning, and therefore
-/// the outer envelope within which maintenance of the differential invocations may move.
+/// Flags both compilers are expected to accept with the same meaning, and therefore the
+/// envelope within which maintenance of the differential invocations may move.
 ///
-/// `flagprobe.rs` iterates this set and asserts an observable consequence per flag rather
-/// than mere acceptance — the output file appears at the requested path, the object-versus
-/// -executable ELF type field changes, the interpreter program header disappears under
-/// static linking, a debug section appears, a macro's printed value changes, and so on.
-/// Acceptance alone is not verification: two compilers can accept the same spelling and
-/// mean different things by it, which is exactly why `-fcf-protection` is excluded below
-/// despite both compilers taking it.
+/// `flagprobe.rs` asserts an observable consequence per flag rather than mere acceptance,
+/// because two compilers can accept the same spelling and mean different things by it —
+/// which is why `-fcf-protection` appears in [`FORBIDDEN_IN_DIFFERENTIAL`] instead.
 ///
-/// `-L` and `-l` are verified for acceptance only. Verifying them semantically would need
-/// an archive-creation tool, which lies outside the no-new-dependency envelope and is
-/// unnecessary because the corpus links nothing but the C runtime, which is linked by
-/// default. That limitation is stated rather than glossed over.
+/// `-L` and `-l` are checked for acceptance only. Verifying them semantically would need
+/// an archive-creation tool, and the corpus links nothing but the C runtime, which is
+/// linked by default.
 pub const SHARED_FLAGS_VERIFIED: &[&str] = &[
     "-o", "-c", "-O0", "-O1", "-O2", "-I", "-D", "-U", "-L", "-l", "-g", "-static", "-fPIC",
 ];
 
-/// The deliberately minimal flag set actually used in a differential invocation: the
-/// output path, static linkage, and exactly one optimization level from
-/// [`OptLevel::flag`].
+/// The minimal flag set actually used in a differential invocation: the output path,
+/// static linkage, and one optimization level from [`OptLevel::flag`].
 ///
-/// Everything else in [`SHARED_FLAGS_VERIFIED`] is verified so that maintenance has a
-/// proven envelope to work within, not because the suite currently needs it. Static
-/// linkage is not a stylistic choice: it is the one linkage mode both compilers spell
-/// identically, and it is what lets emulated execution work with no sysroot and no
+/// Static linkage is what lets emulated execution work with no sysroot and no
 /// dynamic-loader configuration on any of the four targets.
 pub const DIFFERENTIAL_FLAGS_MINIMAL: &[&str] = &["-o", "-static"];
 
-/// Flags that must never appear in a differential invocation, asserted negatively by
-/// `flagprobe.rs` so that a maintenance edit cannot quietly reintroduce one.
+/// Flags that must never appear in the SHARED argument set of a differential invocation, nor
+/// on the reference-compiler side of one, asserted negatively by `flagprobe.rs` so that a
+/// maintenance edit cannot quietly reintroduce one.
 ///
-/// The first eighteen entries are reference-compiler-only or have divergent defaults; the
-/// final two are bcc-only target-selection spellings that are legitimate inside oracle (b)
-/// and nowhere else. Reasons, in table order:
+/// This is the reference-and-shared table. For the compiler-under-test side ask
+/// [`is_forbidden_for_side`] instead: the final two entries are the bcc-only target-selection
+/// spellings of [`BCC_TARGET_SELECTORS`], and one of them is *required* on that side for every
+/// non-native cell.
 ///
-/// - `-O3`, `-Os` — bcc documents no support; only `-O0`, `-O1` and `-O2` are in scope.
-/// - `-std=` — bcc has no such flag at all, and the reference compiler's default mode was
-///   measured as gnu17, which already enables the GNU extensions the corpus exercises.
-///   Passing a standard selector to one side and not the other would compare two
-///   different languages.
-/// - `-pedantic`, `-Wall`, `-Wextra`, `-Werror` — diagnostic control belongs exclusively
-///   to the undefined-behaviour audit gate in `ubaudit.rs`, which drives the reference
-///   compiler only and never bcc.
-/// - `-m32` — measured to fail on the reference host because the multilib start files are
-///   absent. i686 coverage comes from the dedicated i686 cross driver, which is also the
-///   correct choice for parity because it matches the per-target driver pattern used for
-///   AArch64 and RISC-V 64.
-/// - `-S`, `-E` — stopping the pipeline before a runnable artifact exists makes every
-///   oracle in the suite inapplicable, because all three compare the behaviour of a
-///   program that ran.
-/// - `-fwrapv`, `-fno-strict-aliasing` — these redefine the language the corpus is
-///   written in. The corpus is undefined-behaviour-free by construction and machine-
-///   audited to be so, so neither flag can change a correct program's meaning, and
-///   passing them would obscure that guarantee.
-/// - `-fsanitize=` — sanitizers are documented as unsupported by bcc, and they belong
-///   exclusively to the audit gate, where they judge the test program rather than the
-///   compiler.
-/// - `-fno-builtin`, `-ffreestanding`, `-nostdlib` — these change which runtime and which
-///   builtin set the program is compiled against, and the two compilers do not agree on
-///   the consequences.
-/// - `-mretpoline` — a bcc-only hardening spelling with no reference-compiler equivalent
+/// - Only the reference side accepts them: `-O3`, `-Os`, `-std=`, `-m32`. bcc documents no
+///   optimization level above `-O2` and has no `-std` flag at all; the reference compiler's
+///   default mode was measured as gnu17, which already enables the GNU extensions the corpus
+///   exercises. `-m32` is unusable on the reference host, which is why i686 coverage comes
+///   from the i686 cross driver instead.
+/// - They belong to the audit gate, which drives the reference compiler and never bcc:
+///   `-pedantic`, `-Wall`, `-Wextra`, `-Werror`, `-Wconversion`, `-Wsign-conversion`,
+///   `-Wshadow`, `-fsanitize=`. Every member of [`UB_AUDIT_GATE_DEFAULT`] is listed here
+///   without exception, so a gate flag can never be admitted into a `shared_flags` list.
+/// - They redefine the language or the runtime the corpus is written against, so the compared
+///   programs would no longer be the same program: `-fwrapv`, `-fno-strict-aliasing`,
+///   `-fno-builtin`, `-ffreestanding`, `-nostdlib`.
+/// - They stop before a runnable artifact exists, leaving all three oracles nothing to compare:
+///   `-S`, `-E`.
+/// - Both compilers accept them but disagree on the default scope, so acceptance alone would be
+///   a false positive: `-fcf-protection`. This is the entry that proves verification had to be
+///   semantic rather than syntactic.
+/// - They are bcc spellings, forbidden on the reference side rather than everywhere:
+///   `--target`, `--sysroot`. `-mretpoline` is bcc-only hardening with no reference equivalent
 ///   of the same scope.
-/// - `-fcf-protection` — accepted by BOTH compilers, yet excluded, because their default
-///   scopes differ. This is the entry that proves verification had to be semantic rather
-///   than syntactic: acceptance alone would have been a false positive.
-/// - `--target`, `--sysroot` — bcc-only. The reference compiler has no target-selection
-///   flag; the `--target=` spelling belongs to a different compiler family and was
-///   measured to be rejected. Oracle (a)'s cross arm therefore uses the matching cross
-///   driver binary, while oracle (b) legitimately passes `--target` to both of its sides
-///   because both sides are bcc.
 pub const FORBIDDEN_IN_DIFFERENTIAL: &[&str] = &[
     "-O3",
     "-Os",
@@ -328,6 +227,9 @@ pub const FORBIDDEN_IN_DIFFERENTIAL: &[&str] = &[
     "-Wall",
     "-Wextra",
     "-Werror",
+    "-Wconversion",
+    "-Wsign-conversion",
+    "-Wshadow",
     "-m32",
     "-S",
     "-E",
@@ -343,26 +245,136 @@ pub const FORBIDDEN_IN_DIFFERENTIAL: &[&str] = &[
     "--sysroot",
 ];
 
-/// True when `flag` must not appear in a differential (oracle (a)) invocation.
+/// The two bcc-only target-selection spellings.
 ///
-/// Three matching forms are recognised, so that a guard placed on an argument vector
-/// cannot be defeated by a spelling variant:
+/// Both appear in [`FORBIDDEN_IN_DIFFERENTIAL`], because neither may enter the shared
+/// argument set or the reference side, and both are permitted on the compiler-under-test
+/// side, because that side is where a target is selected by flag rather than by driver
+/// binary. Naming them once, here, is what lets [`is_forbidden_for_side`] express the split
+/// without a second table that could drift from the first.
+pub const BCC_TARGET_SELECTORS: &[&str] = &["--target", "--sysroot"];
+
+/// The compiler-under-test target-selection flag.
 ///
-/// - exact match, which covers `-O3`, `-Wall`, `-static` and the rest of the plain forms;
+/// Spelled once so that the flag table, the argument builder in `compile.rs` and the
+/// `bcc_command` template contract in `manifest.rs` cannot disagree about it.
+pub const BCC_TARGET_FLAG: &str = "--target";
+
+/// Which side of a differential invocation an argument is destined for.
+///
+/// The shared-flag discipline governs the flags passed identically to both compilers, so it
+/// is the reference side that decides whether a spelling is admissible: a flag the reference
+/// compiler rejects can never be part of a set both compilers honour with the same meaning.
+/// An argument that reaches only the compiler under test is judged by the same table minus
+/// the target selectors, which that side alone can honour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CompilerSide {
+    /// The compiler under test. Target selection by flag is permitted here, and required for
+    /// a non-native cell — see [`bcc_requires_explicit_target`].
+    UnderTest,
+    /// The reference compiler, and by extension the shared argument set. Target selection by
+    /// flag is forbidden here: the reference compiler has none, so a target is selected by
+    /// choosing a different driver binary.
+    Reference,
+}
+
+impl CompilerSide {
+    /// The phrase used in diagnostics, so a rejection says which side rejected the argument.
+    pub fn label(self) -> &'static str {
+        match self {
+            CompilerSide::UnderTest => "compiler under test",
+            CompilerSide::Reference => "reference compiler",
+        }
+    }
+}
+
+impl fmt::Display for CompilerSide {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// True when `flag` is one of the bcc-only target-selection spellings, in any of the three
+/// matching forms [`is_forbidden_in_differential`] recognises.
+pub fn is_bcc_target_selector(flag: &str) -> bool {
+    matches_flag_table(flag, BCC_TARGET_SELECTORS)
+}
+
+/// True when `flag` must not appear in the shared argument set of a differential invocation,
+/// nor on the reference-compiler side of one.
+///
+/// Three matching forms are recognised, so a guard on an argument vector cannot be
+/// defeated by a spelling variant:
+///
+/// - exact match, which covers `-O3`, `-Wall`, `-S` and the rest of the plain forms;
 /// - prefix match for the two table entries that end in `=`, namely `-std=` and
 ///   `-fsanitize=`, which never appear without a value;
 /// - `<entry>=<value>` for every other entry, which catches `--target=aarch64-linux-gnu`
 ///   and `-fcf-protection=full` as surely as their space-separated spellings.
 ///
 /// The value form is checked explicitly rather than by a bare prefix test, so that
-/// legitimate flags are not swept up by accident: `-static` is not rejected because it
+/// permitted flags are not swept up by accident: `-static` is not rejected because it
 /// happens to begin with `-S`, and `-O0` is not rejected because it resembles `-O3`.
 ///
-/// `compile.rs` calls this on every argument it is about to pass to either compiler, and
-/// `flagprobe.rs` calls it to assert the set negatively.
+/// `manifest.rs` calls this to reject a record whose shared-flag list names a flag only one
+/// compiler honours, and `flagprobe.rs` calls it to assert the set negatively. `compile.rs`
+/// builds a side-specific argument vector and therefore calls [`is_forbidden_for_side`], so
+/// that the target selection bcc requires for a non-native cell is not rejected as if it had
+/// been destined for both compilers.
 pub fn is_forbidden_in_differential(flag: &str) -> bool {
+    matches_flag_table(flag, FORBIDDEN_IN_DIFFERENTIAL)
+}
+
+/// True when `flag` must not be passed to `side` in a differential invocation.
+///
+/// The reference side is judged by [`FORBIDDEN_IN_DIFFERENTIAL`] in full. The
+/// compiler-under-test side is judged by the same table with [`BCC_TARGET_SELECTORS`]
+/// removed, because those two spellings are how that side — which has no cross drivers —
+/// reaches a non-native backend at all.
+///
+/// This is the only place the per-side split is decided, so a maintenance edit cannot make
+/// one caller stricter than another.
+pub fn is_forbidden_for_side(flag: &str, side: CompilerSide) -> bool {
+    match side {
+        CompilerSide::Reference => is_forbidden_in_differential(flag),
+        CompilerSide::UnderTest => {
+            is_forbidden_in_differential(flag) && !is_bcc_target_selector(flag)
+        }
+    }
+}
+
+/// True when the compiler under test must be given an explicit target selection for `target`.
+///
+/// True for every non-native target, because the compiler under test is a single binary with
+/// no cross drivers: without [`BCC_TARGET_FLAG`] it would emit for the host and the cell would
+/// compare a host binary against a cross-compiled one. This holds under oracle (a) exactly as
+/// much as under oracle (b) — the cross arm of oracle (a) compares bcc's output for a target
+/// against the matching cross driver's output for that same target.
+///
+/// The corpus records pass the selection unconditionally, including for the native target,
+/// which is always permitted and keeps one template correct for every cell of a program. This
+/// predicate states the minimum the harness must enforce, not the maximum it may pass.
+pub fn bcc_requires_explicit_target(target: Target) -> bool {
+    !target.is_native()
+}
+
+/// The two arguments that select `target` on the compiler-under-test side.
+///
+/// Returned as a pair rather than one joined string because they are passed as two separate
+/// arguments, and a joined `--target=<triple>` spelling — while accepted by the matching form
+/// in [`is_forbidden_in_differential`] — is not the spelling the corpus records use.
+pub fn bcc_target_arguments(target: Target) -> [String; 2] {
+    [String::from(BCC_TARGET_FLAG), String::from(target.triple())]
+}
+
+/// Match a flag against one of the tables above, in all three recognised forms.
+///
+/// Shared by [`is_forbidden_in_differential`] and [`is_bcc_target_selector`] so that the two
+/// cannot disagree about whether `--target=aarch64-linux-gnu` is the same flag as
+/// `--target aarch64-linux-gnu`.
+fn matches_flag_table(flag: &str, table: &[&str]) -> bool {
     let candidate = flag.trim();
-    FORBIDDEN_IN_DIFFERENTIAL.iter().any(|entry| {
+    table.iter().any(|entry| {
         if entry.ends_with('=') {
             return candidate.starts_with(entry);
         }
@@ -376,61 +388,145 @@ pub fn is_forbidden_in_differential(flag: &str) -> bool {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Target architecture
-// ---------------------------------------------------------------------------
+// The audit gate below is driven by the REFERENCE COMPILER ONLY and never by the compiler
+// under test, so it is not part of the shared-flag discipline and no member of it may ever
+// appear in a differential invocation. That is an invariant rather than an intention: every
+// member of `UB_AUDIT_GATE_DEFAULT` is also an entry of `FORBIDDEN_IN_DIFFERENTIAL`, so the
+// guard that keeps a reference-only flag out of the shared argument set keeps every gate flag
+// out of it too. The gate establishes the precondition that makes all three oracles sound — a
+// divergence is evidence about a compiler only when the program is free of undefined and
+// unspecified behaviour — so it is a judgement about the TEST PROGRAM, never about bcc. It
+// lives here because `manifest.rs` validates a per-program deviation against it and
+// `ubaudit.rs` executes it, and defining it once is what stops the two from drifting apart.
+
+/// The strict warning gate every corpus program passes through, in the order it is passed,
+/// driven by the reference compiler alone.
+///
+/// This is the machine half of the undefined-behaviour-freedom guarantee that makes a divergence
+/// readable as evidence about the compiler at all: if a program contains undefined behaviour, two
+/// compilers disagreeing about it proves nothing, because both are permitted to do anything.
+///
+/// Measured to genuinely bite rather than decorate: it rejected a probe program on a real
+/// diagnostic during design.
+///
+/// A deviation from this gate is a **removal, never an addition**: a program that cannot pass the
+/// full gate records the gate it does want, and that value must be a non-empty subset of this
+/// table which drops only [`UB_AUDIT_GATE_REMOVABLE`] members and always retains
+/// [`UB_AUDIT_GATE_MANDATORY`]. Modelling it that way is what makes the audit unable to become an
+/// arbitrary compiler invocation: no plugin-loading, subprogram-replacing,
+/// specification-overriding, search-path or output option can be named at all, because only these
+/// seven spellings are accepted.
+pub const UB_AUDIT_GATE_DEFAULT: &[&str] = &[
+    "-Wall",
+    "-Wextra",
+    "-pedantic",
+    "-Wconversion",
+    "-Wsign-conversion",
+    "-Wshadow",
+    "-Werror",
+];
+
+/// The default gate under the name the record-validation code uses for it.
+///
+/// An alias rather than a second array, so there is exactly one authority for the gate's content
+/// and no possibility of two tables drifting apart.
+pub const UB_GATE_DEFAULT: &[&str] = UB_AUDIT_GATE_DEFAULT;
+
+/// The only members a program may drop from [`UB_AUDIT_GATE_DEFAULT`], and the sole reason
+/// each may be dropped:
+///
+/// - `-pedantic` — for the supported-extension area, because an extension is non-standard by
+///   definition and this flag exists precisely to reject one.
+/// - `-Wconversion`, `-Wsign-conversion` — for the deliberate narrowing-conversion programs,
+///   because there a narrowing conversion is the behaviour under test rather than a mistake.
+///
+/// Every other member is non-negotiable. Because a deviation may only REMOVE a member of the
+/// default gate, no compiler option outside the gate can be introduced through it — neither a
+/// suppression such as `-w` or `-Wno-error`, nor an option that changes include search,
+/// specification files, plugins, wrappers or output paths.
+pub const UB_AUDIT_GATE_REMOVABLE: &[&str] = &["-pedantic", "-Wconversion", "-Wsign-conversion"];
+
+/// The one member of the gate that no deviation may ever drop.
+///
+/// A gate that warned without failing would be a gate in name only, so a deviation that dropped
+/// this flag would turn every remaining diagnostic into advice.
+pub const UB_AUDIT_GATE_MANDATORY: &str = "-Werror";
+
+/// The first sanctioned reduction of the gate: the default without `-pedantic`.
+///
+/// Sanctioned only in [`EXTENSION_AREA`], where the subject under test is by definition
+/// non-standard and `-pedantic` exists precisely to reject it. Dropping it anywhere else would
+/// discard a diagnostic that would be a genuine defect in the test program.
+pub const UB_GATE_WITHOUT_PEDANTIC: &[&str] = &[
+    "-Wall",
+    "-Wextra",
+    "-Wconversion",
+    "-Wsign-conversion",
+    "-Wshadow",
+    "-Werror",
+];
+
+/// The second sanctioned reduction of the gate: the default without the conversion diagnostics.
+///
+/// Sanctioned where a narrowing conversion is the behaviour under test rather than a mistake, so
+/// that the diagnostic which exists to catch an accidental narrowing does not reject a program
+/// whose whole subject is a deliberate one.
+pub const UB_GATE_WITHOUT_CONVERSION: &[&str] =
+    &["-Wall", "-Wextra", "-pedantic", "-Wshadow", "-Werror"];
+
+/// The one feature area whose warning gate may drop `-pedantic`.
+///
+/// This names the directory of the GCC-extensions area in [`AREAS`]; the two must agree, and the
+/// area lookup in `manifest.rs` rejects any record naming a directory that is not in that table.
+pub const EXTENSION_AREA: &str = "08_gcc_extensions";
+
+/// True when `flag` is a member of the default audit gate.
+pub fn is_ub_audit_gate_member(flag: &str) -> bool {
+    let candidate = flag.trim();
+    UB_AUDIT_GATE_DEFAULT.contains(&candidate)
+}
+
+/// True when `flag` is a member of the default audit gate that a program may drop.
+pub fn is_ub_audit_gate_removable(flag: &str) -> bool {
+    let candidate = flag.trim();
+    UB_AUDIT_GATE_REMOVABLE.contains(&candidate)
+}
+
+/// The audit-gate members that no deviation may drop, in gate order.
+pub fn ub_audit_gate_required() -> Vec<&'static str> {
+    UB_AUDIT_GATE_DEFAULT
+        .iter()
+        .copied()
+        .filter(|flag| !UB_AUDIT_GATE_REMOVABLE.contains(flag))
+        .collect()
+}
 
 /// One of the four target architectures bcc supports.
 ///
-/// The triple spellings, pointer widths, `long` widths, ELF classes and endianness below
-/// are the repository's own authoritative target table, not this suite's invention, and
-/// the ELF class in particular encodes the documented rule that i686 output is ELF32
-/// while the other three targets are ELF64.
+/// The triple spellings, widths and ELF classes below come from the repository's own
+/// target table rather than from this suite.
 ///
-/// # Measured implementation-defined properties
+/// # Implementation-defined properties this harness does not branch on
 ///
-/// Three properties genuinely differ across these targets and were measured rather than
-/// assumed. They are recorded here as documentation and report material only; no logic in
-/// this harness branches on them, because a divergence caused by an implementation-defined
-/// difference is not a compiler defect and must be handled by how a test program is
-/// written or by a per-oracle exclusion in that program's own expectation record:
-///
-/// - Plain `char` signedness: signed on x86-64 and i686, unsigned on AArch64 and
-///   RISC-V 64. Corpus programs therefore use explicit `signed char` or `unsigned char`
-///   and never print a value whose plain-`char` signedness matters.
-/// - `sizeof(long)` and `sizeof(void *)`: four bytes on i686, eight on the other three.
-///   Exposed by [`Target::long_width_bytes`] and [`Target::pointer_width_bytes`].
-/// - `sizeof(long double)`: measured as sixteen, twelve, sixteen and sixteen bytes in
-///   table order, an x87 eighty-bit format on the two x86 targets against IEEE binary128
-///   elsewhere. This is the requirements' own implementation-defined carve-out, so the
-///   `long double` program disables cross-backend value equality alone and stays fully
-///   compared against its same-target reference.
-///
-/// Properties that were measured to be IDENTICAL on all four targets — bitfield layout,
-/// size, alignment and byte image; arithmetic right shift of a negative value; integer
-/// division truncating toward zero with a dividend-signed remainder; little-endian byte
-/// order — need no restriction at all, so a cross-backend divergence in any of them is a
-/// genuine finding rather than an expected difference.
+/// Plain `char` signedness, `sizeof(long)` and `sizeof(void *)`, and `sizeof(long double)` all
+/// differ across these targets. A divergence caused by an implementation-defined difference is
+/// not a compiler defect, so each is handled by how a program is written or by a per-oracle
+/// exclusion in that program's expectation record — never by harness logic. The two widths are
+/// exposed by [`Target::long_width_bytes`] and [`Target::pointer_width_bytes`] for report
+/// legends and fingerprints, not for branching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Target {
-    /// x86-64: the baseline for oracle (b) and, in the planned and continuous-integration
-    /// environments, the host architecture.
+    /// x86-64, and the baseline for oracle (b).
     X86_64,
-    /// i686: the only ELF32 target, and the only one whose `long` and pointer widths
-    /// differ from the rest.
+    /// i686, the only ELF32 target.
     I686,
-    /// AArch64.
     Aarch64,
-    /// RISC-V 64.
     Riscv64,
 }
 
 impl Target {
-    /// Every target, in the repository's documented table order.
-    ///
-    /// The driver sweeps this array to build a program's cell matrix, and
-    /// [`Target::parse`] searches it, which keeps the accepted spellings and the emitted
-    /// spellings the same set by construction.
+    /// Every target, in the repository's documented table order. [`Target::parse`]
+    /// searches this array, so the accepted and emitted spellings are the same set.
     pub const ALL: [Target; 4] = [
         Target::X86_64,
         Target::I686,
@@ -440,13 +536,12 @@ impl Target {
 
     /// The baseline every other target is compared against under oracle (b).
     ///
-    /// x86-64 is chosen because it is the host architecture, so executing a baseline cell
-    /// involves no emulator and therefore introduces no emulation-related variable into
-    /// the comparison.
+    /// x86-64 is chosen because it is the intended host architecture, so a baseline cell
+    /// runs without an emulator and introduces no emulation-related variable.
     pub const BASELINE: Target = Target::X86_64;
 
-    /// The canonical target triple, exactly as the repository's target table spells it and
-    /// exactly as bcc's target-selection flag expects it.
+    /// The canonical target triple, spelled as the repository's target table spells it and
+    /// as bcc's target-selection flag expects it.
     pub fn triple(self) -> &'static str {
         match self {
             Target::X86_64 => "x86_64-linux-gnu",
@@ -456,11 +551,10 @@ impl Target {
         }
     }
 
-    /// The stable short slug used in workspace paths, report rows and artifact filenames.
+    /// The short slug used in workspace paths, report rows and artifact filenames.
     ///
-    /// This is deliberately NOT the name of the target's emulator: the i686 runner is
-    /// spelled `qemu-i386`, never `qemu-i686`. Keeping the two concepts apart is why
-    /// runner discovery lives in `env.rs` and this module exposes only the slug.
+    /// Not the name of the target's emulator: the i686 runner is spelled `qemu-i386`, so
+    /// runner names live in `env.rs` and this module exposes only the slug.
     pub fn short_name(self) -> &'static str {
         match self {
             Target::X86_64 => "x86_64",
@@ -472,9 +566,9 @@ impl Target {
 
     /// ELF class of this target's output: 32 for i686, 64 for the other three.
     ///
-    /// `flagprobe.rs` needs this to pick the right header layout when it reads an ELF
-    /// identification field directly, which is how the flag probe verifies `-c`, `-static`
-    /// and `-g` without depending on any binary-inspection tool being installed.
+    /// `flagprobe.rs` needs it to pick the right header layout when it reads an ELF
+    /// identification field directly, which is how `-c`, `-static` and `-g` are verified
+    /// without depending on a binary-inspection tool being installed.
     pub fn elf_class(self) -> u8 {
         match self {
             Target::I686 => 32,
@@ -485,7 +579,7 @@ impl Target {
     /// Pointer width in bytes: four on i686, eight on the other three.
     ///
     /// Consumed by report legends and by the environment fingerprint written into every
-    /// finding, so that a width-related divergence can be read off the artifact directly.
+    /// finding, so a width-related divergence can be read off the artifact directly.
     pub fn pointer_width_bytes(self) -> u8 {
         match self {
             Target::I686 => 4,
@@ -495,8 +589,8 @@ impl Target {
 
     /// Width of `long` in bytes: four on i686, eight on the other three.
     ///
-    /// Same consumers as [`Target::pointer_width_bytes`]. Corpus programs normalize this
-    /// away with fixed-width types rather than relying on it.
+    /// Same consumers as [`Target::pointer_width_bytes`]. Corpus programs normalize the
+    /// difference away rather than relying on it.
     pub fn long_width_bytes(self) -> u8 {
         match self {
             Target::I686 => 4,
@@ -506,16 +600,14 @@ impl Target {
 
     /// True when this target's binaries execute directly on the host, with no emulator.
     ///
-    /// The host architecture is read at run time rather than assumed, so the harness stays
-    /// correct if it is ever run somewhere other than the planned x86-64 host. The
-    /// mapping is written out explicitly because the standard library reports 32-bit x86
-    /// as `x86`, not as `i686`.
+    /// The host architecture is read at run time rather than assumed. The i686 arm is
+    /// matched against `x86`, which is how the standard library spells 32-bit x86.
     ///
     /// i686 is therefore reported as non-native on an x86-64 host even though such a host
-    /// can usually execute 32-bit binaries. That is deliberate: the suite routes i686
-    /// execution through its emulator exactly as it does AArch64 and RISC-V 64, which
-    /// keeps the emulation variable uniform across all three non-baseline targets and
-    /// leaves the baseline as the only emulator-free arm.
+    /// can usually execute 32-bit binaries. That is deliberate: routing i686 through its
+    /// emulator like AArch64 and RISC-V 64 keeps the emulation variable uniform across
+    /// all three non-baseline targets and leaves the baseline as the only emulator-free
+    /// arm.
     pub fn is_native(self) -> bool {
         let host = std::env::consts::ARCH;
         match self {
@@ -531,9 +623,8 @@ impl Target {
     ///
     /// Both spellings are accepted because expectation records list targets in the short
     /// form (`targets = x86_64, i686, aarch64, riscv64`) while command templates and
-    /// report rows use the triple. Returns `None` for anything else; the caller must
-    /// treat an unrecognised target as a defect in the expectation record and say so,
-    /// never drop the cell.
+    /// report rows use the triple. Returns `None` for anything else, which the caller must
+    /// report as a defect in the expectation record rather than drop the cell.
     pub fn parse(text: &str) -> Option<Target> {
         let wanted = text.trim();
         Target::ALL
@@ -544,11 +635,9 @@ impl Target {
 }
 
 impl fmt::Display for Target {
-    /// `{}` renders the canonical triple.
-    ///
-    /// `{:#}` renders the full documented fact row — triple, pointer width, `long` width,
-    /// ELF class, byte order, execution mode and baseline role — which is what report
-    /// legends and finding environment fingerprints need.
+    /// `{}` renders the canonical triple; `{:#}` renders the fact row report legends and
+    /// finding fingerprints need — triple, pointer width, `long` width, ELF class, byte
+    /// order, execution mode and baseline role.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !f.alternate() {
             return f.write_str(self.triple());
@@ -579,8 +668,7 @@ impl fmt::Display for Target {
 impl std::str::FromStr for Target {
     type Err = HarnessError;
 
-    /// Idiomatic entry point onto [`Target::parse`], for callers that want a `Result`
-    /// carrying an explanatory error instead of a bare `None`.
+    /// [`Target::parse`] for callers that want an explanatory error instead of `None`.
     fn from_str(text: &str) -> Result<Target, HarnessError> {
         Target::parse(text).ok_or_else(|| {
             HarnessError::new(
@@ -614,38 +702,23 @@ fn comma_separated(labels: &[&str]) -> String {
     labels.join(", ")
 }
 
-// ---------------------------------------------------------------------------
-// Optimization level
-// ---------------------------------------------------------------------------
-
 /// An optimization level in the sweep.
 ///
-/// The sweep is exactly these three levels and nothing else, because they are the only
-/// levels the repository documents as in scope and therefore the only ones both compilers
-/// honour with the same meaning. Levels above `-O2`, and size-directed levels, are
-/// documented as out of scope, so no variant for them exists here — not even an unused
-/// one, which would invite a maintainer to start passing one.
-///
-/// Sweeping the levels is what turns the suite into a semantic-preservation test. The
-/// repository's existing optimization tests assert that folding, dead-code elimination and
-/// common-subexpression elimination OCCUR, which is a property of the optimizer's
-/// implementation; asserting that a program's output is byte-identical at every level is a
-/// property of the optimizer's CORRECTNESS, and only the second can catch a
-/// miscompilation.
+/// These three levels are the whole sweep: levels above `-O2` and size-directed levels are
+/// documented as out of scope, so no variant for them exists — not even an unused one,
+/// which would invite a maintainer to start passing one. Comparing output across the
+/// levels is what makes the suite a semantic-preservation test rather than a check that a
+/// particular optimization occurred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OptLevel {
-    /// No optimization.
     O0,
-    /// Light optimization.
     O1,
     /// The highest level in scope.
     O2,
 }
 
 impl OptLevel {
-    /// Every optimization level, in ascending order.
-    ///
-    /// The driver sweeps this array per program, and [`OptLevel::parse`] searches it.
+    /// Every optimization level, in ascending order. [`OptLevel::parse`] searches it.
     pub const ALL: [OptLevel; 3] = [OptLevel::O0, OptLevel::O1, OptLevel::O2];
 
     /// The command-line spelling, passed identically to bcc and to the reference compiler.
@@ -705,52 +778,36 @@ impl std::str::FromStr for OptLevel {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Oracle identity
-// ---------------------------------------------------------------------------
-
 /// Which of the three independent oracles produced a comparison.
 ///
-/// Oracle identity is a first-class value rather than an implicit property of a call site
-/// because an exclusion must be expressible narrowly, per oracle. That is what allows a
-/// construct whose value legitimately differs between architectures to remain fully
-/// compared against its same-target reference while being excluded from cross-backend
-/// value equality alone — so a difficult feature is scoped, not dropped, and every
-/// [`Outcome`] records which oracle spoke.
+/// Oracle identity is a value rather than a property of a call site so that an exclusion
+/// can be expressed per oracle: a construct whose value legitimately differs between
+/// architectures stays fully compared against its same-target reference while being
+/// excluded from cross-backend value equality alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Oracle {
-    /// Oracle (a). bcc versus an external reference C compiler, same target and same
-    /// optimization level. Detects a wrong answer that bcc produces consistently across
-    /// all four of its backends, which no amount of self-comparison could reveal.
+    /// bcc versus an external reference C compiler, same target and optimization level.
     ReferenceCompiler,
-    /// Oracle (b). Every non-baseline target versus the x86-64 baseline at the same
-    /// optimization level. Detects a wrong answer confined to a single backend, which is
-    /// where ABI, register-allocation and instruction-selection defects surface.
+    /// Every non-baseline target versus [`Target::BASELINE`] at the same optimization
+    /// level, which is where ABI, register-allocation and instruction-selection
+    /// differences surface.
     CrossBackend,
-    /// Oracle (c). Every cell versus the `expected_stdout` recorded in the program's own
-    /// expectation record. Catches the single failure mode differential testing
-    /// structurally cannot detect — both compilers changing behaviour in the same
-    /// direction at the same time, which oracle (a) still reports as agreement — and with
-    /// it, toolchain drift and plain regression over time.
+    /// Every cell versus the `expected_stdout` recorded in the program's own expectation
+    /// record, which is the only oracle that detects both compilers changing behaviour in
+    /// the same direction at once.
     GoldenRecord,
 }
 
 impl Oracle {
-    /// Every oracle, in requirement order.
-    ///
-    /// `report.rs` iterates this array to tally the summary per oracle, and
-    /// [`Oracle::parse`] searches it.
+    /// Every oracle, in requirement order. [`Oracle::parse`] searches it.
     pub const ALL: [Oracle; 3] = [
         Oracle::ReferenceCompiler,
         Oracle::CrossBackend,
         Oracle::GoldenRecord,
     ];
 
-    /// The single letter that names this oracle in the requirements.
-    ///
-    /// `findings.rs` uses it to build artifact filenames of the form
-    /// `outputs/<letter>-<target>-<opt>.stdout`, which is why a short, filename-safe token
-    /// exists alongside the human-readable label.
+    /// The single letter that names this oracle in the requirements. `findings.rs` builds
+    /// artifact filenames of the form `outputs/<letter>-<target>-<opt>.stdout` from it.
     pub fn letter(self) -> char {
         match self {
             Oracle::ReferenceCompiler => 'a',
@@ -759,11 +816,9 @@ impl Oracle {
         }
     }
 
-    /// The human-readable label used in reports and failure messages.
-    ///
-    /// The leading token matches the per-oracle toggle key in an expectation record
-    /// (`oracle_a`, `oracle_b`, `oracle_c`), so a report line and the record that governs
-    /// it name the oracle the same way.
+    /// The human-readable label used in reports and failure messages. Its leading token
+    /// matches the per-oracle toggle key in an expectation record, so a report line and
+    /// the record that governs it name the oracle the same way.
     pub fn label(self) -> &'static str {
         match self {
             Oracle::ReferenceCompiler => "oracle_a (reference compiler)",
@@ -773,10 +828,8 @@ impl Oracle {
     }
 
     /// Parse an oracle from its letter (`a`), its record key (`oracle_a`) or its full
-    /// label, ignoring surrounding whitespace.
-    ///
-    /// `manifest.rs` needs the record-key form to read the per-oracle toggles, and
-    /// `report.rs` needs the round trip when it re-reads its own machine-readable rows.
+    /// label, ignoring surrounding whitespace. All three forms are accepted because
+    /// records use the key, reports use the label, and artifact names use the letter.
     pub fn parse(text: &str) -> Option<Oracle> {
         let wanted = text.trim();
         let bare = wanted.strip_prefix("oracle_").unwrap_or(wanted);
@@ -812,51 +865,37 @@ impl std::str::FromStr for Oracle {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Divergence class
-// ---------------------------------------------------------------------------
-
 /// The shape a divergence took, independently of how it was classified into a verdict.
 ///
-/// The set is closed at six members and stays closed: a newly observed failure shape must
-/// be mapped onto one of these, never appended as a seventh, so that the classification
-/// table in `classify.rs` remains total and auditable.
-///
-/// The labels are the machine-readable tokens an expectation record uses in the `class`
-/// field of an expected-divergence marker, so `manifest.rs` reads a marker and
-/// `classify.rs` renders a verdict using one vocabulary.
+/// The set is closed at six members and stays closed: a newly observed failure shape is
+/// mapped onto one of these rather than appended as a seventh, so the classification table
+/// in `classify.rs` remains total. The labels are the tokens an expectation record uses in
+/// the `class` field of an expected-divergence marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DivergenceClass {
-    /// One compiler rejected a program the other accepted. Asymmetric compilation is
-    /// itself a signal, so the diagnostics are captured even though they are never
-    /// compared.
+    /// One compiler rejected a program the other accepted. The diagnostics are captured
+    /// even though they are never compared.
     CompileFailure,
-    /// Compilation succeeded but the artifact failed to link, most often because a
-    /// target's C runtime is missing from the environment rather than because of a
-    /// compiler defect — a distinction the environment fingerprint in a finding preserves.
+    /// Compilation succeeded but the artifact failed to link — most often because a
+    /// target's C runtime is missing, which the environment fingerprint in a finding is
+    /// what distinguishes from a compiler defect.
     LinkFailure,
     /// The program terminated on a signal instead of exiting normally. Exit status is
-    /// compared as a raw wait status precisely so that this is never conflated with a
-    /// numerically equal ordinary exit.
+    /// compared as a raw wait status so this is never conflated with a numerically equal
+    /// ordinary exit.
     RunCrash,
-    /// Both programs ran to completion and agreed on stdout, but their exit statuses
-    /// differ.
     ExitCodeMismatch,
     /// The compared stdout byte streams differ. The first divergent line and byte offset
-    /// are always reported, because a divergence that cannot be located cannot be
-    /// minimized.
+    /// are reported, because a divergence that cannot be located cannot be minimized.
     StdoutMismatch,
-    /// Execution exceeded its per-cell budget. A first-class divergence class rather than
-    /// an infrastructure error: a program that finishes promptly under one compiler and
-    /// hangs under another is exactly the kind of defect the suite exists to surface.
+    /// Execution exceeded its per-cell budget. A divergence class rather than an
+    /// infrastructure error, since a program that finishes promptly under one compiler and
+    /// hangs under another is a defect worth surfacing.
     Timeout,
 }
 
 impl DivergenceClass {
     /// Every divergence class, in the order `classify.rs` considers them.
-    ///
-    /// `report.rs` iterates this array to tally divergences per class, and
-    /// [`DivergenceClass::parse`] searches it.
     pub const ALL: [DivergenceClass; 6] = [
         DivergenceClass::CompileFailure,
         DivergenceClass::LinkFailure,
@@ -866,8 +905,7 @@ impl DivergenceClass {
         DivergenceClass::Timeout,
     ];
 
-    /// The machine-readable token, matching the `class` field of an expected-divergence
-    /// marker.
+    /// The token that matches the `class` field of an expected-divergence marker.
     pub fn label(self) -> &'static str {
         match self {
             DivergenceClass::CompileFailure => "compile_failure",
@@ -880,11 +918,8 @@ impl DivergenceClass {
     }
 
     /// Parse a divergence class from its token, ignoring surrounding whitespace and ASCII
-    /// case.
-    ///
-    /// Case is ignored so that a marker written in a different case is still understood
-    /// rather than silently treated as an unknown class, which would turn a documented
-    /// expected divergence into an unexplained failure.
+    /// case. Case is ignored so a marker written in a different case is understood rather
+    /// than turning a documented expected divergence into an unexplained failure.
     pub fn parse(text: &str) -> Option<DivergenceClass> {
         let wanted = text.trim();
         DivergenceClass::ALL
@@ -915,10 +950,6 @@ impl std::str::FromStr for DivergenceClass {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Verdict
-// ---------------------------------------------------------------------------
 
 /// The outcome of one comparison, from a closed and exhaustive set of six.
 ///
@@ -967,11 +998,8 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    /// Every verdict, in reporting order.
-    ///
-    /// `report.rs` iterates this array so that the summary's verdict tally is always
-    /// complete and always in the same order, including zero rows, and
-    /// [`Verdict::parse`] searches it.
+    /// Every verdict, in reporting order. `report.rs` iterates it so the summary tally is
+    /// complete and ordered, including zero rows.
     pub const ALL: [Verdict; 6] = [
         Verdict::Pass,
         Verdict::XFail,
@@ -993,8 +1021,7 @@ impl Verdict {
         matches!(self, Verdict::Fail | Verdict::XPass)
     }
 
-    /// The uppercase report token, spelled exactly as the requirements spell it so that a
-    /// report line and the specification read identically.
+    /// The uppercase report token, spelled as the requirements spell it.
     pub fn label(self) -> &'static str {
         match self {
             Verdict::Pass => "PASS",
@@ -1039,103 +1066,377 @@ impl std::str::FromStr for Verdict {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Cell identity
-// ---------------------------------------------------------------------------
+// Two kinds of text reach a report, a summary or a reproduction script from outside this
+// harness: free text a maintainer wrote into an expectation record, and a banner an external
+// tool printed when asked to identify itself. Neither may be emitted verbatim.
+//
+// A tab forges a column in a tab-separated report and can therefore relabel a verdict. A
+// terminal escape sequence can hide a line, overwrite one already printed, or repaint a
+// FINDING as a PASS in a maintainer's scrollback. A carriage return can erase the line it
+// ends. None of these say anything about the compiler, and all of them corrupt the artifact
+// the requirements ask for, so the functions below are the single place where such text is
+// made safe. `manifest.rs` additionally REJECTS control characters at parse time, which is
+// stronger; these functions are what protect the text the suite cannot refuse to accept —
+// diagnostics naming an offending value, and the identification banner of a tool the suite
+// did not write.
+
+/// Characters that are not classed as controls but corrupt a report in exactly the same way,
+/// and are therefore escaped alongside them.
+///
+/// The first twelve are the Unicode bidirectional formatting characters. They reorder the
+/// *rendering* of text without changing its bytes, so a line can be made to display something
+/// other than what it says — the mechanism behind the "Trojan Source" class of attack, and in
+/// a verdict table the difference between reading `FAIL` and reading `PASS`. The last two are
+/// the line and paragraph separators, which several Markdown and terminal renderers treat as
+/// line breaks, so leaving them intact would let one report row become two.
+const REPORT_HOSTILE_FORMATTING: &[char] = &[
+    '\u{061c}', // ARABIC LETTER MARK
+    '\u{200e}', // LEFT-TO-RIGHT MARK
+    '\u{200f}', // RIGHT-TO-LEFT MARK
+    '\u{202a}', // LEFT-TO-RIGHT EMBEDDING
+    '\u{202b}', // RIGHT-TO-LEFT EMBEDDING
+    '\u{202c}', // POP DIRECTIONAL FORMATTING
+    '\u{202d}', // LEFT-TO-RIGHT OVERRIDE
+    '\u{202e}', // RIGHT-TO-LEFT OVERRIDE
+    '\u{2066}', // LEFT-TO-RIGHT ISOLATE
+    '\u{2067}', // RIGHT-TO-LEFT ISOLATE
+    '\u{2068}', // FIRST STRONG ISOLATE
+    '\u{2069}', // POP DIRECTIONAL ISOLATE
+    '\u{2028}', // LINE SEPARATOR
+    '\u{2029}', // PARAGRAPH SEPARATOR
+];
+
+/// Whether `character` cannot appear literally in a report, a summary, a fingerprint or a
+/// diagnostic without changing how that text behaves rather than merely what it says.
+///
+/// True for every character [`char::is_control`] reports — the C0 range, the delete character
+/// and the C1 range — and for every entry of [`REPORT_HOSTILE_FORMATTING`].
+///
+/// This predicate is the **single authority** on the question, and it is deliberately shared
+/// rather than reimplemented: [`sanitize_text_for_report`] escapes exactly the characters it
+/// selects, [`CellKey::validate_stem`] refuses a name containing one, and `manifest.rs`
+/// rejects one anywhere in a record — permitting only the line feed, and only inside a
+/// heredoc body, by testing `must_escape_for_report(c) && c != '\n'`. One predicate with three
+/// consumers cannot drift; three hand-written character tests would.
+pub fn must_escape_for_report(character: char) -> bool {
+    character.is_control() || REPORT_HOSTILE_FORMATTING.contains(&character)
+}
+
+/// Render text safely for a report, a summary, a fingerprint or a diagnostic.
+///
+/// Every character [`must_escape_for_report`] selects is replaced by a visible escape. The text can
+/// then be read but can no longer act: no tab can forge a tab-separated column, no escape
+/// introducer can begin a terminal sequence, no carriage return can erase the line it ends,
+/// and no directional override can make a line render as something other than what it says.
+/// The line feed is escaped too, because every consumer of this function writes a single line
+/// and an embedded newline would split one record into two.
+///
+/// Escapes are written `\xNN` for a code point that fits in a byte and `\u{NNNN}` otherwise,
+/// both of which are unambiguous and searchable. Printable text, including every non-ASCII
+/// character that is neither a control nor a formatting character, passes through unchanged, so
+/// a legitimate banner remains exactly as its tool printed it.
+pub fn sanitize_text_for_report(raw: &str) -> String {
+    let mut safe = String::with_capacity(raw.len());
+    for character in raw.chars() {
+        let code_point = u32::from(character);
+        if !must_escape_for_report(character) {
+            safe.push(character);
+        } else if code_point <= 0xff {
+            safe.push_str(&format!("\\x{code_point:02x}"));
+        } else {
+            safe.push_str(&format!("\\u{{{code_point:04x}}}"));
+        }
+    }
+    safe
+}
+
+/// The characters a word may contain and still be safe to write into a shell script without
+/// quoting.
+///
+/// Deliberately conservative: only characters that no POSIX shell treats specially in any
+/// position. Everything else — whitespace, every redirection and list operator, every
+/// quoting character, the expansion introducers, the pattern characters, the comment
+/// character and the home-directory character — forces the quoted form.
+const SHELL_SAFE_PUNCTUATION: &[char] = &['.', '_', '/', ':', '=', '@', '%', '+', ',', '-'];
+
+/// Quote one word so that a POSIX shell reproduces it exactly.
+///
+/// A non-empty word made only of ASCII alphanumerics and [`SHELL_SAFE_PUNCTUATION`] is
+/// returned unchanged, which keeps an ordinary command line readable. Anything else is
+/// wrapped in single quotes, with each embedded single quote written as `'\''` — the standard
+/// idiom, and the only one that is correct for **every** byte, because a single-quoted string
+/// in a POSIX shell has no escape processing at all.
+///
+/// This is what makes a finding's reproduction commands "exact and copy-pasteable" rather
+/// than merely plausible. A checkout path containing a space would otherwise split into two
+/// arguments, and a path containing a semicolon, a backquote or a `$(` would be *executed*
+/// rather than passed — which is precisely the difference between a reproduction script and
+/// an injection. Control characters cannot reach this function from an expectation record,
+/// because `manifest.rs` rejects them at parse time; a control character arriving from a
+/// filesystem path is preserved verbatim inside the quotes, which is the only rendering that
+/// still reproduces the path.
+pub fn posix_quote(word: &str) -> String {
+    let is_safe = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || SHELL_SAFE_PUNCTUATION.contains(&c));
+    if is_safe {
+        return String::from(word);
+    }
+    let mut quoted = String::with_capacity(word.len() + 2);
+    quoted.push('\'');
+    for character in word.chars() {
+        if character == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(character);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// Render an argument vector as a single POSIX shell line, each element quoted by
+/// [`posix_quote`].
+pub fn posix_command_line(argv: &[String]) -> String {
+    argv.iter()
+        .map(|word| posix_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Separator between the components of a cell slug.
 ///
-/// A doubled underscore is unambiguous because [`sanitize_path_component`] guarantees no
-/// component contains a doubled underscore and no component begins or ends with one.
-const SLUG_SEPARATOR: &str = "__";
+/// A plus sign is chosen for one reason: [`encode_slug_component`] escapes it wherever it
+/// occurs inside a component, so it never appears in encoded output. Splitting a slug on this
+/// character therefore recovers exactly the four components that produced it, which is what
+/// makes [`CellKey::slug`] injective rather than merely unlikely to collide. It is also safe
+/// everywhere the harness uses a slug: no shell assigns it a special meaning, and no
+/// supported filesystem reserves it.
+const SLUG_SEPARATOR: char = '+';
 
-/// Placeholder for a component that sanitizes to nothing, so a slug is never malformed.
-const EMPTY_COMPONENT_PLACEHOLDER: &str = "unnamed";
+/// Introducer for an escape sequence inside an encoded slug component.
+///
+/// The percent sign is itself escaped, as `%25`, so an escape sequence is always exactly
+/// three characters long and can never be produced by passthrough input. That is what makes
+/// the encoding reversible, and reversibility is precisely the property collision freedom
+/// needs. Nothing in the harness decodes a slug; the escape is chosen to be reversible so
+/// that collision freedom is a fact about the function rather than a hope about its inputs.
+const SLUG_ESCAPE: char = '%';
 
-/// Fold one slug component into the filesystem-safe alphabet `[A-Za-z0-9._-]`.
+/// Upper-case hexadecimal digits, indexed by nibble value.
 ///
-/// Every character outside that alphabet — and the underscore itself — folds to a single
-/// underscore; runs collapse to one; leading and trailing runs are dropped entirely. Two
-/// properties follow, and together they are what make [`CellKey::slug`] collision-free:
-/// no result contains a doubled underscore, and no result begins or ends with an
-/// underscore, so the doubled-underscore separator can never be confused with a character
-/// belonging to a component.
+/// Both index expressions in [`encode_slug_component`] are four bits wide, so the lookup
+/// cannot be out of range: the encoder needs no fallback arm and cannot panic. That matters
+/// because a slug is rendered on the failure path of every cell, where a panic would replace
+/// a diagnosable divergence with a harness crash.
+const SLUG_HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+
+/// Append one slug component to `encoded`, escaping it injectively into the passthrough
+/// alphabet `[A-Za-z0-9_]` plus [`SLUG_ESCAPE`]-introduced hexadecimal escapes.
 ///
-/// The mapping is a pure function of its input: no clock, no process identifier, no
+/// This is the single authority for turning an identity component into path text: every slug,
+/// every workspace directory and every report row derives from it, so an identity can never be
+/// rendered two ways.
+///
+/// A byte of the passthrough alphabet — ASCII letters, ASCII digits and the underscore — is
+/// emitted verbatim, so the canonical corpus names stay readable: `01_integer_conversions`
+/// encodes to itself. **Every other byte** — including the separator, the escape character
+/// itself, and each individual byte of a multi-byte UTF-8 character — becomes [`SLUG_ESCAPE`]
+/// followed by that byte's two upper-case hexadecimal digits. Encoding operates on bytes rather
+/// than characters, so the result is always pure ASCII.
+///
+/// The mapping is injective, and the argument is short enough to check by hand: the passthrough
+/// alphabet and the escape character are disjoint, an escape sequence has a fixed length of
+/// three, and the two hexadecimal digits name exactly one byte, so the output can be read left
+/// to right to recover the input byte sequence exactly. Folding could not offer that. A scheme
+/// that folded every character outside the alphabet to a single underscore and collapsed runs
+/// made `a_b`, `a__b`, `a b` and `a/b` indistinguishable, and made an empty name
+/// indistinguishable from a name that was literally `unnamed`; under this encoding those six
+/// inputs render as `a_b`, `a__b`, `a%20b`, `a%2Fb`, the empty string and `unnamed`.
+///
+/// Two further properties follow from that alphabet, and they are what make a slug safe to join
+/// onto a path rather than merely tidy:
+///
+/// - The separator can never occur inside an encoded component, so splitting a slug on it
+///   recovers exactly the components that produced it.
+/// - No encoded component can be `.` or `..`, or contain a path separator, because the dot, the
+///   forward slash and the backslash are all outside the passthrough alphabet. A slug is
+///   therefore always a single path component that cannot traverse upwards, so joining it to
+///   [`work_root`] always yields a direct child of that root.
+///
+/// Injectivity is what removes the need for a lock. The slug alone decides a cell's workspace
+/// directory and the feature-area tests run concurrently, so under a lossy fold two distinct
+/// identities that differed only outside the safe alphabet would share one workspace and
+/// overwrite each other's artifacts mid-run — surfacing as an inexplicable divergence rather
+/// than an error. A separate duplicate-slug detection pass would merely assert that theorem.
+///
+/// The mapping is a pure function of its input: no clock, no process identifier, no counter, no
 /// randomness, no environment.
-fn sanitize_path_component(raw: &str) -> String {
-    let mut sanitized = String::with_capacity(raw.len());
-    let mut separator_pending = false;
-    for character in raw.chars() {
-        if character.is_ascii_alphanumeric() || character == '.' || character == '-' {
-            if separator_pending && !sanitized.is_empty() {
-                sanitized.push('_');
-            }
-            separator_pending = false;
-            sanitized.push(character);
+fn encode_slug_component(raw: &str, encoded: &mut String) {
+    for byte in raw.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'_' {
+            encoded.push(char::from(byte));
         } else {
-            separator_pending = true;
+            encoded.push(SLUG_ESCAPE);
+            encoded.push(char::from(SLUG_HEX_DIGITS[usize::from(byte >> 4)]));
+            encoded.push(char::from(SLUG_HEX_DIGITS[usize::from(byte & 0x0f)]));
         }
     }
-    if sanitized.is_empty() {
-        return String::from(EMPTY_COMPONENT_PLACEHOLDER);
-    }
-    sanitized
 }
 
 /// Identifies exactly one cell of the build matrix: one program, on one target, at one
 /// optimization level.
 ///
-/// This is the unit of work the whole harness is organized around, and it is the sole
-/// input to a cell's workspace path, which is how concurrent execution is made safe by
-/// construction rather than by locking.
+/// This is the unit of work the harness is organized around, and the sole input to a
+/// cell's workspace path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CellKey {
-    /// Feature-area directory name, for example `04_bitfields`.
     pub area: String,
-    /// Program stem without an extension, for example `003_compound_assignment`.
     pub program: String,
-    /// Target architecture this cell was built and executed for.
     pub target: Target,
-    /// Optimization level this cell was built at.
     pub opt: OptLevel,
 }
 
 impl CellKey {
     /// A deterministic, collision-free, filesystem-safe rendering of this identity, for
-    /// example `01_integer_conversions__004_narrowing_conversions__aarch64__O1`.
+    /// example `01_integer_conversions+004_narrowing_conversions+aarch64+O1`.
+    ///
+    /// Collision freedom is a property of the rendering rather than an assumption about the
+    /// corpus. Each component is escaped by [`encode_slug_component`], which is injective and
+    /// never emits [`SLUG_SEPARATOR`], so the separators mark exactly the four component
+    /// boundaries and two distinct identities cannot render to the same slug. That is what
+    /// removes the need for any lock — two concurrent cells own distinct workspaces by
+    /// construction, and no duplicate-detection pass is needed because such a pass would merely
+    /// assert the theorem — and it holds for a curated finding reproducer whose name was never
+    /// part of the numbered corpus just as it holds for `004_narrowing_conversions`.
+    ///
+    /// The join is positional: a separator is written before every component after the first,
+    /// always three of them, never "one between the non-empty ones". That is load-bearing in
+    /// the argument above, because a join that emitted a separator only when something had
+    /// already been written would drop a boundary whenever a preceding component encoded to
+    /// empty text.
+    ///
+    /// The result is always exactly one path component: it can contain no path separator of
+    /// either spelling and can be neither `.` nor `..`, because the encoder escapes every byte
+    /// outside `[A-Za-z0-9_]`. Joining it onto [`work_root`] therefore cannot reach outside the
+    /// workspace root, which is the mechanical half of the hermeticity contract.
     ///
     /// The slug contains no process identifier, no timestamp and no counter, so the same
-    /// identity yields the same slug in every process and on every run. That is what makes
-    /// a retained workspace reproducible and inspectable after the fact, and it is also
-    /// what removes the need for any lock: two concurrent cells cannot collide because
-    /// distinct identities cannot render to the same slug.
+    /// identity yields the same slug in every process and on every run. That is what makes a
+    /// retained workspace reproducible and inspectable after the fact.
     pub fn slug(&self) -> String {
-        let components = [
-            sanitize_path_component(&self.area),
-            sanitize_path_component(&self.program),
-            sanitize_path_component(self.target.short_name()),
-            sanitize_path_component(self.opt.short()),
+        let components: [&str; 4] = [
+            self.area.as_str(),
+            self.program.as_str(),
+            self.target.short_name(),
+            self.opt.short(),
         ];
         let mut rendered = String::new();
-        for component in components {
-            if !rendered.is_empty() {
-                rendered.push_str(SLUG_SEPARATOR);
+        for (index, component) in components.iter().enumerate() {
+            if index > 0 {
+                rendered.push(SLUG_SEPARATOR);
             }
-            rendered.push_str(&component);
+            encode_slug_component(component, &mut rendered);
         }
         rendered
+    }
+
+    /// Reject an area or program name that is not a canonical corpus stem.
+    ///
+    /// The encoding in [`encode_slug_component`] is injective, so a strange name could
+    /// never cause a workspace collision. This check exists for the other half of the
+    /// problem: a name that is not a canonical stem means the identity itself was
+    /// assembled wrongly — from an empty string, from a path fragment rather than a stem,
+    /// or from text carrying control characters that would corrupt a report — and every one
+    /// of those is a corpus or caller defect that must surface as an explanatory hard
+    /// failure rather than as a strangely named directory nobody can trace back.
+    ///
+    /// A canonical stem is non-empty, is neither `.` nor `..`, carries no path separator of
+    /// either spelling, and contains no whitespace and no control character. The
+    /// corpus-wide convention is narrower still — lower-case ASCII, digits and underscores,
+    /// as in `04_bitfields` and `003_compound_assignment` — but the check deliberately
+    /// stops at the properties that actually threaten correctness, so that a future area or
+    /// program name is not rejected for a stylistic reason.
+    fn validate_identity(&self) -> HarnessResult<()> {
+        CellKey::validate_stem("area", &self.area)?;
+        CellKey::validate_stem("program", &self.program)
+    }
+
+    /// Apply the canonical-stem rules to one named component of this identity.
+    ///
+    /// Every diagnostic renders the offending value through [`sanitize_text_for_report`],
+    /// so a name carrying a terminal escape cannot smuggle that escape into the failure
+    /// message it provokes.
+    fn validate_stem(role: &str, value: &str) -> HarnessResult<()> {
+        let context = || format!("validating the {role} name of a cell identity");
+        if value.is_empty() {
+            return Err(HarnessError::new(
+                context(),
+                format!(
+                    "the {role} name is empty; a cell identity is assembled from the corpus \
+                     directory and file names, so an empty one means the identity was built \
+                     from something other than a discovered corpus path"
+                ),
+            ));
+        }
+        let shown = sanitize_text_for_report(value);
+        if value == "." || value == ".." {
+            return Err(HarnessError::new(
+                context(),
+                format!(
+                    "the {role} name is {shown:?}, which names a directory relative to another \
+                     rather than a corpus stem; every area and program name is a plain stem"
+                ),
+            ));
+        }
+        if value.contains('/') || value.contains(std::path::MAIN_SEPARATOR) {
+            return Err(HarnessError::new(
+                context(),
+                format!(
+                    "the {role} name {shown:?} contains a path separator; the identity carries \
+                     the area directory name and the program file stem, never a path fragment, \
+                     because the cell's own paths are derived from the corpus root instead"
+                ),
+            ));
+        }
+        if value
+            .chars()
+            .any(|candidate| must_escape_for_report(candidate) || candidate.is_whitespace())
+        {
+            return Err(HarnessError::new(
+                context(),
+                format!(
+                    "the {role} name {shown:?} contains whitespace or a character that cannot \
+                     appear literally in a report; a stem carries neither, because it is written \
+                     into report rows, workspace paths and reproduction commands, where such a \
+                     character could forge a column, hide a line, or make a row render as \
+                     something other than what it says"
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 
 impl fmt::Display for CellKey {
     /// Human-readable form for failure messages, for example
     /// `04_bitfields/003_compound_assignment @ aarch64-linux-gnu -O1`.
+    ///
+    /// The two textual components are rendered through [`sanitize_text_for_report`]. A
+    /// [`CellKey`] built from a discovered corpus path has already passed
+    /// [`CellKey::validate_stem`] and is therefore unchanged by that call, but the fields are
+    /// public and this rendering reaches report rows and the tab-separated summary, so the
+    /// safety is applied at the point of output rather than assumed from the point of
+    /// construction.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{}/{} @ {} {}",
-            self.area, self.program, self.target, self.opt
+            sanitize_text_for_report(&self.area),
+            sanitize_text_for_report(&self.program),
+            self.target,
+            self.opt
         )
     }
 }
@@ -1143,16 +1444,21 @@ impl fmt::Display for CellKey {
 /// One fully resolved cell: its identity, the two files that define it, and the single
 /// directory it is permitted to write into.
 ///
-/// A cell is deliberately self-describing. Requirement four demands that every cell be
-/// reproducible in isolation from its source file and its expectation record alone, so both
-/// paths travel with the identity rather than being recomputed by each consumer.
+/// Both paths travel with the identity rather than being recomputed by each consumer,
+/// because a cell must be reproducible from its source file and its expectation record
+/// alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Cell {
-    /// Which program, target and optimization level this cell is.
     pub key: CellKey,
-    /// Absolute path to the C program.
+    /// Canonical absolute path to the C program.
+    ///
+    /// This is the fully resolved path [`Cell::new`] proved to be a regular file inside the
+    /// corpus, not the possibly indirect spelling that was handed in. Storing the resolved
+    /// form means every consumer compiles, reads and reports the same file the constructor
+    /// validated, and that a reproduction command carries a path with no `..` segment and no
+    /// intermediate symbolic link for a maintainer to resolve by hand.
     pub source: PathBuf,
-    /// Absolute path to the sibling expectation record that governs this program.
+    /// Canonical absolute path to the sibling expectation record that governs this program.
     pub expectation: PathBuf,
     /// The one directory this cell may write into, derived from [`work_root`] and
     /// [`CellKey::slug`].
@@ -1160,21 +1466,74 @@ pub struct Cell {
 }
 
 impl Cell {
-    /// Resolve a cell, validating the two input paths and deriving the workspace.
+    /// Resolve a cell and derive its workspace.
     ///
-    /// The workspace is derived rather than supplied, so hermeticity is decided in exactly
-    /// one place: every cell writes beneath [`work_root`] and nowhere else.
+    /// The workspace is derived rather than supplied, so hermeticity is decided in exactly one
+    /// place: every cell writes beneath [`work_root`] and nowhere else. The two input paths are
+    /// stored resolved, so a report and a reproduction command always name the files that were
+    /// actually read.
     ///
-    /// Validation is strict on purpose. A program without a sibling expectation record, or
-    /// a path that is not absolute, is a broken invariant of the corpus rather than a
-    /// condition an environment can legitimately produce, so it becomes an explanatory hard
-    /// failure that names the cell — never a quiet skip and never an opaque panic.
+    /// # Errors
+    ///
+    /// Validation is strict on purpose: every rejection below is a broken corpus invariant
+    /// rather than a condition an environment can legitimately produce, so it becomes an
+    /// explanatory hard failure naming the cell — never a quiet skip and never an opaque panic.
+    ///
+    /// Absoluteness and the right extension are necessary but nowhere near sufficient: both are
+    /// satisfied by `/etc/shadow.c` and by a committed symbolic link pointing anywhere on the
+    /// machine. Validation therefore covers three things:
+    ///
+    /// - the identity, through [`CellKey::validate_identity`]: the area and program names must
+    ///   be canonical stems, so an identity assembled from an empty string, a path fragment or
+    ///   text carrying control characters fails here rather than becoming a strangely named
+    ///   directory nobody can trace back;
+    /// - the read half of hermeticity, through [`require_contained_corpus_file`]: each input
+    ///   must be an absolute path to a regular, non-symbolic-link file that resolves strictly
+    ///   inside the corpus and carries the extension its role requires. A symbolic link is
+    ///   refused rather than followed, because following one is how a corpus path comes to name
+    ///   a file anywhere on the machine while every report still shows the corpus path — and a
+    ///   discovered file is not merely read but compiled and *executed*;
+    /// - the identity-to-location agreement: the two inputs must be same-directory siblings
+    ///   sharing one stem, and the resolved location must agree with the key — the containing
+    ///   directory with [`CellKey::area`] and the stem with [`CellKey::program`]. Without that
+    ///   agreement a cell could be reported under one identity while compiling a different
+    ///   program, and the workspace path, derived from the key alone, would name the wrong cell.
+    ///
+    /// The derived workspace is then asserted to be a direct child of [`work_root`]. That
+    /// already follows from the slug being a single path component, and it is re-checked here
+    /// because it is the one line on which the whole hermeticity argument rests.
+    ///
+    /// The two path fields of the returned cell hold the **canonical** forms, so a consumer can
+    /// never operate on a different file from the one that was validated, and a reproduction
+    /// command carries a path with no `..` segment and no intermediate symbolic link for a
+    /// maintainer to resolve by hand.
     pub fn new(key: CellKey, source: PathBuf, expectation: PathBuf) -> HarnessResult<Cell> {
-        Cell::require_absolute(&key, "source", &source)?;
-        Cell::require_extension(&key, "source", &source, "c")?;
-        Cell::require_absolute(&key, "expectation record", &expectation)?;
-        Cell::require_extension(&key, "expectation record", &expectation, "expected")?;
-        let workspace = work_root().join(key.slug());
+        let context = format!("resolving the input paths for {key}");
+        key.validate_identity()?;
+        let source = require_contained_corpus_file(&context, "source", &source, "c")?;
+        let expectation = require_contained_corpus_file(
+            &context,
+            "expectation record",
+            &expectation,
+            "expected",
+        )?;
+        Cell::require_sibling_pair(&context, &source, &expectation)?;
+        Cell::require_identity(&context, &key, &source)?;
+
+        let root = work_root();
+        let workspace = root.join(key.slug());
+        if workspace.parent() != Some(root.as_path()) {
+            return Err(HarnessError::new(
+                format!("deriving the workspace path for {key}"),
+                format!(
+                    "{} is not a direct child of the work root {}; every cell writes into one \
+                     directory immediately beneath that root and nowhere else, which is the \
+                     property the suite's hermeticity rests on",
+                    workspace.display(),
+                    root.display()
+                ),
+            ));
+        }
         Ok(Cell {
             key,
             source,
@@ -1183,40 +1542,73 @@ impl Cell {
         })
     }
 
-    /// Reject a relative path, naming the cell and the role of the offending path.
-    fn require_absolute(key: &CellKey, role: &str, path: &Path) -> HarnessResult<()> {
-        if path.is_absolute() {
-            return Ok(());
+    /// Reject a program and record that are not same-directory siblings of one stem.
+    ///
+    /// The pairing is what makes "source file, build commands, and expected output recorded
+    /// together" literally true, so a record borrowed from a neighbouring program — the one
+    /// mistake that would leave every individual path check satisfied — is refused here.
+    fn require_sibling_pair(context: &str, source: &Path, expectation: &Path) -> HarnessResult<()> {
+        if source.parent() != expectation.parent() {
+            return Err(HarnessError::new(
+                context,
+                format!(
+                    "the program {} and the expectation record {} are not in the same directory; \
+                     every record is the sibling of the program it governs, which is what makes \
+                     a cell reproducible from those two files alone",
+                    source.display(),
+                    expectation.display()
+                ),
+            ));
         }
-        Err(HarnessError::new(
-            format!("resolving the {role} path for {key}"),
-            format!(
-                "{} is not absolute; corpus paths are derived from the package manifest \
-                 directory so that a cell never depends on the working directory",
-                path.display()
-            ),
-        ))
+        if source.file_stem() != expectation.file_stem() {
+            return Err(HarnessError::new(
+                context,
+                format!(
+                    "the program {} and the expectation record {} do not share a file stem; a \
+                     record that governs a different program is the one mistake every individual \
+                     path check would still accept",
+                    source.display(),
+                    expectation.display()
+                ),
+            ));
+        }
+        Ok(())
     }
 
-    /// Reject a path whose extension is not the one the role requires.
-    fn require_extension(
-        key: &CellKey,
-        role: &str,
-        path: &Path,
-        wanted: &str,
-    ) -> HarnessResult<()> {
-        let found = path.extension().and_then(|extension| extension.to_str());
-        if found == Some(wanted) {
-            return Ok(());
+    /// Reject a resolved program path that disagrees with the identity it is being given.
+    fn require_identity(context: &str, key: &CellKey, source: &Path) -> HarnessResult<()> {
+        let area = source
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str());
+        if area != Some(key.area.as_str()) {
+            return Err(HarnessError::new(
+                context,
+                format!(
+                    "the program {} lives in the feature-area directory {:?}, but this cell claims \
+                     the area {:?}; the workspace path is derived from the identity alone, so a \
+                     disagreement would file a cell's artifacts under another cell's name",
+                    source.display(),
+                    area.unwrap_or("<unreadable>"),
+                    key.area
+                ),
+            ));
         }
-        Err(HarnessError::new(
-            format!("resolving the {role} path for {key}"),
-            format!(
-                "{} does not have the required extension {wanted:?}; every program in the corpus \
-                 is a .c file paired with a sibling .expected record",
-                path.display()
-            ),
-        ))
+        let stem = source.file_stem().and_then(|stem| stem.to_str());
+        if stem != Some(key.program.as_str()) {
+            return Err(HarnessError::new(
+                context,
+                format!(
+                    "the program {} has the file stem {:?}, but this cell claims the program {:?}; \
+                     a cell reported under one identity while compiling another program would make \
+                     every verdict about it meaningless",
+                    source.display(),
+                    stem.unwrap_or("<unreadable>"),
+                    key.program
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1233,27 +1625,16 @@ impl fmt::Display for Cell {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Accumulated outcome
-// ---------------------------------------------------------------------------
-
 /// One accumulated verdict: what a single oracle concluded about a single cell.
 ///
-/// Outcomes are accumulated rather than asserted one at a time. Each feature-area test
-/// runs its complete matrix and collects every outcome before asserting, because the
-/// deliverable summary must enumerate every result — every expected divergence with its
-/// documented basis and every finding with its reproducer — and stopping at the first
-/// divergence would truncate exactly the artifact the requirements ask for.
-///
-/// An outcome is keyed by oracle as well as by cell, which is what lets a construct be
-/// excluded from one oracle while remaining fully compared under the others.
+/// Outcomes are accumulated rather than asserted one at a time, because each area test
+/// must enumerate every result in its report and stopping at the first divergence would
+/// truncate it. Keying by oracle as well as by cell is what lets a construct be excluded
+/// from one oracle while remaining fully compared under the others.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Outcome {
-    /// The cell this outcome is about.
     pub key: CellKey,
-    /// Which oracle produced it.
     pub oracle: Oracle,
-    /// What was concluded.
     pub verdict: Verdict,
     /// The shape of the divergence, when there was one. `None` for an agreement and for an
     /// oracle that could not be attempted.
@@ -1269,11 +1650,9 @@ pub struct Outcome {
 impl Outcome {
     /// Record one outcome.
     ///
-    /// The detail is never allowed to be empty. If a caller supplies nothing, an
-    /// explanatory sentence naming the verdict, the oracle and the cell is substituted, and
-    /// for a verdict that fails the run the substitution says plainly that the missing
-    /// detail is itself a defect — because a run-failing outcome with an opaque message is
-    /// exactly what makes a real divergence impossible to act on.
+    /// An empty `detail` is replaced with a sentence naming the verdict, the oracle and the
+    /// cell, because a run-failing outcome carrying an opaque message is what makes a real
+    /// divergence impossible to act on.
     pub fn new(
         key: CellKey,
         oracle: Oracle,
@@ -1306,8 +1685,8 @@ impl Outcome {
 }
 
 impl fmt::Display for Outcome {
-    /// One-line rendering used verbatim in the driver's verdict table and in failure
-    /// messages, so a failing run reproduces the same text a report contains.
+    /// One-line rendering used verbatim in both the driver's verdict table and its failure
+    /// messages, so a failing run reproduces the same text the report contains.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}] {} {}", self.verdict, self.oracle, self.key)?;
         if let Some(class) = self.class {
@@ -1320,22 +1699,16 @@ impl fmt::Display for Outcome {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Error reporting
-// ---------------------------------------------------------------------------
-
-/// A harness failure that is genuinely the suite's or the corpus's fault.
+/// A harness failure that is the suite's or the corpus's fault rather than the
+/// environment's.
 ///
-/// The distinction this type draws is the one the requirements insist on. A tool that an
-/// environment can legitimately lack is NOT an error: it becomes [`Verdict::Unavailable`],
-/// reported loudly and in the summary. An error is reserved for a broken invariant — a
-/// program with no sibling expectation record, an unreadable corpus directory, a compiler
-/// under test that is absent, a marker that cites a document which does not exist — and it
-/// always surfaces as an explanatory hard failure. Neither path is ever a silent pass.
+/// A tool an environment can legitimately lack is not an error: it becomes
+/// [`Verdict::Unavailable`] and is reported in the summary. This type is reserved for a
+/// broken invariant — an unreadable corpus directory, an absent compiler under test, a
+/// marker citing a document that does not exist — and always surfaces as a hard failure.
 ///
-/// Both halves are carried separately so that a message always says what the harness was
-/// doing as well as what went wrong, which is what makes a failure actionable without a
-/// stack trace.
+/// Context and cause are carried separately so a message says what the harness was doing
+/// as well as what went wrong, which makes a failure actionable without a stack trace.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HarnessError {
     /// What the harness was attempting, phrased as a gerund, for example
@@ -1347,10 +1720,6 @@ pub struct HarnessError {
 
 impl HarnessError {
     /// Build an error from its context and its cause.
-    ///
-    /// Both arguments accept a borrowed or an owned string, so a call site can pass a
-    /// literal for the fixed half and a formatted string for the variable half without
-    /// ceremony.
     pub fn new(context: impl Into<String>, cause: impl Into<String>) -> HarnessError {
         HarnessError {
             context: context.into(),
@@ -1372,12 +1741,12 @@ impl fmt::Display for HarnessError {
 impl std::error::Error for HarnessError {}
 
 impl From<std::io::Error> for HarnessError {
-    /// Adapt a filesystem or process error so that the question-mark operator works
-    /// throughout the harness.
+    /// Adapt a filesystem or process error so the question-mark operator works throughout
+    /// the harness.
     ///
-    /// The context is necessarily generic here, which is why call sites that know what they
-    /// were doing should build the error with [`HarnessError::new`] instead. The underlying
-    /// message is preserved verbatim, so the cause is never lost.
+    /// The context is generic, so a call site that knows what it was doing should build the
+    /// error with [`HarnessError::new`] instead. The underlying message is preserved
+    /// verbatim.
     fn from(error: std::io::Error) -> HarnessError {
         HarnessError::new(
             "performing a filesystem or process operation",
@@ -1389,44 +1758,34 @@ impl From<std::io::Error> for HarnessError {
 /// Result alias used throughout the harness.
 pub type HarnessResult<T> = Result<T, HarnessError>;
 
-// ---------------------------------------------------------------------------
-// Path roots
-// ---------------------------------------------------------------------------
-//
-// Every filesystem location the harness touches is derived from the four roots below, so
-// hermeticity is provable by inspecting one place. The suite reads only a program's source
-// and its expectation record, and it writes only beneath the work, report and findings
-// roots — all three of which live inside the Cargo build directory. Nothing is written
-// outside it, no path outside the build directory is created, and no socket is opened
-// anywhere in the harness.
+// Every filesystem location the harness touches is derived from the roots below, so
+// hermeticity can be checked in one place: the suite reads a program's source and its
+// expectation record, and writes only beneath the work, report and findings roots.
 
 /// Absolute path to the package root, taken from the manifest directory Cargo provides at
 /// compile time.
 ///
-/// Resolved from the manifest directory rather than from the working directory on purpose:
-/// `cargo test` makes no guarantee about the working directory of a test process, so a
-/// relative guess or a parent-directory walk would be a latent bug that only appears when
-/// the suite is invoked from somewhere unexpected.
+/// Resolved from the manifest directory rather than the working directory because
+/// `cargo test` makes no guarantee about a test process's working directory.
 pub fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 /// Absolute path to the corpus root, which holds the feature-area directories, the
-/// registers, the single fixture header, the maintenance tooling and the curated findings.
+/// registers, the fixture header, the maintenance tooling and the curated findings.
 ///
-/// The corpus is discovered by scanning this directory, which is why adding a program takes
-/// exactly two new files and no harness change at all.
+/// The corpus is discovered by scanning this directory, so adding a program takes two new
+/// files and no harness change.
 pub fn corpus_root() -> PathBuf {
     manifest_dir().join("tests").join("conformance")
 }
 
 /// Absolute path to the Cargo build directory, the only place the harness writes.
 ///
-/// The configured target directory is honoured when set, because a build that redirects its
-/// output would otherwise have the harness writing into a directory the build does not own
-/// — the most common way a test harness escapes its sandbox. A configured value that is
-/// relative is resolved against the package root rather than against the working directory,
-/// so the result is absolute in every case.
+/// A configured target directory is honoured, so a build that redirects its output does not
+/// leave the harness writing into a directory the build does not own. A relative
+/// configured value is resolved against the package root rather than the working
+/// directory, so the result is absolute whenever [`manifest_dir`] is.
 pub fn build_root() -> PathBuf {
     let configured = std::env::var_os("CARGO_TARGET_DIR").filter(|value| !value.is_empty());
     match configured {
@@ -1445,8 +1804,8 @@ pub fn build_root() -> PathBuf {
 /// Root of the per-cell workspaces, one subdirectory per [`CellKey::slug`].
 ///
 /// A workspace is removed once its cell has passed and retained when it has not, so a
-/// failing cell leaves behind exactly the artifacts needed to investigate it; the retention
-/// setting keeps every workspace when a maintainer wants to inspect a passing cell too.
+/// failing cell leaves behind the artifacts needed to investigate it. The retention setting
+/// in `env.rs` keeps passing workspaces too.
 pub fn work_root() -> PathBuf {
     build_root().join("conformance-work")
 }
@@ -1455,18 +1814,249 @@ pub fn work_root() -> PathBuf {
 /// plus the run summary in both forms.
 ///
 /// Each area writes only its own file, so concurrently executing areas never contend, and
-/// the summary is finalized by a check-and-write that succeeds once every area file exists
-/// — which requires no ordering between tests and adds no test of its own.
+/// the summary is finalized by a check-and-write that succeeds once every area file exists,
+/// which needs no ordering between tests.
 pub fn report_root() -> PathBuf {
     build_root().join("conformance-report")
 }
 
 /// Root of the findings generated by the current run.
 ///
-/// This is deliberately distinct from the curated, committed finding set that lives under
-/// the corpus root: that set is a deliverable, and a test run must never write into it, so
-/// an in-progress run cannot pollute it. No function in this harness returns a writable
-/// handle to the committed set for exactly that reason.
+/// Distinct from the curated finding set committed under [`corpus_root`], which is a
+/// deliverable: no function here returns a writable handle to it, so an in-progress run
+/// cannot pollute it.
 pub fn findings_root() -> PathBuf {
     build_root().join("conformance-findings")
+}
+
+/// The corpus root with every symbolic link resolved.
+///
+/// Resolved rather than merely joined, because containment can only be decided between two
+/// paths that have both been reduced to their real locations: comparing a real path against an
+/// unresolved root would reject a legitimate file whenever the build tree itself sits behind a
+/// link, and comparing an unresolved path against an unresolved root would accept an escape.
+///
+/// An unreadable corpus root is a hard failure. It is the one directory the suite cannot do
+/// without, and a run that quietly discovered no programs would report success while testing
+/// nothing.
+pub fn canonical_corpus_root() -> HarnessResult<PathBuf> {
+    let declared = corpus_root();
+    declared.canonicalize().map_err(|error| {
+        HarnessError::new(
+            "resolving the corpus root",
+            format!(
+                "{} could not be resolved: {error}; the corpus is the directory the suite reads \
+                 every program and every expectation record from, so a root that cannot be \
+                 resolved is a hard failure rather than an empty run",
+                declared.display()
+            ),
+        )
+    })
+}
+
+// Constraint four permits the suite to compile and execute the programs it discovers, and
+// forbids those programs from touching anything outside the sandbox working directory. That
+// permission is only safe while the set of things the suite will compile is exactly the set
+// of files committed under the corpus root, because a program is an input the suite hands to
+// a compiler and then *runs*. A file that reaches the matrix from elsewhere is arbitrary code
+// execution with the suite's privileges, and a file the suite merely *reads* from elsewhere
+// is disclosure: its bytes are copied into a finding artifact and a report.
+//
+// Two properties are therefore established before any discovered path is used, and they are
+// established here so that every caller — cell construction, record loading, area discovery —
+// gets the same answer:
+//
+//   1. the path names an existing regular file, not a symbolic link and not a directory,
+//      device node, socket or FIFO;
+//   2. after canonicalization the path lies strictly beneath the canonical corpus root.
+//
+// The order matters. Testing the link status first, with `symlink_metadata`, means a committed
+// symbolic link is refused outright rather than silently followed — a link is not a program,
+// and accepting one would let the corpus name a file it does not contain. Canonicalizing
+// second means an intermediate directory that *is* a link is resolved and then judged on where
+// it actually leads, so a link that stays inside the corpus is harmless and one that escapes
+// upward is rejected by the containment test rather than by a special case.
+//
+// Containment is compared component by component rather than by string prefix. A prefix test
+// on text answers "does `/corpus-evil/x` start with `/corpus`" with yes, which is wrong; a
+// component test answers it with no, because `corpus-evil` and `corpus` are different
+// components. This is the classic path-prefix confusion, and comparing components is the only
+// spelling that does not have it.
+
+/// Require that `path` is an existing regular file, rejecting symbolic links.
+///
+/// `context` describes the operation in progress and is used verbatim in the error, so the
+/// failure names what the harness was doing as well as what was wrong.
+///
+/// [`std::fs::symlink_metadata`] is used rather than [`std::fs::metadata`] precisely because
+/// it does **not** follow a final symbolic link: the link itself is inspected, so a link is
+/// reported as a link and refused. Following it would mean the corpus could name any file on
+/// the machine — `/etc/shadow` renamed to something ending in `.c` satisfies every other
+/// check this harness makes — and that file's bytes would then be compiled, executed and
+/// copied into a report.
+pub fn require_regular_file(context: &str, path: &Path) -> HarnessResult<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        HarnessError::new(
+            String::from(context),
+            format!(
+                "{} could not be inspected: {error}; every path the suite compiles, runs or \
+                 reads must be a regular file that exists in the checkout",
+                path.display()
+            ),
+        )
+    })?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{} is a symbolic link; the suite refuses to follow one, because a link lets the \
+                 corpus name a file it does not contain and every discovered file is compiled, \
+                 executed and copied into a report",
+                path.display()
+            ),
+        ));
+    }
+    if !file_type.is_file() {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{} is not a regular file; a directory, device node, socket or FIFO cannot be a \
+                 program or an expectation record, and reading one can block indefinitely",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Require that `path` lies strictly beneath `root` once both have been canonicalized, and
+/// return the canonical form of `path`.
+///
+/// Both sides are canonicalized so that the comparison is between two fully resolved,
+/// absolute, link-free paths. Canonicalizing only one side would compare a resolved path
+/// against an unresolved root and could reject a legitimate file — for instance when the
+/// checkout itself is reached through a symbolic link, which is ordinary on a build machine.
+///
+/// "Strictly beneath" means the root's component sequence is a proper prefix of the path's.
+/// The root itself is therefore not contained in itself, which is correct here: a root is a
+/// directory and every caller is asking about a file.
+pub fn ensure_within(context: &str, root: &Path, path: &Path) -> HarnessResult<PathBuf> {
+    let canonical_root = root.canonicalize().map_err(|error| {
+        HarnessError::new(
+            String::from(context),
+            format!(
+                "the containment root {} could not be resolved: {error}; the suite cannot prove \
+                 a file lies inside a directory it cannot find",
+                root.display()
+            ),
+        )
+    })?;
+    let canonical_path = path.canonicalize().map_err(|error| {
+        HarnessError::new(
+            String::from(context),
+            format!(
+                "{} could not be resolved: {error}; containment is decided on the fully resolved \
+                 path so that no symbolic link along the way can change the answer",
+                path.display()
+            ),
+        )
+    })?;
+
+    let mut path_components = canonical_path.components();
+    for root_component in canonical_root.components() {
+        if path_components.next() != Some(root_component) {
+            return Err(HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} resolves to {}, which is not inside {}; the suite compiles, executes and \
+                     reports only files committed beneath that directory, so a path that leaves \
+                     it is refused rather than followed",
+                    path.display(),
+                    canonical_path.display(),
+                    canonical_root.display()
+                ),
+            ));
+        }
+    }
+    if path_components.next().is_none() {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{} resolves to the containment root {} itself rather than to a file beneath it",
+                path.display(),
+                canonical_root.display()
+            ),
+        ));
+    }
+    Ok(canonical_path)
+}
+
+/// Require that `path` lies beneath [`corpus_root`], and return its canonical form.
+///
+/// This is the containment check every consumer of a discovered path uses. It is a thin
+/// specialization of [`ensure_within`] so that the corpus root is named in exactly one place
+/// and cannot drift between callers.
+pub fn ensure_within_corpus(context: &str, path: &Path) -> HarnessResult<PathBuf> {
+    ensure_within(context, &corpus_root(), path)
+}
+
+/// Validate one corpus input and return its resolved path.
+///
+/// Four conditions must hold, and each closes a distinct way a path could name something the
+/// suite must not read:
+///
+/// - the path is absolute, so the file a cell names never depends on the working directory,
+///   about which the test harness makes no guarantee;
+/// - the entry is a regular file and **not a symbolic link**, delegated to
+///   [`require_regular_file`];
+/// - the resolved path lies strictly beneath the corpus root, delegated to
+///   [`ensure_within_corpus`], which also rejects a file whose parent directory is a link out
+///   of the corpus, since resolution reduces the whole path;
+/// - the extension is the one the role requires, so a program and its record cannot be
+///   swapped.
+///
+/// The two properties in the middle are delegated rather than repeated so that this funnel and
+/// the primitives above cannot disagree about what "inside the corpus" means.
+///
+/// The returned path is the resolved one. Callers record it rather than the path they were
+/// given, so that a report and a reproduction command always name the file that was actually
+/// read.
+pub fn require_contained_corpus_file(
+    context: &str,
+    role: &str,
+    path: &Path,
+    extension: &str,
+) -> HarnessResult<PathBuf> {
+    if !path.is_absolute() {
+        return Err(HarnessError::new(
+            context,
+            format!(
+                "the {role} path {} is not absolute; corpus paths are derived from the package \
+                 manifest directory so that a cell never depends on the working directory",
+                path.display()
+            ),
+        ));
+    }
+
+    let scoped = format!("{context}: the {role} path");
+    require_regular_file(&scoped, path)?;
+    let resolved = ensure_within_corpus(&scoped, path)?;
+
+    let found = resolved
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(String::from);
+    if found.as_deref() != Some(extension) {
+        return Err(HarnessError::new(
+            context,
+            format!(
+                "the {role} path {} does not have the required extension {extension:?}; every \
+                 program in the corpus is a .c file paired with a sibling .expected record",
+                resolved.display()
+            ),
+        ));
+    }
+
+    Ok(resolved)
 }

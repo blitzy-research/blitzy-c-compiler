@@ -1,12 +1,6 @@
-/* 002_loop_invariance.c -- Area 09, differential conformance suite.
- *
- * Claim under test: loop results are IDENTICAL at -O0, -O1 and -O2, whether or
- * not the compiler performs loop-invariant code motion, strength reduction or
- * unrolling.  bcc documents none of unrolling, vectorization or IPA, while the
- * reference compiler performs all of them; that asymmetry must not change any
- * printed value.  Every bound and factor is read from volatile storage so no
- * loop can be folded away into a constant.
- */
+/* The printed results must not depend on which loop transformations, if any, a
+ * compiler applies.  The two compilers being compared do not document the same
+ * optimization set, and that difference must not be observable in any value. */
 
 int printf(const char *, ...);
 
@@ -23,31 +17,26 @@ int main(void)
     int n = v_n, k = v_k, m = v_m, big = v_big;
     int i, j;
 
-    /* strength reduction candidate: multiply by a loop-invariant factor */
     int sum_mul = 0;
     for (i = 0; i < n; i++) {
         sum_mul += i * k;
     }
 
-    /* loop-invariant code motion candidate: k * m never changes */
     int sum_inv = 0;
     for (i = 0; i < n; i++) {
         sum_inv += k * m;
     }
 
-    /* power-of-two multiply: classic strength reduction to a shift */
     int sum_pow2 = 0;
     for (i = 0; i < n; i++) {
         sum_pow2 += i * 8;
     }
 
-    /* larger trip count, still far inside range: 999*1000/2 = 499500 */
     int sum_big = 0;
     for (i = 0; i < big; i++) {
         sum_big += i;
     }
 
-    /* while loop with a decrementing induction variable */
     int down = 0;
     i = n;
     while (i > 0) {
@@ -55,7 +44,6 @@ int main(void)
         i--;
     }
 
-    /* do-while executes at least once even when the bound is zero */
     int once = 0;
     i = 0;
     do {
@@ -63,7 +51,6 @@ int main(void)
         i++;
     } while (i < 0);
 
-    /* nested loops: 10 * 7 iterations, product accumulated */
     int nested = 0;
     for (i = 0; i < n; i++) {
         for (j = 0; j < m; j++) {
@@ -71,7 +58,6 @@ int main(void)
         }
     }
 
-    /* loop with an early break and a continue */
     int guarded = 0;
     for (i = 0; i < big; i++) {
         if (i % 3 == 0) {

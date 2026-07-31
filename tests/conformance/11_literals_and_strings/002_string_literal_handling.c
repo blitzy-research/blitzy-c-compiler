@@ -1,6 +1,6 @@
-/* Area 11 / 002 - string literal concatenation, indexing and termination.
-   No string literal is ever modified.  Every element is read through
-   unsigned char.  Source file is pure US-ASCII. */
+/* No string literal is ever modified, which would be undefined behaviour, and
+   every element is read through unsigned char so no plain-char signedness
+   difference can be observed.  The source file is pure US-ASCII. */
 int printf(const char *, ...);
 
 static const char concatenated[] = "abc" "def" "ghi";
@@ -43,9 +43,17 @@ int main(void)
 
     printf("lines_size=%d\n", (int)sizeof across_lines);
     printf("lines_len=%d\n", literal_length(across_lines));
-    printf("lines_first=%d lines_last=%d\n",
-           (int)(unsigned char)across_lines[0],
-           (int)(unsigned char)across_lines[(int)sizeof across_lines - 2]);
+    /* Every data byte is emitted, exactly as for concatenated above, and
+       not merely the first and the last.  Size, length and the two end
+       bytes all survive corruption of a byte in between -- including
+       either concatenation boundary, which is what this literal exists
+       to check -- so the full dump is what makes the property
+       discriminating. */
+    for (i = 0; i < (int)sizeof across_lines - 1; i++) {
+        printf("lines[%d]=%d\n", i, (int)(unsigned char)across_lines[i]);
+    }
+    printf("lines_terminator=%d\n",
+           (int)(unsigned char)across_lines[(int)sizeof across_lines - 1]);
 
     printf("escapes_size=%d\n", (int)sizeof with_escapes);
     for (i = 0; i < (int)sizeof with_escapes - 1; i++) {

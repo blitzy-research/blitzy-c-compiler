@@ -1,4 +1,3 @@
-/* Area 08 - GCC extensions: __extension__ suppressing pedantic rejection. */
 int printf(const char *, ...);
 
 #define EXT_MAX(a, b) __extension__ ({ \

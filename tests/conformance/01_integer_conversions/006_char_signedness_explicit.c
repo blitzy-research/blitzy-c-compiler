@@ -1,11 +1,8 @@
-/* Area 01 / program 006 - character-type conversions expressed exclusively
- * through signed char and unsigned char.
- *
- * Plain char is deliberately never used for a signedness-dependent value:
- * its signedness is implementation-defined and was measured signed on
- * x86-64 and i686 but unsigned on AArch64 and RISC-V 64, so any plain-char
- * value here would diverge across backends for reasons unrelated to the
- * compiler under test.
+/* Plain char is deliberately never used for a signedness-dependent value: its
+ * signedness is implementation-defined, and it was measured signed on x86-64
+ * and i686 but unsigned on AArch64 and RISC-V 64, so a plain-char value here
+ * would diverge across backends for a reason unrelated to the compiler under
+ * test.  Every character type below is spelled signed char or unsigned char.
  */
 int printf(const char *, ...);
 
@@ -31,7 +28,6 @@ int main(void)
     volatile int i_200 = 200;
     volatile int i_neg = -1;
 
-    /* Folded variant: constant expressions only. */
     printf("fold_schar_min=%d\n", (int)(signed char)(-128));
     printf("fold_schar_max=%d\n", (int)(signed char)127);
     printf("fold_uchar_max=%d\n", (int)(unsigned char)255);
@@ -45,7 +41,8 @@ int main(void)
     printf("fold_uchar_shift=%d\n", (unsigned char)200 >> 1);
     printf("fold_schar_uchar_diff=%d\n", (int)(signed char)0x7f - (int)(unsigned char)0x7f);
 
-    /* Runtime variant: volatile operands force real sign and zero extension. */
+    /* Runtime variant: the operands are volatile, so each sign or zero extension
+     * is applied to a value read at run time rather than to a constant. */
     printf("run_schar_min=%d\n", (int)s_min);
     printf("run_schar_max=%d\n", (int)s_max);
     printf("run_uchar_max=%d\n", (int)u_max);
@@ -59,7 +56,6 @@ int main(void)
     printf("run_uchar_shift=%d\n", u_200 >> 1);
     printf("run_schar_uchar_diff=%d\n", (int)s_max - (int)(unsigned char)127);
 
-    /* Types produced by promoting each character type. */
     printf("schar_promotes=%s\n", schar_promotes());
     printf("uchar_promotes=%s\n", uchar_promotes());
     return 0;

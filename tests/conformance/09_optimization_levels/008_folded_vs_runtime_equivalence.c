@@ -1,23 +1,16 @@
-/* 008_folded_vs_runtime_equivalence.c -- Area 09, conformance suite. KEYSTONE.
- *
- * Claim under test: the constant folder's answer and the backend's answer are
- * IDENTICAL, at -O0, -O1 and -O2, for the same computation.  This is the
- * two-variant rule of the whole suite stated explicitly as an assertion, and it
- * is what lets any divergence elsewhere be attributed to the folder or to the
- * backend rather than to "one of the two".
- */
+/* The same computation is spelled twice - once over literal constants, once over
+ * volatile-qualified operands - and both spellings must print the same value at
+ * every optimization level. */
 
 int printf(const char *, ...);
 
-/* Each computation is written EXACTLY ONCE, as a macro, and then instantiated
-   twice: once with literal constants (which the constant folder may evaluate
-   at compile time) and once with volatile-qualified operands (which force the
-   backend to emit real instructions).  Using one macro for both instantiations
-   is what guarantees the two variants really are the same computation, so a
-   divergence can be attributed to the folder or to the backend rather than to
-   "one of the two".  Every macro parameter appears EXACTLY ONCE in every macro
-   body, so no operand is evaluated more than once and no volatile object is
-   read twice within a single expression. */
+/* Each computation is written once, as a macro, and instantiated twice: with
+   literal constants, and with volatile-qualified operands whose values are read
+   at run time and so are not available for compile-time substitution.  Using one
+   macro for both instantiations is what makes the two variants the same
+   computation.  Every macro parameter appears exactly once in every macro body,
+   so no operand is evaluated more than once and no volatile object is read twice
+   within a single expression. */
 
 #define MIX_INT(A, B, C, D, E)     ((((A) * (B)) + ((C) << 2) - ((D) / (E))) % 97)
 #define MIX_UNS(A, B, C)           ((((A) ^ (B)) + ((C) >> 3)) & 0x00FFFFFFu)
@@ -27,14 +20,12 @@ int printf(const char *, ...);
 
 int main(void)
 {
-    /* ---- folded instantiation: literal operands ------------------------ */
     int          f_int  = MIX_INT(191, 7, 13, 100, 3);
     unsigned int f_uns  = MIX_UNS(0xF0F0F0F0u, 0x0FF00FF0u, 0xABCDEF00u);
     long long    f_wide = MIX_WIDE(1234567LL, 89101LL, 987654321LL);
     int          f_rel  = MIX_REL(3, 9, 9, 9);
     int          f_cond = MIX_COND(41, 17, 41, 17, 5);
 
-    /* ---- runtime instantiation: volatile operands ---------------------- */
     volatile int          va = 191, vb = 7, vc = 13, vd = 100, ve = 3;
     volatile unsigned int ua = 0xF0F0F0F0u, ub = 0x0FF00FF0u, uc = 0xABCDEF00u;
     volatile long long    wa = 1234567LL, wb = 89101LL, wc = 987654321LL;

@@ -1,18 +1,9 @@
-/* 009_recursion_call_chains.c -- Area 06 control flow.
- * Direct recursion, mutual recursion, and a recursion that keeps several values
- * live across the recursive call so that callee-saved registers must genuinely
- * be spilled and restored.  Every depth is bounded and deliberately shallow:
- * the deepest chain in this program is 31 frames.  That is deep enough to force
- * real call-frame work on every target, and shallow enough that no target can
- * come close to overflowing its stack under user-mode emulation -- the
- * repository's own runtime-verified recursion depths are single digit
- * (factorial(5) and fib(7)), so 31 frames stays in the same order of magnitude.
- *
- * All arithmetic stays well inside the range of a 32-bit int: the largest value
- * produced is 3628800 (10 factorial), so no signed overflow can occur.  Each
- * chain is driven once by a compile-time constant and once by an argument read
- * from volatile storage, so the recursion cannot be folded away.
- */
+/* Every recursion depth here is bounded and shallow - the deepest chain is 31
+ * levels - so no run can approach stack exhaustion, including under user-mode
+ * emulation.  All arithmetic stays well inside the range of a 32-bit int, the
+ * largest value produced being 3628800 (10 factorial), so no signed overflow can
+ * occur.  Each chain is driven once by a constant and once by an argument read
+ * from volatile storage. */
 
 int printf(const char *, ...);
 
@@ -57,7 +48,6 @@ static int is_odd(int n)
     return is_even(n - 1);
 }
 
-/* Mutual recursion where both partners contribute to the result. */
 static int pong(int n);
 
 static int ping(int n)
@@ -74,9 +64,8 @@ static int pong(int n)
     return 2 + ping(n - 1);
 }
 
-/* Two values stay live across the recursive call, forcing callee-saved
- * register preservation.  chain(n) = chain(n - 1) + n - 5, chain(0) = 0.
- */
+/* Two values stay live across the recursive call, so the printed result is wrong
+ * unless both survive it: chain(n) = chain(n - 1) + n - 5, chain(0) = 0. */
 static int chain(int n)
 {
     int a;
@@ -91,9 +80,9 @@ static int chain(int n)
     return deeper + a - b;
 }
 
-/* A local array is fully written before any read, and stays live across the
- * recursive call, forcing a real stack frame at every level.
- */
+/* The local array is fully written before any element is read, so no
+ * uninitialised value is ever used, and it stays live across the recursive
+ * call. */
 static int frames(int n)
 {
     int local[8];
@@ -110,7 +99,6 @@ static int frames(int n)
     return s;
 }
 
-/* Recursion whose dispatch goes through a switch at every level. */
 static int switched(int n)
 {
     int r;

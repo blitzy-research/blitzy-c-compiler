@@ -1,4 +1,3 @@
-/* Area 08 - GCC extensions: computed goto through arrays of label addresses. */
 int printf(const char *, ...);
 
 int main(void)

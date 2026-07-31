@@ -1,12 +1,6 @@
-/* 004_common_subexpression_invariance.c -- Area 09, conformance suite.
- *
- * Claim under test: repeated subexpressions produce IDENTICAL results whether
- * or not the compiler eliminates them.  CSE is one of the two passes that -O2
- * adds over -O1, so this program is the area's sharpest -O1 versus -O2
- * discriminator.  Seeds are read once out of volatile storage so the values are
- * opaque to the constant folder, while the arithmetic itself is pure and is
- * therefore a genuine elimination candidate.
- */
+/* Repeated subexpressions must produce the same result whether or not a compiler
+ * eliminates them; only the printed values are compared, never which
+ * subexpressions were shared. */
 
 int printf(const char *, ...);
 
@@ -27,15 +21,14 @@ int main(void)
     unsigned int u = v_u;
 
     int e1 = a * b + c;
-    int e2 = a * b + c;           /* textually identical to e1 */
-    int e3 = c + a * b;           /* same value, different spelling */
+    int e2 = a * b + c;
+    int e3 = c + a * b;
     int product = (a * b + c) * (a * b + c);
     int chain = (a + b) * (a + b) - (a + b);
     int nested = ((a * b) + (a * b)) / 2;
     unsigned int uexp1 = u / 7u + u % 7u;
     unsigned int uexp2 = u / 7u + u % 7u;
 
-    /* Repeated subexpression across a call boundary and a branch. */
     int branchy;
     if (a * b + c > 0) {
         branchy = a * b + c;

@@ -1,4 +1,3 @@
-/* Area 08 - GCC extensions: __builtin_* intrinsics with deterministic results. */
 int printf(const char *, ...);
 
 struct off_s { int x; int y; double z; };

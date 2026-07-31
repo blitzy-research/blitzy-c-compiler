@@ -1,12 +1,3 @@
-/* Area 05 - Pointer arithmetic and function pointers
- * 003_struct_member_access: member access through pointers, including
- * nested members and array members, via both -> and (*p). forms.
- *
- * No header is included; printf is hand-declared.  No address or pointer
- * value is printed; pointer facts appear only as comparisons and as
- * differences cast to long long.
- */
-
 int printf(const char *, ...);
 
 struct inner {
@@ -51,7 +42,6 @@ int main(void)
     volatile int vidx;
     int k;
 
-    /* ---- arrow and dereference-dot forms on the same object ---- */
     printf("arrow_id=%d\n", p->id);
     printf("dot_id=%d\n", (*p).id);
     {
@@ -60,36 +50,31 @@ int main(void)
         printf("arrow_eq_dot=%d\n", via_arrow == via_dot);
     }
 
-    /* ---- nested members ---- */
     printf("nested_x=%d\n", p->in.x);
     printf("nested_y=%d\n", p->in.y);
     printf("nested_via_dot=%d %d\n", (*p).in.x, (*p).in.y);
 
-    /* ---- pointer to a nested member ---- */
     q = &p->in;
     printf("inner_ptr_x=%d\n", q->x);
     printf("inner_ptr_y=%d\n", q->y);
     printf("inner_ptr_same_object=%d\n", q == &o.in);
 
-    /* ---- array member ---- */
     printf("vec_all=%d %d %d %d\n",
            p->vec[0], p->vec[1], p->vec[2], p->vec[3]);
-    v = p->vec;                     /* array member decays to a pointer */
+    v = p->vec;
     printf("vec_decay=%d %d\n", v[0], v[3]);
     printf("vec_decay_same=%d\n", v == &p->vec[0]);
     printf("vec_span=%lld\n", (long long)(&p->vec[4] - &p->vec[0]));
     printf("vec_interior=%lld\n", (long long)(&p->vec[3] - &p->vec[1]));
 
-    /* ---- array of nested structs ---- */
     printf("arr0=%d %d\n", p->arr[0].x, p->arr[0].y);
     printf("arr2=%d %d\n", p->arr[2].x, p->arr[2].y);
-    q = p->arr;                     /* struct array member decays too */
+    q = p->arr;
     printf("arr_decay=%d %d\n", q->x, q->y);
     ++q;
     printf("arr_decay_step=%d %d\n", q->x, q->y);
     printf("arr_decay_index=%lld\n", (long long)(q - p->arr));
 
-    /* ---- write through a pointer, then read back ---- */
     p->id = 8;
     p->in.x = 13;
     p->vec[2] = 99;
@@ -99,7 +84,6 @@ int main(void)
     printf("written_vec=%d\n", o.vec[2]);
     printf("written_arr=%d\n", o.arr[1].y);
 
-    /* ---- stepping across an array of structs ---- */
     p = table;
     printf("table0_id=%d\n", p->id);
     ++p;
@@ -112,7 +96,6 @@ int main(void)
     printf("table_index=%lld\n", (long long)(p - table));
     printf("table_span=%lld\n", (long long)((table + 3) - table));
 
-    /* ---- self-referential structure walked through pointers ---- */
     {
         struct node *n = &n1;
         int sum = 0;
@@ -129,7 +112,6 @@ int main(void)
         printf("list_tail_null=%d\n", n1.next->next->next == 0);
     }
 
-    /* ---- runtime variant: volatile index selects the element ---- */
     vidx = 2;
     k = vidx;
     p = table + k;

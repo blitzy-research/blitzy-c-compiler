@@ -1,17 +1,9 @@
-/* Area 05 - Pointer arithmetic and function pointers
- * 009_null_semantics: null pointer constant forms, comparison and
- * conversion.
+/* The two spellings used here, the integer constant 0 and (void *)0, are the
+ * forms the standard itself defines as null pointer constants, so the program
+ * does not depend on a macro definition to obtain one.
  *
- * The stddef.h null-pointer macro is deliberately not used: it comes from a
- * header, and no header may be included.  The two null pointer constant
- * spellings exercised here are the integer constant 0 and the cast form
- * (void *)0, which are exactly the forms the standard defines as null
- * pointer constants.
- *
- * A null pointer is never dereferenced anywhere in this program.  Null
- * facts appear only as equality comparisons, as truth-value tests and as
- * conversions, and nothing but those results is printed.
- */
+ * A null pointer is never dereferenced: every null fact is observed through an
+ * equality comparison, a truth-value test or a conversion. */
 
 int printf(const char *, ...);
 
@@ -57,7 +49,6 @@ int main(void)
     volatile int vzero;
     int k;
 
-    /* ---- the two null pointer constant spellings ---- */
     p = 0;
     q = (void *)0;
     printf("zero_form_is_null=%d\n", p == 0);
@@ -66,7 +57,6 @@ int main(void)
     printf("zero_form_vs_cast=%d\n", p == (void *)0);
     printf("cast_form_vs_zero=%d\n", q == 0);
 
-    /* ---- truth value of a null pointer ---- */
     printf("null_is_false=%d\n", !p);
     printf("null_in_condition=%d\n", p ? 1 : 0);
     printf("null_and=%d\n", p && 1);
@@ -77,7 +67,6 @@ int main(void)
         printf("null_if_branch=%d\n", 0);
     }
 
-    /* ---- a non-null pointer contrasted against it ---- */
     p = &obj;
     printf("nonnull_ne_zero=%d\n", p != 0);
     printf("nonnull_ne_cast=%d\n", p != (void *)0);
@@ -86,7 +75,6 @@ int main(void)
     printf("nonnull_value=%d\n", *p);
     printf("nonnull_ne_null_var=%d\n", p != q);
 
-    /* ---- null for every pointed-to type ---- */
     cp = 0;
     dp = (void *)0;
     sp = 0;
@@ -99,7 +87,6 @@ int main(void)
     printf("func_null=%d\n", fp == 0);
     printf("func_null_not=%d\n", !fp);
 
-    /* ---- assignment away from null and back ---- */
     dp = &dobj;
     printf("double_assigned=%.3f\n", *dp);
     printf("double_now_nonnull=%d\n", dp != 0);
@@ -110,7 +97,6 @@ int main(void)
     sp = (void *)0;
     printf("struct_back_to_null=%d\n", sp == 0);
 
-    /* ---- conversion to and from void * ---- */
     p = 0;
     vp = p;
     printf("null_to_void=%d\n", vp == 0);
@@ -120,7 +106,6 @@ int main(void)
     printf("nonnull_to_void=%d\n", vp != 0);
     printf("nonnull_void_roundtrip=%d\n", (int *)vp == p);
 
-    /* ---- static initialization produces null without an initializer ---- */
     printf("implicit_null=%d\n", implicit_null == 0);
     printf("table0_nonnull=%d\n", table[0] != 0);
     printf("table0_value=%d\n", *table[0]);
@@ -130,21 +115,18 @@ int main(void)
     printf("struct_member_null=%d\n", lone.next == 0);
     printf("struct_member_value=%d\n", lone.value);
 
-    /* ---- null as an argument and as a guard ---- */
     printf("arg_null=%d\n", takes_pointer(0));
     printf("arg_cast_null=%d\n", takes_pointer((void *)0));
     printf("arg_nonnull=%d\n", takes_pointer(&obj));
     printf("arg_from_table=%d\n", takes_pointer(table[0]));
     printf("arg_from_null_table=%d\n", takes_pointer(table[2]));
 
-    /* ---- null in a conditional operator ---- */
     p = 1 ? 0 : &obj;
     printf("conditional_null=%d\n", p == 0);
     p = 0 ? 0 : &obj;
     printf("conditional_nonnull=%d\n", p != 0);
     printf("conditional_nonnull_value=%d\n", *p);
 
-    /* ---- counting null entries in a table ---- */
     {
         int nulls = 0;
         int nonnulls = 0;
@@ -160,7 +142,6 @@ int main(void)
         printf("table_nonnulls=%d\n", nonnulls);
     }
 
-    /* ---- runtime variant: the null constant arrives through a volatile ---- */
     vzero = 0;
     k = vzero;
     p = k ? &obj : 0;
@@ -183,8 +164,9 @@ int main(void)
     printf("runtime_table_nonnull=%d\n", table[k] != 0);
     printf("runtime_table_value=%d\n", *table[k]);
 
-    /* a function that returns 0 is not a null pointer constant source, but
-     * comparing its result against a pointer's null-ness still holds */
+    /* Two separate facts: `fp != 0` tests the pointer, which is non-null, while
+     * `fp()` yields the int 0 - a value computed at run time, not a null pointer
+     * constant. */
     fp = returns_zero;
     printf("runtime_fp_nonnull=%d\n", fp != 0);
     printf("runtime_fp_result=%d\n", fp());

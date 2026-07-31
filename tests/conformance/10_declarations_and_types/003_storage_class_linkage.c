@@ -1,7 +1,3 @@
-/* Area 10 / 003 -- storage class and linkage inside a single translation unit:
- * file-scope static, extern declared then defined here, block-scope static
- * persistence, static function, and static-duration zero initialization. */
-
 int printf(const char *, ...);
 
 extern int shared_counter;

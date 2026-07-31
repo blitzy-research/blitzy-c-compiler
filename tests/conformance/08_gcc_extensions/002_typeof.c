@@ -1,4 +1,3 @@
-/* Area 08 - GCC extensions: typeof / __typeof__ on expressions and declarations. */
 int printf(const char *, ...);
 
 #define TO_SWAP(a, b) do { __typeof__(a) sw_t = (a); (a) = (b); (b) = sw_t; } while (0)

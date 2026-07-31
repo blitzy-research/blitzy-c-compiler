@@ -1,34 +1,28 @@
-/* 004_signed_unsigned.c -- narrow signed bitfields driven to their exact
- * minimum representable value, and unsigned bitfields driven to their exact
- * maximum, in a folded variant and in a volatile runtime variant.
- * Area 04 (bitfields).  No header is included; printf is declared by hand.
- * Every bitfield carries an explicit signed int / unsigned int base type, so
- * the signedness of every field is stated by the program rather than chosen
- * by the implementation. */
-
+/* Every field carries an explicit signed int or unsigned int base type, so its
+ * signedness is stated by the program rather than chosen by the implementation as
+ * it would be for a field declared on unqualified int. */
 int printf(const char *, ...);
 
 struct sfields {
-    signed int s2  : 2;    /* representable -2 .. 1                     */
-    signed int s3  : 3;    /* representable -4 .. 3                     */
-    signed int s5  : 5;    /* representable -16 .. 15                   */
-    signed int s8  : 8;    /* representable -128 .. 127                 */
-    signed int s16 : 16;   /* representable -32768 .. 32767             */
-    signed int s31 : 31;   /* representable -1073741823-1 .. 1073741823 */
-    signed int s32 : 32;   /* representable -2147483647-1 .. 2147483647 */
+    signed int s2  : 2;
+    signed int s3  : 3;
+    signed int s5  : 5;
+    signed int s8  : 8;
+    signed int s16 : 16;
+    signed int s31 : 31;
+    signed int s32 : 32;
 };
 
 struct ufields {
-    unsigned int u1  : 1;  /* representable 0 .. 1          */
-    unsigned int u2  : 2;  /* representable 0 .. 3          */
-    unsigned int u5  : 5;  /* representable 0 .. 31         */
-    unsigned int u8  : 8;  /* representable 0 .. 255        */
-    unsigned int u16 : 16; /* representable 0 .. 65535      */
-    unsigned int u31 : 31; /* representable 0 .. 2147483647 */
-    unsigned int u32 : 32; /* representable 0 .. 4294967295 */
+    unsigned int u1  : 1;
+    unsigned int u2  : 2;
+    unsigned int u5  : 5;
+    unsigned int u8  : 8;
+    unsigned int u16 : 16;
+    unsigned int u31 : 31;
+    unsigned int u32 : 32;
 };
 
-/* Folded variant: constant initializers, every value at an exact extreme. */
 static struct sfields s_min = { -2, -4, -16, -128, -32768,
                                 -1073741823 - 1, -2147483647 - 1 };
 static struct sfields s_max = { 1, 3, 15, 127, 32767,
@@ -36,8 +30,8 @@ static struct sfields s_max = { 1, 3, 15, 127, 32767,
 static struct ufields u_max = { 1u, 3u, 31u, 255u, 65535u,
                                 2147483647u, 4294967295u };
 
-/* Runtime variant: volatile storage forces a real insert on every write and a
- * real extract on every read. */
+/* Runtime variant: volatile storage, so every write and read below happens at run
+ * time rather than being folded. */
 static volatile struct sfields vs;
 static volatile struct ufields vu;
 
@@ -60,7 +54,6 @@ int main(void)
            (unsigned)u_max.u8, (unsigned)u_max.u16, (unsigned)u_max.u31,
            (unsigned)u_max.u32);
 
-    /* Runtime variant, constant stores into volatile storage. */
     vs.s2 = -2; vs.s3 = -4; vs.s5 = -16; vs.s8 = -128; vs.s16 = -32768;
     vs.s31 = -1073741823 - 1; vs.s32 = -2147483647 - 1;
     printf("runtime_smin s2=%d s3=%d s5=%d s8=%d s16=%d s31=%d s32=%d\n",
@@ -80,10 +73,10 @@ int main(void)
            (unsigned)vu.u8, (unsigned)vu.u16, (unsigned)vu.u31,
            (unsigned)vu.u32);
 
-    /* Derived extremes: the stored value is computed from an opaque seed, so
-     * the extreme is reached by real arithmetic rather than by a constant
-     * store.  Signed destinations select between two in-range literals;
-     * unsigned destinations are masked to the exact field width. */
+    /* Each extreme is derived from the opaque seed rather than stored as a
+     * literal.  Signed destinations select between two in-range literals and
+     * unsigned destinations are masked to the exact field width, which is what
+     * keeps every store provably value-preserving for the conversion warnings. */
     v = seed;
     vs.s2  = (v != 0) ? -2 : 1;
     vs.s5  = (v != 0) ? -16 : 15;
@@ -100,7 +93,6 @@ int main(void)
            (unsigned)vu.u1, (unsigned)vu.u5, (unsigned)vu.u8,
            (unsigned)vu.u16);
 
-    /* One below the extreme, to show the field is not saturating. */
     vs.s5 = -15;
     vu.u5 = 30u;
     printf("near_extreme s5=%d u5=%u\n", (int)vs.s5, (unsigned)vu.u5);

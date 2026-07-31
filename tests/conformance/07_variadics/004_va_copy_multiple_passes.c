@@ -1,56 +1,21 @@
 /*
- * tests/conformance/07_variadics/004_va_copy_multiple_passes.c
+ * The va_copy lifecycle rules this file obeys throughout: every va_copy
+ * destination gets its own va_end; each list created by va_start is ended exactly
+ * once; a copy is always taken before its source has been traversed, so source and
+ * copy start from the same position; a copy of a copy is legal; a list may be ended
+ * without having consumed all of its arguments; no list is ever read past the
+ * number of arguments actually supplied; and every va_end sits in the same function
+ * as its va_start or va_copy.
  *
- * Differential conformance corpus, area 07_variadics, program 004.
- * Focus: an argument list copied and traversed more than once.
+ * <stdarg.h> is included because va_copy cannot be reached without it, and it
+ * belongs to both compilers' freestanding header sets.  printf is hand-declared,
+ * because bcc ships no stdio.h: its bundled set is the nine required freestanding
+ * headers plus a bonus stdatomic.h, ten files in all (docs/project-guide.md line
+ * 212), and no standard I/O header is among them.
  *
- * Sanctioned header exception. This area may include <stdarg.h>. It is one of
- * the nine freestanding headers bcc bundles, and line 208 of
- * docs/technical-specifications.md documents va_list, va_start, va_arg, va_end
- * and va_copy as compiler builtins -- va_copy included, which is precisely the
- * facility exercised here.
- * The reference compiler supplies the same freestanding header, so both oracles
- * see identical declarations and the program stays a single-file reproducer.
- * No other header is included: printf is hand-declared because bcc ships no
- * <stdio.h>, so including one would fail under bcc while succeeding under the
- * reference compiler, producing a divergence caused by the test rather than by
- * the compiler.
- *
- * va_copy lifecycle rules obeyed throughout (C11 7.16.1):
- *   - every va_copy destination gets its own va_end;
- *   - each list created by va_start is va_end'ed exactly once;
- *   - a copy is always taken before its source list has been traversed, so
- *     source and copy start from the same position;
- *   - a copy of a copy is legal: three_passes takes cp2_th from cp1_th;
- *   - a list may be va_end'ed without having consumed all of its arguments,
- *     which head_tail relies on by ending its copy after reading only the
- *     first three of six arguments;
- *   - no list is ever read past the number of arguments actually supplied;
- *   - every va_end sits in the same function as its va_start or va_copy.
- * Macro budget for this file: 3 va_start, 4 va_copy, 7 va_end.
- *
- * Two-variant rule. Every helper is exercised once with literal arguments,
- * which the constant folder is free to evaluate at compile time, and once with
- * arguments that originate in volatile storage and are copied into plain
- * locals of the same type, which forces the backend to emit real loads and
- * real argument marshalling. Without the second variant, optimization could
- * substitute the folder's answer for the backend's and a code generation
- * defect would escape detection.
- *
- * Determinism. Only %s, %d and %.6f are used. No address, pointer value,
- * sizeof result or va_list-derived value is ever printed; only the values
- * retrieved from a list. The type long is never used, because sizeof(long)
- * and sizeof(void *) are 4 bytes on i686 and 8 bytes on the other three
- * targets. Every floating literal (1.5, 2.25, 4.125, 0.5, 3.25, 8.125) and
- * every floating sum (7.875, 11.875) is a dyadic rational exactly
- * representable in IEEE binary64, so %.6f renders byte-identically on all
- * four backends. There is no timestamp, randomness, uninitialized read,
- * locale-dependent formatting or variable iteration order. Exit status is 0.
- *
- * Expected output: 66 lines, recorded verbatim in the sibling expectation
- * record 004_va_copy_multiple_passes.expected, which also carries the target
- * and optimization matrix, the shared flags, the literal command templates and
- * the undefined-behaviour freedom argument for this program.
+ * Every floating literal and every floating sum here is a dyadic rational exactly
+ * representable in IEEE binary64, so %.6f renders the same bytes everywhere, and
+ * long is never used because its width differs between the targets under test.
  */
 
 #include <stdarg.h>
@@ -209,13 +174,12 @@ int main(void)
     int rsplit_plain_c[6];
     int rsplit_idx_c;
 
-    /* 1. Folded variant: literal integer arguments, four of them. */
     two_passes("fdup", 4, 2, -5, 10, -13);
 
-    /* 2. Runtime variant: each volatile source is read into a plain local of
-     * the same type by one simple assignment, and the plain locals are what
-     * gets passed. Several volatile reads inside a single call expression are
-     * deliberately avoided. */
+    /* Each volatile source is read into a plain local of the same type by one
+     * simple assignment, and only the plain locals are passed: several volatile
+     * reads inside one call expression would make the order of those accesses
+     * depend on the unspecified order of argument evaluation. */
     rdup_plain_a0 = rdup_vsrc_a0;
     rdup_plain_a1 = rdup_vsrc_a1;
     rdup_plain_a2 = rdup_vsrc_a2;
@@ -223,24 +187,20 @@ int main(void)
     two_passes("rdup", 4,
         rdup_plain_a0, rdup_plain_a1, rdup_plain_a2, rdup_plain_a3);
 
-    /* 3. Folded variant: literal double arguments with no f suffix, so the
-     * retrieval type is unambiguously double and no default argument
-     * promotion is involved. */
+    /* The literals carry no f suffix, so they are already double and no default
+     * argument promotion is involved in this group. */
     three_passes("ftri", 3, 1.5, 2.25, 4.125);
 
-    /* 4. Runtime variant: volatile double sources copied into plain doubles. */
     rtri_plain_b0 = rtri_vsrc_b0;
     rtri_plain_b1 = rtri_vsrc_b1;
     rtri_plain_b2 = rtri_vsrc_b2;
     three_passes("rtri", 3, rtri_plain_b0, rtri_plain_b1, rtri_plain_b2);
 
-    /* 5. Folded variant: six literal integer arguments, split three and
-     * three by the helper. */
     head_tail("fsplit", 6, 1, 2, 3, 4, 5, 6);
 
-    /* 6. Runtime variant: a volatile array is written in one loop and read
-     * back into a plain array in a second, separate loop, so the values
-     * cannot be propagated to the call site at compile time. */
+    /* The volatile array is written in one loop and read back into a plain array
+     * in a second, separate loop, so no element is available for compile-time
+     * substitution at the call site. */
     for (rsplit_idx_c = 0; rsplit_idx_c < 6; rsplit_idx_c++) {
         rsplit_vsrc_c[rsplit_idx_c] = (rsplit_idx_c + 1) * 10;
     }

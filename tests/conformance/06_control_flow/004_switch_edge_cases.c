@@ -1,20 +1,11 @@
-/* 004_switch_edge_cases.c -- Area 06 control flow.
- * Switch edge cases: an empty switch body, default placed first, default
- * absent so that a non-matching value falls straight past the switch, a
- * single-label switch, case labels written out of ascending order, and -- the
- * discriminating pair -- a DENSE contiguous label set alongside a SPARSE
- * widely-separated label set.  Label density is what selects the backend's
- * lowering strategy (a jump table for the dense set, a comparison chain or
- * binary search for the sparse set), so a single dense switch would not
- * exercise it.  Every switch is driven once by a compile-time constant and
- * once by a value read from volatile storage.
- */
+/* The dense and the sparse label set are both present because label density is
+ * one of the things a compiler may use when choosing how to lower a switch, so a
+ * corpus with only dense switches could leave one of those paths unvisited.  The
+ * observable result is the same either way, which is what the printed values
+ * check. */
 
 int printf(const char *, ...);
 
-/* An empty switch body executes nothing for any value; control simply
- * continues after the switch.
- */
 static int empty_body(int v)
 {
     int r = 5;
@@ -24,7 +15,6 @@ static int empty_body(int v)
     return r;
 }
 
-/* default written before any case label. */
 static int default_first(int v)
 {
     int r;
@@ -43,9 +33,6 @@ static int default_first(int v)
     return r;
 }
 
-/* No default: a value matching no label runs no statement group at all and
- * control resumes at the statement after the switch.
- */
 static int default_absent(int v)
 {
     int r = 0;
@@ -62,7 +49,6 @@ static int default_absent(int v)
     return r;
 }
 
-/* A switch with exactly one label. */
 static int single_label(int v)
 {
     int r = 0;
@@ -75,7 +61,6 @@ static int single_label(int v)
     return r;
 }
 
-/* Case labels need not appear in ascending order. */
 static int unordered_labels(int v)
 {
     int r;
@@ -97,7 +82,6 @@ static int unordered_labels(int v)
     return r;
 }
 
-/* DENSE: sixteen contiguous labels starting at zero. */
 static int dense(int v)
 {
     int r;
@@ -124,7 +108,6 @@ static int dense(int v)
     return r;
 }
 
-/* DENSE but not starting at zero, so the lowering must bias the index. */
 static int dense_offset(int v)
 {
     int r;
@@ -143,7 +126,6 @@ static int dense_offset(int v)
     return r;
 }
 
-/* SPARSE: six labels spread over a range far too wide for a jump table. */
 static int sparse(int v)
 {
     int r;
@@ -248,7 +230,6 @@ int main(void)
     printf("runtime_sparse=%d %d %d %d %d %d %d %d\n",
            out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7]);
 
-    /* Every dense label reached in one sweep, and every sparse label too. */
     out[0] = 0;
     for (i = 0; i < 16; i++) {
         vin = i;

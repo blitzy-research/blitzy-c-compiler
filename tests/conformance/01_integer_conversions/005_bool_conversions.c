@@ -1,7 +1,4 @@
-/* Area 01 / program 005 - _Bool conversion from scalars and back, folded and
- * volatile-runtime variants.
- *
- * The discriminating cases are values whose low bits are zero but which are
+/* The discriminating cases are values whose low bits are zero but which are
  * nonzero overall: a conforming conversion to _Bool yields 1, while a
  * truncating implementation would yield 0.
  */
@@ -33,7 +30,6 @@ int main(void)
     volatile _Bool b_true = 1;
     volatile _Bool b_false = 0;
 
-    /* Folded variant: conversion applied to constant expressions. */
     printf("fold_from_zero=%d\n", (int)(_Bool)0);
     printf("fold_from_one=%d\n", (int)(_Bool)1);
     printf("fold_from_neg=%d\n", (int)(_Bool)(-1));
@@ -47,7 +43,8 @@ int main(void)
     printf("fold_not=%d\n", !(_Bool)0);
     printf("fold_negate=%d\n", -(int)(_Bool)1);
 
-    /* Runtime variant: volatile sources force a real conversion. */
+    /* Runtime variant: the sources are volatile, so each conversion is applied
+     * to a value read at run time rather than to a constant. */
     printf("run_from_zero=%d\n", (int)(_Bool)i_zero);
     printf("run_from_one=%d\n", (int)(_Bool)i_one);
     printf("run_from_neg=%d\n", (int)(_Bool)i_neg);
@@ -61,7 +58,6 @@ int main(void)
     printf("run_not=%d\n", !b_false);
     printf("run_negate=%d\n", -(int)b_true);
 
-    /* Types involved. */
     printf("bool_promotes=%s\n", bool_promotes());
     printf("bool_sum_type=%s\n", bool_sum_type());
     return 0;

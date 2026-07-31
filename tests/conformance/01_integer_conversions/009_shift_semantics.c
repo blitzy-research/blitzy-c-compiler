@@ -1,10 +1,15 @@
-/* Area 01 / program 009 - shift operators with counts strictly inside range,
- * including arithmetic right shift of negative signed values.
+/* Two separate properties are at work here, and they must not be conflated.
  *
- * Every shift count is at least 0 and strictly less than the width of the
- * promoted left operand, so no shift is undefined.  No negative value is ever
- * shifted left.  No signed left shift produces a value outside the range of
- * its type.
+ * Undefined behaviour is avoided outright: every shift count is at least 0 and
+ * strictly less than the width of the promoted left operand, no negative value
+ * is ever shifted left, and no signed left shift produces a value outside the
+ * range of its type.
+ *
+ * Right shift of a *negative* signed value is a different matter: the result is
+ * implementation-defined, not guaranteed by the standard.  All four targets
+ * under test were measured to define it as an arithmetic shift, which is what
+ * makes the values below comparable across them; an implementation that chose a
+ * logical shift would print different numbers without being non-conforming.
  */
 int printf(const char *, ...);
 
@@ -26,7 +31,6 @@ int main(void)
     volatile int sh_31 = 31;
     volatile int sh_62 = 62;
 
-    /* Folded variant: constant expressions only. */
     printf("fold_ushl_max=%u\n", 1u << 31);
     printf("fold_ushr_max=%u\n", 2147483648u >> 31);
     printf("fold_sshl_safe=%d\n", 1 << 30);
@@ -40,7 +44,8 @@ int main(void)
     printf("fold_llong_shr=%lld\n", -8LL >> 1);
     printf("fold_ullong_shl=%llu\n", 1uLL << 63);
 
-    /* Runtime variant: volatile operands and volatile counts force real shifts. */
+    /* Runtime variant: both the operands and the counts are volatile, so every
+     * shift is computed from values read at run time. */
     printf("run_ushl_max=%u\n", u_one << sh_31);
     printf("run_ushr_max=%u\n", u_high >> sh_31);
     printf("run_sshl_safe=%d\n", i_one << 30);

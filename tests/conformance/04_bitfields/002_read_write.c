@@ -1,7 +1,3 @@
-/* 002_read_write.c -- read and write of every bitfield, folded and volatile runtime variants.
- * Area 04 (bitfields).  No header is included; printf is declared by hand.
- * Every bitfield carries an explicit signed int / unsigned int base type. */
-
 int printf(const char *, ...);
 
 struct bits {
@@ -12,12 +8,10 @@ struct bits {
     unsigned int u1  : 1;
 };
 
-/* Folded variant: file-scope object with a constant initializer.  Every value
- * below is inside its field's representable range. */
 static struct bits folded = { 6u, -13, 400u, -1500, 1u };
 
-/* Runtime variant: volatile-qualified, so each read and write must emit real
- * extract / insert code instead of being folded to an immediate. */
+/* Runtime variant: volatile-qualified, so every read and write below happens at
+ * run time rather than being folded into an immediate. */
 static volatile struct bits runtime;
 
 int main(void)

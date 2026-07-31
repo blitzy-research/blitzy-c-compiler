@@ -1,17 +1,9 @@
-/* 010_comma_operator_sequencing.c -- Area 06 control flow.
- * The comma operator: the left operand is evaluated as a void expression, there
- * is a sequence point between the two operands, and the result is the value and
- * type of the right operand.  The property under test is therefore an ORDER,
- * and an order is only observable if the observation itself cannot be removed.
- * The same technique as 006 and 007 is used: every side effect appends to a
- * trace whose length is held in a volatile counter and increments a volatile
- * tick, so neither the appends nor the count can legally be elided, and the
- * trace is printed after each expression.
- *
- * Every trace identifier is a single decimal digit, so the printed order is one
- * unambiguous digit per side effect.  The trace is bounded by an explicit range
- * check, so no out-of-range write is ever performed.
- */
+/* The sequence point between the two operands of a comma operator fully defines
+ * the order of their side effects, and that order is what is under test: each
+ * side effect appends one decimal digit to a trace held in volatile storage, so
+ * the sequence is part of the program's observable behaviour and is printed after
+ * each expression.  Every append is guarded by an explicit range check, so no
+ * write can leave the trace array. */
 
 int printf(const char *, ...);
 

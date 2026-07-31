@@ -1,10 +1,3 @@
-/* Area 01 / program 007 - enumeration constants in arithmetic, and the
- * behaviour of an enumerated type's underlying representation.
- *
- * The compatible type chosen for an enumerated type is implementation-defined,
- * so it is never printed as a width.  It is asserted only as a relation
- * against int, which holds on all four supported targets.
- */
 int printf(const char *, ...);
 
 enum Color { RED = 1, GREEN = 5, BLUE = -3 };
@@ -17,9 +10,10 @@ static const char *enumerator_type(void)
 }
 
 /* An enumerated type is compatible with some implementation-defined integer
- * type, so listing both `enum Color` and `int` in one _Generic is a constraint
- * violation on implementations where they happen to be compatible.  Only the
- * enumerated type itself is listed here, which is portable.
+ * type, so listing both `enum Color` and `int` in one _Generic would be a
+ * constraint violation wherever the two turn out to be compatible.  Only the
+ * enumerated type itself is listed, which is portable.  The compatible type is
+ * never printed as a width for the same reason.
  */
 static const char *enum_object_type(void)
 {
@@ -56,7 +50,6 @@ int main(void)
     volatile enum Gap g_next = GAP_NEXT;
     volatile enum Gap g_last = GAP_LAST;
 
-    /* Folded variant: enumeration constants are constant expressions of type int. */
     printf("fold_values=%d %d %d\n", RED, GREEN, BLUE);
     printf("fold_seq=%d %d %d\n", SEQ_A, SEQ_B, SEQ_C);
     printf("fold_gap=%d %d %d %d\n", GAP_LOW, GAP_NEXT, GAP_HIGH, GAP_LAST);
@@ -67,7 +60,8 @@ int main(void)
     printf("fold_relation=%d\n", GREEN > RED);
     printf("fold_size_relation=%d\n", (int)(sizeof(enum Color) == sizeof(int)));
 
-    /* Runtime variant: volatile enumerated objects force real loads. */
+    /* Runtime variant: the enumerated objects are volatile, so their values are
+     * read at run time rather than substituted at compile time. */
     printf("run_values=%d %d %d\n", (int)c_red, (int)c_green, (int)c_blue);
     printf("run_seq=%d\n", (int)s_b);
     printf("run_gap=%d %d\n", (int)g_next, (int)g_last);
@@ -78,7 +72,6 @@ int main(void)
     printf("run_relation=%d\n", (int)c_green > (int)c_red);
     printf("run_switch=%d %d %d\n", classify(c_red), classify(c_green), classify(c_blue));
 
-    /* Types involved. */
     printf("enumerator_type=%s\n", enumerator_type());
     printf("enum_object_type=%s\n", enum_object_type());
     printf("enum_sum_type=%s\n", enum_sum_type());

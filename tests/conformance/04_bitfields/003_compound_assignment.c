@@ -1,14 +1,9 @@
-/* 003_compound_assignment.c -- +=, -=, |=, &=, ^=, <<= and >>= applied to
- * bitfields, in a folded variant and in a volatile runtime variant.
- * Area 04 (bitfields).  No header is included; printf is declared by hand.
- * Every bitfield carries an explicit signed int / unsigned int base type. */
-
 int printf(const char *, ...);
 
 struct acc {
-    unsigned int u6 : 6;   /* representable 0 .. 63    */
-    signed   int s7 : 7;   /* representable -64 .. 63  */
-    signed   int s9 : 9;   /* representable -256 .. 255 */
+    unsigned int u6 : 6;
+    signed   int s7 : 7;
+    signed   int s9 : 9;
 };
 
 static struct acc folded = { 5u, 3, -100 };
@@ -16,7 +11,6 @@ static volatile struct acc runtime = { 5u, 3, -100 };
 
 int main(void)
 {
-    /* ---- folded variant: unsigned field, all seven operators ---- */
     folded.u6 += 3u;   printf("folded_u6_add=%u\n", (unsigned)folded.u6);
     folded.u6 -= 1;    printf("folded_u6_sub=%u\n", (unsigned)folded.u6);
     folded.u6 |= 0x18u; printf("folded_u6_or=%u\n", (unsigned)folded.u6);
@@ -25,10 +19,9 @@ int main(void)
     folded.u6 <<= 1;   printf("folded_u6_shl=%u\n", (unsigned)folded.u6);
     folded.u6 >>= 2;   printf("folded_u6_shr=%u\n", (unsigned)folded.u6);
 
-    /* ---- folded variant: signed field, all seven operators.
-     * The value is non-negative at every shift, so no negative left shift and
-     * no negative right shift is performed.  Every right-hand constant
-     * lies inside the field's representable range. ---- */
+    /* The signed field is non-negative at every shift, so no negative value is
+     * ever shifted, and every right-hand constant lies inside the field's
+     * representable range. */
     folded.s7 += 5;    printf("folded_s7_add=%d\n", (int)folded.s7);
     folded.s7 -= 2;    printf("folded_s7_sub=%d\n", (int)folded.s7);
     folded.s7 |= 0x11;  printf("folded_s7_or=%d\n", (int)folded.s7);
@@ -37,7 +30,6 @@ int main(void)
     folded.s7 <<= 1;   printf("folded_s7_shl=%d\n", (int)folded.s7);
     folded.s7 >>= 3;   printf("folded_s7_shr=%d\n", (int)folded.s7);
 
-    /* ---- folded variant: signed field driven to both extremes ---- */
     folded.s9 += 40;   printf("folded_s9_add=%d\n", (int)folded.s9);
     folded.s9 -= 25;   printf("folded_s9_sub=%d\n", (int)folded.s9);
     folded.s9 -= 171;  printf("folded_s9_min=%d\n", (int)folded.s9);
@@ -45,8 +37,8 @@ int main(void)
     folded.s9 += 200;  printf("folded_s9_up2=%d\n", (int)folded.s9);
     folded.s9 += 56;   printf("folded_s9_max=%d\n", (int)folded.s9);
 
-    /* ---- runtime variant: identical operator sequence through volatile
-     * storage, which forces a real load, extract, operate, insert, store. ---- */
+    /* The identical operator sequence through volatile storage, so each
+     * read-modify-write happens at run time rather than being folded. */
     runtime.u6 += 3u;   printf("runtime_u6_add=%u\n", (unsigned)runtime.u6);
     runtime.u6 -= 1;    printf("runtime_u6_sub=%u\n", (unsigned)runtime.u6);
     runtime.u6 |= 0x18u; printf("runtime_u6_or=%u\n", (unsigned)runtime.u6);

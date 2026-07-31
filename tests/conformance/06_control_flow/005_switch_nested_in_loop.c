@@ -1,12 +1,8 @@
-/* 005_switch_nested_in_loop.c -- Area 06 control flow.
- * The interaction between break, continue, a switch, and the switch's
- * enclosing loop: break inside a switch ends the switch and NOT the loop,
- * while continue inside a switch continues the enclosing loop and skips the
- * rest of the loop body.  Also covers a loop nested inside a switch case, a
- * switch inside a do-while, and switches nested inside one another inside
- * nested loops.  Every controlling expression is read from volatile storage so
- * the dispatch is genuinely emitted rather than folded.
- */
+/* break inside a switch ends the switch and not the enclosing loop, whereas
+ * continue inside a switch continues that loop and skips the rest of its body -
+ * the two are easy to conflate, so every case below prints which one happened.
+ * Each controlling expression is read from volatile storage, so no dispatch is
+ * available for compile-time substitution. */
 
 int printf(const char *, ...);
 
@@ -76,7 +72,6 @@ int main(void)
     }
     printf("loop_break_inside_switch=%d\n", sum);
 
-    /* A while loop whose switch uses both break and continue. */
     sum = 0;
     hits = 0;
     i = 0;
@@ -134,7 +129,6 @@ int main(void)
     } while (i < 5);
     printf("do_while_switch_continue sum=%d hits=%d\n", sum, hits);
 
-    /* Nested switches inside nested loops. */
     sum = 0;
     for (i = 0; i < 3; i++) {
         int j;

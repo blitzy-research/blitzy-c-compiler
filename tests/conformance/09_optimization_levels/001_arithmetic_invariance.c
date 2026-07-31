@@ -1,17 +1,12 @@
-/* 001_arithmetic_invariance.c -- Area 09, differential conformance suite.
- *
- * Claim under test: the OBSERVABLE RESULT of ordinary integer arithmetic is
- * identical at -O0, -O1 and -O2.  Every expression appears twice: once built
- * entirely from literal constants (so the constant folder may evaluate it at
- * compile time) and once from volatile-qualified storage (so the backend must
- * emit real instructions).  Both spellings must print the same value.
- */
+/* Every expression appears twice: once built entirely from literal constants, and
+ * once from volatile-qualified storage, whose values are read at run time and are
+ * therefore not available for compile-time substitution.  Both spellings must
+ * print the same value at every optimization level. */
 
 int printf(const char *, ...);
 
 int main(void)
 {
-    /* ---- folded variant: literal operands, foldable at compile time ---- */
     int f_add = 1000 + 337;
     int f_sub = 2000 - 663;
     int f_mul = 191 * 7;
@@ -26,7 +21,6 @@ int main(void)
     unsigned int f_not = ~0x0000FFFFu;
     long long f_wide = 1234567891011LL + 9876543210LL;
 
-    /* ---- runtime variant: volatile operands, not foldable -------------- */
     volatile int va = 1000, vb = 337, vc = 2000, vd = 663;
     volatile int ve = 191, vf = 7, vg = 9359, vh = 9362, vi = 1337;
     volatile unsigned int vs = 167u, vt = 5348u;

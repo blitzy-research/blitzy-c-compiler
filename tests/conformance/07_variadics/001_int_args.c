@@ -1,34 +1,13 @@
 /*
- * tests/conformance/07_variadics/001_int_args.c
+ * <stdarg.h> is included because a variadic function cannot be written without
+ * va_list, va_start, va_arg and va_end, and it belongs to both compilers'
+ * freestanding header sets, so it resolves the same way under either oracle.
+ * printf is still hand-declared, because bcc ships no stdio.h and including one
+ * would manufacture a divergence caused by the test rather than by the compiler.
  *
- * Area:  07_variadics
- * Focus: integer variadic arguments retrieved in order.
- *
- * Header exception: this area is one of only two places in the whole corpus that
- * includes a header. <stdarg.h> is unavoidable here because a variadic function
- * cannot be written at all without va_list, va_start, va_arg and va_end, and
- * stdarg.h is part of bcc's bundled freestanding header set as well as the
- * reference compiler's, so it resolves identically under both oracles and the
- * program stays a single-file reproducer. No other header is included: printf is
- * hand-declared below because bcc ships no stdio.h, and including one would
- * manufacture a divergence caused by the test rather than by the compiler.
- *
- * Two-variant rule: each of the three retrieval types is exercised twice. Once
- * with compile-time literal arguments (folded variant, tags "fint"/"fuint"/
- * "fllong"), which exercises the constant folder and the compile-time argument
- * setup path; and once with arguments that originate in volatile storage
- * (runtime variant, tags "rint"/"ruint"/"rllong"), which forces the backend to
- * emit real argument-setup instructions. Without the runtime variant a folded
- * answer could silently stand in for the backend's answer.
- *
- * Every value is a literal in this source: no input, no file, no clock, no
- * randomness. Output is one line per retrieved argument plus one line per
- * computed sum, so a single divergent line localizes the defect to exactly one
- * retrieved argument.
- *
- * The reproduction commands, the target and optimization matrix, and the golden
- * stdout are recorded in the sibling expectation record
- * tests/conformance/07_variadics/001_int_args.expected.
+ * Each retrieval type is exercised twice: once from literal arguments and once
+ * from arguments that originate in volatile storage, so a folded answer cannot
+ * stand in for the one computed at run time.
  */
 
 #include <stdarg.h>
@@ -93,14 +72,10 @@ static unsigned long long sum_uints(const char *tag, int count, ...)
 }
 
 /*
- * Retrieve and sum `count` variadic arguments of type long long.
- *
- * This is the widest integer retrieval the suite performs and the one where the
- * four targets differ most in how the argument is placed: on i686 a long long
- * variadic argument occupies two stack words, while the three 64-bit targets
- * pass it in a single register or slot. The operands below are chosen so every
- * partial sum stays far inside the 64-bit signed range, so no signed overflow is
- * possible.
+ * This is the widest integer retrieval the suite performs, and the one whose
+ * argument placement differs most between the targets under test.  The operands
+ * are chosen so every partial sum stays far inside the 64-bit signed range, so no
+ * signed overflow is possible.
  */
 static long long sum_llongs(const char *tag, int count, ...)
 {
@@ -174,11 +149,9 @@ int main(void)
     long long total_fllong;
     long long total_rllong;
 
-    /* 1. int, folded: 3 + -7 + 11 + 250 + -1000 == -743 */
     total_fint = sum_ints("fint", 5, 3, -7, 11, 250, -1000);
     printf("fint_sum=%lld\n", total_fint);
 
-    /* 2. int, runtime: 5 + 9 + -20 + 400 + 606 == 1000 */
     plain_rint_a = vsrc_rint_a;
     plain_rint_b = vsrc_rint_b;
     plain_rint_c = vsrc_rint_c;
@@ -188,11 +161,9 @@ int main(void)
                           plain_rint_d, plain_rint_e);
     printf("rint_sum=%lld\n", total_rint);
 
-    /* 3. unsigned int, folded: 1 + 4000000000 + 7 + 65535 == 4000065543 */
     total_fuint = sum_uints("fuint", 4, 1u, 4000000000u, 7u, 65535u);
     printf("fuint_sum=%llu\n", total_fuint);
 
-    /* 4. unsigned int, runtime: 2 + 3000000000 + 4 + 65536 == 3000065542 */
     plain_ruint_a = vsrc_ruint_a;
     plain_ruint_b = vsrc_ruint_b;
     plain_ruint_c = vsrc_ruint_c;
@@ -201,11 +172,9 @@ int main(void)
                             plain_ruint_c, plain_ruint_d);
     printf("ruint_sum=%llu\n", total_ruint);
 
-    /* 5. long long, folded: 1000000000000 + -250000000000 + 3 == 750000000003 */
     total_fllong = sum_llongs("fllong", 3, 1000000000000LL, -250000000000LL, 3LL);
     printf("fllong_sum=%lld\n", total_fllong);
 
-    /* 6. long long, runtime: 2000000000000 + 500000000000 + -7 == 2499999999993 */
     plain_rllong_a = vsrc_rllong_a;
     plain_rllong_b = vsrc_rllong_b;
     plain_rllong_c = vsrc_rllong_c;

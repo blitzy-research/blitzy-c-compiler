@@ -1,18 +1,16 @@
-/* 005_straddling_and_zero_width.c -- bitfields that straddle a storage-unit
- * boundary, and zero-width separators that force the next field to a fresh
- * storage unit.
- * Area 04 (bitfields).  No header is included; printf is declared by hand.
- * Every bitfield carries an explicit signed int / unsigned int base type.
+/* Byte images are printed only for structs whose every bit is covered by a named
+ * field, so no unspecified padding bit is ever observed.  Structs that necessarily
+ * contain padding - the zero-width and unnamed-field cases - are observed through
+ * sizeof, _Alignof and named-member read-back only.
  *
- * Byte images are printed only for structs whose every bit is covered by a
- * named field, so no unspecified padding bit is ever observed.  Structs that
- * necessarily contain padding (the zero-width and unnamed-field cases) are
- * observed through sizeof, _Alignof and named-member read-back only. */
+ * Where a field is placed inside its allocation unit is implementation-defined, so
+ * every bit position named below is the placement expected on the four targets
+ * under test rather than a guarantee the standard makes. */
 
 int printf(const char *, ...);
 
-/* Exactly 32 bits, fully covered.  c spans bits 8..16 and d spans bits 17..31,
- * so both straddle a byte boundary inside the storage unit. */
+/* Exactly 32 bits, fully covered, with c and d expected to straddle a byte
+ * boundary inside the storage unit. */
 struct cover32 {
     unsigned int a : 3;
     unsigned int b : 5;
@@ -20,7 +18,6 @@ struct cover32 {
     unsigned int d : 15;
 };
 
-/* Exactly 64 bits, fully covered by two consecutive full units. */
 struct cover64 {
     unsigned int a : 3;
     unsigned int b : 5;
@@ -30,8 +27,8 @@ struct cover64 {
     unsigned int f : 21;
 };
 
-/* Each field is too wide to finish inside the unit its predecessor occupies,
- * so each one is placed in a fresh unit.  This is observable through sizeof. */
+/* Each field is too wide to finish inside the unit its predecessor occupies, so
+ * each is expected in a fresh unit - observable through sizeof. */
 struct nostraddle {
     unsigned int a : 20;
     unsigned int b : 20;
@@ -49,7 +46,6 @@ struct twozero {
     unsigned int c : 7;
 };
 
-/* Unnamed non-zero-width separator: four bits of padding between a and b. */
 struct unnamedpad {
     unsigned int a : 3;
     unsigned int : 4;
@@ -113,7 +109,6 @@ int main(void)
     union image32 x;
     union image64 y;
 
-    /* ---- sizes and alignments ---- */
     printf("size_cover32=%u align_cover32=%u\n",
            (unsigned)sizeof(struct cover32), (unsigned)_Alignof(struct cover32));
     printf("size_cover64=%u align_cover64=%u\n",
@@ -129,14 +124,12 @@ int main(void)
            (unsigned)sizeof(struct signedstraddle),
            (unsigned)_Alignof(struct signedstraddle));
 
-    /* ---- byte image of a fully covered 32-bit sequence ---- */
     zero32(&x);
     x.f.a = 5u; x.f.b = 21u; x.f.c = 300u; x.f.d = 20000u;
     printf("cover32_read a=%u b=%u c=%u d=%u\n",
            (unsigned)x.f.a, (unsigned)x.f.b, (unsigned)x.f.c, (unsigned)x.f.d);
     show32(&x, "cover32_image");
 
-    /* Modifying one straddling field must leave every neighbour untouched. */
     x.f.c = 511u;
     printf("cover32_after_c a=%u b=%u c=%u d=%u\n",
            (unsigned)x.f.a, (unsigned)x.f.b, (unsigned)x.f.c, (unsigned)x.f.d);
@@ -147,7 +140,6 @@ int main(void)
            (unsigned)x.f.a, (unsigned)x.f.b, (unsigned)x.f.c, (unsigned)x.f.d);
     show32(&x, "cover32_image_c_zero");
 
-    /* ---- byte image of a fully covered 64-bit sequence ---- */
     zero64(&y);
     y.f.a = 7u; y.f.b = 31u; y.f.c = 511u; y.f.d = 32767u;
     y.f.e = 2047u; y.f.f = 2097151u;
@@ -164,14 +156,12 @@ int main(void)
            (unsigned)y.f.d, (unsigned)y.f.e, (unsigned)y.f.f);
     show64(&y, "cover64_image");
 
-    /* ---- fields that are pushed to a fresh unit ---- */
     printf("nostraddle_read a=%u b=%u c=%u\n",
            (unsigned)ns.a, (unsigned)ns.b, (unsigned)ns.c);
     ns.b = 1048575u;
     printf("nostraddle_after_b a=%u b=%u c=%u\n",
            (unsigned)ns.a, (unsigned)ns.b, (unsigned)ns.c);
 
-    /* ---- zero-width separators ---- */
     printf("nozero_read a=%u b=%u\n", (unsigned)nz.a, (unsigned)nz.b);
     printf("onezero_read a=%u b=%u\n", (unsigned)oz.a, (unsigned)oz.b);
     printf("twozero_read a=%u b=%u c=%u\n",
@@ -182,19 +172,18 @@ int main(void)
     printf("twozero_after_b a=%u b=%u c=%u\n",
            (unsigned)tz.a, (unsigned)tz.b, (unsigned)tz.c);
 
-    /* ---- unnamed padding separator ---- */
     printf("unnamedpad_read a=%u b=%u\n", (unsigned)up.a, (unsigned)up.b);
     up.b = 511u;
     printf("unnamedpad_after_b a=%u b=%u\n", (unsigned)up.a, (unsigned)up.b);
 
-    /* ---- signed straddling fields, read-back only ---- */
     printf("signedstraddle_read a=%d b=%d c=%d\n",
            (int)ss.a, (int)ss.b, (int)ss.c);
     ss.b = 4095;
     printf("signedstraddle_after_b a=%d b=%d c=%d\n",
            (int)ss.a, (int)ss.b, (int)ss.c);
 
-    /* ---- volatile runtime variant: real extract and insert on every access ---- */
+    /* Volatile runtime variant: every access below happens at run time rather than
+     * being folded. */
     vc32.a = 5u; vc32.b = 21u; vc32.c = 300u; vc32.d = 20000u;
     printf("volatile_cover32 a=%u b=%u c=%u d=%u\n",
            (unsigned)vc32.a, (unsigned)vc32.b, (unsigned)vc32.c, (unsigned)vc32.d);
