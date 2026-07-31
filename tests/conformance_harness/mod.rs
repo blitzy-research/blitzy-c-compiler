@@ -38,11 +38,11 @@
 // compile with `E0583: file not found for module`. Such a declaration would be a compilation
 // error in a checkpoint that claims to compile.
 //
-// The one remaining submodule the harness will grow — `report` — is therefore declared by the
-// change that adds the corresponding file, in the same commit, so the declaration and the file
-// it names can never disagree. `classify` and `findings` were each declared by the change that
-// added `classify.rs` and `findings.rs`, on exactly that rule. The module documentation above
-// describes the completed design; this list describes what is present.
+// Every submodule of the harness is now present: `report` was the last one outstanding, and the
+// change that added `report.rs` declared it here in the same commit, so the declaration and the
+// file it names can never disagree. `classify` and `findings` were each declared by the change
+// that added `classify.rs` and `findings.rs`, on exactly that rule. The module documentation
+// above describes the design; this list describes what is present, and the two now coincide.
 //
 // Declaring them here and satisfying the declarations by creating `Cargo.toml` and
 // `tests/conformance.rs` is not an option: the plan places `Cargo.toml` in the read-only set
@@ -57,6 +57,7 @@ pub mod execute;
 pub mod findings;
 pub mod flagprobe;
 pub mod manifest;
+pub mod report;
 pub mod sandbox;
 pub mod ubaudit;
 
