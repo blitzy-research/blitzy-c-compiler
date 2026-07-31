@@ -1,0 +1,53 @@
+# Expectation record for 01_integer_conversions/008_unsigned_wraparound.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 008_unsigned_wraparound
+area               = 01_integer_conversions
+description        = Modular wraparound at the unsigned maximum for four widths, folded and volatile-runtime
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Unsigned arithmetic is defined to wrap modulo two to the power of the width, so every
+overflow and underflow here is well defined rather than undefined.  No signed type ever
+overflows.  Limits are spelled as literals with explicit unsigned suffixes because
+<limits.h> is not included.  Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+fold_uint_max=4294967295
+fold_uint_complement=4294967295
+fold_uint_underflow=4294967295
+fold_uint_overflow=0
+fold_uint_mul_wrap=0
+fold_uint_mul_max=4294967293
+fold_uchar_wrap=0
+fold_ushort_wrap=0
+fold_ullong_underflow=18446744073709551615
+fold_ullong_overflow=0
+fold_modular_identity=1
+run_uint_max=4294967295
+run_uint_complement=4294967295
+run_uint_underflow=4294967295
+run_uint_overflow=0
+run_uint_mul_wrap=0
+run_uint_mul_max=4294967293
+run_uchar_wrap=0
+run_ushort_wrap=0
+run_ullong_underflow=18446744073709551615
+run_ullong_overflow=0
+run_modular_identity=1
+END

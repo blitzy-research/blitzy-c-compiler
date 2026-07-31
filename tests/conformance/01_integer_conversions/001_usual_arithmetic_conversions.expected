@@ -1,0 +1,45 @@
+# Expectation record for 01_integer_conversions/001_usual_arithmetic_conversions.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_usual_arithmetic_conversions
+area               = 01_integer_conversions
+description        = Usual arithmetic conversions across mixed signedness and rank, folded and volatile-runtime
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every operand pair is converted under the usual arithmetic conversions to a common type
+that represents both values, so no conversion is value-changing and no signed overflow can
+arise.  The _Generic probes report the common type without evaluating their controlling
+expression.  Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+fold_uint_common=4294967294
+fold_ushort_promotes=-2
+fold_uchar_promotes=-2
+fold_llong_wins=0
+fold_ullong_wins=5
+run_uint_common=4294967294
+run_ushort_promotes=-2
+run_uchar_promotes=-2
+run_llong_wins=0
+run_ullong_wins=5
+type_int_uint=unsigned int
+type_ushort_int=int
+type_uint_llong=long long
+type_uint_ullong=unsigned long long
+END

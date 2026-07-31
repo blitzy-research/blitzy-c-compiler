@@ -2,9 +2,23 @@
  * ever printed.  Only the char, short, int and float alignments are printed raw,
  * because those four are identical on all four targets; they are printed as
  * values rather than asserted here, so a target that disagreed would show up as a
- * divergence on that line.  The alignments of double, long long, long and
- * pointers do differ (4 on i686 versus 8 elsewhere) and so appear only as bounded
- * relations.
+ * divergence on that line.
+ *
+ * EXACT EXPECTATIONS, NOT A TOLERATED RANGE.  The alignments of double, long
+ * long, long and pointers do differ per target (4 on i686 versus 8 on the other
+ * three), but they are still asserted EXACTLY rather than bounded.  The exact
+ * value is selected by the architecture macro the compiler predefines, in the
+ * same style as 08_gcc_extensions/008_inline_asm_per_target.c, so every printed
+ * predicate is an equality against one specific number and the output stays
+ * byte-identical across all four targets.  A permissive range such as
+ * "4 <= align <= 8" must not be used as normalization: it accepts an alignment of
+ * 5, 6 or 7, and it accepts the wrong choice between 4 and 8, so a real
+ * code-generation defect would still print 1 and both the reference oracle and
+ * the golden record would agree with it.  The expectation is deliberately keyed
+ * to the ARCHITECTURE macro rather than to __SIZEOF_POINTER__: the architecture
+ * is a categorical fact the harness fixes with --target, whereas a pointer-width
+ * macro is a numeric claim by the compiler under test, and asserting that claim
+ * against itself would be circular.
  *
  * WIDTH DISCIPLINE.  Each address is converted in two steps: first to unsigned
  * long, which is exactly pointer width on all four targets (8 on x86-64, AArch64
@@ -18,6 +32,23 @@
  * require stdint.h and no header may be included. */
 
 int printf(const char *, ...);
+
+/* The exact alignment, in bytes, that double, long long, long and every object
+ * pointer must have on the target being compiled, and the exact size of a pointer
+ * and of long.  On all four supported targets these five quantities are one and
+ * the same number, so a single expectation pins all of them.  Each branch states
+ * the number outright, which is what makes the predicates below exact. */
+#if defined(__x86_64__) || defined(__amd64__)
+#define EXPECTED_WIDE_ALIGN 8u
+#elif defined(__i386__) || defined(__i386)
+#define EXPECTED_WIDE_ALIGN 4u
+#elif defined(__aarch64__) || defined(__arm64__)
+#define EXPECTED_WIDE_ALIGN 8u
+#elif defined(__riscv) || defined(__riscv__)
+#define EXPECTED_WIDE_ALIGN 8u
+#else
+#error "007_alignof_alignas: no alignment expectation selected; the target architecture predefined macro (__x86_64__ / __i386__ / __aarch64__ / __riscv) was not recognized"
+#endif
 
 struct padded { char c; _Alignas(8) int aligned_member; };
 
@@ -44,11 +75,23 @@ int main(void)
     printf("alignof_stable=%d %d %d %d\n",
            (int)_Alignof(char), (int)_Alignof(short),
            (int)_Alignof(int), (int)_Alignof(float));
-    printf("alignof_bounded=%d %d %d %d\n",
-           (int)(_Alignof(double) >= 4u && _Alignof(double) <= 8u),
-           (int)(_Alignof(long long) >= 4u && _Alignof(long long) <= 8u),
-           (int)(_Alignof(long) >= 4u && _Alignof(long) <= 8u),
-           (int)(_Alignof(void *) >= 4u && _Alignof(void *) <= 8u));
+    /* Exact equality against the one number the target must use.  An alignment of
+     * 5, 6 or 7, or the wrong choice between 4 and 8, changes the printed digit
+     * from 1 to 0 and so changes stdout. */
+    printf("alignof_exact=%d %d %d %d\n",
+           (int)(_Alignof(double) == EXPECTED_WIDE_ALIGN),
+           (int)(_Alignof(long long) == EXPECTED_WIDE_ALIGN),
+           (int)(_Alignof(long) == EXPECTED_WIDE_ALIGN),
+           (int)(_Alignof(void *) == EXPECTED_WIDE_ALIGN));
+    /* The same exact number also pins the width-varying sizes, and the two sizes
+     * that are 8 on every target are pinned to 8 outright.  Without these, a
+     * compiler that got both the alignment and the width wrong in the same
+     * direction could still satisfy the line above. */
+    printf("sizeof_exact=%d %d %d %d\n",
+           (int)(sizeof(void *) == EXPECTED_WIDE_ALIGN),
+           (int)(sizeof(long) == EXPECTED_WIDE_ALIGN),
+           (int)(sizeof(double) == 8u),
+           (int)(sizeof(long long) == 8u));
     printf("alignas_struct=%d %d\n",
            (int)_Alignof(struct padded), (int)sizeof(struct padded));
     printf("residues=%d %d %d %d\n",

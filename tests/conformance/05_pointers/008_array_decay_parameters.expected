@@ -1,0 +1,83 @@
+# Expectation record for 05_pointers/008_array_decay_parameters.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 008_array_decay_parameters
+area               = 05_pointers
+description        = Array-to-pointer parameter adjustment for one-, two- and three-dimensional arrays
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every parameter walk stays inside the array actually passed, and each element count is
+supplied by the caller from the array's own size rather than assumed.  The flattened index
+is computed from pointer-to-row arithmetic within one array object multiplied by the row
+width, never by subtracting element pointers from two different rows, and its row and
+column arguments are bounds-checked before use.  sizeof a decayed parameter is never
+printed, so the output does not depend on pointer width.
+Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+one_d_count=8
+two_d_rows=3
+two_d_cols=4
+three_d_planes=2
+sum_brackets=36
+sum_pointer=36
+sum_sized=36
+sum_const_ptr=36
+spellings_agree=1
+sum_from_interior=26
+sum_partial=6
+sum_empty=0
+step_param=6
+step_param_zero=1
+sum_2d_brackets=258
+sum_2d_pointer=258
+sum_2d_partial=132
+sum_2d_one_row=86
+row_first0=10
+row_first2=30
+row_stride=1
+row_element_span=4
+flat_index_00=0
+flat_index_12=6
+flat_index_23=11
+row_as_1d=86
+row_as_1d_last=126
+sum_3d=78
+sum_3d_one_plane=21
+sum_3d_second_plane=57
+plane0_as_2d=21
+plane1_as_2d=57
+plane_row_as_1d=23
+sum_via_table=16
+sum_via_table_partial=4
+table_count=4
+runtime_sum_1d=36
+runtime_sum_pointer=36
+runtime_sum_2d=258
+runtime_row_first=30
+runtime_flat_index=11
+runtime_row_as_1d=86
+runtime_sum_3d=78
+runtime_step=3
+runtime_from_interior=7
+runtime_table=4
+runtime_one_row=126
+runtime_plane=57
+runtime_plane_row=11
+END

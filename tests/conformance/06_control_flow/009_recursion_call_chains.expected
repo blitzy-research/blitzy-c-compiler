@@ -1,0 +1,50 @@
+# Expectation record for 06_control_flow/009_recursion_call_chains.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 009_recursion_call_chains
+area               = 06_control_flow
+description        = Recursive and mutually recursive call chains at bounded depth
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every recursion depth is bounded and shallow - the deepest chain is thirty-one levels - so
+no run can approach stack exhaustion, including under user-mode emulation.  All arithmetic
+stays well inside the range of a 32-bit int, the largest value produced being ten
+factorial, so no signed overflow can occur.  Each chain is driven once by a constant and
+once by an argument read from volatile storage.  No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+const_fact=1 120 3628800
+runtime_fact_one=1
+runtime_fact_ten=3628800
+const_fib=0 1 13 610
+runtime_fib_seven=13
+runtime_fib_fifteen=610
+const_sum_to=0 55 465
+runtime_sum_to_zero=0
+runtime_sum_to_thirty=465
+const_mutual_parity=1 1 0 1
+runtime_is_even_twenty=1
+runtime_is_odd_twentyone=1
+const_ping_pong=0 15 15
+runtime_ping_ten=15
+runtime_pong_ten=15
+const_chain=0 -4 5
+runtime_chain_ten=5
+const_frames=0 260
+runtime_frames_five=260
+const_switched=0 1 30
+runtime_switched_ten=30
+END

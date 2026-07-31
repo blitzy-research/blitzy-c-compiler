@@ -125,11 +125,30 @@ const RECORD_EXTENSION: &str = "expected";
 
 /// Extensions a regular file may carry inside a feature-area directory without being a program.
 ///
-/// Any other extension is a hard error, which catches a `.rs` file dropped into the top level of
-/// an area directory: the corpus has to stay invisible to the build system for the suite to need
-/// no package-manifest change. [`discover_area`] does not descend into nested directories, so
+/// Exactly one: the expectation record. A feature-area directory holds programs and the records
+/// that govern them, and nothing else at all.
+///
+/// The list is deliberately this short. Admitting a header, a script or a document here would
+/// permit a per-program dependency to sit inside an area, and that would quietly dismantle two
+/// guarantees the suite is built on. A program must be reproducible from its own source file and
+/// its record alone — that is what makes "source file, build commands, and expected output
+/// recorded together" literally true — and every program therefore hand-declares the one libc
+/// prototype it needs rather than including anything. A header beside the programs is an
+/// invitation to break that, and a shared header would additionally fail against a compiler under
+/// test that bundles no `stdio.h`, producing a divergence caused by the test rather than by the
+/// compiler. A script beside the programs is worse still: the area directory is scanned, and
+/// something that looks like a per-area build step is the beginning of a corpus that no longer
+/// builds the way its records say it does.
+///
+/// The corpus's genuine companions — the fixture support tree, the tooling tree, the findings tree
+/// and the two registers — are siblings of the area directories rather than children, so nothing
+/// legitimate is displaced by this rule.
+///
+/// Any other extension is a hard error, which also catches a `.rs` file dropped into the top level
+/// of an area directory: the corpus has to stay invisible to the build system for the suite to
+/// need no package-manifest change. [`discover_area`] does not descend into nested directories, so
 /// this check reaches the top level of each area and no further.
-const AREA_COMPANION_EXTENSIONS: &[&str] = &[RECORD_EXTENSION, "md", "h", "sh"];
+const AREA_COMPANION_EXTENSIONS: &[&str] = &[RECORD_EXTENSION];
 
 /// The only dot-prefixed entry names an area directory may contain.
 ///
@@ -894,25 +913,240 @@ fn parse_fields(text: &str, origin: &Path) -> HarnessResult<Vec<(&'static KeySpe
     Ok(fields)
 }
 
+/// How a cell's artifact is executed.
+///
+/// This is an explicit two-way choice rather than an optional runner path, and the distinction is
+/// the whole point. "No runner" and "a runner that could not be found" are opposite situations
+/// with opposite correct responses: the first means run the artifact directly, the second means
+/// the cell cannot be judged at all and its oracles must be reported unavailable. Collapsing them
+/// into one absent value leaves the difference to be re-derived by every consumer, and a consumer
+/// that gets it wrong executes a foreign binary on the host and reads the resulting failure as a
+/// compiler defect.
+///
+/// Making the choice a type means a missing runner is not expressible here. A caller that has no
+/// runner for a non-native target cannot build the [`Execution`] value that would let it proceed,
+/// so the situation is forced back to the discovery layer, where the target is marked unexecutable
+/// and reported — which is the only place that answer belongs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Execution {
+    /// The artifact runs directly on the host, so `<runner>` contributes no argument at all.
+    ///
+    /// Accepted only for a target the host executes natively. [`CommandSubstitutions::new`]
+    /// refuses it for any other target rather than producing a command line that would run a
+    /// foreign binary on the host.
+    Native,
+    /// The artifact runs under the emulator at this vetted path, substituted for `<runner>`.
+    Emulated(PathBuf),
+}
+
+impl Execution {
+    /// The emulator path, or `None` when the artifact runs natively.
+    pub fn runner(&self) -> Option<&Path> {
+        match self {
+            Execution::Native => None,
+            Execution::Emulated(runner) => Some(runner.as_path()),
+        }
+    }
+}
+
 /// Everything one cell needs in order to turn a command template into a literal command line.
 ///
-/// The fields are public because this is a plain carrier with no invariant to protect, which
-/// matches how the harness root models its own cell and outcome records.
+/// # Why the fields are private
+///
+/// This is not a plain carrier. Every value it holds has already been vetted by the layer that
+/// produced it — a compiler path was checked for ownership, world-writability and location trust,
+/// a source path was proved to resolve inside the corpus, an output path was derived from the
+/// cell's own workspace — and the whole worth of that vetting is that the *same* value is the one
+/// that gets executed. A writable field would let a caller substitute a different path between
+/// the check and the use, and nothing downstream could tell: the argument vector, the reproduction
+/// command and the finding artifact would all name whatever they were handed.
+///
+/// Construction additionally establishes two invariants no field could carry on its own. Every
+/// path is representable as text without loss, so the string that reaches the command line is
+/// byte-for-byte the path that was vetted; and the execution mode agrees with the target, so a
+/// foreign artifact can never be handed to the host to run.
+///
+/// # The reference compiler is optional, deliberately
+///
+/// Two of the three command templates never mention it. A cell that only needs its compiler-under-
+/// test line rendered, or only its run line, must not be obliged to produce a reference driver it
+/// has no use for — and on an environment where oracle (a) is unavailable there is no reference
+/// driver to produce, while oracles (b) and (c) still have every reason to run. So the reference
+/// driver is added by [`CommandSubstitutions::with_reference_compiler`] only where a reference
+/// command is actually going to be rendered, and asking to render one without it is an explanatory
+/// failure that names the omission rather than a half-expanded line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSubstitutions {
-    pub bcc: PathBuf,
-    /// The reference compiler driver for this cell's target, substituted for every accepted
-    /// `$REF_CC` spelling: the native driver for the native arm, the matching GCC cross driver
-    /// for a cross arm.
-    pub reference_compiler: PathBuf,
-    pub target: Target,
-    pub opt: OptLevel,
-    pub source: PathBuf,
-    pub output: PathBuf,
-    /// The execution runner, substituted for `<runner>`. `None` on a natively executing target,
-    /// where the placeholder and one following space are removed so the rendered line begins
-    /// with the artifact itself.
-    pub runner: Option<PathBuf>,
+    /// Vetted path to the compiler under test, held as text validated at construction.
+    bcc: String,
+    /// The reference compiler driver for this cell's target, substituted for the `$REF_CC`
+    /// spellings: the native driver for the native arm, the matching GCC cross driver for a cross
+    /// arm. `None` until [`CommandSubstitutions::with_reference_compiler`] supplies one.
+    reference_compiler: Option<String>,
+    target: Target,
+    opt: OptLevel,
+    source: String,
+    output: String,
+    /// The execution runner, substituted for `<runner>`. `None` means the artifact runs natively,
+    /// where the placeholder contributes no argument so the rendered line begins with the artifact
+    /// itself.
+    ///
+    /// Unlike the optional runner this replaced, `None` here is unambiguous: it can only arise
+    /// from [`Execution::Native`], which the constructor accepts solely for a target the host runs
+    /// natively. A missing emulator cannot reach this field at all.
+    runner: Option<String>,
+}
+
+impl CommandSubstitutions {
+    /// Build the substitutions for one cell, without a reference compiler.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a path that cannot be represented as text without loss, and rejects
+    /// [`Execution::Native`] for a target the host does not execute natively. Both are caller
+    /// defects rather than conditions an environment can legitimately produce, so each becomes an
+    /// explanatory failure naming the offending value.
+    pub fn new(
+        bcc: &Path,
+        target: Target,
+        opt: OptLevel,
+        source: &Path,
+        output: &Path,
+        execution: &Execution,
+    ) -> HarnessResult<CommandSubstitutions> {
+        let context = format!(
+            "assembling the command substitutions for the {} cell at {}",
+            target.triple(),
+            opt.flag()
+        );
+        if matches!(execution, Execution::Native) && !target.is_native() {
+            return Err(HarnessError::new(
+                context,
+                format!(
+                    "this cell targets {} but declares native execution, and the host executes {}; \
+                     a non-native artifact needs its emulator, and rendering a run command without \
+                     one would hand a foreign binary to the host, whose refusal to run it would \
+                     then be read as a defect in the compiler that produced it. A target with no \
+                     runner is reported as unexecutable by the discovery layer instead",
+                    target.triple(),
+                    std::env::consts::ARCH
+                ),
+            ));
+        }
+        let runner = execution
+            .runner()
+            .map(|path| require_representable_path(&context, "execution runner", path))
+            .transpose()?;
+        Ok(CommandSubstitutions {
+            bcc: require_representable_path(&context, "compiler under test", bcc)?,
+            reference_compiler: None,
+            target,
+            opt,
+            source: require_representable_path(&context, "program source", source)?,
+            output: require_representable_path(&context, "build artifact", output)?,
+            runner,
+        })
+    }
+
+    /// Add the reference compiler driver for this cell's target.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a path that cannot be represented as text without loss.
+    pub fn with_reference_compiler(mut self, reference: &Path) -> HarnessResult<Self> {
+        let context = format!(
+            "adding the reference compiler driver to the {} cell at {}",
+            self.target.triple(),
+            self.opt.flag()
+        );
+        self.reference_compiler = Some(require_representable_path(
+            &context,
+            "reference compiler",
+            reference,
+        )?);
+        Ok(self)
+    }
+
+    /// Vetted path to the compiler under test.
+    pub fn bcc(&self) -> &Path {
+        Path::new(&self.bcc)
+    }
+
+    /// Vetted path to the reference compiler driver for this cell's target, when one was supplied.
+    pub fn reference_compiler(&self) -> Option<&Path> {
+        self.reference_compiler.as_deref().map(Path::new)
+    }
+
+    /// The target this cell is built and executed for.
+    pub fn target(&self) -> Target {
+        self.target
+    }
+
+    /// The optimization level this cell is built at.
+    pub fn opt(&self) -> OptLevel {
+        self.opt
+    }
+
+    /// Resolved path to the program source.
+    pub fn source(&self) -> &Path {
+        Path::new(&self.source)
+    }
+
+    /// Path to the build artifact inside this cell's workspace.
+    pub fn output(&self) -> &Path {
+        Path::new(&self.output)
+    }
+
+    /// The emulator that runs this cell's artifact, or `None` when it runs natively.
+    pub fn runner(&self) -> Option<&Path> {
+        self.runner.as_deref().map(Path::new)
+    }
+
+    /// True when this cell's artifact runs directly on the host.
+    pub fn executes_natively(&self) -> bool {
+        self.runner.is_none()
+    }
+}
+
+/// Render one vetted path as the exact text that will become a command-line argument, refusing a
+/// path that cannot be represented without loss.
+///
+/// This is the single place the harness converts a path into argument text, and it converts
+/// **losslessly or not at all**. The distinction matters because a path is not always valid
+/// Unicode: on this platform it is an arbitrary sequence of non-zero bytes. The lossy conversion
+/// every convenient rendering method performs replaces each unrepresentable byte with U+FFFD, and
+/// the result is a *different path* that happens to print plausibly.
+///
+/// Silently accepting that would make three separate claims false at once. The path that was
+/// vetted for ownership, world-writability and location trust would not be the path that was
+/// executed, so the vetting would guard nothing. A finding's reproduction command would name a
+/// file that does not exist, so "exact reproduction commands" would be untrue in precisely the
+/// case a maintainer most needs them. And the failure would surface as a puzzling
+/// file-not-found from a command line that looks correct on screen, which is the least
+/// diagnosable shape a defect can take.
+///
+/// So an unrepresentable path is refused here, at construction, with a message that says which
+/// role the path was filling and shows its lossy rendering purely so a reader can recognise it.
+/// Every subsequent rendering is then a plain copy of already-validated text and cannot fail,
+/// which is what lets the substitution functions promise a lossless result rather than hope for
+/// one.
+fn require_representable_path(context: &str, role: &str, path: &Path) -> HarnessResult<String> {
+    match path.to_str() {
+        Some(text) => Ok(String::from(text)),
+        None => Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "the {role} path {} is not valid Unicode, so it cannot be rendered as command-line \
+                 text without alteration; it is refused rather than converted approximately, \
+                 because an approximate rendering names a different file — the vetting that \
+                 approved this path would guard nothing, the reproduction command would not \
+                 reproduce the cell, and the failure would arrive as a file-not-found from a \
+                 command line that reads correctly. Move the checkout, or the tool, to a path that \
+                 is valid Unicode",
+                path.display()
+            ),
+        )),
+    }
 }
 
 /// The concrete reference-driver spelling for one target, for example `$REF_CC_AARCH64`.
@@ -925,6 +1159,20 @@ fn concrete_reference_placeholder(target: Target) -> String {
         "{PLACEHOLDER_REFERENCE_BARE}_{}",
         target.short_name().to_ascii_uppercase()
     )
+}
+
+/// True when `token` is the concrete reference-driver spelling of **some** target.
+///
+/// Separate from [`substitute_token`], which expands only the spelling matching the cell's own
+/// target, because the two questions have different answers and both are needed. Template
+/// validation asks the broad question — is this token placeholder-shaped, and therefore exempt from
+/// the character rules that apply to literal text — and must answer yes for all four spellings, so
+/// that a target-restricted record may name its one driver directly. Rendering asks the narrow
+/// question, and must answer yes for exactly one.
+fn is_concrete_reference_placeholder(token: &str) -> bool {
+    Target::ALL
+        .iter()
+        .any(|target| token == concrete_reference_placeholder(*target))
 }
 
 /// Expand a command template into a literal command line.
@@ -982,35 +1230,75 @@ fn concrete_reference_placeholder(target: Target) -> String {
 /// A token that is not a placeholder is literal text, and it is validated at parse time by
 /// [`validate_templates`] against [`TEMPLATE_FORBIDDEN_CHARACTERS`], so no shell metacharacter
 /// can reach this function from a record in the first place.
-fn substitute_token(token: &str, subs: &CommandSubstitutions) -> Option<String> {
+///
+/// # Why every substituted value is exact
+///
+/// Each path is copied out of the already-validated text the substitutions carry, which
+/// [`require_representable_path`] proved at construction to be a lossless rendering of the vetted
+/// path. The value that reaches the argument vector is therefore byte-for-byte the value that was
+/// checked — there is no approximate conversion anywhere on this path, and so no way for the
+/// executed file to differ from the identified one.
+///
+/// # Returns
+///
+/// - `Ok(Some(value))` — the token is a placeholder this cell can expand.
+/// - `Ok(None)` — the token is not a placeholder for this cell. That covers ordinary literal text
+///   and, deliberately, a concrete reference spelling belonging to another architecture.
+///
+/// # Errors
+///
+/// Returns an error only for a reference-driver placeholder in substitutions that carry no
+/// reference driver. That is a caller defect — a reference command was asked for without the
+/// compiler it names — and naming the omission is far more useful than emitting a half-expanded
+/// line and letting the residual check describe the symptom.
+fn substitute_token(token: &str, subs: &CommandSubstitutions) -> HarnessResult<Option<String>> {
     if token == PLACEHOLDER_BCC {
-        return Some(subs.bcc.display().to_string());
+        return Ok(Some(subs.bcc.clone()));
     }
-    if token == PLACEHOLDER_REFERENCE_TEMPLATED || token == PLACEHOLDER_REFERENCE_BARE {
-        return Some(subs.reference_compiler.display().to_string());
+    // The canonical spelling, the bare synonym, and the one concrete spelling that names THIS
+    // cell's target all resolve to this cell's driver. A concrete spelling naming a different
+    // architecture deliberately falls through to `Ok(None)`: see the note below.
+    if token == PLACEHOLDER_REFERENCE_TEMPLATED
+        || token == PLACEHOLDER_REFERENCE_BARE
+        || token == concrete_reference_placeholder(subs.target)
+    {
+        return match &subs.reference_compiler {
+            Some(reference) => Ok(Some(reference.clone())),
+            None => Err(HarnessError::new(
+                format!(
+                    "expanding {token} for the {} cell at {}",
+                    subs.target.triple(),
+                    subs.opt.flag()
+                ),
+                String::from(
+                    "these substitutions carry no reference compiler driver, so this placeholder \
+                     has nothing to expand to. A reference command can only be rendered for a \
+                     cell whose reference driver resolved; where oracle (a) is unavailable the \
+                     cell is reported unavailable for that oracle and its other oracles are \
+                     rendered and run as usual. Add the driver with \
+                     `CommandSubstitutions::with_reference_compiler` before rendering a reference \
+                     command",
+                ),
+            )),
+        };
     }
-    for target in Target::ALL {
-        let concrete = format!(
-            "{PLACEHOLDER_REFERENCE_BARE}_{}",
-            target.short_name().to_ascii_uppercase()
-        );
-        if token == concrete {
-            return Some(subs.reference_compiler.display().to_string());
-        }
-    }
+    // A concrete spelling for another architecture is NOT expanded. Rewriting it to this cell's
+    // driver would compile with a compiler the record did not name, while every artifact still
+    // read as though the named one had been used — a wrong comparison that leaves no trace. It is
+    // left as literal text so the residual-placeholder check refuses the template outright.
     if token == PLACEHOLDER_TRIPLE {
-        return Some(String::from(subs.target.triple()));
+        return Ok(Some(String::from(subs.target.triple())));
     }
     if token == PLACEHOLDER_OPT {
-        return Some(String::from(subs.opt.flag()));
+        return Ok(Some(String::from(subs.opt.flag())));
     }
     if token == PLACEHOLDER_SOURCE {
-        return Some(subs.source.display().to_string());
+        return Ok(Some(subs.source.clone()));
     }
     if token == PLACEHOLDER_OUTPUT {
-        return Some(subs.output.display().to_string());
+        return Ok(Some(subs.output.clone()));
     }
-    None
+    Ok(None)
 }
 
 /// True when `token` is one of the accepted placeholder spellings.
@@ -1019,19 +1307,24 @@ fn substitute_token(token: &str, subs: &CommandSubstitutions) -> Option<String> 
 /// character rules, which is what lets `<out>` and `$REF_CC_<TRIPLE>` contain angle brackets and
 /// a dollar sign while a literal token may not.
 fn is_placeholder_token(token: &str) -> bool {
-    if token == PLACEHOLDER_RUNNER {
+    if token == PLACEHOLDER_RUNNER || is_concrete_reference_placeholder(token) {
         return true;
     }
+    // A fully populated probe, so the answer is about the token's spelling alone and never about
+    // which values a particular cell happens to carry. The concrete spellings are answered above
+    // rather than here, because this probe declares one target and `substitute_token` expands only
+    // the spelling matching it — the very narrowing that makes rendering correct would make this
+    // question wrong.
     let probe = CommandSubstitutions {
-        bcc: PathBuf::from("bcc"),
-        reference_compiler: PathBuf::from("cc"),
+        bcc: String::from("bcc"),
+        reference_compiler: Some(String::from("cc")),
         target: Target::X86_64,
         opt: OptLevel::O0,
-        source: PathBuf::from("s"),
-        output: PathBuf::from("o"),
+        source: String::from("s"),
+        output: String::from("o"),
         runner: None,
     };
-    substitute_token(token, &probe).is_some()
+    matches!(substitute_token(token, &probe), Ok(Some(_)))
 }
 
 /// Expand a command template into an argument vector, one element per token.
@@ -1047,13 +1340,32 @@ pub fn render_command_argv(
     for token in template.split_whitespace() {
         if token == PLACEHOLDER_RUNNER {
             if let Some(runner) = &subs.runner {
-                argv.push(runner.display().to_string());
+                argv.push(runner.clone());
             }
             continue;
         }
-        match substitute_token(token, subs) {
+        match substitute_token(token, subs)? {
             Some(value) => argv.push(value),
-            None => argv.push(String::from(token)),
+            None => {
+                // The residual check applies to this token — a LITERAL one, straight from the
+                // template — and never to a substituted value.
+                //
+                // The distinction is not a refinement, it is the difference between the check
+                // working and the check being wrong in both directions. A substituted value is a
+                // path, and a path may legitimately contain a dollar sign or a pair of angle
+                // brackets: a checkout under a directory literally named `$HOME` or `<build>` is
+                // unusual but entirely valid, and scanning the substituted value would reject
+                // every cell on such a machine for a defect that does not exist. Meanwhile the
+                // thing genuinely worth catching — a template token that is placeholder-shaped but
+                // is not a placeholder this harness knows — is exactly what reaches here, because
+                // an unrecognised token is passed through as literal text.
+                if let Some(residual) = residual_placeholder(token) {
+                    return Err(unexpanded_placeholder_error(
+                        template, token, &residual, subs,
+                    ));
+                }
+                argv.push(String::from(token));
+            }
         }
     }
     if argv.is_empty() {
@@ -1066,23 +1378,52 @@ pub fn render_command_argv(
             ),
         ));
     }
-    for element in &argv {
-        if let Some(residual) = residual_placeholder(element) {
-            return Err(HarnessError::new(
-                format!("rendering the command template {template:?}"),
-                format!(
-                    "the element {element:?} still contains the placeholder {residual}; a \
-                     half-expanded command line cannot reproduce a cell, so it is rejected rather \
-                     than recorded. A placeholder is substituted only as a whole token, which is \
-                     what keeps one placeholder equal to one argument. The accepted placeholders \
-                     are {PLACEHOLDER_BCC}, {PLACEHOLDER_REFERENCE_TEMPLATED}, \
-                     {PLACEHOLDER_REFERENCE_BARE}, {PLACEHOLDER_TRIPLE}, {PLACEHOLDER_OPT}, \
-                     {PLACEHOLDER_SOURCE}, {PLACEHOLDER_OUTPUT} and {PLACEHOLDER_RUNNER}"
-                ),
-            ));
-        }
-    }
     Ok(argv)
+}
+
+/// Explain a template token that is placeholder-shaped but expanded to nothing.
+///
+/// The wrong-architecture case gets its own sentence, because it is the one shape of this failure
+/// that is a genuine mistake in a record rather than a typo, and because saying so turns a puzzling
+/// rejection into an obvious one.
+fn unexpanded_placeholder_error(
+    template: &str,
+    token: &str,
+    residual: &str,
+    subs: &CommandSubstitutions,
+) -> HarnessError {
+    let context = format!("rendering the command template {template:?}");
+    if is_concrete_reference_placeholder(token) {
+        return HarnessError::new(
+            context,
+            format!(
+                "the token {token} names the reference driver of another architecture, but this \
+                 cell targets {}, whose driver is spelled {}. It is refused rather than expanded \
+                 to this cell's driver: expanding it would compile with a compiler the record did \
+                 not name while every artifact still read as though the named one had been used, \
+                 so a comparison between the wrong pair of binaries would be recorded as though it \
+                 were the right one. A record may name a concrete driver only for the single target \
+                 it declares; otherwise write {PLACEHOLDER_REFERENCE_TEMPLATED}, which resolves to \
+                 whichever driver the cell needs",
+                subs.target.triple(),
+                concrete_reference_placeholder(subs.target)
+            ),
+        );
+    }
+    HarnessError::new(
+        context,
+        format!(
+            "the token {token:?} is placeholder-shaped — it still contains {residual} — but is not \
+             a placeholder this harness recognises, so it would be passed to the compiler as \
+             literal text. A half-expanded command line cannot reproduce a cell, so it is rejected \
+             rather than recorded. A placeholder is substituted only as a whole token, which is \
+             what keeps one placeholder equal to one argument. The accepted placeholders are \
+             {PLACEHOLDER_BCC}, {PLACEHOLDER_REFERENCE_TEMPLATED}, {PLACEHOLDER_REFERENCE_BARE}, \
+             the concrete {PLACEHOLDER_REFERENCE_BARE}_<ARCH> spelling of this cell's own target, \
+             {PLACEHOLDER_TRIPLE}, {PLACEHOLDER_OPT}, {PLACEHOLDER_SOURCE}, {PLACEHOLDER_OUTPUT} \
+             and {PLACEHOLDER_RUNNER}"
+        ),
+    )
 }
 
 /// The first placeholder-shaped token still present in a rendered command line, if any.
@@ -1140,13 +1481,40 @@ pub fn render_command_checked(
 /// dimension is normalized to the canonical table order, and a dimension the scope does not
 /// mention defaults to every member of that dimension — so `oracle_b` on its own means
 /// "cross-backend comparison, on every target, at every optimization level".
+/// The fields are private because a scope is the sole authority on whether a divergence is excused,
+/// and the three dimension lists have to stay faithful to the `raw` text beside them. A caller able
+/// to widen one list would extend a marker's reach beyond what the record says and beyond what the
+/// register documents, turning real failures into expected divergences while every report still
+/// displayed the original, narrower scope — the one change to this type that could hide a defect
+/// rather than reveal one. Parsing is the only way in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkerScope {
+    raw: String,
+    oracles: Vec<Oracle>,
+    targets: Vec<Target>,
+    opt_levels: Vec<OptLevel>,
+}
+
+impl MarkerScope {
     /// The scope exactly as the record wrote it, retained for reports and artifacts.
-    pub raw: String,
-    pub oracles: Vec<Oracle>,
-    pub targets: Vec<Target>,
-    pub opt_levels: Vec<OptLevel>,
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    /// The oracles this scope covers, in canonical table order.
+    pub fn oracles(&self) -> &[Oracle] {
+        &self.oracles
+    }
+
+    /// The targets this scope covers, in canonical table order.
+    pub fn targets(&self) -> &[Target] {
+        &self.targets
+    }
+
+    /// The optimization levels this scope covers, in canonical table order.
+    pub fn opt_levels(&self) -> &[OptLevel] {
+        &self.opt_levels
+    }
 }
 
 impl fmt::Display for MarkerScope {
@@ -1162,24 +1530,63 @@ impl fmt::Display for MarkerScope {
 /// difficult feature under test instead of quietly dropped. The basis is carried as both the
 /// original text and the repository-relative path it cites, so the infrastructure test that
 /// audits the register can assert the cited document actually exists.
+/// The fields are private for the same reason the scope's are: this type is the mechanism by which
+/// a failure is reclassified as expected, so every part of it has to keep pointing at the record
+/// and the document it came from. The identifier is what the register is cross-checked against in
+/// both directions, `basis_path` is the path whose existence that cross-check asserts, and
+/// `program_path` is what ties the marker to the one program it may excuse. A writable field would
+/// let a marker be retargeted at another program, or made to cite a document it was never granted,
+/// after every one of those checks had already passed. Parsing a record is the only way in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpectedDivergence {
-    /// Marker identifier, by convention `XD-<AREA>-<TOPIC>-<NNN>`, for example
-    /// `XD-GCCEXT-CASE-RANGES-001`. Unique across the corpus.
-    pub id: String,
-    pub class: DivergenceClass,
-    pub scope: MarkerScope,
-    /// The documented basis, verbatim: a repository-relative path, a comma, then the section or
-    /// description that authorises the marker.
-    pub basis: String,
-    pub basis_path: PathBuf,
-    /// The divergence as observed, so a reader can recognise it without reproducing the run.
-    pub observed: String,
-    /// The program that provokes the divergence: the `.c` file, not its record.
-    pub program_path: PathBuf,
+    id: String,
+    class: DivergenceClass,
+    scope: MarkerScope,
+    basis: String,
+    basis_path: PathBuf,
+    observed: String,
+    program_path: PathBuf,
 }
 
 impl ExpectedDivergence {
+    /// Marker identifier, by convention `XD-<AREA>-<TOPIC>-<NNN>`, for example
+    /// `XD-GCCEXT-CASE-RANGES-001`. Unique across the corpus.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The shape of divergence this marker excuses.
+    pub fn class(&self) -> DivergenceClass {
+        self.class
+    }
+
+    /// Which oracles, targets and optimization levels the marker covers.
+    pub fn scope(&self) -> &MarkerScope {
+        &self.scope
+    }
+
+    /// The documented basis, verbatim: a repository-relative path, a comma, then the section or
+    /// description that authorises the marker.
+    pub fn basis(&self) -> &str {
+        &self.basis
+    }
+
+    /// The repository-relative path the basis cites, split out so the register cross-check can
+    /// assert the cited document exists.
+    pub fn basis_path(&self) -> &Path {
+        &self.basis_path
+    }
+
+    /// The divergence as observed, so a reader can recognise it without reproducing the run.
+    pub fn observed(&self) -> &str {
+        &self.observed
+    }
+
+    /// The program that provokes the divergence: the `.c` file, not its record.
+    pub fn program_path(&self) -> &Path {
+        &self.program_path
+    }
+
     /// True when this marker's scope covers the given cell and oracle.
     ///
     /// This answers the **scope** question only, and deliberately does not re-check which
@@ -1188,8 +1595,8 @@ impl ExpectedDivergence {
     /// holds one. Keeping the check to the scope is what makes the answer unambiguous.
     pub fn covers(&self, key: &CellKey, oracle: Oracle) -> bool {
         self.scope.oracles.contains(&oracle)
-            && self.scope.targets.contains(&key.target)
-            && self.scope.opt_levels.contains(&key.opt)
+            && self.scope.targets.contains(&key.target())
+            && self.scope.opt_levels.contains(&key.opt())
     }
 
     /// The basis path resolved against the package root, for a caller that needs to test the
@@ -1426,19 +1833,30 @@ impl Manifest {
     /// because both lists are normalized to canonical order at parse time. Two runs therefore
     /// visit the same cells in the same order, which is what makes a retained workspace and a
     /// report row reproducible.
-    pub fn cells(&self) -> Vec<CellKey> {
+    ///
+    /// # Errors
+    ///
+    /// Each identity is built through [`CellKey::new`], which enforces the canonical-stem rules
+    /// on the area and program names. Both names reached this record through the parser, which
+    /// already required the program to equal the file stem and the area to be a known feature
+    /// area, so a rejection here means those two checks and the stem rules have drifted apart —
+    /// a defect in the harness rather than in the corpus. It is surfaced rather than asserted
+    /// away, because the alternative spellings are a panic, which would replace a diagnosable
+    /// failure with a crash, and a silent fallback, which would file a cell's artifacts under
+    /// the wrong name.
+    pub fn cells(&self) -> HarnessResult<Vec<CellKey>> {
         let mut cells = Vec::with_capacity(self.cell_count());
         for target in &self.targets {
             for opt in &self.opt_levels {
-                cells.push(CellKey {
-                    area: self.area.clone(),
-                    program: self.program.clone(),
-                    target: *target,
-                    opt: *opt,
-                });
+                cells.push(CellKey::new(
+                    self.area.clone(),
+                    self.program.clone(),
+                    *target,
+                    *opt,
+                )?);
             }
         }
-        cells
+        Ok(cells)
     }
 
     pub fn render_bcc_command(&self, subs: &CommandSubstitutions) -> HarnessResult<String> {
@@ -2822,7 +3240,7 @@ fn parse_marker(
 }
 
 fn known_area_names() -> String {
-    let names: Vec<&str> = AREAS.iter().map(|area| area.directory).collect();
+    let names: Vec<&str> = AREAS.iter().map(|area| area.directory()).collect();
     comma_separated(&names)
 }
 
@@ -3788,10 +4206,11 @@ pub fn load_for_source(c_path: &Path) -> HarnessResult<Manifest> {
 ///
 /// The scan is strict about what an area directory may contain, and nothing that could carry a
 /// program is passed over silently. Programs are the `.c` files; the extensions in
-/// [`AREA_COMPANION_EXTENSIONS`] are recognised companions and ignored; the whitelisted names in
-/// [`AREA_PLACEHOLDER_NAMES`] are ignored by name rather than by pattern. Everything else — an
-/// unrecognised extension, a dot-prefixed entry, a nested directory, a symbolic link — is a hard
-/// error.
+/// [`AREA_COMPANION_EXTENSIONS`] — which is the expectation record and nothing else — are
+/// recognised companions, and each one must pair with a same-stem program by
+/// [`require_paired_companions`]; the whitelisted names in [`AREA_PLACEHOLDER_NAMES`] are ignored
+/// by name rather than by pattern. Everything else — an unrecognised extension, a dot-prefixed
+/// entry, a nested directory, a symbolic link — is a hard error.
 ///
 /// That strictness is load-bearing rather than fussy. It mechanically enforces the rule that the
 /// corpus tree contains no `.rs` file anywhere, which is what keeps the corpus invisible to the
@@ -3803,6 +4222,55 @@ pub fn load_for_source(c_path: &Path) -> HarnessResult<Manifest> {
 /// the corpus's genuine subdirectories being siblings of the areas rather than inside one; and a
 /// symbolic link is rejected rather than followed, for the reason given in
 /// [`require_contained_corpus_file`].
+/// Reject a companion file in a feature area that no program claims.
+///
+/// Every recognised companion is an expectation record, and a record governs exactly one program:
+/// its same-stem sibling. A record whose stem matches no program in the area is therefore either a
+/// record whose program was deleted or renamed, or a record misnamed at birth — and both are
+/// silent failures of exactly the shape this suite exists to prevent. Nothing would compile it,
+/// nothing would run it, and nothing would say so; the run would report a complete pass over a
+/// matrix that was quietly one program smaller than the corpus appears to be.
+///
+/// Only this direction needs checking here. The opposite direction — a program with no record — is
+/// already a hard failure, because resolving a cell requires the record and reports its absence as
+/// a corpus defect rather than skipping the program.
+///
+/// The stems are sorted and de-duplicated first, so the diagnostic names every unpaired record in
+/// a stable order rather than whichever one the filesystem happened to hand over first.
+fn require_paired_companions(
+    area: &str,
+    programs: &[PathBuf],
+    companion_stems: &mut Vec<String>,
+) -> HarnessResult<()> {
+    companion_stems.sort();
+    companion_stems.dedup();
+    let program_stems: Vec<&str> = programs
+        .iter()
+        .filter_map(|program| program.file_stem().and_then(|stem| stem.to_str()))
+        .collect();
+    let orphans: Vec<&str> = companion_stems
+        .iter()
+        .map(String::as_str)
+        .filter(|stem| !program_stems.contains(stem))
+        .collect();
+    if orphans.is_empty() {
+        return Ok(());
+    }
+    Err(HarnessError::new(
+        format!("discovering the programs of feature area {area:?}"),
+        format!(
+            "the expectation record(s) {} have no same-stem `.{SOURCE_EXTENSION}` program in this \
+             area; a record governs exactly one program, its sibling of the same stem, which is \
+             what makes a cell reproducible from those two files alone. An unpaired record is \
+             either a record whose program was deleted or renamed, or a record misnamed at birth, \
+             and neither would ever be compiled, run or mentioned — the run would report a \
+             complete pass over a matrix quietly smaller than the corpus looks. Either restore \
+             the program or remove the record",
+            comma_separated(&orphans)
+        ),
+    ))
+}
+
 pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
     let name = area.trim();
     if AreaSpec::lookup(name).is_none() {
@@ -3829,6 +4297,11 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
     })?;
 
     let mut programs: Vec<PathBuf> = Vec::new();
+    // Stems of the recognised companions, collected so that the pairing rule can be applied
+    // once the whole directory has been seen. It cannot be applied entry by entry, because a
+    // directory listing is in no particular order and a record may be visited before its
+    // program.
+    let mut companion_stems: Vec<String> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
             HarnessError::new(
@@ -3928,7 +4401,21 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
                 let context = format!("discovering the programs of feature area {name:?}");
                 programs.push(ensure_within(&context, &root, &path)?);
             }
-            Some(companion) if AREA_COMPANION_EXTENSIONS.contains(&companion) => {}
+            Some(companion) if AREA_COMPANION_EXTENSIONS.contains(&companion) => {
+                match path.file_stem().and_then(|stem| stem.to_str()) {
+                    Some(stem) => companion_stems.push(String::from(stem)),
+                    None => {
+                        return Err(HarnessError::new(
+                            format!("discovering the programs of feature area {name:?}"),
+                            format!(
+                                "{file_name:?} has a stem that is not valid UTF-8; a companion is \
+                                 paired with its program by stem, so a stem that cannot be read \
+                                 cannot be paired"
+                            ),
+                        ));
+                    }
+                }
+            }
             _ => {
                 return Err(HarnessError::new(
                     format!("discovering the programs of feature area {name:?}"),
@@ -3944,6 +4431,8 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
             }
         }
     }
+
+    require_paired_companions(name, &programs, &mut companion_stems)?;
 
     if programs.is_empty() {
         return Err(HarnessError::new(
@@ -3968,7 +4457,7 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
 pub fn discover_all() -> HarnessResult<Vec<PathBuf>> {
     let mut programs: Vec<PathBuf> = Vec::new();
     for area in AREAS {
-        programs.extend(discover_area(area.directory)?);
+        programs.extend(discover_area(area.directory())?);
     }
     Ok(programs)
 }

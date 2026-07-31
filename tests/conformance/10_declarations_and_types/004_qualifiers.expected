@@ -1,0 +1,34 @@
+# Expectation record for 10_declarations_and_types/004_qualifiers.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 004_qualifiers
+area               = 10_declarations_and_types
+description        = const, volatile and restrict on objects and parameters
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+No const object is written, and no const qualification is cast away and then written
+through.  The restrict-qualified parameters are used truthfully: the destination and source
+are distinct file-scope arrays that never alias, so the promise restrict makes is kept.
+Every volatile access is to a real volatile object, and every index is inside bounds.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+const_read=42
+volatile_seq=6
+restrict_scaled=3 6 9 12 sum=30
+const_qualified_ptr_target=42
+const_pointer_write=19
+END

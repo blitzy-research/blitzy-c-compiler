@@ -1,0 +1,61 @@
+# Expectation record for 05_pointers/001_arithmetic_on_arrays.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_arithmetic_on_arrays
+area               = 05_pointers
+description        = Pointer increment, decrement, indexing and element scaling within one array
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every pointer stays within its own array, and no pointer is advanced past one element
+beyond the last.  Element offsets are expressed as differences between pointers into the
+same array object, never by subtracting character views of distinct element subobjects,
+which would not be a subtraction within one object.  No address is printed and no pointer
+one past the end is dereferenced.  Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+folded_index=10 20 50 80
+folded_offset=60
+folded_preinc=70
+folded_postinc=80
+folded_predec=70
+folded_postdec=60
+folded_plusassign=80
+folded_minusassign=40
+folded_walked_index=3
+folded_short=1 4 8
+folded_double=0.500 3.500
+folded_struct=1 2 7 8
+folded_scale_short=2
+folded_scale_int=4
+folded_scale_double=8
+folded_scale_struct=8
+folded_scale_int_span=16
+runtime_index=40
+runtime_index_plus=40
+runtime_index_commuted=40
+runtime_plusassign=40
+runtime_minusassign=20
+runtime_walked_index=1
+runtime_short=6
+runtime_double=2.500
+runtime_struct=7 8
+runtime_scale_int=4
+runtime_scale_double=8
+runtime_scan_total=360
+END

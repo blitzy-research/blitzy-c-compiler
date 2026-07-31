@@ -1,0 +1,83 @@
+# Expectation record for 04_bitfields/007_promotion_in_expressions.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 007_promotion_in_expressions
+area               = 04_bitfields
+description        = Bitfield promotion as an operand, contrasting sub-int widths with a full 32-bit field
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+A bitfield narrower than int promotes to int even when its base type is unsigned, so
+subtracting below zero yields a negative int; a 32-bit unsigned field promotes to unsigned
+int and wraps modularly.  Both behaviours are defined, and that contrast is the subject of
+the file.  Every product and shift is chosen to stay inside the range of the promoted type,
+so no signed overflow occurs and every shift count is in range.
+Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+folded_sizeof_promoted_u5=4
+folded_sizeof_promoted_s5=4
+folded_u5_minus_one=-1
+folded_u16_minus_one=-1
+folded_u31_minus_one=-1
+folded_u32_minus_one=4294967295
+folded_not_u5=1
+folded_complement_u5=-1
+folded_negate_s5=16
+folded_s5_times_two=-32
+folded_s5_minus_one=-17
+folded_s16_times_hundred=-100000
+folded_max_u5_squared=961
+folded_max_u5_shifted=32505856
+folded_max_u16_squared=1020
+folded_max_u32_plus_one=0
+folded_max_s5_squared=225
+folded_max_s16_div=10922
+folded_signed_div=0
+folded_mixed_unsigned=2
+folded_conditional=10
+folded_conditional_zero=20
+folded_nocast_u5=21
+folded_nocast_s5=-11
+folded_nocast_u32=3000000000
+runtime_sizeof_promoted_u5=4
+runtime_sizeof_promoted_s5=4
+runtime_u5_minus_one=-1
+runtime_u16_minus_one=-1
+runtime_u31_minus_one=-1
+runtime_u32_minus_one=4294967295
+runtime_not_u5=1
+runtime_complement_u5=-1
+runtime_negate_s5=16
+runtime_s5_times_two=-32
+runtime_s5_minus_one=-17
+runtime_s16_times_hundred=-100000
+runtime_max_u5_squared=961
+runtime_max_u5_shifted=32505856
+runtime_max_u16_squared=1020
+runtime_max_u32_plus_one=0
+runtime_max_s5_squared=225
+runtime_max_s16_div=10922
+runtime_signed_div=0
+runtime_mixed_unsigned=2
+runtime_conditional=10
+runtime_conditional_zero=20
+runtime_nocast_u5=21
+runtime_nocast_s5=-11
+runtime_nocast_u32=3000000000
+END

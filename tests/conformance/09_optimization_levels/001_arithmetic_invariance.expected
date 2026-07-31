@@ -1,0 +1,44 @@
+# Expectation record for 09_optimization_levels/001_arithmetic_invariance.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_arithmetic_invariance
+area               = 09_optimization_levels
+description        = Identical arithmetic results at every optimization level, folded and volatile-runtime
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every operator is applied to operands chosen to stay inside the range of its type, so no
+signed overflow occurs; every divisor is nonzero and the most negative value is never
+divided by minus one; every shift count is in range and no negative value is left-shifted.
+Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+add folded=1337 runtime=1337 equal=1
+sub folded=1337 runtime=1337 equal=1
+mul folded=1337 runtime=1337 equal=1
+div folded=1337 runtime=1337 equal=1
+mod folded=3 runtime=3 equal=1
+neg folded=-1337 runtime=-1337 equal=1
+shl folded=1336 runtime=1336 equal=1
+shr folded=1337 runtime=1337 equal=1
+and folded=15728880 runtime=15728880 equal=1
+or  folded=4293984240 runtime=4293984240 equal=1
+xor folded=4278255360 runtime=4278255360 equal=1
+not folded=4294901760 runtime=4294901760 equal=1
+wide folded=1244444434221 runtime=1244444434221 equal=1
+END

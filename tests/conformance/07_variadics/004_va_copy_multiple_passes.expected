@@ -1,0 +1,97 @@
+# Expectation record for 07_variadics/004_va_copy_multiple_passes.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 004_va_copy_multiple_passes
+area               = 07_variadics
+description        = An argument list copied and traversed more than once, including a copy of a copy
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+The va_copy lifecycle is obeyed throughout: every copy has its own va_end, each list from
+va_start is ended exactly once, a copy is always taken before its source has been
+traversed so both start from the same position, a copy of a copy is legal, a list may be
+ended without consuming all of its arguments, no list is read past the number of arguments
+supplied, and every va_end sits in the same function as its va_start or va_copy.  Every
+floating value is exactly representable, so the printed text is exact.  <stdarg.h> is
+included because a variadic function cannot be written without it and it is in both
+compilers' freestanding sets; printf is still hand-declared, because bcc ships no stdio.h.
+END
+expected_stdout    <<END
+fdup_copy[0]=2
+fdup_copy[1]=-5
+fdup_copy[2]=10
+fdup_copy[3]=-13
+fdup_orig[0]=2
+fdup_orig[1]=-5
+fdup_orig[2]=10
+fdup_orig[3]=-13
+fdup_copy_sum=-6
+fdup_orig_sum=-6
+fdup_equal=1
+rdup_copy[0]=3
+rdup_copy[1]=-7
+rdup_copy[2]=12
+rdup_copy[3]=-18
+rdup_orig[0]=3
+rdup_orig[1]=-7
+rdup_orig[2]=12
+rdup_orig[3]=-18
+rdup_copy_sum=-10
+rdup_orig_sum=-10
+rdup_equal=1
+ftri_c2[0]=1.500000
+ftri_c2[1]=2.250000
+ftri_c2[2]=4.125000
+ftri_c1[0]=1.500000
+ftri_c1[1]=2.250000
+ftri_c1[2]=4.125000
+ftri_ap[0]=1.500000
+ftri_ap[1]=2.250000
+ftri_ap[2]=4.125000
+ftri_sums=7.875000,7.875000,7.875000
+rtri_c2[0]=0.500000
+rtri_c2[1]=3.250000
+rtri_c2[2]=8.125000
+rtri_c1[0]=0.500000
+rtri_c1[1]=3.250000
+rtri_c1[2]=8.125000
+rtri_ap[0]=0.500000
+rtri_ap[1]=3.250000
+rtri_ap[2]=8.125000
+rtri_sums=11.875000,11.875000,11.875000
+fsplit_head[0]=1
+fsplit_head[1]=2
+fsplit_head[2]=3
+fsplit_all[0]=1
+fsplit_all[1]=2
+fsplit_all[2]=3
+fsplit_all[3]=4
+fsplit_all[4]=5
+fsplit_all[5]=6
+fsplit_head_sum=6
+fsplit_tail_sum=15
+fsplit_total=21
+rsplit_head[0]=10
+rsplit_head[1]=20
+rsplit_head[2]=30
+rsplit_all[0]=10
+rsplit_all[1]=20
+rsplit_all[2]=30
+rsplit_all[3]=40
+rsplit_all[4]=50
+rsplit_all[5]=60
+rsplit_head_sum=60
+rsplit_tail_sum=150
+rsplit_total=210
+END

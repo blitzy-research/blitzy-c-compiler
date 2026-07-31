@@ -1,0 +1,38 @@
+# Expectation record for 04_bitfields/002_read_write.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_read_write
+area               = 04_bitfields
+description        = Reading and writing each bitfield of a struct, folded and volatile-runtime
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every value stored into a bitfield is inside the range its declared width and signedness
+can represent, so no store is out of range and no implementation-defined truncation is
+relied upon.  Each field carries an explicit signed or unsigned base type.  No padding bit
+or padding byte is ever read.  Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+folded_read u3=6 s5=-13 u9=400 s12=-1500 u1=1
+folded_write u3=1 s5=15 u9=511 s12=2047 u1=0
+folded_min s5=-16 s12=-2048
+runtime_read u3=6 s5=-13 u9=400 s12=-1500 u1=1
+runtime_write u3=7 s5=-12 u9=401 s12=-1499 u1=0
+runtime_max u3=7 u9=511 u1=1
+runtime_zero u3=0 u9=0 u1=0
+END

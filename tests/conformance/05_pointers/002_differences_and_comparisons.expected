@@ -1,0 +1,84 @@
+# Expectation record for 05_pointers/002_differences_and_comparisons.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_differences_and_comparisons
+area               = 05_pointers
+description        = Pointer differences and relational comparisons, with a one-past-end sentinel never dereferenced
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+A pointer one past the last element is formed, compared and subtracted but never
+dereferenced, which is exactly what the standard permits.  A pointer TWO past the end is
+never formed at all: each strided walk advances only while a full stride of elements
+genuinely remains, and the overshoot a further stride would have produced is derived by
+integer arithmetic from the last legal difference instead.  Every difference is between
+pointers into the same array object.  Each result is cast to long long before printing, so
+the text does not depend on the width of ptrdiff_t.  No address is printed.
+Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+folded_span=10
+folded_head=4
+folded_tail=6
+folded_negative=-4
+folded_self=0
+folded_end_self=0
+folded_alias_eq=1
+folded_end_alias_eq=1
+folded_lt=1
+folded_le=1
+folded_gt=1
+folded_ge=1
+folded_eq=1
+folded_ne=1
+folded_mid_between=1
+folded_end_not_begin=1
+folded_forward_sum=45
+folded_forward_stopped_at_end=1
+folded_reverse_sum=90
+folded_reverse_stopped_at_begin=1
+folded_stride3_count=4
+folded_stride3_overshoot=2
+folded_short_span=6
+folded_double_span=4
+folded_struct_span=3
+folded_short_interior=4
+folded_double_interior=2
+folded_struct_interior=2
+folded_short_end_gt=1
+folded_double_end_gt=1
+folded_struct_end_gt=1
+folded_solo_span=1
+folded_solo_lt=1
+folded_solo_value=77
+runtime_head=4
+runtime_tail=6
+runtime_negative=-4
+runtime_lt=1
+runtime_gt=1
+runtime_ne_end=1
+runtime_end_matches=1
+runtime_end_span=10
+runtime_forward_sum=55
+runtime_stopped_at_end=1
+runtime_stride_count=5
+runtime_stride_overshoot=0
+runtime_short_interior=4
+runtime_double_interior=3
+runtime_struct_interior=2
+END

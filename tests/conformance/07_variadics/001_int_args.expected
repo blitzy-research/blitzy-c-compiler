@@ -1,0 +1,60 @@
+# Expectation record for 07_variadics/001_int_args.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_int_args
+area               = 07_variadics
+description        = Integer variadic arguments of three widths retrieved in order
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every va_arg names exactly the type the caller supplied, and no list is read past the
+number of arguments actually passed.  Each list created by va_start is ended exactly once
+by va_end in the same function.  All sums stay inside the range of their type.  Each
+retrieval is exercised twice, once from literal arguments and once from arguments
+originating in volatile storage.  <stdarg.h> is included because a variadic function cannot
+be written without it and it is in both compilers' freestanding sets; printf is still
+hand-declared, because bcc ships no stdio.h.
+END
+expected_stdout    <<END
+fint[0]=3
+fint[1]=-7
+fint[2]=11
+fint[3]=250
+fint[4]=-1000
+fint_sum=-743
+rint[0]=5
+rint[1]=9
+rint[2]=-20
+rint[3]=400
+rint[4]=606
+rint_sum=1000
+fuint[0]=1
+fuint[1]=4000000000
+fuint[2]=7
+fuint[3]=65535
+fuint_sum=4000065543
+ruint[0]=2
+ruint[1]=3000000000
+ruint[2]=4
+ruint[3]=65536
+ruint_sum=3000065542
+fllong[0]=1000000000000
+fllong[1]=-250000000000
+fllong[2]=3
+fllong_sum=750000000003
+rllong[0]=2000000000000
+rllong[1]=500000000000
+rllong[2]=-7
+rllong_sum=2499999999993
+END

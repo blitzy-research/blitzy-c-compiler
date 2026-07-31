@@ -1,0 +1,40 @@
+# Expectation record for 10_declarations_and_types/001_complex_declarators.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_complex_declarators
+area               = 10_declarations_and_types
+description        = Arrays of pointers to functions returning pointers, and the surrounding declarator family
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every function pointer is initialized before it is called and is called through a type
+compatible with the function's definition.  Each table index is inside its bounds, each
+returned pointer designates a live object of the expected type, and every arithmetic result
+stays inside the range of int.  Sizes are printed as element counts and 0/1 relations, so
+no printed value depends on pointer width, and no address is printed.
+Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+fn_table_folded=27
+fn_table_runtime=21
+slot_values=11 22
+direct_table=11 22
+row_ptr=4 5 6
+choose=11 10
+sizes=36 8
+END

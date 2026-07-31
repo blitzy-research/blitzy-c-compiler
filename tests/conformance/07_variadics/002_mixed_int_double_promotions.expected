@@ -1,0 +1,63 @@
+# Expectation record for 07_variadics/002_mixed_int_double_promotions.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_mixed_int_double_promotions
+area               = 07_variadics
+description        = Default argument promotions for float and the narrow integer types
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Arguments are supplied in the unpromoted types and retrieved in the promoted ones, so
+va_arg always names the type actually present in the list: naming the type written at the
+call site would be undefined behaviour, and a divergence on an undefined program would
+prove nothing about either compiler.  No list is read past the argument count and each is
+ended exactly once.  Every floating literal is a dyadic rational exactly representable in
+IEEE binary32 and binary64, so the printed text is exact.  <stdarg.h> is included because a
+variadic function cannot be written without it and it is in both compilers' freestanding
+sets; printf is still hand-declared, because bcc ships no stdio.h.
+END
+expected_stdout    <<END
+fflt[0]=1.500000
+fflt[1]=2.250000
+fflt[2]=4.125000
+fflt_sum=7.875000
+rflt[0]=0.250000
+rflt[1]=8.500000
+rflt[2]=3.062500
+rflt_sum=11.812500
+fnarrow[0]=-5
+fnarrow[1]=200
+fnarrow[2]=-3000
+fnarrow[3]=60000
+fnarrow[4]=1
+fnarrow_sum=57196
+rnarrow[0]=-128
+rnarrow[1]=255
+rnarrow[2]=-32768
+rnarrow[3]=65535
+rnarrow[4]=1
+rnarrow_sum=32895
+fmix_int[0]=11
+fmix_int[1]=22
+fmix_flt[0]=1.250000
+fmix_flt[1]=2.500000
+fmix_int_sum=33
+fmix_flt_sum=3.750000
+rmix_int[0]=33
+rmix_int[1]=44
+rmix_flt[0]=0.750000
+rmix_flt[1]=1.500000
+rmix_int_sum=77
+rmix_flt_sum=2.250000
+END

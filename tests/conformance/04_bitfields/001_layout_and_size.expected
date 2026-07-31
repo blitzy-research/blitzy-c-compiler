@@ -1,0 +1,55 @@
+# Expectation record for 04_bitfields/001_layout_and_size.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_layout_and_size
+area               = 04_bitfields
+description        = Bitfield size, alignment and byte image for fully covered allocation units
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every bitfield is declared on an explicit unsigned int or signed int base type, so its
+signedness is stated by the program rather than chosen by the implementation, and the
+allocation unit is four bytes on all four targets.  A byte image is printed only for
+structs whose every bit is covered by a named field, so no unspecified padding bit is ever
+observed; the struct that necessarily leaves padding is read back only through its named
+members.  Each union is read through the member last written, so no type punning is
+relied upon.  Every stored value is masked to its destination field's exact width, so no
+store is out of range.  Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+sizeof_packed3=4
+alignof_packed3=4
+sizeof_oneword=4
+alignof_oneword=4
+sizeof_withsigned=4
+alignof_withsigned=4
+sizeof_spanning=8
+alignof_spanning=4
+sizeof_covered32=4
+alignof_covered32=4
+packed3_readback a=5 b=21 c=300
+oneword_readback lo=4660 hi=22136
+oneword_image 34 12 78 56
+covered32_readback a=1 b=12345 c=101 d=678
+covered32_image 73 e0 b2 a9
+volatile_packed3_readback a=5 b=21 c=300
+volatile_oneword_readback lo=4660 hi=22136
+volatile_oneword_image 34 12 78 56
+volatile_covered32_readback a=1 b=12345 c=101 d=678
+volatile_covered32_image 73 e0 b2 a9
+END

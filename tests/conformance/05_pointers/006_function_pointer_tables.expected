@@ -1,0 +1,85 @@
+# Expectation record for 05_pointers/006_function_pointer_tables.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 006_function_pointer_tables
+area               = 05_pointers
+description        = Dispatch through arrays of function pointers, including a two-dimensional table
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every index into a table is inside its bounds and every entry is initialized before it is
+called, through a compatible type.  The row span is taken between pointers to rows of the
+same array object and combined with the column count, never by subtracting element pointers
+belonging to two different rows, which would not be a subtraction within one object.  No
+function address is printed.  Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+bin0=17
+bin1=7
+bin2=60
+bin3=5
+bin4=12
+bin5=12
+bin0_deref=24
+bin1_deref=16
+bin_identity0=1
+bin_identity5=1
+bin_distinct=1
+un0=-9
+un1=18
+un2=81
+nil0=1
+nil1=2
+nil2=3
+grid00=10
+grid01=4
+grid02=21
+grid10=3
+grid11=7
+grid12=7
+decay_first=36
+decay_second=24
+decay_fourth=6
+decay_index=3
+decay_third=180
+decay_span=6
+decay_row_span=2
+decay_cell_span=3
+dispatch_param0=48
+dispatch_param2=320
+dispatch_param_row1=40
+folded_sweep=84
+runtime_bin=17
+runtime_bin_identity=1
+runtime_bin_min=5
+runtime_bin_deref=5
+runtime_bin_last=12
+runtime_bin_index=5
+runtime_un=81
+runtime_nil=3
+runtime_grid=7
+runtime_grid_other=21
+runtime_dispatch=40
+runtime_dispatch_table=32
+runtime_sweep=84
+runtime_sweep_matches_folded=1
+runtime_grid_sweep=38
+runtime_copied=12
+runtime_copied_is_max=1
+runtime_copied_from_table=1
+END

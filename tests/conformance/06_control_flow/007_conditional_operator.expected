@@ -1,0 +1,47 @@
+# Expectation record for 06_control_flow/007_conditional_operator.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 007_conditional_operator
+area               = 06_control_flow
+description        = Conditional operator result typing and single-branch evaluation
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Exactly one branch is evaluated, and that absence is made observable by recording each side
+effect in a volatile counter printed after the expression.  The result type is the common
+type of the two branches after the usual arithmetic conversions; the double values used are
+exactly representable, so the printed text is exact.  No address is printed: the
+pointer-typed branches are observed only by comparison.  No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+const_true_branch r=10 branch_calls=1
+const_false_branch r=20 branch_calls=1
+runtime_true_branch r=10 branch_calls=1
+runtime_false_branch r=20 branch_calls=1
+nested_one_leaf r=1 branch_calls=1
+size_char=4 size_short=4 size_int_double=8 size_float=4
+const_int_double_branches=1.00
+runtime_int_double_true=1.00
+runtime_int_double_false=2.50
+right_associative=10 20 30 40
+pointer_branch_true=1
+pointer_branch_false=1
+void_branches_true branch_calls=1
+void_branches_false branch_calls=1
+in_argument=10 of_comparison=1
+in_argument_other=6 of_comparison_other=0
+compound_assignment=12
+as_switch_control=1
+END

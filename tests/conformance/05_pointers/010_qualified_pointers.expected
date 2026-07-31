@@ -1,0 +1,92 @@
+# Expectation record for 05_pointers/010_qualified_pointers.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 010_qualified_pointers
+area               = 05_pointers
+description        = const, volatile and restrict qualified pointers and pointed-to types
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+const is never cast away and then written through: every write targets an object that is
+not itself const and is merely reached through a const view, so no attempt is made to
+modify an object defined with a const type.  The restrict-qualified parameters are used
+truthfully, receiving distinct objects that never alias.  Every volatile access is to a
+real volatile object.  No address is printed.
+Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+read_pointer_to_const=11
+pointer_to_const_identity=1
+const_array_first=1
+const_array_index=4
+const_array_stepped=2
+const_array_offset=1
+const_array_span=5
+const_pointer_read=44
+const_pointer_write=45
+const_pointer_reread=45
+const_pointer_identity=1
+const_pointer_param_bump=50
+const_pointer_param_bump2=60
+const_pointer_to_const=11
+const_pointer_to_const_identity=1
+volatile_read=22
+volatile_after_write=23
+volatile_object=23
+volatile_identity=1
+volatile_array_first=10
+volatile_array_index=50
+volatile_array_stepped=30
+volatile_array_offset=2
+volatile_array_written=31
+const_volatile_read=33
+const_volatile_reread=33
+const_volatile_identity=1
+qual_added_read=60
+qual_added_same_object=1
+qual_added_sees_write=71
+volatile_added_read=71
+volatile_added_write_seen=72
+both_added_read=72
+const_struct=6 7
+const_struct_identity=1
+mutable_struct=8 9
+mutable_struct_written=80 90
+const_view_of_mutable=80 90
+sum_const_array=15
+sum_const_partial=6
+sum_const_interior=12
+sum_volatile_array=151
+sum_volatile_partial=30
+sum_const_of_mutable=72
+volatile_counter=7
+volatile_counter_doubled=14
+volatile_sink_total=12
+runtime_const_index=4
+runtime_volatile_index=40
+runtime_const_ptr_read=4
+runtime_const_ptr_offset=3
+runtime_volatile_ptr_read=40
+runtime_volatile_ptr_written=41
+runtime_volatile_ptr_offset=3
+runtime_sum_const=15
+runtime_sum_volatile=152
+runtime_const_volatile_read=31
+runtime_const_volatile_offset=2
+runtime_bump=74
+END

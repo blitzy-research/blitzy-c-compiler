@@ -1,0 +1,77 @@
+# Expectation record for 05_pointers/003_struct_member_access.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 003_struct_member_access
+area               = 05_pointers
+description        = Member access through pointers, including nested members, arrays and a linked walk
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every pointer targets a live object of the right type for its whole lifetime, and every
+member read is of a member that was written first.  Array walks stay within their arrays
+and stop on a one-past-end sentinel that is never dereferenced.  The linked walk terminates
+on a null next pointer that is tested before use.  No address is printed.
+Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+arrow_id=7
+dot_id=7
+arrow_eq_dot=1
+nested_x=11
+nested_y=12
+nested_via_dot=11 12
+inner_ptr_x=11
+inner_ptr_y=12
+inner_ptr_same_object=1
+vec_all=21 22 23 24
+vec_decay=21 24
+vec_decay_same=1
+vec_span=4
+vec_interior=2
+arr0=31 32
+arr2=35 36
+arr_decay=31 32
+arr_decay_step=33 34
+arr_decay_index=1
+written_id=8
+written_nested=13
+written_vec=99
+written_arr=44
+table0_id=100
+table1_id=200
+table1_nested=13 14
+table1_vec=16 18
+table1_arr=23 24
+table2_id=300
+table_index=2
+table_span=3
+list_sum=6
+list_steps=3
+list_second=2
+list_third=3
+list_tail_null=1
+runtime_id=300
+runtime_nested=25 26
+runtime_vec=29
+runtime_arr=35 36
+runtime_index=2
+runtime_member_of_index=16
+runtime_nested_of_index=21
+runtime_inner_ptr=21 22
+runtime_inner_same=1
+END

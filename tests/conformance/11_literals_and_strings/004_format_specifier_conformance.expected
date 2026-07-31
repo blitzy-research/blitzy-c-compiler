@@ -1,0 +1,50 @@
+# Expectation record for 11_literals_and_strings/004_format_specifier_conformance.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 004_format_specifier_conformance
+area               = 11_literals_and_strings
+description        = Width-normalized format specifiers producing identical output on every target
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+No conversion whose argument width varies by target is used: no long length modifier, no
+size_t modifier, no pointer conversion and no long double modifier appears.  Every integer
+argument is an int, an unsigned int, a long long or an unsigned long long, and each matches
+the conversion it is passed to after the default argument promotions, so no argument is of
+the wrong type.  Every floating value is exactly representable.  No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+d=-42 i=-42
+u=4000000000 o=35632624000 x=ee6b2800 X=EE6B2800
+lld=-9007199254740993 llu=18446744073709551615 llx=ffffffffffffffff
+hd=-300 hhd=-100
+c=Q s=text pct=%
+width=[   42] left=[42   ] zero=[00042]
+plus=[+42] space=[ 42] neg=[-42]
+alt_x=[0xff] alt_o=[0377]
+prec_s=[abc] width_s=[    ab] left_s=[ab    ]
+star=[    42] star_prec=[ab]
+f=1.500000 e=1.500000e+00 g=1.5
+f_from_float=0.250000
+zero_f=0.000000 neg_f=-0.500000
+big_lld=9007199254740993 small_lld=-9007199254740993
+cast_int_to_ll=-42
+cast_uint_to_ull=4000000000
+sizeof_int=4 sizeof_ll=8
+rt_i=-12345 rt_u=4294967295
+rt_lld=-1234567890123
+rt_f=2.500000
+rt_hex=ffffffff rt_oct=37777777777
+END

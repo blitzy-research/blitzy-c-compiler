@@ -1,0 +1,40 @@
+# Expectation record for 10_declarations_and_types/005_struct_copy_and_return.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 005_struct_copy_and_return
+area               = 10_declarations_and_types
+description        = By-value aggregate copy, parameter passing and return across two sizes
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every member is assigned before it is read, so no indeterminate value and no padding byte
+is ever observed; aggregates are compared member by member rather than by object
+representation.  All member values stay inside the range of their types.  How either
+aggregate travels is the ABI's decision, and both sizes are printed rather than assumed so
+they are compared as well.  Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+small_folded=1 2
+small_runtime=4 5
+large_folded=1 2 3 4 5 6 7 8
+large_runtime=4 5 6 7 8 9 10 11
+copy=1 2
+passthrough=2 4 unchanged=1 2
+consume=10 26
+sizes=8 32
+END

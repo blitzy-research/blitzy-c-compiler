@@ -1,0 +1,56 @@
+# Expectation record for 08_gcc_extensions/006_builtin_functions.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 006_builtin_functions
+area               = 08_gcc_extensions
+description        = Documented builtin functions with deterministic results
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every bit-counting builtin is given a nonzero argument, so the cases those builtins leave
+undefined for zero are never reached.  The string and memory builtins operate on
+properly terminated literals and on distinct objects large enough for the access, so no
+read or write is out of bounds and no overlap is relied upon.  All results are printed as
+fixed-width integers, so no printed value depends on a target's word size.
+Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+bi_popcount32=16
+bi_popcount64=13
+bi_clz_one=31
+bi_clz_top=0
+bi_ctz_eight=3
+bi_clzll_one=63
+bi_ctzll_bit40=40
+bi_bswap16=13330
+bi_bswap32=1144201745
+bi_bswap64=578437695752307201
+bi_abs=12345
+bi_strlen=11
+bi_strcmp_sign=-1 1 0
+bi_mem_roundtrip=1
+bi_offsetof=0 4 8
+bi_expect_taken=7
+bi_expect_value=5
+bi_runtime_popcount32=16
+bi_runtime_popcount64=13
+bi_runtime_clz=0
+bi_runtime_ctz=4
+bi_runtime_bswap32=4042322160
+bi_runtime_abs=12345
+END

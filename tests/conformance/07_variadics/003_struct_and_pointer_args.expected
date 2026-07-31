@@ -1,0 +1,59 @@
+# Expectation record for 07_variadics/003_struct_and_pointer_args.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 003_struct_and_pointer_args
+area               = 07_variadics
+description        = Aggregates and pointers passed through the variadic path
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Aggregates are not subject to the default argument promotions, so va_arg names exactly the
+type supplied.  Because the pointer retrieval type is pointer-to-const-int and int and
+const int are not compatible types, every pointer argument is written with an explicit cast
+to the retrieval type, so no argument of the wrong type is ever retrieved.  Only the
+pointee value is printed, never a pointer.  No list is read past its argument count and
+each is ended exactly once.  <stdarg.h> is included because a variadic function cannot be
+written without it and it is in both compilers' freestanding sets; printf is still
+hand-declared, because bcc ships no stdio.h.
+END
+expected_stdout    <<END
+fsmall[0]=1,2
+fsmall[1]=30,40
+fsmall[2]=500,600
+fsmall_sum=1173
+rsmall[0]=7,8
+rsmall[1]=90,100
+rsmall[2]=1100,1200
+rsmall_sum=2505
+fmid[0]=1,2,3,4
+fmid[1]=10,20,30,40
+fmid_sum=110
+rmid[0]=5,6,7,8
+rmid[1]=50,60,70,80
+rmid_sum=286
+flarge[0]=1,2,3,4,5,6,7,8
+flarge[1]=10,20,30,40,50,60,70,80
+flarge_sum=396
+rlarge[0]=2,4,6,8,10,12,14,16
+rlarge[1]=100,200,300,400,500,600,700,800
+rlarge_sum=3672
+fptr[0]=11
+fptr[1]=22
+fptr[2]=33
+fptr_sum=66
+rptr[0]=111
+rptr[1]=222
+rptr[2]=333
+rptr_sum=666
+END

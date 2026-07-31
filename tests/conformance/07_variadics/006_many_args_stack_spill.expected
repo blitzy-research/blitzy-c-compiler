@@ -1,0 +1,157 @@
+# Expectation record for 07_variadics/006_many_args_stack_spill.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 006_many_args_stack_spill
+area               = 07_variadics
+description        = Argument counts that exhaust every target's argument registers and force stack spill
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Each group passes far more arguments of one class than any ABI under test documents
+argument registers for, so the paths those ABIs use once their registers are exhausted are
+exercised.  Every va_arg names exactly the type supplied, no list is read past its argument
+count, and each is ended exactly once.  All sums stay inside the range of their type and
+every floating value is exactly representable.  One line is printed per retrieved argument,
+so a single divergent line identifies the exact argument mishandled.  <stdarg.h> is included
+because a variadic function cannot be written without it and it is in both compilers'
+freestanding sets; printf is still hand-declared, because bcc ships no stdio.h.
+END
+expected_stdout    <<END
+fint[0]=1000
+fint[1]=1001
+fint[2]=1002
+fint[3]=1003
+fint[4]=1004
+fint[5]=1005
+fint[6]=1006
+fint[7]=1007
+fint[8]=1008
+fint[9]=1009
+fint[10]=1010
+fint[11]=1011
+fint[12]=1012
+fint[13]=1013
+fint[14]=1014
+fint[15]=1015
+fint[16]=1016
+fint[17]=1017
+fint[18]=1018
+fint[19]=1019
+fint_sum=20190
+rint[0]=2000
+rint[1]=2001
+rint[2]=2002
+rint[3]=2003
+rint[4]=2004
+rint[5]=2005
+rint[6]=2006
+rint[7]=2007
+rint[8]=2008
+rint[9]=2009
+rint[10]=2010
+rint[11]=2011
+rint[12]=2012
+rint[13]=2013
+rint[14]=2014
+rint[15]=2015
+rint[16]=2016
+rint[17]=2017
+rint[18]=2018
+rint[19]=2019
+rint_sum=40190
+fll[0]=1000000000000
+fll[1]=1000000000001
+fll[2]=1000000000002
+fll[3]=1000000000003
+fll[4]=1000000000004
+fll[5]=1000000000005
+fll[6]=1000000000006
+fll[7]=1000000000007
+fll[8]=1000000000008
+fll[9]=1000000000009
+fll[10]=1000000000010
+fll[11]=1000000000011
+fll_sum=12000000000066
+rll[0]=3000000000000
+rll[1]=3000000000001
+rll[2]=3000000000002
+rll[3]=3000000000003
+rll[4]=3000000000004
+rll[5]=3000000000005
+rll[6]=3000000000006
+rll[7]=3000000000007
+rll[8]=3000000000008
+rll[9]=3000000000009
+rll[10]=3000000000010
+rll[11]=3000000000011
+rll_sum=36000000000066
+fdbl[0]=1.000000
+fdbl[1]=1.500000
+fdbl[2]=2.000000
+fdbl[3]=2.500000
+fdbl[4]=3.000000
+fdbl[5]=3.500000
+fdbl[6]=4.000000
+fdbl[7]=4.500000
+fdbl[8]=5.000000
+fdbl[9]=5.500000
+fdbl[10]=6.000000
+fdbl[11]=6.500000
+fdbl[12]=7.000000
+fdbl[13]=7.500000
+fdbl[14]=8.000000
+fdbl[15]=8.500000
+fdbl_sum=76.000000
+rdbl[0]=100.000000
+rdbl[1]=100.500000
+rdbl[2]=101.000000
+rdbl[3]=101.500000
+rdbl[4]=102.000000
+rdbl[5]=102.500000
+rdbl[6]=103.000000
+rdbl[7]=103.500000
+rdbl[8]=104.000000
+rdbl[9]=104.500000
+rdbl[10]=105.000000
+rdbl[11]=105.500000
+rdbl[12]=106.000000
+rdbl[13]=106.500000
+rdbl[14]=107.000000
+rdbl[15]=107.500000
+rdbl_sum=1660.000000
+fmix[0]=10,0.250000
+fmix[1]=11,0.500000
+fmix[2]=12,0.750000
+fmix[3]=13,1.000000
+fmix[4]=14,1.250000
+fmix[5]=15,1.500000
+fmix[6]=16,1.750000
+fmix[7]=17,2.000000
+fmix[8]=18,2.250000
+fmix[9]=19,2.500000
+fmix_isum=145
+fmix_dsum=13.750000
+rmix[0]=50,0.500000
+rmix[1]=51,1.000000
+rmix[2]=52,1.500000
+rmix[3]=53,2.000000
+rmix[4]=54,2.500000
+rmix[5]=55,3.000000
+rmix[6]=56,3.500000
+rmix[7]=57,4.000000
+rmix[8]=58,4.500000
+rmix[9]=59,5.000000
+rmix_isum=545
+rmix_dsum=27.500000
+END

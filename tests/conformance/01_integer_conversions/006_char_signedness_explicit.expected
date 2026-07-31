@@ -1,0 +1,64 @@
+# Expectation record for 01_integer_conversions/006_char_signedness_explicit.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 006_char_signedness_explicit
+area               = 01_integer_conversions
+description        = Explicit signed char and unsigned char conversions and arithmetic, folded and volatile-runtime
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Plain char is never used for a signedness-dependent value.  Every character object is
+spelled signed char or unsigned char, so its range is fixed by the program rather than by
+the implementation.  Each signed value stays inside the destination range, unsigned
+results wrap modularly as defined, and every shift count is in range.
+Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+impl_defined_notes <<END
+Plain char has implementation-defined signedness and was measured signed on x86-64 and
+i686 but unsigned on AArch64 and RISC-V 64.  Rather than restrict the target list, the
+program removes the dependence entirely by never using plain char for a value whose
+signedness matters, so all four targets remain fully compared and nothing is excluded.
+END
+expected_stdout    <<END
+fold_schar_min=-128
+fold_schar_max=127
+fold_uchar_max=255
+fold_schar_to_uchar=255
+fold_uchar_to_schar=-56
+fold_int_to_schar=-56
+fold_int_to_uchar=255
+fold_uchar_add=256
+fold_schar_sub=-129
+fold_schar_shift=-1
+fold_uchar_shift=100
+fold_schar_uchar_diff=0
+run_schar_min=-128
+run_schar_max=127
+run_uchar_max=255
+run_schar_to_uchar=255
+run_uchar_to_schar=-56
+run_int_to_schar=-56
+run_int_to_uchar=255
+run_uchar_add=256
+run_schar_sub=-129
+run_schar_shift=-1
+run_uchar_shift=100
+run_schar_uchar_diff=0
+schar_promotes=int
+uchar_promotes=int
+END

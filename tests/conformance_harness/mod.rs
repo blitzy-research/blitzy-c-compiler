@@ -32,17 +32,25 @@
 //!
 //! Edition 2021, minimum supported Rust 1.70.
 
-pub mod classify;
-pub mod compare;
-pub mod compile;
+// Only the submodules whose files exist in the checkout are declared. A `mod` declaration is
+// not a plan — it is a compile-time assertion that the file is there, so declaring a module
+// whose file has not been written yet makes this file, and every file that reaches it, fail to
+// compile with `E0583: file not found for module`. Nine such declarations would be nine
+// compilation errors in a checkpoint that claims to compile.
+//
+// The remaining submodules the harness will grow — `classify`, `compare`, `compile`, `execute`,
+// `findings`, `flagprobe`, `report`, `sandbox` and `ubaudit` — are therefore each declared by
+// the change that adds the corresponding file, in the same commit, so the declaration and the
+// file it names can never disagree. The module documentation above describes the completed
+// design; this list describes what is present.
+//
+// Declaring them here and satisfying the declarations by creating `Cargo.toml` and
+// `tests/conformance.rs` is not an option: the plan places `Cargo.toml` in the read-only set
+// and states that the layout is designed so that no manifest change is required at all, which
+// is how the "do not modify the compiler's source code" constraint is honoured without
+// qualification. `tests/conformance.rs` is likewise the deliverable of a later boundary.
 pub mod env;
-pub mod execute;
-pub mod findings;
-pub mod flagprobe;
 pub mod manifest;
-pub mod report;
-pub mod sandbox;
-pub mod ubaudit;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -90,17 +98,26 @@ pub const MIN_PROGRAMS_PER_MANDATED_AREA: usize = 6;
 
 /// One feature area of the corpus.
 ///
-/// The [`AREAS`] table is the only source of values: there is no public constructor, so
-/// callers look an area up with [`AreaSpec::lookup`] and read the fields.
+/// The [`AREAS`] table is the only source of values: the constructor is private to this
+/// module, so callers look an area up with [`AreaSpec::lookup`] and read the three
+/// properties through [`AreaSpec::directory`], [`AreaSpec::program_count`] and
+/// [`AreaSpec::mandated`].
+///
+/// The fields are private because each one carries an invariant that only the table can
+/// establish. `directory` must name a real corpus directory — it is joined to
+/// [`corpus_root`] to discover programs and used as the stem of a report file, so a value
+/// that never came from the table would read one area and report it as another.
+/// `program_count` is the expected size of that directory, which the run compares against
+/// what it actually discovered; a caller able to assign it could make a corpus that lost a
+/// program agree with its own expectation. `mandated` decides whether
+/// [`MIN_PROGRAMS_PER_MANDATED_AREA`] applies, so a caller able to clear it could lift the
+/// floor off an area the requirements name explicitly. Read-only access preserves every one
+/// of those guarantees while costing a consumer nothing but a pair of parentheses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AreaSpec {
-    /// Directory name beneath [`corpus_root`], for example `04_bitfields`. Also the stem
-    /// of the area's report files and the suffix of the driver's area test name.
-    pub directory: &'static str,
-    pub program_count: usize,
-    /// True when the requirements name the area explicitly, false when it is
-    /// supplementary.
-    pub mandated: bool,
+    directory: &'static str,
+    program_count: usize,
+    mandated: bool,
 }
 
 impl AreaSpec {
@@ -110,6 +127,23 @@ impl AreaSpec {
             program_count,
             mandated,
         }
+    }
+
+    /// Directory name beneath [`corpus_root`], for example `04_bitfields`. Also the stem
+    /// of the area's report files and the suffix of the driver's area test name.
+    pub fn directory(&self) -> &'static str {
+        self.directory
+    }
+
+    /// How many programs this area is expected to contain.
+    pub fn program_count(&self) -> usize {
+        self.program_count
+    }
+
+    /// True when the requirements name the area explicitly, false when it is
+    /// supplementary.
+    pub fn mandated(&self) -> bool {
+        self.mandated
     }
 
     /// Look an area up by its directory name, trimming surrounding whitespace.
@@ -1290,15 +1324,78 @@ fn encode_slug_component(raw: &str, encoded: &mut String) {
 ///
 /// This is the unit of work the harness is organized around, and the sole input to a
 /// cell's workspace path.
+///
+/// The two textual fields are private and [`CellKey::new`] is the only way to build one,
+/// because this identity is not merely descriptive: it *decides* a filesystem path. The area
+/// and program names are joined into [`CellKey::slug`], which becomes the name of the one
+/// directory the cell may write into, and they are written into report rows, the
+/// tab-separated summary and reproduction commands. A caller able to assign them — by struct
+/// literal or by field assignment — could bypass [`CellKey::validate_stem`] and produce an
+/// identity built from an empty string, a path fragment or text carrying control characters,
+/// none of which could be traced back to a corpus file. Making the constructor the only door
+/// turns "every identity is canonical" from a convention every caller must remember into a
+/// property of the type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CellKey {
-    pub area: String,
-    pub program: String,
-    pub target: Target,
-    pub opt: OptLevel,
+    area: String,
+    program: String,
+    target: Target,
+    opt: OptLevel,
 }
 
 impl CellKey {
+    /// Build a cell identity, rejecting an area or program name that is not a canonical
+    /// corpus stem.
+    ///
+    /// This is the single construction point for the type, so every [`CellKey`] in existence
+    /// has passed [`CellKey::validate_stem`] on both of its textual components. Consumers may
+    /// therefore treat the canonical-stem rules as a type invariant instead of re-deriving
+    /// them — [`fmt::Display`] and [`CellKey::slug`] both rely on exactly that, which is why
+    /// neither can produce text that forges a report column or escapes a workspace directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory failure when either name is empty, is `.` or `..`, carries a
+    /// path separator of either spelling, or contains whitespace or a character that cannot
+    /// appear literally in a report. Each of those means the identity itself was assembled
+    /// wrongly, which is a caller or corpus defect rather than something an environment can
+    /// legitimately produce.
+    pub fn new(
+        area: impl Into<String>,
+        program: impl Into<String>,
+        target: Target,
+        opt: OptLevel,
+    ) -> HarnessResult<CellKey> {
+        let key = CellKey {
+            area: area.into(),
+            program: program.into(),
+            target,
+            opt,
+        };
+        key.validate_identity()?;
+        Ok(key)
+    }
+
+    /// The feature-area directory name, for example `04_bitfields`.
+    pub fn area(&self) -> &str {
+        &self.area
+    }
+
+    /// The program file stem, for example `003_compound_assignment`.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// The target architecture this cell is built and executed for.
+    pub fn target(&self) -> Target {
+        self.target
+    }
+
+    /// The optimization level this cell is built at.
+    pub fn opt(&self) -> OptLevel {
+        self.opt
+    }
+
     /// A deterministic, collision-free, filesystem-safe rendering of this identity, for
     /// example `01_integer_conversions+004_narrowing_conversions+aarch64+O1`.
     ///
@@ -1423,12 +1520,13 @@ impl fmt::Display for CellKey {
     /// Human-readable form for failure messages, for example
     /// `04_bitfields/003_compound_assignment @ aarch64-linux-gnu -O1`.
     ///
-    /// The two textual components are rendered through [`sanitize_text_for_report`]. A
-    /// [`CellKey`] built from a discovered corpus path has already passed
-    /// [`CellKey::validate_stem`] and is therefore unchanged by that call, but the fields are
-    /// public and this rendering reaches report rows and the tab-separated summary, so the
-    /// safety is applied at the point of output rather than assumed from the point of
-    /// construction.
+    /// The two textual components are rendered through [`sanitize_text_for_report`]. Every
+    /// [`CellKey`] has passed [`CellKey::validate_stem`], because [`CellKey::new`] is the only
+    /// constructor, so that call is a no-op on every value the harness can actually build.
+    /// It is applied regardless: this rendering reaches report rows and the tab-separated
+    /// summary, where a single control character could forge a column or hide a line, and a
+    /// guarantee is worth more when it is enforced at the point of output as well as at the
+    /// point of construction than when one of the two is trusted to be sufficient.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -1447,9 +1545,30 @@ impl fmt::Display for CellKey {
 /// Both paths travel with the identity rather than being recomputed by each consumer,
 /// because a cell must be reproducible from its source file and its expectation record
 /// alone.
+///
+/// All four fields are private and [`Cell::new`] is the only way to build one, because this
+/// type is where the read half and the write half of the hermeticity contract are decided
+/// together. The constructor proves that each input path resolves to a regular,
+/// non-symbolic-link file strictly inside the corpus, that the two are same-stem siblings,
+/// that their location agrees with the identity, and that the derived workspace is a direct
+/// child of [`work_root`]. Every one of those guarantees is about a *combination* of fields,
+/// so any of them could be defeated by assigning a single field afterwards — which is exactly
+/// what a writable field permits. Read-only access means a value of this type cannot exist in
+/// a state the constructor would have refused.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Cell {
-    pub key: CellKey,
+    key: CellKey,
+    source: PathBuf,
+    expectation: PathBuf,
+    workspace: PathBuf,
+}
+
+impl Cell {
+    /// The identity of this cell.
+    pub fn key(&self) -> &CellKey {
+        &self.key
+    }
+
     /// Canonical absolute path to the C program.
     ///
     /// This is the fully resolved path [`Cell::new`] proved to be a regular file inside the
@@ -1457,15 +1576,27 @@ pub struct Cell {
     /// form means every consumer compiles, reads and reports the same file the constructor
     /// validated, and that a reproduction command carries a path with no `..` segment and no
     /// intermediate symbolic link for a maintainer to resolve by hand.
-    pub source: PathBuf,
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+
     /// Canonical absolute path to the sibling expectation record that governs this program.
-    pub expectation: PathBuf,
+    pub fn expectation(&self) -> &Path {
+        &self.expectation
+    }
+
     /// The one directory this cell may write into, derived from [`work_root`] and
     /// [`CellKey::slug`].
-    pub workspace: PathBuf,
-}
+    ///
+    /// Read-only on purpose. This single path is the whole mechanical content of the
+    /// hermeticity contract — a cell writes here and nowhere else — and [`Cell::new`] derives
+    /// it from the identity and then proves it is a direct child of [`work_root`]. A consumer
+    /// able to assign it could move a cell's writes anywhere on the machine while every report
+    /// still showed the workspace path, which is the one failure that would leave no trace.
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
 
-impl Cell {
     /// Resolve a cell and derive its workspace.
     ///
     /// The workspace is derived rather than supplied, so hermeticity is decided in exactly one
@@ -1486,7 +1617,11 @@ impl Cell {
     /// - the identity, through [`CellKey::validate_identity`]: the area and program names must
     ///   be canonical stems, so an identity assembled from an empty string, a path fragment or
     ///   text carrying control characters fails here rather than becoming a strangely named
-    ///   directory nobody can trace back;
+    ///   directory nobody can trace back. Since [`CellKey::new`] is the only constructor for
+    ///   that type, this re-asserts an invariant rather than establishing it; it is kept
+    ///   because the workspace path is derived from the identity alone, and that derivation is
+    ///   worth more when it cannot be reached by an unvalidated identity even if the type ever
+    ///   grows a second constructor;
     /// - the read half of hermeticity, through [`require_contained_corpus_file`]: each input
     ///   must be an absolute path to a regular, non-symbolic-link file that resolves strictly
     ///   inside the corpus and carries the extension its role requires. A symbolic link is
@@ -1633,18 +1768,12 @@ impl fmt::Display for Cell {
 /// from one oracle while remaining fully compared under the others.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Outcome {
-    pub key: CellKey,
-    pub oracle: Oracle,
-    pub verdict: Verdict,
-    /// The shape of the divergence, when there was one. `None` for an agreement and for an
-    /// oracle that could not be attempted.
-    pub class: Option<DivergenceClass>,
-    /// Identifier of the expected-divergence marker that explains this outcome, present for
-    /// an expected divergence and for an unexpected success, absent otherwise.
-    pub marker_id: Option<String>,
-    /// Everything a reader needs to understand the outcome without re-running it: the first
-    /// divergent line and byte offset, both exit statuses, and the command lines involved.
-    pub detail: String,
+    key: CellKey,
+    oracle: Oracle,
+    verdict: Verdict,
+    class: Option<DivergenceClass>,
+    marker_id: Option<String>,
+    detail: String,
 }
 
 impl Outcome {
@@ -1653,6 +1782,28 @@ impl Outcome {
     /// An empty `detail` is replaced with a sentence naming the verdict, the oracle and the
     /// cell, because a run-failing outcome carrying an opaque message is what makes a real
     /// divergence impossible to act on.
+    ///
+    /// `detail` and `marker_id` are both passed through [`sanitize_text_for_report`] here, at
+    /// the single point where an outcome comes into existence. That is not defensive
+    /// decoration: `detail` is assembled from material the harness does not author — a
+    /// compiler's diagnostics, a program's own stdout, a field of an expectation record — and
+    /// [`Outcome`]'s [`fmt::Display`] renders the whole outcome as **one line** of the verdict
+    /// table and of the tab-separated summary. Left raw, a single line feed in a compiler
+    /// message would split one verdict row into two, a tab would forge a column in the
+    /// machine-readable summary, a carriage return would erase the verdict that preceded it on
+    /// the line, and a directional override or an escape introducer would let a row render as
+    /// something other than what it says. Any of those turns a report a maintainer is meant to
+    /// act on into one that cannot be trusted, and the material that would carry them is
+    /// exactly the material a real divergence produces.
+    ///
+    /// Sanitizing at construction rather than at each use is what makes the guarantee hold: an
+    /// outcome cannot exist in an unsafe state, so no present or future consumer can render one
+    /// unsafely by forgetting. The escaping is visible and reversible by eye — `\x0a` for a
+    /// line feed — so nothing a reader needs is lost.
+    ///
+    /// Raw, unescaped bytes belong only in the captured-output artifacts a finding directory
+    /// holds, where each stream is written to its own file, byte for byte, and is never mixed
+    /// into a line-oriented report.
     pub fn new(
         key: CellKey,
         oracle: Oracle,
@@ -1662,7 +1813,10 @@ impl Outcome {
         detail: impl Into<String>,
     ) -> Outcome {
         let supplied = detail.into();
-        let detail = if supplied.trim().is_empty() {
+        // Emptiness is judged on the supplied text so that a detail made only of whitespace,
+        // including a lone line feed, still selects the explanatory fallback rather than
+        // surviving as the escape sequence that whitespace would sanitize into.
+        let chosen = if supplied.trim().is_empty() {
             let severity = if verdict.fails_run() {
                 "this verdict fails the run, so the absent detail is itself a defect in the \
                  caller that recorded it"
@@ -1678,15 +1832,59 @@ impl Outcome {
             oracle,
             verdict,
             class,
-            marker_id,
-            detail,
+            marker_id: marker_id.map(|marker| sanitize_text_for_report(&marker)),
+            detail: sanitize_text_for_report(&chosen),
         }
+    }
+
+    /// The cell this outcome is about.
+    pub fn key(&self) -> &CellKey {
+        &self.key
+    }
+
+    /// Which oracle reached this conclusion.
+    pub fn oracle(&self) -> Oracle {
+        self.oracle
+    }
+
+    /// The conclusion itself.
+    pub fn verdict(&self) -> Verdict {
+        self.verdict
+    }
+
+    /// The shape of the divergence, when there was one. `None` for an agreement and for an
+    /// oracle that could not be attempted.
+    pub fn class(&self) -> Option<DivergenceClass> {
+        self.class
+    }
+
+    /// Identifier of the expected-divergence marker that explains this outcome, present for
+    /// an expected divergence and for an unexpected success, absent otherwise.
+    ///
+    /// Already sanitized for single-line rendering by [`Outcome::new`].
+    pub fn marker_id(&self) -> Option<&str> {
+        self.marker_id.as_deref()
+    }
+
+    /// Everything a reader needs to understand the outcome without re-running it: the first
+    /// divergent line and byte offset, both exit statuses, and the command lines involved.
+    ///
+    /// Already sanitized for single-line rendering by [`Outcome::new`], so this is safe to
+    /// write into a report row, a summary column or a diagnostic without further treatment.
+    pub fn detail(&self) -> &str {
+        &self.detail
     }
 }
 
 impl fmt::Display for Outcome {
     /// One-line rendering used verbatim in both the driver's verdict table and its failure
     /// messages, so a failing run reproduces the same text the report contains.
+    ///
+    /// "One line" is a guarantee rather than an expectation. Of the five rendered components,
+    /// three are enumerations with fixed spellings, [`CellKey`]'s own rendering sanitizes its
+    /// textual halves, and the two free-text components were sanitized by [`Outcome::new`] at
+    /// construction. No value of this type can therefore render as more or fewer than one line,
+    /// which is what lets a report row be counted as one outcome.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}] {} {}", self.verdict, self.oracle, self.key)?;
         if let Some(class) = self.class {
@@ -1711,11 +1909,8 @@ impl fmt::Display for Outcome {
 /// as well as what went wrong, which makes a failure actionable without a stack trace.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HarnessError {
-    /// What the harness was attempting, phrased as a gerund, for example
-    /// `resolving the source path for 04_bitfields/002_read_write @ i686-linux-gnu -O1`.
-    pub context: String,
-    /// What went wrong, in enough detail to act on without re-running.
-    pub cause: String,
+    context: String,
+    cause: String,
 }
 
 impl HarnessError {
@@ -1725,6 +1920,17 @@ impl HarnessError {
             context: context.into(),
             cause: cause.into(),
         }
+    }
+
+    /// What the harness was attempting, phrased as a gerund, for example
+    /// `resolving the source path for 04_bitfields/002_read_write @ i686-linux-gnu -O1`.
+    pub fn context(&self) -> &str {
+        &self.context
+    }
+
+    /// What went wrong, in enough detail to act on without re-running.
+    pub fn cause(&self) -> &str {
+        &self.cause
     }
 }
 

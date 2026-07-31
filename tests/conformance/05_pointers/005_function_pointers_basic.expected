@@ -1,0 +1,75 @@
+# Expectation record for 05_pointers/005_function_pointers_basic.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 005_function_pointers_basic
+area               = 05_pointers
+description        = Function pointer declaration, assignment, equality and indirect call in several spellings
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every function pointer is assigned before it is called, and each is called through a type
+compatible with the function's definition, so no call is made through an incompatible type.
+All arithmetic stays inside the range of int.  No function address is printed: which entry
+was reached is observed through equality comparisons and returned values.
+Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+call_plain=13
+call_deref=13
+call_forms_agree=1
+eq_add=1
+ne_sub=1
+addrof_call=7
+addrof_eq_designator=1
+mul_call=30
+mul_deref_call=42
+reassign_a=25
+reassign_b=15
+reassign_c=100
+typedef_binop=17
+typedef_eq_plain=1
+typedef_unop=-12
+typedef_unop_neg=12
+typedef_nilop=7
+typedef_nilop_zero=0
+apply_add=20
+apply_sub=8
+apply_mul=84
+apply_via_var=20
+apply_twice_add=9
+apply_twice_mul=27
+select0=34
+select1=26
+select2=120
+select0_is_add=1
+select1_is_sub=1
+fold_add=15
+fold_mul=120
+fold_sub=85
+null_fp_is_null=1
+null_fp_is_false=1
+nonnull_fp_is_true=1
+runtime_select_call=48
+runtime_select_is_add=1
+runtime_select_call2=32
+runtime_select_is_sub=1
+runtime_apply=81
+runtime_fold=15
+runtime_conditional=43
+runtime_conditional_is_sub=1
+END

@@ -1,0 +1,50 @@
+# Expectation record for 06_control_flow/006_short_circuit_evaluation.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 006_short_circuit_evaluation
+area               = 06_control_flow
+description        = Short-circuit suppression of the right operand, observed through a volatile side-effect counter
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+The property under test is an absence, so each side effect increments a volatile counter
+that is part of the program's observable behaviour and is printed after every expression;
+the optimizer may not legally elide those accesses.  The guarded division never divides by
+zero, precisely because the left operand suppresses it.  Every expression appears twice,
+once with a constant left operand and once with one read from volatile storage.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+const_and_false r=0 rhs_calls=0
+const_or_true r=1 rhs_calls=0
+const_and_true r=1 rhs_calls=1
+const_or_false r=1 rhs_calls=1
+runtime_and_false r=0 rhs_calls=0
+runtime_or_true r=1 rhs_calls=0
+runtime_and_true r=1 rhs_calls=1
+runtime_or_false r=1 rhs_calls=1
+chain_and_stop_at_first r=0 rhs_calls=0
+chain_or_stop_at_first r=1 rhs_calls=0
+chain_and_stop_midway r=0 rhs_calls=2
+chain_or_stop_midway r=1 rhs_calls=2
+mixed_grouping r=1 rhs_calls=1
+guarded_divide_zero r=0 rhs_calls=0
+guarded_divide_one r=1
+if_and_short_circuit r=2 rhs_calls=0
+if_or_short_circuit r=1 rhs_calls=0
+while_short_circuit a=3 rhs_calls=3
+normalisation not=0 notnot=1 and=1 or=1
+normalisation_zero not=1 notnot=0 and=0 or=0
+END

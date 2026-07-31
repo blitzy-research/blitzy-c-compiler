@@ -1,0 +1,70 @@
+# Expectation record for 04_bitfields/005_straddling_and_zero_width.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 005_straddling_and_zero_width
+area               = 04_bitfields
+description        = Fields straddling an allocation-unit boundary, zero-width separators and unnamed padding
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Byte images are printed only for structs whose every bit is covered by a named field, so no
+unspecified padding bit is ever observed; the zero-width and unnamed-field structs, which
+necessarily contain padding, are observed only through sizeof, _Alignof and named-member
+read-back.  Every stored value is inside its field's range.  Each field has an explicit
+signed or unsigned base type.  Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+impl_defined_notes <<END
+Where a field is placed inside its allocation unit is implementation-defined.  Every bit
+position this program asserts is the placement measured on all four targets under test
+rather than a guarantee the standard makes, which is what makes the byte images
+comparable across backends; the program is compared on all four targets rather than
+restricted, and the measured agreement is the reason.
+END
+expected_stdout    <<END
+size_cover32=4 align_cover32=4
+size_cover64=8 align_cover64=4
+size_nostraddle=12 align_nostraddle=4
+size_nozero=4 size_onezero=8 size_twozero=12
+size_unnamedpad=4 align_unnamedpad=4
+size_signedstraddle=4 align_signedstraddle=4
+cover32_read a=5 b=21 c=300 d=20000
+cover32_image ad 2c 41 9c
+cover32_after_c a=5 b=21 c=511 d=20000
+cover32_image_after_c ad ff 41 9c
+cover32_c_zero a=5 b=21 c=0 d=20000
+cover32_image_c_zero ad 00 40 9c
+cover64_read a=7 b=31 c=511 d=32767 e=2047 f=2097151
+cover64_all_ones ff ff ff ff ff ff ff ff
+cover64_mixed a=5 b=21 c=300 d=20000 e=1365 f=1398101
+cover64_image ad 2c 41 9c 55 ad aa aa
+nostraddle_read a=703710 b=74565 c=6785451
+nostraddle_after_b a=703710 b=1048575 c=6785451
+nozero_read a=21 b=10
+onezero_read a=21 b=10
+twozero_read a=100 b=101 c=102
+onezero_after_a a=31 b=10
+twozero_after_b a=100 b=127 c=102
+unnamedpad_read a=5 b=300
+unnamedpad_after_b a=5 b=511
+signedstraddle_read a=-256 b=-4096 c=-512
+signedstraddle_after_b a=-256 b=4095 c=-512
+volatile_cover32 a=5 b=21 c=300 d=20000
+volatile_cover32_after_c a=5 b=21 c=511 d=20000
+volatile_signedstraddle a=-256 b=-4096 c=-512
+volatile_signedstraddle_after_b a=-256 b=4095 c=-512
+END

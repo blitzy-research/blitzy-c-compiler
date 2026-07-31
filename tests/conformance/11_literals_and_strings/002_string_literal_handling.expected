@@ -1,0 +1,78 @@
+# Expectation record for 11_literals_and_strings/002_string_literal_handling.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_string_literal_handling
+area               = 11_literals_and_strings
+description        = Concatenation, indexing, embedded NUL and termination of string literals
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+No string literal is ever modified, which would be undefined behaviour.  Every element is
+read through unsigned char, so no plain-char signedness difference can be observed, and
+every index is inside the literal's own size, the terminator included.  The source file is
+pure US-ASCII.  No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+expected_stdout    <<END
+concat_size=10
+concat_len=9
+concat[0]=97
+concat[1]=98
+concat[2]=99
+concat[3]=100
+concat[4]=101
+concat[5]=102
+concat[6]=103
+concat[7]=104
+concat[8]=105
+concat_terminator=0
+empty_size=4
+empty_len=3
+empty_bytes=120,121,122
+lines_size=14
+lines_len=13
+lines[0]=111
+lines[1]=110
+lines[2]=101
+lines[3]=45
+lines[4]=116
+lines[5]=119
+lines[6]=111
+lines[7]=45
+lines[8]=116
+lines[9]=104
+lines[10]=114
+lines[11]=101
+lines[12]=101
+lines_terminator=0
+escapes_size=6
+escapes[0]=65
+escapes[1]=9
+escapes[2]=66
+escapes[3]=67
+escapes[4]=68
+nul_size=6
+nul_len=2
+nul[0]=112
+nul[1]=113
+nul[2]=0
+nul[3]=114
+nul[4]=115
+nul[5]=0
+direct_index=101
+direct_size=6
+direct_terminator=0
+runtime_concat0=97
+runtime_concat_len=9
+END

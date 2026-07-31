@@ -6,7 +6,7 @@
 //! it reads the entire environment-variable catalogue; and it emits a capability record
 //! that states exactly which arms of which oracles will run.
 //!
-//! # Availability is decided per target
+//! # Availability is answered per arm, but not every cause is per-arm
 //!
 //! There is deliberately no "skip because unsupported" verdict anywhere in the suite. An arm that
 //! cannot be attempted is recorded as [`Verdict::Unavailable`](super::Verdict::Unavailable) and
@@ -14,10 +14,22 @@
 //! never masquerade as a passing run.
 //!
 //! [`Capabilities::oracle_a_available`], [`Capabilities::oracle_b_available`] and
-//! [`Capabilities::oracle_c_available`] each take a target and answer for that target alone, so no
-//! oracle is ever declared dead as a whole. Reporting the surviving arms is strictly more truthful
-//! than declaring the oracle gone, and it cannot mask a gap, because every unattemptable arm is
-//! enumerated.
+//! [`Capabilities::oracle_c_available`] each take a target and answer for that target alone, which
+//! is the finest granularity the report can carry: a single missing emulator costs one target's
+//! arms and nothing more.
+//!
+//! Answering per arm is not the same as every *cause* being per-arm, and the distinction matters
+//! because one cause genuinely is not. Some inputs an arm depends on are shared across all four
+//! targets, and when one of those is missing, every arm that depends on it is unavailable — which
+//! is a whole-oracle outcome reached one arm at a time rather than an exception to the per-arm
+//! rule. The native reference compiler is exactly such an input: it is the driver both
+//! undefined-behaviour audit gates run, so without it oracle (a) is unavailable on every target,
+//! including targets whose own cross driver resolved perfectly well. The degradation table below
+//! states each cause and its reach, and it is applied exactly as written.
+//!
+//! Reporting the surviving arms individually therefore loses no detail in either case, and it
+//! cannot mask a gap, because every unattemptable arm is enumerated by name whether it fell alone
+//! or alongside the rest of its oracle.
 //!
 //! # Environment-variable catalogue
 //!
@@ -149,12 +161,13 @@ use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::manifest::Execution;
 use super::{
     sanitize_text_for_report, AreaSpec, HarnessError, HarnessResult, OptLevel, Oracle, Target,
 };
@@ -265,6 +278,22 @@ const DUMP_MACHINE_FLAG: &str = "-dumpmachine";
 /// correctly configured machine from being rejected over a naming convention, while still refusing
 /// a driver that reports a genuinely different architecture.
 const I686_ARCHITECTURE_ALIASES: &[&str] = &["i686", "i586", "i486", "i386", "x86"];
+
+/// The only operating-system component a reference driver for this suite may report.
+///
+/// Every one of the four supported targets is a Linux target, every test binary is a statically
+/// linked Linux executable, and the three non-native arms execute under a Linux user-mode emulator.
+/// A driver reporting anything else — `mingw32`, `elf`, `darwin`, `freebsd` — cannot build a program
+/// this suite is able to run, let alone one whose output may be compared.
+const LINUX_OPERATING_SYSTEM: &str = "linux";
+
+/// The only environment component a reference driver for this suite may report when it states one.
+///
+/// The comparison is byte-exact against stdout, so the reference arm and the compiler under test
+/// must agree on type widths, calling convention and the formatting of the C library they link. A
+/// driver reporting `musl`, `android`, `uclibc` or `gnux32` satisfies none of that, and every one of
+/// them says so in this component.
+const GNU_ENVIRONMENT: &str = "gnu";
 
 /// Default per-cell execution budget in seconds.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -562,7 +591,7 @@ const FILTER_SEPARATOR: char = '/';
 fn corpus_area_list() -> String {
     let directories = super::AREAS
         .iter()
-        .map(|area| area.directory)
+        .map(|area| area.directory())
         .collect::<Vec<_>>();
     join_quoted_static(&directories)
 }
@@ -589,14 +618,26 @@ fn corpus_area_list() -> String {
 ///   no leading, trailing or embedded whitespace survives. A value read from the environment
 ///   therefore cannot be bent into a path that leaves the corpus.
 ///
-/// # What is deliberately not validated here, and what happens instead
+/// # Existence is checked, but not here
 ///
-/// Whether a program of that name exists. Answering that means reading the corpus, which is
-/// `manifest.rs`'s responsibility; reaching into it from the environment module would invert the
-/// layering for no gain. A filter naming a program that does not exist yields a run that covers
-/// nothing, and that outcome is loud rather than silent: [`RunConfig::is_reduced_run`] holds, so
-/// the report is stamped partial, and the driver states the covered-program count — which is
-/// zero — in the summary.
+/// Whether a program of that name exists is deliberately *not* answered by this constructor.
+/// Answering it means reading the corpus, which is `manifest.rs`'s responsibility, and reaching
+/// into the corpus from the environment module would invert the layering for no gain.
+///
+/// It is answered nonetheless, and as a hard failure, by [`ProgramFilter::require_match`]: the
+/// consumer that has just performed discovery reports how many programs this filter selected, and
+/// a count of zero fails the run. Splitting the question that way keeps each half where it belongs
+/// — shape is validated where the environment is read, existence where the corpus is read — while
+/// leaving no gap between them.
+///
+/// Being merely "loud" is not sufficient here, and it is worth saying why, because the earlier
+/// design chose exactly that. A mistyped filter selects nothing; every selected program then
+/// passes, because there are none to fail; and the run exits successfully. The report is stamped
+/// partial and states a covered-program count of zero, both of which are true and neither of which
+/// changes the exit status — so in continuous integration, where nobody reads a passing job's
+/// report, a single typo turns the entire suite into a no-op that reports success. A filter is an
+/// instruction to test one program, so selecting no program is a failure to carry out that
+/// instruction, not a smaller run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramFilter {
     /// Canonical feature-area directory name, borrowed from the corpus area table so that the
@@ -651,7 +692,7 @@ impl ProgramFilter {
             ));
         };
         Ok(ProgramFilter {
-            area: spec.directory,
+            area: spec.directory(),
             program: String::from(program),
         })
     }
@@ -703,6 +744,57 @@ impl ProgramFilter {
     /// more than the maintainer asked for is as misleading as one that selects less.
     pub fn matches(&self, area: &str, program: &str) -> bool {
         self.area == area && self.program == program
+    }
+
+    /// Confirm this filter actually selected a program, given how many it matched during discovery.
+    ///
+    /// The count is supplied by the caller rather than computed here, because computing it means
+    /// reading the corpus and that belongs to `manifest.rs`. This function owns the *policy*: a
+    /// filter that selected nothing is a hard failure, and a filter that somehow selected more than
+    /// one program is too.
+    ///
+    /// # Errors
+    ///
+    /// Zero matches fails the run, naming the filter, the variable that set it and the two mistakes
+    /// that actually cause it — a mistyped stem, and a stem that is correct but lives in a different
+    /// area. Nothing about a zero-match run is worth continuing: every remaining check would pass
+    /// for want of anything to check.
+    ///
+    /// More than one match also fails. It cannot arise from a well-formed corpus, because
+    /// [`ProgramFilter::matches`] compares both halves exactly and a feature area cannot hold two
+    /// programs of one stem — so if it ever happens, the corpus has acquired a duplicate and the
+    /// cells of two different programs are about to be reported under one identity.
+    pub fn require_match(&self, matched: usize) -> HarnessResult<()> {
+        let context = format!("applying the program filter {self} from {VAR_ONLY}");
+        if matched == 1 {
+            return Ok(());
+        }
+        if matched == 0 {
+            return Err(HarnessError::new(
+                context,
+                format!(
+                    "the filter selected no program: no `{}.c` exists in the feature area {:?}. \
+                     This fails the run rather than shrinking it, because a filter that matches \
+                     nothing produces a run in which every selected program passes for want of any \
+                     program to fail — a successful exit over a matrix of zero cells, which in \
+                     continuous integration is indistinguishable from a suite that works. The two \
+                     causes are a mistyped program stem and a correct stem named under the wrong \
+                     area; unset {} to run the whole matrix, or correct the half that is wrong",
+                    self.program, self.area, VAR_ONLY
+                ),
+            ));
+        }
+        Err(HarnessError::new(
+            context,
+            format!(
+                "the filter selected {matched} programs, and it can only ever name one: both halves \
+                 are compared exactly, so this means the feature area {:?} contains more than one \
+                 program with the stem {:?}. That is a corpus defect rather than a filter defect — \
+                 two programs sharing one identity would have their cells reported under the same \
+                 name, making every verdict about either of them ambiguous",
+                self.area, self.program
+            ),
+        ))
     }
 }
 
@@ -974,22 +1066,56 @@ fn has_execute_permission(_metadata: &fs::Metadata) -> bool {
 /// - **Which file was the run actually conducted against?** The canonical target is recorded in the
 ///   environment fingerprint, so a divergence can be attributed to a toolchain that changed
 ///   underneath a stable name — the case a name alone hides completely.
+/// # A launcher is not an implementation either
+///
+/// The identity of the file a name resolves to is still not always the identity of the compiler
+/// that runs. A compiler is very often shipped as a small shell script that `exec`s the real
+/// driver, and this suite's own reference toolchain is installed exactly that way: several
+/// distinct wrapper scripts, each its own file with its own inode, every one of them handing the
+/// work to the same driver binary.
+///
+/// Comparing launchers alone would therefore answer the independence question wrongly in the one
+/// direction that matters. Two different wrapper scripts are two different files, so a launcher
+/// comparison calls them independent — while the compiler that actually runs is the same compiler
+/// on both sides. Oracle (a) would then compare an implementation with itself and agree
+/// everywhere, and the arm would report perfect agreement *precisely because* it had stopped being
+/// an oracle. That is a silent false authority, which is worse than a missing arm.
+///
+/// So a resolved wrapper is attested: [`read_wrapper_target`] resolves the program its `exec` line
+/// names, and that program's identity is recorded here as the *implementation*. Independence is
+/// then decided on implementations by [`ToolIdentity::is_same_implementation`], while the launcher
+/// spelling is kept intact for invocation — which is not a nicety, because a GCC driver derives its
+/// own exec prefix from `argv[0]` and invoking the implementation directly can make it fail to find
+/// its own components.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolIdentity {
     /// The fully resolved path, with every symbolic link followed.
-    pub canonical: PathBuf,
+    canonical: PathBuf,
     /// Device and inode numbers, where the platform exposes them.
     ///
     /// `None` on a platform with no such notion, in which case [`ToolIdentity::is_same_file`]
     /// falls back to comparing canonical paths. The distinction is kept explicit rather than
     /// defaulted to zero, because two absent identities must never be reported as equal.
-    pub file_id: Option<(u64, u64)>,
+    file_id: Option<(u64, u64)>,
     /// True when the name that resolved was a symbolic link.
     ///
     /// Recorded rather than resolved away, because it is a fact the pre-flight report needs: this
     /// environment supplies its emulators under two spellings, one of which is a link, and which
     /// one was selected is exactly what the report exists to state.
-    pub via_symlink: bool,
+    via_symlink: bool,
+    /// The identity of the program a wrapper script hands the work to, when this file is one.
+    ///
+    /// Boxed because the relation nests: a wrapper may `exec` another wrapper, and the chain is
+    /// followed to its end within [`WRAPPER_ATTESTATION_DEPTH_MAX`].
+    implementation: Option<Box<ToolIdentity>>,
+    /// True when this file looks like a wrapper script but the program it runs could not be
+    /// determined.
+    ///
+    /// Kept distinct from "not a wrapper", because the two call for opposite treatment. A compiled
+    /// binary is its own implementation and needs no attestation. A script whose `exec` target
+    /// could not be read might be a wrapper for the very compiler it is being compared against,
+    /// and there is no way to tell — so under strict mode it is refused rather than trusted.
+    unattested_wrapper: bool,
 }
 
 impl ToolIdentity {
@@ -1000,6 +1126,18 @@ impl ToolIdentity {
     /// over: a tool that vanished between being resolved and being identified cannot be used, and
     /// saying so is better than carrying a path that will fail at the first spawn.
     fn of(path: &Path) -> Option<ToolIdentity> {
+        ToolIdentity::of_within(path, WRAPPER_ATTESTATION_DEPTH_MAX)
+    }
+
+    /// Capture an identity, following a wrapper chain no deeper than `depth`.
+    ///
+    /// The depth bound is what makes the recursion total. A wrapper that `exec`s a second wrapper is
+    /// ordinary, but a pair that `exec` each other is possible to write and would otherwise recurse
+    /// without end — turning a misconfiguration into a stack overflow during pre-flight, which is
+    /// the least diagnosable failure this module could produce. On exhausting the bound the file is
+    /// recorded as an unattested wrapper, which is the honest answer: it *is* a wrapper and its
+    /// implementation was *not* established.
+    fn of_within(path: &Path, depth: usize) -> Option<ToolIdentity> {
         let link = fs::symlink_metadata(path).ok()?;
         let via_symlink = link.file_type().is_symlink();
         // Followed deliberately. A link is a legitimate way to ship a tool — this environment
@@ -1009,11 +1147,97 @@ impl ToolIdentity {
         if !target.is_file() {
             return None;
         }
+        let canonical = fs::canonicalize(path).ok()?;
+        let (implementation, unattested_wrapper) = match read_wrapper_target(&canonical) {
+            // Not a script at all: a compiled binary is its own implementation, so there is
+            // nothing to attest and nothing missing.
+            WrapperTarget::NotAWrapper => (None, false),
+            WrapperTarget::Unreadable => (None, true),
+            WrapperTarget::Execs(program) => {
+                if depth == 0 {
+                    (None, true)
+                } else {
+                    match ToolIdentity::of_within(&program, depth - 1) {
+                        Some(inner) => (Some(Box::new(inner)), false),
+                        // The `exec` line names a program that cannot be identified. The wrapper
+                        // will fail at the first spawn, but more importantly its implementation is
+                        // unknown, so it cannot be compared for independence.
+                        None => (None, true),
+                    }
+                }
+            }
+        };
         Some(ToolIdentity {
-            canonical: fs::canonicalize(path).ok()?,
+            canonical,
             file_id: identity_numbers(&target),
             via_symlink,
+            implementation,
+            unattested_wrapper,
         })
+    }
+
+    /// The fully resolved path of the file this name denotes, with every symbolic link followed.
+    ///
+    /// This is the *launcher*: the file the suite will actually execute. See
+    /// [`ToolIdentity::implementation_path`] for the compiler behind a wrapper.
+    pub fn canonical(&self) -> &Path {
+        &self.canonical
+    }
+
+    /// Device and inode numbers of the launcher, where the platform exposes them.
+    pub fn file_id(&self) -> Option<(u64, u64)> {
+        self.file_id
+    }
+
+    /// True when the name that resolved was a symbolic link.
+    pub fn via_symlink(&self) -> bool {
+        self.via_symlink
+    }
+
+    /// True when this file is a wrapper script whose implementation could not be established.
+    pub fn is_unattested_wrapper(&self) -> bool {
+        self.unattested_wrapper
+    }
+
+    /// The identity that actually does the compiling: the end of the wrapper chain, or this file
+    /// when it is not a wrapper.
+    ///
+    /// This is the identity every independence question must be asked about, because it is the one
+    /// that describes the program that runs rather than the name it was reached by.
+    pub fn implementation(&self) -> &ToolIdentity {
+        match &self.implementation {
+            Some(inner) => inner.implementation(),
+            None => self,
+        }
+    }
+
+    /// Canonical path of the implementation, for reporting and for trust judgements.
+    ///
+    /// # Never invoke this path
+    ///
+    /// It is deliberately *not* the path any tool is spawned with, and substituting it would break
+    /// the very toolchain this attestation was written for. A GCC driver derives its own exec prefix
+    /// from `argv[0]` and then looks for its compiler proper — `cc1` — relative to that prefix. The
+    /// launcher spelling is what the installation was built to be invoked as; running the driver
+    /// under a different name can make it search a prefix where `cc1` does not exist and fail with
+    /// nothing but "cannot execute `cc1`". Measured on the reference host, which is exactly why its
+    /// five compiler entries are `exec`-ing scripts rather than symbolic links.
+    ///
+    /// The two paths therefore have two distinct jobs, and both are kept: [`ToolRecord::path`] is
+    /// the spelling every invocation and every recorded reproduction command uses, while this is the
+    /// file whose identity independence is decided on and whose location strict mode vets.
+    pub fn implementation_path(&self) -> &Path {
+        &self.implementation().canonical
+    }
+
+    /// True when both names ultimately run the same program.
+    ///
+    /// This — not [`ToolIdentity::is_same_file`] — is the question oracle independence turns on.
+    /// Two distinct wrapper scripts are two distinct files, so a launcher comparison would call
+    /// them independent while the compiler doing the work is the same on both sides; this
+    /// comparison sees through the wrappers to the program itself.
+    pub fn is_same_implementation(&self, other: &ToolIdentity) -> bool {
+        self.implementation().is_same_file(other.implementation())
     }
 
     /// True when both identities denote the same file on disk.
@@ -1031,6 +1255,11 @@ impl ToolIdentity {
     }
 
     /// A one-line description for the pre-flight report and the environment fingerprint.
+    ///
+    /// The implementation is named whenever it differs from the launcher, because "which compiler
+    /// actually ran" is the question a fingerprint exists to answer, and behind a wrapper the
+    /// launcher path does not answer it. An unattested wrapper says so, so a reader can see that
+    /// the independence guarantee rests on a chain that could not be followed.
     pub fn describe(&self) -> String {
         let mut text = shown_path(&self.canonical);
         if let Some((device, inode)) = self.file_id {
@@ -1039,8 +1268,163 @@ impl ToolIdentity {
         if self.via_symlink {
             text.push_str(" via symbolic link");
         }
+        let implementation = self.implementation();
+        if !std::ptr::eq(implementation, self) {
+            text.push_str(&format!(
+                ", a wrapper for {}",
+                shown_path(&implementation.canonical)
+            ));
+            if let Some((device, inode)) = implementation.file_id {
+                text.push_str(&format!(" (device {device}, inode {inode})"));
+            }
+        }
+        if self.unattested_wrapper {
+            text.push_str(", a script whose exec target could not be determined");
+        }
         text
     }
+}
+
+/// What inspecting a resolved tool for wrapper-hood established.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WrapperTarget {
+    /// The file carries no shebang, so it is a compiled program and is its own implementation.
+    NotAWrapper,
+    /// The file begins with a shebang but no program could be extracted from it.
+    Unreadable,
+    /// The file is a script whose last `exec` line hands control to this absolute path.
+    Execs(PathBuf),
+}
+
+/// How many wrapper links are followed before the chain is declared unattested.
+///
+/// A wrapper that wraps a wrapper is ordinary; four levels is far beyond any real installation, and
+/// the bound is what stops a mutually-`exec`ing pair from recursing forever.
+const WRAPPER_ATTESTATION_DEPTH_MAX: usize = 4;
+
+/// How much of a candidate is read while looking for a wrapper's `exec` line.
+///
+/// Generous for a shell script and negligible for a compiled binary, which is rejected by its
+/// missing shebang after the first two bytes anyway. Bounded so that pointing an override at a
+/// pipe, a device or a multi-gigabyte file cannot stall or exhaust pre-flight.
+const WRAPPER_SCRIPT_BYTES_MAX: usize = 8 * 1024;
+
+/// The two bytes that introduce an interpreted script.
+const SHEBANG: &[u8] = b"#!";
+
+/// Determine whether a resolved tool is a wrapper script and, if so, which program it runs.
+///
+/// # Why this is worth doing at all
+///
+/// Oracle (a) is only an oracle while the two compilers are different implementations, and a
+/// wrapper hides which implementation a name denotes. This suite's own reference toolchain is a
+/// live example: five separate wrapper scripts, five distinct inodes, and two of them — the `gcc`
+/// and `cc` spellings — `exec` the very same driver. A launcher-only comparison declares that pair
+/// independent. Reading the `exec` line is what turns "different file" into "different compiler".
+///
+/// # What is accepted as an answer
+///
+/// Deliberately narrow, because a wrong answer here is worse than no answer. A candidate qualifies
+/// only when it begins with a shebang; only lines whose first word is exactly `exec` are considered;
+/// the builtin's own options are accounted for by [`exec_program_word`], including `-a NAME`, whose
+/// argument would otherwise be mistaken for the program; and the program word must be an **absolute**
+/// path. A relative program word is not resolved,
+/// because resolving it would mean guessing the working directory the wrapper will eventually run
+/// in, and a guess is precisely what must not enter an independence decision — it is reported as
+/// unreadable instead, which under strict mode refuses the tool rather than trusting it.
+///
+/// The **last** qualifying line wins. A wrapper commonly `exec`s inside a conditional branch and
+/// then falls through to its real target, and the trailing line is the one that describes the
+/// ordinary path. Anything further — following conditionals, expanding variables, honouring `$@`
+/// placement — would be interpreting shell, and a partial shell interpreter reaching a confident
+/// wrong conclusion is exactly the failure this function exists to avoid. When no qualifying line is
+/// found in a file that *is* a script, the answer is [`WrapperTarget::Unreadable`]: not a claim
+/// that it runs itself, but an admission that its implementation is unknown.
+fn read_wrapper_target(path: &Path) -> WrapperTarget {
+    let Ok(bytes) = read_file_prefix(path, WRAPPER_SCRIPT_BYTES_MAX) else {
+        return WrapperTarget::Unreadable;
+    };
+    if !bytes.starts_with(SHEBANG) {
+        return WrapperTarget::NotAWrapper;
+    }
+    // A script whose bytes are not text cannot be read for an `exec` line, and guessing is not an
+    // option, so it is unattested rather than assumed to run itself.
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return WrapperTarget::Unreadable;
+    };
+    let mut found: Option<PathBuf> = None;
+    for line in text.lines() {
+        // `split_whitespace` already ignores leading and trailing runs, so an indented `exec` line
+        // is read exactly as an unindented one is.
+        let mut words = line.split_whitespace();
+        if words.next() != Some("exec") {
+            continue;
+        }
+        if let Some(program) = exec_program_word(words) {
+            let candidate = Path::new(program);
+            if candidate.is_absolute() {
+                found = Some(candidate.to_path_buf());
+            }
+        }
+    }
+    match found {
+        Some(program) => WrapperTarget::Execs(program),
+        None => WrapperTarget::Unreadable,
+    }
+}
+
+/// The option of the `exec` builtin that takes a separate argument.
+///
+/// `exec -a NAME PROGRAM` runs `PROGRAM` while presenting `NAME` as its `argv[0]`. It is the one
+/// `exec` option whose argument is a separate word, and skipping the option without skipping its
+/// argument would mistake `NAME` for the program — which matters here more than anywhere, because
+/// controlling `argv[0]` is exactly what a GCC launcher is written to do.
+const EXEC_ARGV0_OPTION: &str = "-a";
+
+/// Marks the end of the `exec` builtin's options.
+const EXEC_END_OF_OPTIONS: &str = "--";
+
+/// Pick the program word out of the remainder of an `exec` line.
+///
+/// The words supplied are everything after `exec` itself. The builtin's option syntax is small and
+/// documented — `-c` and `-l` take nothing, `-a NAME` takes one word, `--` ends the options — so this
+/// is parsing one builtin's grammar rather than interpreting shell, and it stops at the first word
+/// that is not an option or an option's argument.
+///
+/// Anything it cannot account for yields the word it found anyway, which the caller then requires to
+/// be an absolute path. That is the safe direction: an unrecognised spelling produces a relative or
+/// nonsensical word, the caller declines it, and the tool is reported unattested — refused under
+/// strict mode rather than guessed at.
+fn exec_program_word<'a>(words: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let mut words = words.peekable();
+    while let Some(word) = words.peek().copied() {
+        if word == EXEC_END_OF_OPTIONS {
+            words.next();
+            break;
+        }
+        if !word.starts_with('-') {
+            break;
+        }
+        words.next();
+        if word == EXEC_ARGV0_OPTION {
+            // Consume the replacement `argv[0]`, which is a word of its own and is not the program.
+            words.next();
+        }
+    }
+    words.next()
+}
+
+/// Read at most `limit` bytes from the beginning of `path`.
+///
+/// Bounded rather than whole-file, so a candidate that is a pipe, a device or an enormous file
+/// cannot stall pre-flight or exhaust memory. A short read is not an error: a wrapper script is a
+/// few hundred bytes and the prefix is all that is wanted.
+fn read_file_prefix(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(limit as u64).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Device and inode numbers of a file, where the platform exposes them.
@@ -1310,6 +1694,42 @@ struct ProbeCapture {
     stderr: Vec<u8>,
     /// True when the child had to be terminated because it outlived [`PROBE_DEADLINE`].
     timed_out: bool,
+    /// How the child ended, or `None` when it timed out or could not be waited on.
+    ///
+    /// Recorded rather than discarded because two probes in this module want opposite things from
+    /// it. A banner probe deliberately ignores it — a usage message may exit non-zero while
+    /// printing exactly the identification wanted. A target-reporting probe must not ignore it: a
+    /// program that rejected the flag, or crashed on it, has said nothing about its target, and
+    /// treating its silence as an answer is what made that check fail open.
+    status: Option<ExitStatus>,
+}
+
+impl ProbeCapture {
+    /// True when the child ran to completion and reported success.
+    ///
+    /// Both halves are required. A timeout leaves no status to consult, and a status that exists
+    /// but is not success means the program declined the question rather than answered it.
+    fn exited_successfully(&self) -> bool {
+        !self.timed_out && self.status.is_some_and(|status| status.success())
+    }
+
+    /// How the child ended, phrased for a diagnostic.
+    ///
+    /// The text comes from the standard library's own rendering of an exit status, so it is
+    /// generated rather than external and cannot carry hostile bytes into a report.
+    fn completion_summary(&self) -> String {
+        if self.timed_out {
+            return format!(
+                "it did not terminate within {} seconds and was killed",
+                PROBE_DEADLINE.as_secs()
+            );
+        }
+        match self.status {
+            Some(status) if status.success() => String::from("it exited successfully"),
+            Some(status) => format!("it ended with {status}"),
+            None => String::from("it could not be waited on"),
+        }
+    }
 }
 
 /// Run one probe with a deadline, a capped output and guaranteed cleanup.
@@ -1364,13 +1784,14 @@ fn run_bounded_probe(command: &mut Command) -> Option<ProbeCapture> {
     let deadline = Instant::now() + PROBE_DEADLINE;
     let stdout_reader = child.stdout.take().map(spawn_capped_reader);
     let stderr_reader = child.stderr.take().map(spawn_capped_reader);
-    let timed_out = await_child_within_deadline(&mut child, deadline);
+    let (timed_out, status) = await_child_within_deadline(&mut child, deadline);
     let stdout = harvest_within_deadline(stdout_reader, deadline);
     let stderr = harvest_within_deadline(stderr_reader, deadline);
     Some(ProbeCapture {
         stdout,
         stderr,
         timed_out,
+        status,
     })
 }
 
@@ -1414,23 +1835,30 @@ fn harvest_within_deadline(reader: Option<Receiver<Vec<u8>>>, deadline: Instant)
 
 /// Wait for a probe's child until the deadline, killing and reaping it if it outlives one.
 ///
-/// Returns true when the deadline was reached and the child had to be terminated. An error from
-/// [`std::process::Child::try_wait`] means the child's status can no longer be observed, so waiting
-/// longer cannot help; the child is terminated and reaped on that path too, which is what
-/// guarantees this function never leaves a process behind however it exits.
-fn await_child_within_deadline(child: &mut Child, deadline: Instant) -> bool {
+/// Returns `(timed_out, status)`. The status is `Some` on exactly one path — the child was observed
+/// to finish on its own — and `None` on the two paths where no status exists to report: the deadline
+/// was reached, or the status can no longer be observed at all. Keeping those three outcomes
+/// distinct is what lets a caller that must not fail open tell "answered" from "did not answer",
+/// while a caller that only wants a banner can go on ignoring the status entirely.
+///
+/// An error from [`std::process::Child::try_wait`] means the child's status can no longer be
+/// observed, so waiting longer cannot help; the child is terminated and reaped on that path too,
+/// which is what guarantees this function never leaves a process behind however it exits. That path
+/// is deliberately *not* reported as a timeout, because the child did not outlive its budget — it
+/// became unobservable, which is a different fact and yields a different diagnostic.
+fn await_child_within_deadline(child: &mut Child, deadline: Instant) -> (bool, Option<ExitStatus>) {
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => return false,
+            Ok(Some(status)) => return (false, Some(status)),
             Ok(None) => {}
             Err(_) => {
                 terminate_and_reap(child);
-                return false;
+                return (false, None);
             }
         }
         if Instant::now() >= deadline {
             terminate_and_reap(child);
-            return true;
+            return (true, None);
         }
         thread::sleep(PROBE_POLL_INTERVAL);
     }
@@ -1518,28 +1946,77 @@ impl ToolSource {
     }
 }
 
+/// Whether a tool's identity participates in the oracle-independence decision.
+///
+/// The distinction exists because one vetting rule — refusing a launcher whose implementation cannot
+/// be established — is sound for a compiler and a false positive for anything else. Oracle
+/// independence is a property of *compilers*: two names that hand their work to one driver make
+/// oracle (a) compare a compiler with itself. No such hazard exists for an emulator, a timeout
+/// utility or a test-case reducer, none of which produces or compares a program's output.
+///
+/// Measured on the reference host, which is why this is a scoped rule rather than a blanket one: the
+/// installed reducer is a Perl script, so it begins with a shebang and names no absolute program on
+/// an `exec` line. Refusing it under strict mode would remove a working tool for no benefit — it
+/// would make finding minimization manual on precisely the unattended runs that produce findings —
+/// while protecting nothing, because a reducer's identity is not an input to any comparison.
+///
+/// Every other check in [`vet_resolved_tool`] applies to both kinds, and deliberately so: an
+/// emulator that anyone on the machine could substitute is as much a hazard as a compiler that could
+/// be, since it is what actually runs the program whose output becomes a verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolKind {
+    /// The compiler under test, or a reference driver. Its identity decides oracle independence.
+    Compiler,
+    /// A supporting utility: an emulator, the timeout utility, the reducer.
+    Support,
+}
+
 /// One discovered — or genuinely absent — tool.
 ///
 /// A record is kept for a tool that could not be found, rather than the tool simply being
 /// missing from a collection, because the report has to be able to say what was looked for
 /// and how to supply it. An absent tool with no record would be an absent tool with no
 /// diagnosis.
+///
+/// # Why every field is private
+///
+/// This record is the *outcome of vetting*, and a writable field would let a caller reinstate
+/// exactly what vetting rejected. Three fields make that concrete, and they are the three a
+/// well-meaning caller is most likely to reach for:
+///
+/// * **`path` and `rejection` are a matched pair.** A refusal clears the path, and every
+///   availability question in the module — which arms run, which cells are unavailable, whether
+///   strict mode escalates to a failure — is answered from the path being empty. Writing a path
+///   back would restore a refused tool to service while leaving its own refusal recorded beside it,
+///   so the report would explain why the tool was declined and the run would use it anyway.
+/// * **`identity` is what oracle independence is decided on.** Substituting one would let two arms
+///   backed by the same compiler pass the distinctness check, and oracle (a) would then compare a
+///   compiler with itself and agree by construction. That is the one failure this whole module
+///   exists to prevent, and it would leave no trace in any report.
+/// * **`source` and `overridden` are how a diagnosis chooses its remedy.** They decide whether a
+///   maintainer is told to edit a variable or install a package, and a wrong answer there sends
+///   them to fix something that is not broken.
+///
+/// The accessors below return borrows and copies, so a caller can report anything and change
+/// nothing. Construction goes through [`ToolRecord::discover`] or
+/// [`ToolRecord::from_build_system`], each of which runs [`vet_resolved_tool`] and is therefore
+/// unable to produce a record whose path survived a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolRecord {
     /// What the tool does in this suite, for example `reference compiler (aarch64 arm of
     /// oracle (a))`.
-    pub role: String,
+    role: String,
     /// The environment variable that overrides this tool, when the catalogue defines one.
     ///
     /// `None` for the two optional auxiliary tools, which the catalogue deliberately gives no
     /// override: inventing a variable for them would add configuration the specification does not
     /// define, and neither tool changes a verdict, so probing the standard name is sufficient.
-    pub override_variable: Option<&'static str>,
-    pub defaults: &'static [&'static str],
+    override_variable: Option<&'static str>,
+    defaults: &'static [&'static str],
     /// The candidates actually tried, in order. Equal to the override alone when one was set,
     /// and to [`ToolRecord::defaults`] otherwise, which is what lets the report distinguish a
     /// bad override from a genuinely missing package.
-    pub candidates: Vec<String>,
+    candidates: Vec<String>,
     /// True when the override variable supplied the candidate list, whether or not the
     /// candidate resolved.
     ///
@@ -1547,32 +2024,32 @@ pub struct ToolRecord {
     /// resolution happened. The distinction is what lets an unresolved tool be diagnosed
     /// correctly: a bad override is fixed by editing a variable, while a missing default is
     /// fixed by installing a package, and the two must not be described as each other.
-    pub overridden: bool,
-    pub source: ToolSource,
+    overridden: bool,
+    source: ToolSource,
     /// Absolute or `PATH`-resolved path to the executable, when one was found.
-    pub path: Option<PathBuf>,
+    path: Option<PathBuf>,
     /// First line of the tool's banner, when one could be captured. `None` means the tool
     /// exists but declined to identify itself, which is recorded rather than treated as an
     /// error.
-    pub version: Option<String>,
+    version: Option<String>,
     /// Which file the resolved path actually denotes, captured once at discovery.
     ///
     /// Present exactly when [`ToolRecord::path`] is, and it is what makes oracle independence
     /// checkable: a name says what a tool is called, an identity says which file it is.
-    pub identity: Option<ToolIdentity>,
+    identity: Option<ToolIdentity>,
     /// Why an otherwise-executable candidate was refused, when one was.
     ///
     /// A refusal is recorded rather than being allowed to look like an absent package, and it
     /// leaves [`ToolRecord::path`] empty so the affected oracle arm is reported unavailable — which
     /// under strict mode is escalated to a failure. That composition is deliberate: a tool the
     /// suite declines to trust must not quietly become a tool the suite silently did without.
-    pub rejection: Option<String>,
+    rejection: Option<String>,
     /// What the tool says it targets, for a driver that can be asked.
     ///
     /// Recorded for the report and the fingerprint. A driver whose stated target contradicts the
     /// arm it was selected for is refused through [`ToolRecord::rejection`], because a reference
     /// compiler that builds for the wrong architecture is not a weaker oracle but a false one.
-    pub provenance: Option<String>,
+    provenance: Option<String>,
 }
 
 impl ToolRecord {
@@ -1599,6 +2076,7 @@ impl ToolRecord {
         role: impl Into<String>,
         override_variable: Option<&'static str>,
         defaults: &'static [&'static str],
+        kind: ToolKind,
         expected_target: Option<Target>,
         strict: bool,
     ) -> ToolRecord {
@@ -1620,6 +2098,8 @@ impl ToolRecord {
         let (rejection, provenance) = vet_resolved_tool(
             resolved.as_deref(),
             identity.as_ref(),
+            override_variable,
+            kind,
             expected_target,
             strict,
         );
@@ -1655,29 +2135,70 @@ impl ToolRecord {
     /// Record a tool that the build system located for us.
     ///
     /// Used for the compiler under test when no override is set, where the path comes from the
-    /// build system rather than from a search, so there is nothing to probe and nothing that
-    /// could have gone wrong on `PATH`.
+    /// build system rather than from a search, so there is nothing to probe on `PATH`.
+    ///
+    /// # Provenance is not a substitute for vetting
+    ///
+    /// It is tempting to treat a build-system path as trusted because no environment variable
+    /// chose it, but the two checks this shares with a discovered tool do not depend on who named
+    /// the path — they depend on what is at the end of it:
+    ///
+    /// * **Identity must be capturable.** [`ToolIdentity::of`] can fail while the path still passes
+    ///   an executable-file test, because the two happen at different instants: a build directory
+    ///   being rewritten by a concurrent build is the ordinary case, and it produces exactly this
+    ///   window. Accepting a path with no captured identity would leave the compiler under test as
+    ///   the one tool in the run whose file cannot be named — and it is the tool every oracle
+    ///   independence check is made *against*, so its identity is the one that matters most.
+    /// * **Under strict mode its location must be trustworthy.** A build directory is an ordinary
+    ///   place for a compiler to be, and an interactive run is deliberately exempt for that reason.
+    ///   An unattended job is not: a world-writable build tree, or a world-writable directory
+    ///   anywhere above it, is a substitution opportunity for the binary whose output the entire
+    ///   suite is about to attribute to this project.
+    ///
+    /// Only the fixed-target probe is omitted, and that omission is principled rather than
+    /// convenient: a reference cross driver serves exactly one architecture and can be asked which,
+    /// whereas the compiler under test is asked for a different target in every cell, so there is no
+    /// single answer for it to give.
+    ///
+    /// A refusal is recorded in [`ToolRecord::rejection`] and clears the path, exactly as it does
+    /// for a discovered tool. For this record specifically, an empty path is a hard failure at the
+    /// caller — there is no degraded mode in which the suite runs without the compiler it exists to
+    /// test.
     fn from_build_system(
         role: impl Into<String>,
         override_variable: Option<&'static str>,
         path: PathBuf,
+        strict: bool,
     ) -> ToolRecord {
-        let version = probe_version(&path);
         let identity = ToolIdentity::of(&path);
+        let (rejection, provenance) = vet_resolved_tool(
+            Some(&path),
+            identity.as_ref(),
+            override_variable,
+            ToolKind::Compiler,
+            None,
+            strict,
+        );
+        let accepted = match rejection {
+            Some(_) => None,
+            None => Some(path.clone()),
+        };
+        let source = match accepted {
+            Some(_) => ToolSource::CargoBinary,
+            None => ToolSource::Unresolved,
+        };
+        let version = accepted.as_deref().and_then(probe_version);
         ToolRecord {
             role: role.into(),
             override_variable,
             defaults: &[],
             candidates: vec![path.display().to_string()],
             overridden: false,
-            source: ToolSource::CargoBinary,
-            identity,
-            // Nothing to vet: this path came from the build system rather than from a search or a
-            // variable, and it is the compiler under test, whose target is chosen per cell rather
-            // than fixed by the driver.
-            rejection: None,
-            provenance: None,
-            path: Some(path),
+            source,
+            identity: accepted.as_ref().and(identity),
+            rejection,
+            provenance,
+            path: accepted,
             version,
         }
     }
@@ -1688,6 +2209,66 @@ impl ToolRecord {
 
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
+    }
+
+    /// What this tool does in the suite, for a report row or a diagnostic.
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+
+    /// The environment variable that overrides this tool, when the catalogue defines one.
+    pub fn override_variable(&self) -> Option<&'static str> {
+        self.override_variable
+    }
+
+    /// The default names the catalogue probes for this tool, in order.
+    pub fn defaults(&self) -> &'static [&'static str] {
+        self.defaults
+    }
+
+    /// The candidates actually tried, in order.
+    pub fn candidates(&self) -> &[String] {
+        &self.candidates
+    }
+
+    /// True when the override variable supplied the candidate list, resolved or not.
+    pub fn overridden(&self) -> bool {
+        self.overridden
+    }
+
+    /// How a successful resolution happened, or that none did.
+    pub fn source(&self) -> ToolSource {
+        self.source
+    }
+
+    /// The captured banner, when one could be captured.
+    ///
+    /// Prefer [`ToolRecord::version_or_unknown`] for report text: it substitutes a stable marker for
+    /// an absent banner, which is what makes two fingerprints taken on the same machine compare
+    /// equal.
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+
+    /// Which file the resolved path denotes, captured once at discovery.
+    ///
+    /// Present exactly when [`ToolRecord::path`] is. This is the value oracle independence is
+    /// decided on, through [`ToolIdentity::is_same_implementation`].
+    pub fn identity(&self) -> Option<&ToolIdentity> {
+        self.identity.as_ref()
+    }
+
+    /// Why an otherwise-executable candidate was refused, when one was.
+    ///
+    /// A `Some` here always accompanies an empty [`ToolRecord::path`], so a refused tool reports as
+    /// unavailable with an explanation rather than as an absent package.
+    pub fn rejection(&self) -> Option<&str> {
+        self.rejection.as_deref()
+    }
+
+    /// What the tool says it targets, for a driver that can be asked.
+    pub fn provenance(&self) -> Option<&str> {
+        self.provenance.as_deref()
     }
 
     /// The captured banner, or a fixed absence marker when none could be captured.
@@ -1762,8 +2343,15 @@ impl ToolRecord {
 ///
 /// Returns `(rejection, provenance)`. A `Some` rejection means the candidate was found and then
 /// declined, which leaves the tool unavailable with an explanation rather than silently trusted.
-/// Three conditions are checked, in the order that produces the most useful diagnostic:
+/// Four conditions are checked, in the order that produces the most useful diagnostic:
 ///
+/// 0. **Its path must be expressible as text without loss.** Every command this suite records is
+///    text, so a path that does not decode as UTF-8 cannot be written into a reproduction command
+///    without substituting a replacement character for the bytes that do not — at which point the
+///    recorded command names a different file from the one that ran, and the identity vetted below
+///    is not the identity of what the recorded command would launch. The record parser already
+///    refuses to render such a path; refusing it here instead converts a failure buried in one cell
+///    into a single pre-flight line naming the tool, the reason and the remedy.
 /// 1. **It must still be the file it was a moment ago.** Resolution and use are two separate
 ///    instants, and a path that resolved but can no longer be identified as a regular file has
 ///    changed underneath the search — a dangling link, a replaced entry, or a deletion. This is the
@@ -1784,6 +2372,8 @@ impl ToolRecord {
 fn vet_resolved_tool(
     resolved: Option<&Path>,
     identity: Option<&ToolIdentity>,
+    override_variable: Option<&'static str>,
+    kind: ToolKind,
     expected_target: Option<Target>,
     strict: bool,
 ) -> (Option<String>, Option<String>) {
@@ -1791,6 +2381,32 @@ fn vet_resolved_tool(
         return (None, None);
     };
     let shown = shown_path(path);
+    if path.to_str().is_none() {
+        let remedy = match override_variable {
+            Some(variable) => format!(
+                "Set {variable} to a path whose every byte is valid UTF-8, or install the tool \
+                 somewhere whose name is"
+            ),
+            None => String::from(
+                "Install the tool somewhere whose name is entirely valid UTF-8, or remove the \
+                 directory holding it from PATH",
+            ),
+        };
+        return (
+            Some(format!(
+                "{shown} was found but its path is not valid UTF-8, so it is refused. Every \
+                 reproduction command this suite records is text, and a path that is not text can \
+                 only be written into one by substituting a replacement character for the bytes \
+                 that do not decode. That would make two of the suite's own guarantees false at \
+                 once: the command a maintainer copies out of a finding would name a *different* \
+                 file from the one that ran, and the tool whose identity was vetted would not be \
+                 the tool the recorded command launches. Refusing here rather than at render time \
+                 is deliberate — it turns a failure buried in one cell of a 1,296-cell matrix into \
+                 one pre-flight line that names the tool and the fix. {remedy}"
+            )),
+            None,
+        );
+    }
     if identity.is_none() {
         return (
             Some(format!(
@@ -1816,60 +2432,132 @@ fn vet_resolved_tool(
                 None,
             );
         }
+        if kind == ToolKind::Compiler && identity.is_some_and(ToolIdentity::is_unattested_wrapper) {
+            return (
+                Some(format!(
+                    "{shown} was found but is refused because {VAR_STRICT} is set and it is a \
+                     script whose implementation could not be determined: it begins with a shebang \
+                     but names no absolute program on an `exec` line. Which compiler it ultimately \
+                     runs is therefore unknown, and that is the one fact oracle independence rests \
+                     on — two names that appear distinct may hand their work to a single driver, in \
+                     which case a differential comparison would compare a compiler with itself and \
+                     agree by construction. Point this tool's override at the driver itself rather \
+                     than at a launcher, or unset {VAR_STRICT} for an interactive run"
+                )),
+                None,
+            );
+        }
     }
     let Some(target) = expected_target else {
         return (None, None);
     };
-    match probe_dumpmachine(path) {
-        Some(machine) if machine_targets(&machine, target) => {
-            (None, Some(format!("reports target {machine}")))
-        }
-        Some(machine) => (
+    let unanswered = |cause: String| {
+        (
             Some(format!(
-                "{shown} was found but reports that it targets {machine}, while it was selected as \
-                 the driver for {target}. A reference compiler that builds for a different \
-                 architecture than the arm it serves is not a weaker oracle but a false one: every \
-                 comparison on that arm would be against a program built for something else. Point \
-                 the override for this arm at a driver that targets {target}, or unset it to probe \
-                 the documented defaults"
+                "{shown} was found but did not state which target it builds for: asked with \
+                 {DUMP_MACHINE_FLAG}, {cause}. It is refused rather than trusted, because the only \
+                 thing that distinguishes the driver for {target} from any other program on this \
+                 machine is its own answer to that question. Accepting silence would let an \
+                 override aimed at the wrong driver — or at something that is not a compiler at all \
+                 — stand in as the authority for the {target} arm. Point {} at a driver that \
+                 answers {DUMP_MACHINE_FLAG} with a {target} triple, or unset it to probe the \
+                 documented defaults",
+                reference_variable_for(target)
             )),
-            Some(format!("reports target {machine}")),
-        ),
-        None => (
-            None,
-            Some(String::from(
-                "target not stated (the driver did not answer the target-reporting flag)",
-            )),
-        ),
+            Some(format!("target not stated ({cause})")),
+        )
+    };
+    match probe_dumpmachine(path) {
+        MachineAnswer::Named(machine) => match machine_mismatch(&machine, target) {
+            None => (None, Some(format!("reports target {machine}"))),
+            Some(mismatch) => (
+                Some(format!(
+                    "{shown} was found but reports that it targets {machine}, while it was \
+                     selected as the driver for {target} ({}): {mismatch}. A reference compiler \
+                     from a different platform family than the arm it serves is not a weaker \
+                     oracle but a false one: every comparison on that arm would be against a \
+                     program built for something else. Point {} at a driver that targets {target}, \
+                     or unset it to probe the documented defaults",
+                    target.triple(),
+                    reference_variable_for(target)
+                )),
+                Some(format!("reports target {machine}")),
+            ),
+        },
+        MachineAnswer::NotLaunched => unanswered(String::from("it could not be launched")),
+        MachineAnswer::NoCompletion(completion) => unanswered(completion),
+        MachineAnswer::Declined(completion) => unanswered(completion),
+        MachineAnswer::Silent => {
+            unanswered(String::from("it exited successfully but printed no target"))
+        }
     }
 }
 
 /// Report why a tool's location cannot be trusted, examining every path that reaches its bytes.
 ///
-/// Both chains are checked when a symbolic link is involved, because either one is sufficient to
-/// substitute the tool and neither implies the other:
+/// Three chains are checked, because each one is independently sufficient to substitute the tool and
+/// none of them implies the others:
 ///
-/// * The **name that was resolved** is what the suite will execute. If any directory on its chain
-///   is world-writable, the link itself can be repointed at another program.
-/// * The **file the name leads to** is what actually runs. A link in a perfectly safe directory can
-///   point into a world-writable one, and checking only the name would accept it — the link's own
-///   permissions are always `rwxrwxrwx` and say nothing about its target.
+/// * The **name that was resolved** is what the suite will spawn. If any directory on its chain is
+///   world-writable, the entry itself can be replaced or repointed at another program.
+/// * The **file the name leads to** is what those bytes actually are. A symbolic link in a perfectly
+///   safe directory can point into a world-writable one, and checking only the name would accept it
+///   — a link's own permissions are always `rwxrwxrwx` and say nothing about its target.
+/// * The **implementation behind a launcher** is what ultimately does the work. This is the same
+///   distinction that makes a launcher-only identity comparison unsound: a wrapper script in
+///   `/usr/local/bin` is unwritable and canonicalizes to itself, so both chains above are clean,
+///   while the driver it `exec`s may sit anywhere at all. Vetting the launcher and not the driver
+///   would trust a script precisely because *it* cannot be tampered with, while the compiler it
+///   hands every compilation to could be replaced freely.
 ///
-/// Checking one chain and not the other would leave a complete substitution path open, so the tool
-/// is refused if either chain is untrustworthy.
+/// Checking any subset would leave a complete substitution path open, so the tool is refused if any
+/// chain is untrustworthy. The third check costs nothing when the tool is not a wrapper, because the
+/// implementation is then the file itself and the comparison short-circuits.
 fn untrusted_location(path: &Path, identity: Option<&ToolIdentity>) -> Option<String> {
     if let Some(reason) = untrusted_reason(path) {
         return Some(reason);
     }
-    let canonical = &identity?.canonical;
-    if canonical == path {
+    let identity = identity?;
+    let canonical = &identity.canonical;
+    if canonical != path {
+        if let Some(reason) = untrusted_reason(canonical) {
+            return Some(format!(
+                "it resolves through a symbolic link to {}, and {reason}",
+                shown_path(canonical)
+            ));
+        }
+    }
+    let implementation = identity.implementation_path();
+    if implementation == canonical {
         return None;
     }
-    let reason = untrusted_reason(canonical)?;
+    let reason = untrusted_reason(implementation)?;
     Some(format!(
-        "it resolves through a symbolic link to {}, and {reason}",
-        shown_path(canonical)
+        "it is a launcher that runs {}, and {reason}",
+        shown_path(implementation)
     ))
+}
+
+/// What asking a driver which target it builds for produced.
+///
+/// Five outcomes rather than an `Option`, because the four ways of *not* answering are not
+/// interchangeable and each earns a different sentence in the refusal. Collapsing them into one
+/// `None` is precisely what let this check fail open: a program that could not be launched, one that
+/// hung, one that rejected the flag and one that printed nothing all arrived as the same absence,
+/// and that absence was then read as permission to proceed.
+enum MachineAnswer {
+    /// The driver could not be launched at all.
+    NotLaunched,
+    /// The driver outlived the probe deadline and was terminated, or became unobservable.
+    ///
+    /// Carries the rendered completion so the diagnostic can say which of the two happened.
+    NoCompletion(String),
+    /// The driver ran to completion and reported failure, so it declined the question.
+    Declined(String),
+    /// The driver reported success but printed nothing that could be read as a target.
+    Silent,
+    /// The driver named this target.
+    Named(String),
 }
 
 /// Ask a compiler driver which target it builds for.
@@ -1877,34 +2565,109 @@ fn untrusted_location(path: &Path, identity: Option<&ToolIdentity>) -> Option<St
 /// The flag is a reference-compiler probe flag and appears in no differential invocation, so the
 /// discipline that only flags both compilers honour identically may be passed to both compilers is
 /// untouched — the same justification that already applies to the static-link input probe.
-fn probe_dumpmachine(driver: &Path) -> Option<String> {
-    let capture = run_bounded_probe(Command::new(driver).arg(DUMP_MACHINE_FLAG))?;
-    if capture.timed_out {
-        return None;
+///
+/// Success is required on top of a non-empty answer, and the two are separate conditions. Measured
+/// here: `/bin/true -dumpmachine` exits zero and prints nothing, while `/bin/echo -dumpmachine`
+/// exits zero and prints the flag back. The first is a successful non-answer and the second is a
+/// confident wrong one, and only a check that looks at both the status and the text can tell either
+/// of them from a real driver reporting `x86_64-linux-gnu`.
+fn probe_dumpmachine(driver: &Path) -> MachineAnswer {
+    let Some(capture) = run_bounded_probe(Command::new(driver).arg(DUMP_MACHINE_FLAG)) else {
+        return MachineAnswer::NotLaunched;
+    };
+    if capture.timed_out || capture.status.is_none() {
+        return MachineAnswer::NoCompletion(capture.completion_summary());
     }
-    first_non_empty_line(&capture.stdout)
+    if !capture.exited_successfully() {
+        return MachineAnswer::Declined(capture.completion_summary());
+    }
+    match first_non_empty_line(&capture.stdout) {
+        Some(machine) => MachineAnswer::Named(machine),
+        None => MachineAnswer::Silent,
+    }
 }
 
-/// True when a driver's reported machine describes `target`.
+/// Why a driver's reported machine does not describe `target`, or `None` when it does.
 ///
-/// The architecture component is compared rather than the whole triple, because the remainder is
-/// spelled differently by different distributions and vendors while the architecture is the part
-/// that decides what the driver actually emits. The measured drivers on this machine report exactly
-/// the suite's own triples, so this comparison is a tolerance rather than a necessity — but it is
-/// the tolerance that keeps the check from failing on a correctly configured machine that spells
-/// its triples another way.
-fn machine_targets(machine: &str, target: Target) -> bool {
+/// # The architecture alone is not the contract
+///
+/// Comparing only the leading component accepts an oracle from an entirely different platform. Every
+/// one of `x86_64-w64-mingw32`, `riscv64-unknown-elf`, `aarch64-linux-musl` and `x86_64-linux-gnux32`
+/// leads with an architecture this suite recognises, and not one of them can serve as a reference
+/// arm: the first targets Windows, the second is bare metal with no operating system underneath it,
+/// the third is a different C library whose formatted output need not agree byte for byte, and the
+/// fourth is a distinct ABI with different type widths. An arm built by any of them would not be a
+/// weaker authority but a false one, and a false authority is worse than a missing one, because a
+/// missing arm is reported and a false one silently produces verdicts.
+///
+/// What is compared is therefore the whole family: the architecture, the operating system, and the C
+/// library environment.
+///
+/// # Why the triple cannot be read positionally
+///
+/// A GNU triple has two to four components and the vendor is optional, so position does not identify
+/// meaning. Measured on this machine: the four reference drivers report `x86_64-linux-gnu`,
+/// `i686-linux-gnu`, `aarch64-linux-gnu` and `riscv64-linux-gnu`, where the *second* component is the
+/// operating system; the alternate reference compiler reports `x86_64-pc-linux-gnu`, where the second
+/// component is the vendor and the *third* is the operating system. Reading by position would have to
+/// be wrong about one of them. The components are consequently searched for the operating system
+/// rather than indexed, which makes vendor variation free — exactly the tolerance a triple's optional
+/// vendor field is supposed to buy.
+///
+/// # Why an absent environment component is accepted
+///
+/// Requiring the word `gnu` to be present would refuse a correctly configured machine. Red Hat and
+/// SUSE build their native driver to report `x86_64-redhat-linux` and `x86_64-suse-linux`: three
+/// components, vendor in the middle, and no environment component at all — while being ordinary
+/// glibc Linux systems. The rule is therefore that an environment component, *when stated*, must be
+/// exactly `gnu`. That admits nothing dangerous, because every incompatible family names itself:
+/// musl, android, uclibc and the x32 ABI all appear in that component, and MinGW and bare-metal ELF
+/// are already excluded by the operating-system check above. It rejects everything the stricter rule
+/// rejects, and refuses one thing fewer that is actually legitimate.
+fn machine_mismatch(machine: &str, target: Target) -> Option<String> {
+    // The spelling the four measured drivers produce, checked first so the ordinary case costs one
+    // comparison and cannot be affected by any of the tolerance below.
     if machine == target.triple() {
-        return true;
+        return None;
     }
-    let Some(architecture) = machine.split('-').next() else {
-        return false;
+    let components: Vec<&str> = machine.split('-').filter(|part| !part.is_empty()).collect();
+    let Some(architecture) = components.first() else {
+        return Some(String::from("that names no architecture at all"));
     };
+    if !architecture_matches(architecture, target) {
+        return Some(format!(
+            "its architecture {architecture} is not {}",
+            target.short_name()
+        ));
+    }
+    let Some(operating_system) = components
+        .iter()
+        .position(|part| *part == LINUX_OPERATING_SYSTEM)
+    else {
+        return Some(format!(
+            "it does not name the {LINUX_OPERATING_SYSTEM} operating system, so it belongs to a \
+             different platform family"
+        ));
+    };
+    match components.get(operating_system + 1) {
+        None => None,
+        Some(environment) if *environment == GNU_ENVIRONMENT => None,
+        Some(environment) => Some(format!(
+            "its environment {environment} is not {GNU_ENVIRONMENT}, so it targets a different C \
+             library or application binary interface"
+        )),
+    }
+}
+
+/// True when a reported architecture component names `target`'s instruction set.
+///
+/// The 32-bit x86 family is the one target with several accepted architecture spellings, and a
+/// driver may legitimately report any of them for the same instruction set. No other target is given
+/// aliases, because none has any in circulation that a GNU driver would report.
+fn architecture_matches(architecture: &str, target: Target) -> bool {
     if architecture == target.short_name() {
         return true;
     }
-    // The 32-bit x86 family is the one target with several accepted architecture spellings, and a
-    // driver may legitimately report any of them for the same instruction set.
     target == Target::I686 && I686_ARCHITECTURE_ALIASES.contains(&architecture)
 }
 
@@ -1945,12 +2708,29 @@ fn join_quoted_static(values: &[&str]) -> String {
 }
 
 /// Whether one static-link input could be located for a target.
+///
+/// Both fields are private for the same reason the enclosing status keeps its own: the pair is a
+/// probe *result*, and a caller that could write `resolved` back would turn "this target's C runtime
+/// is incomplete" into "it is fine", which is the difference between a link failure attributed to
+/// the environment and the same failure attributed to the compiler under test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CRuntimeArtifact {
-    pub name: &'static str,
+    name: &'static str,
     /// Where the target's reference driver said it would find the file, when it named an
     /// existing absolute path.
-    pub resolved: Option<PathBuf>,
+    resolved: Option<PathBuf>,
+}
+
+impl CRuntimeArtifact {
+    /// The static-link input this entry is about, for example `crt1.o`.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Where the driver said it would find the file, when it named an existing absolute path.
+    pub fn resolved(&self) -> Option<&Path> {
+        self.resolved.as_deref()
+    }
 }
 
 /// Whether a target's C runtime appears usable for the static links the suite performs.
@@ -1963,11 +2743,15 @@ pub struct CRuntimeArtifact {
 /// This is a report-quality signal, not a gate. A runtime that is genuinely broken surfaces as
 /// a link failure at environment scope, which is reported as such rather than as a compiler
 /// defect — that distinction is the whole point of recording it here.
+///
+/// Its fields are private because the whole value is a measurement: rewriting the driver or the
+/// artifact list would let a report claim a runtime was probed with a driver that never ran, and the
+/// only purpose this record serves is to let a maintainer trust that claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CRuntimeStatus {
-    pub target: Target,
-    pub driver: Option<PathBuf>,
-    pub artifacts: Vec<CRuntimeArtifact>,
+    target: Target,
+    driver: Option<PathBuf>,
+    artifacts: Vec<CRuntimeArtifact>,
 }
 
 impl CRuntimeStatus {
@@ -1984,6 +2768,21 @@ impl CRuntimeStatus {
             driver: driver.map(Path::to_path_buf),
             artifacts,
         }
+    }
+
+    /// Which target this runtime serves.
+    pub fn target(&self) -> Target {
+        self.target
+    }
+
+    /// The reference driver that was asked, when one was available to ask.
+    pub fn driver(&self) -> Option<&Path> {
+        self.driver.as_deref()
+    }
+
+    /// One entry per required static-link input, in catalogue order.
+    pub fn artifacts(&self) -> &[CRuntimeArtifact] {
+        &self.artifacts
     }
 
     pub fn appears_usable(&self) -> bool {
@@ -2088,32 +2887,55 @@ const CARGO_BIN_EXE_BCC: Option<&str> = option_env!("CARGO_BIN_EXE_bcc");
 /// The value itself carries no interior mutability, so once [`discover`] has initialized it a
 /// clone can be handed to every concurrently executing test without further synchronization and
 /// with no test able to disturb another's view.
+///
+/// # Why every field is private
+///
+/// This is the record every downstream question is answered from, and the questions are not
+/// independent of each other. [`discover`] establishes three cross-field properties before it
+/// returns, and each one is a property of the *combination* rather than of any single field:
+///
+/// * **The oracles are mutually independent.** [`require_distinct_oracles`] has proved that the
+///   compiler under test and every reference arm run different implementations, and that no two
+///   reference arms are the same driver. Writing one tool record could make two arms share a
+///   compiler, at which point oracle (a) compares a compiler with itself and reports agreement by
+///   construction — a green run over a comparison that was never made.
+/// * **Every retained tool passed vetting.** A record whose path is present has been through
+///   [`vet_resolved_tool`]: its identity was captured, its path is expressible as text, and — under
+///   strict mode — its location is not world-writable and it is not an unattested launcher.
+/// * **One configuration governs the whole run.** [`RunConfig`] is held here rather than re-read on
+///   demand precisely so that the matrix, the per-cell budget, the strictness policy and the active
+///   filter cannot differ between two concurrently executing area tests. A writable field would
+///   reintroduce exactly the divergence holding it here removes.
+///
+/// A struct literal or a field assignment could establish none of those, so both are made
+/// impossible: the accessors below hand out borrows and copies, and [`discover`] is the only way to
+/// obtain the value at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capabilities {
     /// The compiler under test. Always present: discovery fails hard when it is not.
-    pub bcc: ToolRecord,
+    bcc: ToolRecord,
     /// Reference compiler for the host architecture, and the driver both undefined-behaviour
     /// audit gates use.
-    pub ref_cc_native: ToolRecord,
+    ref_cc_native: ToolRecord,
     /// Reference cross driver for the i686 arm of oracle (a).
-    pub ref_cc_i686: ToolRecord,
+    ref_cc_i686: ToolRecord,
     /// Reference cross driver for the AArch64 arm of oracle (a).
-    pub ref_cc_aarch64: ToolRecord,
+    ref_cc_aarch64: ToolRecord,
     /// Reference cross driver for the RISC-V 64 arm of oracle (a).
-    pub ref_cc_riscv64: ToolRecord,
+    ref_cc_riscv64: ToolRecord,
     /// Emulated-execution runner for the i686 target. Its name carries the suffix `i386`,
     /// deliberately not the target slug — see [`DEFAULT_QEMU_I386`].
-    pub runner_i686: ToolRecord,
-    pub runner_aarch64: ToolRecord,
-    pub runner_riscv64: ToolRecord,
+    runner_i686: ToolRecord,
+    runner_aarch64: ToolRecord,
+    runner_riscv64: ToolRecord,
     /// External per-cell timeout utility. Optional: execution falls back to a watchdog thread.
-    pub timeout_tool: ToolRecord,
-    pub reducer: ToolRecord,
-    pub c_runtimes: Vec<CRuntimeStatus>,
+    timeout_tool: ToolRecord,
+    reducer: ToolRecord,
+    c_runtimes: Vec<CRuntimeStatus>,
     /// Kernel identification, or an explanatory substitute when it could not be obtained.
-    pub kernel: String,
-    pub host_arch: &'static str,
-    pub host_os: &'static str,
+    kernel: String,
+    host_arch: &'static str,
+    host_os: &'static str,
     /// The validated configuration snapshot this run is operating under.
     ///
     /// Held here rather than re-read on demand so that every question about policy — the effective
@@ -2122,7 +2944,7 @@ pub struct Capabilities {
     /// validated value. Two consequences follow: the reporting functions cannot fail on a
     /// configuration problem, and two concurrently executing area tests cannot describe different
     /// policies.
-    pub config: RunConfig,
+    config: RunConfig,
     /// `PATH` entries that were skipped during tool resolution, each with the reason.
     ///
     /// Surfaced in the capability report rather than discarded, because a skipped entry changes
@@ -2130,10 +2952,81 @@ pub struct Capabilities {
     /// would make an absent tool look like a missing package when it is actually installed
     /// somewhere the suite declined to search — a diagnosis that would send them looking in
     /// entirely the wrong place.
-    pub path_rejections: Vec<String>,
+    path_rejections: Vec<String>,
 }
 
 impl Capabilities {
+    /// The compiler under test. Always available: discovery fails hard when it is not.
+    ///
+    /// Every one of the 1,296 bcc cells is built by the path this record carries, so it is the
+    /// single most consequential value in the whole capability record — and the reason the record's
+    /// fields are read-only. A caller that could replace it would redirect the entire matrix at a
+    /// different binary while every report still named the one that was vetted.
+    pub fn bcc(&self) -> &ToolRecord {
+        &self.bcc
+    }
+
+    /// The native reference compiler: oracle (a)'s host arm and both audit gates.
+    ///
+    /// Exposed as the whole record rather than a path because its absence gates oracle (a) on
+    /// *every* target — see [`Capabilities::oracle_a_available`] — so a report needs its diagnosis,
+    /// not merely whether it is there.
+    pub fn ref_cc_native(&self) -> &ToolRecord {
+        &self.ref_cc_native
+    }
+
+    /// The external per-cell timeout utility, which is optional.
+    ///
+    /// Its absence changes how execution enforces the budget — a watchdog thread instead of the
+    /// utility — and changes no verdict, which is why it degrades silently where a missing oracle
+    /// does not.
+    pub fn timeout_tool(&self) -> &ToolRecord {
+        &self.timeout_tool
+    }
+
+    /// The test-case reducer used to minimize a finding, which is optional.
+    ///
+    /// Its absence makes minimization manual. A finding remains complete without it, because the
+    /// reproducer, the exact commands, the per-cell outputs and the environment fingerprint do not
+    /// depend on it.
+    pub fn reducer(&self) -> &ToolRecord {
+        &self.reducer
+    }
+
+    /// One C-runtime probe result per target, in [`Target::ALL`] order.
+    pub fn c_runtimes(&self) -> &[CRuntimeStatus] {
+        &self.c_runtimes
+    }
+
+    /// Kernel identification, or an explanatory substitute when it could not be obtained.
+    pub fn kernel(&self) -> &str {
+        &self.kernel
+    }
+
+    /// The host architecture as the standard library reports it.
+    pub fn host_arch(&self) -> &'static str {
+        self.host_arch
+    }
+
+    /// The host operating system as the standard library reports it.
+    pub fn host_os(&self) -> &'static str {
+        self.host_os
+    }
+
+    /// The validated configuration snapshot this run operates under.
+    ///
+    /// Read from here rather than from the environment a second time, so that two concurrently
+    /// executing area tests cannot describe different policies and no reporting function can fail
+    /// on a configuration problem.
+    pub fn config(&self) -> &RunConfig {
+        &self.config
+    }
+
+    /// `PATH` entries skipped during resolution, each with the reason it was skipped.
+    pub fn path_rejections(&self) -> &[String] {
+        &self.path_rejections
+    }
+
     /// The reference-compiler record that targets `target`, when one is configured.
     ///
     /// The native driver serves whichever target the host is, and each non-native target is
@@ -2181,19 +3074,48 @@ impl Capabilities {
         }
     }
 
-    /// The emulator that must be prefixed to an execution for `target`, or `None` when the binary
-    /// is to be executed directly.
+    /// The emulator that must be prefixed to an execution for `target`, or `None` when there is
+    /// none to prefix.
     ///
     /// # This returns `None` for two very different reasons
     ///
     /// A native target needs no runner, and a non-native target whose runner is missing has none.
-    /// Both answer `None`, so a caller about to execute something must gate on
-    /// [`Capabilities::can_execute`] first and treat a target it cannot execute as unavailable.
-    /// Executing on the strength of `None` alone would run a foreign binary directly and read the
-    /// resulting failure as a compiler defect.
+    /// Both answer `None`, and nothing in the answer says which. Prefer
+    /// [`Capabilities::execution_for`], which is the same question asked in a form that cannot be
+    /// misread: it distinguishes the two by returning a value only in the case where execution is
+    /// actually possible. This accessor is retained for reporting, where the runner's path is wanted
+    /// as text and the distinction does not arise.
     pub fn runner_for(&self, target: Target) -> Option<&Path> {
         self.runner_record_for(target)
             .and_then(|record| record.path())
+    }
+
+    /// How a binary built for `target` is to be executed, or `None` when it cannot be.
+    ///
+    /// # Why this exists rather than a bare runner path
+    ///
+    /// Execution has two shapes and three situations, and a bare `Option<&Path>` can only express
+    /// two of the three. Native execution runs the binary directly; a foreign target runs it under
+    /// its emulator; and a foreign target with no emulator cannot be run at all. Collapsing the
+    /// first and third into one `None` puts the most dangerous possible default on the most likely
+    /// mistake: a caller that reads "no runner" as "run it directly" would launch a foreign binary
+    /// on the host, and the operating system's refusal to execute it would arrive as a non-zero exit
+    /// status — indistinguishable, to a comparison that only reads status and stdout, from the
+    /// compiler under test having produced a program that fails. A missing emulator would then be
+    /// reported as a compiler defect.
+    ///
+    /// [`Execution`] makes that mistake unrepresentable in the type rather than forbidden by a
+    /// comment: `Execution::Native` is refused for a non-native target by
+    /// [`Execution::runner`]'s own consumer in the record parser, and this function never
+    /// manufactures it for one. A caller that has an `Execution` in hand has already been told
+    /// execution is possible; a caller that has `None` has been told it is not, and has no value it
+    /// could accidentally use.
+    pub fn execution_for(&self, target: Target) -> Option<Execution> {
+        if target.is_native() {
+            return Some(Execution::Native);
+        }
+        self.runner_for(target)
+            .map(|runner| Execution::Emulated(runner.to_path_buf()))
     }
 
     /// True when a binary built for `target` can actually be run on this machine.
@@ -2843,6 +3765,7 @@ fn discover_once() -> HarnessResult<Capabilities> {
         ),
         Some(VAR_REF_CC),
         DEFAULT_REF_CC,
+        ToolKind::Compiler,
         // Required to target the host when the host is one of the four supported targets, and
         // unconstrained otherwise: on an unsupported host there is no architecture to demand.
         native_target(),
@@ -2852,6 +3775,7 @@ fn discover_once() -> HarnessResult<Capabilities> {
         format!("reference cross driver, oracle (a) {} arm", Target::I686),
         Some(VAR_REF_CC_I686),
         DEFAULT_REF_CC_I686,
+        ToolKind::Compiler,
         Some(Target::I686),
         strict,
     );
@@ -2859,6 +3783,7 @@ fn discover_once() -> HarnessResult<Capabilities> {
         format!("reference cross driver, oracle (a) {} arm", Target::Aarch64),
         Some(VAR_REF_CC_AARCH64),
         DEFAULT_REF_CC_AARCH64,
+        ToolKind::Compiler,
         Some(Target::Aarch64),
         strict,
     );
@@ -2866,6 +3791,7 @@ fn discover_once() -> HarnessResult<Capabilities> {
         format!("reference cross driver, oracle (a) {} arm", Target::Riscv64),
         Some(VAR_REF_CC_RISCV64),
         DEFAULT_REF_CC_RISCV64,
+        ToolKind::Compiler,
         Some(Target::Riscv64),
         strict,
     );
@@ -2877,6 +3803,7 @@ fn discover_once() -> HarnessResult<Capabilities> {
         format!("execution runner for {}", Target::I686),
         Some(VAR_QEMU_I386),
         DEFAULT_QEMU_I386,
+        ToolKind::Support,
         // An emulator is not a compiler driver: it emits nothing and states no target, so there is
         // no provenance to verify. Its architecture is instead proved by the arm's cells running.
         None,
@@ -2886,6 +3813,7 @@ fn discover_once() -> HarnessResult<Capabilities> {
         format!("execution runner for {}", Target::Aarch64),
         Some(VAR_QEMU_AARCH64),
         DEFAULT_QEMU_AARCH64,
+        ToolKind::Support,
         None,
         strict,
     );
@@ -2893,6 +3821,7 @@ fn discover_once() -> HarnessResult<Capabilities> {
         format!("execution runner for {}", Target::Riscv64),
         Some(VAR_QEMU_RISCV64),
         DEFAULT_QEMU_RISCV64,
+        ToolKind::Support,
         None,
         strict,
     );
@@ -2901,6 +3830,7 @@ fn discover_once() -> HarnessResult<Capabilities> {
         "per-cell timeout utility (optional)",
         None,
         DEFAULT_TIMEOUT_TOOL,
+        ToolKind::Support,
         None,
         strict,
     );
@@ -2908,6 +3838,7 @@ fn discover_once() -> HarnessResult<Capabilities> {
         "test-case reducer for finding minimization (optional)",
         None,
         DEFAULT_REDUCER,
+        ToolKind::Support,
         None,
         strict,
     );
@@ -2991,17 +3922,23 @@ fn require_distinct_oracles(capabilities: &Capabilities) -> HarnessResult<()> {
         let Some((under_test, reference)) = compiler.zip(record.identity.as_ref()) else {
             continue;
         };
-        if under_test.is_same_file(reference) {
+        // Implementations, not launchers. Either side may be a wrapper script, and two distinct
+        // wrappers for one compiler are two distinct files — so a launcher comparison would call
+        // them independent while the compiler doing the work was the same on both sides.
+        if under_test.is_same_implementation(reference) {
             return Err(HarnessError::new(
                 "verifying that the compiler under test and the reference compilers are \
                  independent implementations",
                 format!(
-                    "the compiler under test and the reference compiler for the {target} arm are \
-                     the same file ({}). Oracle (a) would then compare the compiler under test \
+                    "the compiler under test and the reference compiler for the {target} arm run \
+                     the same program ({}). Oracle (a) would then compare the compiler under test \
                      with itself, which agrees by construction: every comparison on that arm would \
                      pass, and the arm would report perfect agreement precisely because it had \
-                     stopped being an independent oracle. Point {} at the compiler under test and \
-                     {} at a genuinely different reference compiler",
+                     stopped being an independent oracle. This is judged on the program each name \
+                     ultimately runs rather than on the names themselves, so two different wrapper \
+                     scripts that hand the work to one driver are correctly recognised as one \
+                     implementation. Point {} at the compiler under test and {} at a genuinely \
+                     different reference compiler",
                     under_test.describe(),
                     VAR_BCC_BIN,
                     reference_variable_for(*target),
@@ -3024,12 +3961,12 @@ fn require_distinct_oracles(capabilities: &Capabilities) -> HarnessResult<()> {
             else {
                 continue;
             };
-            if first.is_same_file(second) {
+            if first.is_same_implementation(second) {
                 return Err(HarnessError::new(
                     "verifying that each arm of oracle (a) has its own reference driver",
                     format!(
                         "the reference compilers for the {first_target} and {second_target} arms \
-                         of oracle (a) are the same file ({}). One driver cannot serve two \
+                         of oracle (a) run the same program ({}). One driver cannot serve two \
                          architectures here — the reference compiler has no target-selection flag, \
                          so selecting a target means selecting a different driver binary — which \
                          means at least one of these two arms would compare against a program \
@@ -3079,7 +4016,14 @@ fn reference_variable_for(target: Target) -> &'static str {
 fn resolve_compiler_under_test(strict: bool) -> HarnessResult<ToolRecord> {
     let role = "compiler under test";
     if checked_var(VAR_BCC_BIN)?.is_some() {
-        let record = ToolRecord::discover(role, Some(VAR_BCC_BIN), &[], None, strict);
+        let record = ToolRecord::discover(
+            role,
+            Some(VAR_BCC_BIN),
+            &[],
+            ToolKind::Compiler,
+            None,
+            strict,
+        );
         if record.is_available() {
             return Ok(record);
         }
@@ -3102,11 +4046,15 @@ fn resolve_compiler_under_test(strict: bool) -> HarnessResult<ToolRecord> {
             shown_path(&candidate)
         )));
     }
-    Ok(ToolRecord::from_build_system(
-        role,
-        Some(VAR_BCC_BIN),
-        candidate,
-    ))
+    let record = ToolRecord::from_build_system(role, Some(VAR_BCC_BIN), candidate, strict);
+    if record.is_available() {
+        return Ok(record);
+    }
+    // Vetting refused it. The same hard failure as an absent binary, because a compiler under test
+    // the suite declines to trust must not quietly become a compiler under test the suite silently
+    // did without — that is precisely the composition every other tool's refusal path avoids, and
+    // this tool has no degraded mode at all.
+    Err(compiler_under_test_error(&record.diagnosis()))
 }
 
 /// Build the hard-failure message for an unlocatable compiler under test.

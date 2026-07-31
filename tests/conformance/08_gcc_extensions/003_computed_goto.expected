@@ -1,0 +1,46 @@
+# Expectation record for 08_gcc_extensions/003_computed_goto.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 003_computed_goto
+area               = 08_gcc_extensions
+description        = Indirect jump through an array of label addresses
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
+ub_notes           <<END
+Every jump target is the address of a label in the same function, taken from a fully
+initialized array that is only ever indexed inside its bounds, so no jump is made through
+an indeterminate target.  No jump enters the scope of a variably-modified type, because no
+variable-length array is declared, and no jump bypasses an initialisation that is later
+read.  Every dispatch loop terminates and every accumulator stays inside the range of int.
+No label address is printed: distinctness is shown by comparison alone.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+impl_defined_notes <<END
+The warning gate drops -pedantic for this program.  The subject under test is a GCC
+extension, which is by definition not standard C, and -pedantic exists precisely to reject
+such constructs: with it in force the program could not be compiled at all and the feature
+would go untested, which constraint C3 forbids.  Every other member of the gate is
+retained, including -Werror, so no other class of defect in this program is downgraded.
+END
+expected_stdout    <<END
+cg_folded_acc=30
+cg_folded_hits=2
+cg_runtime_acc=30
+cg_runtime_hits=2
+cg_loop_sum=10
+cg_loop_iters=5
+cg_label_addrs_distinct=1
+END
