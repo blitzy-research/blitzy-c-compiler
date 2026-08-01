@@ -15,7 +15,13 @@
 //! Every `cargo` invocation above presupposes the repository's own `Cargo.toml`, its `bcc` binary
 //! target and its `src/**` tree. On a checkout that carries this suite ahead of the compiler tree
 //! the `cargo` gates therefore do not run at all, while `rustfmt --check` and a direct
-//! `rustc --test --emit=metadata` on this file still do, because neither needs a package. That
+//! `rustc --test --emit=metadata` on this file still do, because neither needs a package. The
+//! direct `rustc` form needs one thing Cargo would otherwise have supplied: `CARGO_MANIFEST_DIR`,
+//! which `conformance_harness::manifest_dir` reads through the compile-time `env!` macro to
+//! resolve every corpus path from the package root. Run it as
+//! `CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata --out-dir
+//! target/conformance-typecheck tests/conformance.rs` from the repository root; without the
+//! variable it stops at that macro rather than at anything wrong with the suite. That
 //! split, the way the remaining gates are established without adding a manifest anywhere, and the
 //! fact that the resolution is to merge onto the branch that already carries the package rather
 //! than to create one here, are recorded in full under "The Cargo integration precondition" in

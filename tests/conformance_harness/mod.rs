@@ -2045,6 +2045,25 @@ pub type HarnessResult<T> = Result<T, HarnessError>;
 ///
 /// Resolved from the manifest directory rather than the working directory because
 /// `cargo test` makes no guarantee about a test process's working directory.
+///
+/// # The one build-time requirement in the whole suite
+///
+/// `env!` is deliberate and load-bearing: this value must be the package root, and there is no
+/// run-time source for it that a test process can trust. It is also the one thing here that a
+/// **bare `rustc`** does not supply. Cargo defines `CARGO_MANIFEST_DIR` for every target it builds,
+/// so `cargo test` and `cargo clippy` need nothing extra; a direct
+/// `rustc --test --emit=metadata tests/conformance.rs` — the type-check the suite's own contract
+/// offers for a checkout that carries it ahead of the compiler tree — defines nothing, and stops
+/// here with "environment variable `CARGO_MANIFEST_DIR` not defined at compile time". Supply it on
+/// the command line in that case: `CARGO_MANIFEST_DIR="$(pwd)" rustc …`, run from the repository
+/// root.
+///
+/// The contrast with how the compiler under test is located is intentional, and is the reason only
+/// this one value behaves this way. `env::CARGO_BIN_EXE_BCC` reads Cargo's binary-path variable
+/// through `option_env!` rather than `env!`, so a package that declares no `bcc` binary target
+/// still builds and the missing compiler becomes an explanatory run-time failure instead of a
+/// build error. The manifest directory cannot be deferred that way: without it the suite has no
+/// root to resolve a corpus path from, and so nothing to explain the failure with.
 pub fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -2576,7 +2595,7 @@ pub fn digest_hex(components: &[&str]) -> String {
 // - [`RunGeneration::token`] identifies *this process's* run. It is unpredictable, which is what
 //   makes it useful for claiming a one-shot action and for naming a temporary file no concurrent
 //   writer can also choose. It is deliberately **never** rendered into a report's Markdown or into
-//   any field of either summary, because those artifacts are documented as byte-identical for
+//   any field of either summary: an area report's Markdown is documented as byte-identical for
 //   identical inputs and a token would break that on every run. It appears in exactly two places
 //   outside those artifacts: the `token=` field of an area report's generation preamble, which is a
 //   comment line whose only consumer is the machine check that refuses a report an earlier run of an
@@ -2585,10 +2604,19 @@ pub fn digest_hex(components: &[&str]) -> String {
 //   argued where they are written, in `report.rs`'s generation-identity section and in
 //   `findings.rs`'s environment renderer.
 // - [`RunGeneration::configuration`] identifies the *configuration* the run was performed under. It
-//   is a pure function of that configuration, so it is stable across runs that were configured
-//   alike and differs the moment one of them was reduced, filtered or pointed at another compiler.
-//   That is the value a report may carry: it is deterministic, and it is exactly what distinguishes
-//   a full run's numbers from a quick run's.
+//   is a pure function of that configuration, so it differs the moment one run was reduced, filtered
+//   or pointed at another compiler, which is exactly what distinguishes a full run's numbers from a
+//   quick run's. That is the value a report may carry.
+//
+//   Being a pure function of the configuration is not the same as being constant between two runs,
+//   and the difference matters to anyone diffing two summaries. The configuration includes the
+//   resolved identity of every tool, and a tool's identity includes how it was established; under
+//   strict mode a runner is established by attestation, which requires it to print a token derived
+//   from this run and exit with a status derived from it, and that required status is part of the
+//   record. So this value legitimately differs between two identically configured runs on one
+//   machine whenever a runner was attested. The stability promise therefore belongs to the area
+//   Markdown, which renders neither value; `env.rs`'s
+//   `Capabilities::configuration_fingerprint` states the consequence field by field.
 // =================================================================================================
 
 /// Identity of one run of the suite.

@@ -153,20 +153,35 @@
 //!
 //! # Determinism
 //!
-//! Identical inputs produce byte-identical reports. There is no wall-clock timestamp, no elapsed
-//! duration, no process identifier and no iteration over an unordered collection anywhere in the
-//! **rendered text** — meaning every Markdown artifact, every data row and every field of either
-//! summary. The one value in this module that is none of those is the `token=` field of an area
-//! report's generation preamble: a comment line, never rendered into a report a maintainer diffs, and
-//! present because without it a report an earlier identically configured run left behind cannot be
-//! refused. The reasoning, and the exact bound on where the token may appear, are recorded under
-//! "Generation identity". Everything else obeys the rule without exception: rows are sorted by
-//! program, then target in [`Target::ALL`] order, then level in
-//! [`OptLevel::ALL`] order, then oracle in [`Oracle::ALL`] order, and every map is ordered. A
-//! report that reordered itself between runs would produce phantom differences and lose exactly
-//! the regression value it exists to provide. The session signature obeys the same rule: it is
-//! derived from configuration alone, never from a clock, a process identifier or a counter, so two
-//! identically configured runs stamp identical bytes and their reports stay diffable.
+//! **Identical inputs produce byte-identical area-report Markdown.** That is the promise, and it is
+//! stated at exactly that scope because two fields elsewhere are deliberately run-specific and a
+//! broader claim would be wrong. There is no wall-clock timestamp, no elapsed duration, no process
+//! identifier and no iteration over an unordered collection anywhere in the rendered text, and rows
+//! are sorted by program, then target in [`Target::ALL`] order, then level in [`OptLevel::ALL`]
+//! order, then oracle in [`Oracle::ALL`] order, with every map ordered. A report that reordered
+//! itself between runs would produce phantom differences and lose exactly the regression value it
+//! exists to provide.
+//!
+//! Two values are run-specific by design, and both are outside the area Markdown:
+//!
+//! * the `token=` field of an area report's generation preamble — a comment line, never rendered
+//!   into a table, present because without it a report an earlier identically configured run left
+//!   behind cannot be refused. The reasoning and the exact bound on where the token may appear are
+//!   recorded under "Generation identity";
+//! * the session signature, and with it the `identity` column of every data row and the
+//!   configuration digest and fingerprint the summary reports. The signature is derived from
+//!   configuration alone — never from a clock, a process identifier or a counter — but
+//!   "configuration" includes the environment fingerprint, and one part of that fingerprint is
+//!   itself per-run: each emulator is attested by being required to print a token derived from this
+//!   run and exit with a status derived from it, and the status it had to produce is recorded in its
+//!   fingerprint line. Two identically configured runs on the same machine therefore agree on every
+//!   rendered verdict and differ in that digest.
+//!
+//! The asymmetry is the point rather than a defect to file. The area Markdown is what a maintainer
+//! diffs to ask whether a change altered a result, so it is kept free of anything run-specific; the
+//! digest is what answers "which run, in which environment, proved to have really executed", and an
+//! attestation that did not vary could be satisfied by a stand-in that ignored its arguments, which
+//! would make a silently absent emulator indistinguishable from a working one.
 //!
 //! # Coverage is a matrix, never a percentage
 //!
@@ -382,8 +397,9 @@ const TSV_SEPARATOR: char = '\t';
 //
 // # The one place a process token is written, and why it is here
 //
-// This module's determinism rule is that identical inputs produce byte-identical reports, and a
-// per-process token breaks that for whatever carries it. It is carried here anyway, in exactly one
+// This module's determinism rule is that identical inputs produce byte-identical area-report
+// Markdown, and a per-process token breaks that for whatever carries it. It is carried here anyway,
+// in exactly one
 // field of exactly one line, because the alternative is worse: without it, a report left behind by an
 // earlier run of the *same configuration over the same corpus* is byte-for-byte a report this run
 // could have written, and the identity check that exists to refuse it cannot. Clearing the report
@@ -397,9 +413,15 @@ const TSV_SEPARATOR: char = '\t';
 //     is a comment line whose sole consumer is the aggregation check it serves;
 //   * it appears in **no** rendered Markdown, in **no** summary field of either half, and in **no**
 //     diagnostic — a token-only mismatch is described in words rather than by quoting either token —
-//     so every artifact a maintainer diffs between runs stays byte-identical for identical inputs;
+//     so the area Markdown a maintainer diffs between runs stays byte-identical for identical inputs;
 //   * `run` and `config` are unchanged and still derived from configuration alone, so a *differently*
 //     configured file is still recognised by a deterministic value and can still be explained.
+//
+// The token is not the only value that differs between two identically configured runs — the session
+// signature does too, because the environment fingerprint it is derived from records the per-run
+// status each emulator had to exit with to be attested. That is a separate, deliberate exception,
+// documented under "Determinism" above and at `RunIdentity::compute`. The bound stated here is about
+// the token alone.
 // ---------------------------------------------------------------------------------------------
 
 /// First token of the generation preamble, which is also how a preamble is recognised.
@@ -720,12 +742,32 @@ impl RunIdentity {
     /// Derive the provenance from the things a report's meaning depends on.
     ///
     /// Both halves are derived from configuration and corpus content alone — never from a clock, a
-    /// process identifier or a counter — so two identically configured runs over an unchanged corpus
-    /// stamp identical bytes and their reports stay diffable, which is the determinism rule this
-    /// module opens with. Recognising a file written by *another* run of the same configuration over
-    /// the same corpus is deliberately not this value's job: [`prepare_namespace`] removes the previous
-    /// run's artifacts before this run writes any, and [`Generation`]'s per-process token catches
-    /// whatever that purge could not reach.
+    /// process identifier or a counter. Recognising a file written by *another* run of the same
+    /// configuration over the same corpus is deliberately not this value's job:
+    /// [`prepare_namespace`] removes the previous run's artifacts before this run writes any, and
+    /// [`Generation`]'s per-process token catches whatever that purge could not reach.
+    ///
+    /// # Why `identity` still differs between two identically configured runs
+    ///
+    /// "Configuration alone" is not the same as "stable across runs", and the difference is worth
+    /// stating because `identity` is rendered — as the `identity` column of every data row and as
+    /// the configuration digest and fingerprint of the summary. One of this value's inputs is the
+    /// discovered tool set, and a tool record carries how that tool was established. Under strict
+    /// mode an emulator is established by **attestation**: it is required to print a token derived
+    /// from this run and to exit with a status derived from it, so a stand-in that ignored its
+    /// arguments cannot satisfy the check by luck. The status it had to produce is part of the
+    /// record, so the fingerprint — and therefore this digest — legitimately differs from run to
+    /// run on one unchanged machine.
+    ///
+    /// That is why the module's determinism promise is scoped to the **area Markdown**, which
+    /// renders no part of this value, rather than to every artifact. The two serve different
+    /// questions: the Markdown answers "did a result change", so it must not move; this digest
+    /// answers "which sweep, against which corpus bytes, in an environment each tool proved itself
+    /// in", and an attestation that never varied would answer the last part falsely. A run
+    /// comparing two reports' `identity` values is asking whether they describe the same sweep of
+    /// the same corpus in the same process — which is exactly the check
+    /// [`prepare_namespace`] and the aggregation step need, and which the memoization above keeps
+    /// consistent for every thread of one process.
     ///
     /// `run` digests the sweep that was configured: the effective matrix and policy above, plus
     /// the test-name filters this process was started with, which decide which areas could run at
@@ -4369,12 +4411,16 @@ fn render_summary_markdown(
     lines.push(format!(
         "The fingerprint below is a digest of everything that could make two runs' numbers \
          incomparable — the effective matrix, the resolved identity of every tool, the per-cell \
-         budget and the settings that decide which verdicts fail a run. Two runs configured alike \
-         share it, so a reduced run's totals can never be mistaken for a full run's. It is \
-         deterministic, which is why it can appear here at all: the token that identifies *this \
-         process's* run is deliberately not in this file, because these two artifacts are \
-         byte-identical for identical inputs and a per-run token would break that on every run. The \
-         token is recorded once, in `{}` beside this summary.",
+         budget and the settings that decide which verdicts fail a run. Differ in any of those and \
+         the digest differs, so a reduced run's totals can never be mistaken for a full run's. \
+         Expect it to differ between two runs configured alike as well, and do not read that as a \
+         change in configuration: under strict mode each emulator is attested by being made to \
+         print a token derived from the run and exit with a status derived from it, so that a \
+         stand-in ignoring its arguments cannot pass by luck, and the status it had to produce is \
+         part of the tool identity this digest covers. The artifact to diff when asking whether a \
+         result changed is an area report's Markdown, which renders none of this and is \
+         byte-identical for identical inputs. The token identifying *this process's* run is not in \
+         this file at all; it is recorded once, in `{}` beside this summary.",
         super::sandbox::RUN_MANIFEST_NAME
     ));
     lines.push(String::new());
@@ -4804,8 +4850,11 @@ fn render_summary_tsv(
             .set(COL_LABEL, "coverage_metric")
             .set(COL_DETAIL, "enumerable matrix; no percentage is measurable"),
     );
-    // Deterministic, so it belongs in an artifact documented as byte-identical for identical
-    // inputs; the per-process run token deliberately does not, and lives in the run manifest alone.
+    // Derived from configuration and the resolved tool identities, so it states what this run was
+    // comparable with. It is not constant across runs — an attested emulator's required exit status
+    // is part of a tool identity — which is why the stability promise belongs to the area Markdown
+    // rather than to this summary. The per-process run token is a separate matter and is not here at
+    // all: it lives in the run manifest alone.
     rows.push(
         SummaryRow::new(RECORD_META)
             .set(COL_LABEL, "configuration_fingerprint")

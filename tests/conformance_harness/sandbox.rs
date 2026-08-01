@@ -368,11 +368,19 @@ pub fn workspace_path(key: &CellKey) -> PathBuf {
 
 /// Name of the sidecar that records which run owns the artifacts beneath [`report_root`].
 ///
-/// A sidecar rather than a header inside each report, because a report's Markdown and
-/// tab-separated bytes are documented as identical for identical inputs and a run token would
-/// break that on every run. The identity therefore lives beside the reports, where a reader — and
-/// [`report`](super::report)'s finalization — can consult it without making the reports themselves
-/// non-deterministic.
+/// A sidecar rather than a header inside each report, because an **area report's Markdown** is
+/// documented as identical for identical inputs and a run token would break that on every run. The
+/// identity therefore lives beside the reports, where a reader — and
+/// [`report`](super::report)'s finalization — can consult it without disturbing the one artifact
+/// whose bytes are promised to be stable.
+///
+/// It is worth being exact about the scope of that promise, because it is narrower than "every
+/// artifact": the area Markdown is byte-identical across runs, while the tab-separated companion
+/// additionally carries the run token in its generation preamble and a per-run `identity` column,
+/// and the run summary carries the configuration digest and fingerprint. Those fields exist to say
+/// *which run* produced a result and to record the evidence that each emulator really executed, so
+/// they legitimately differ between two otherwise identical runs. See
+/// [`report`](super::report)'s determinism notes for the field-by-field statement.
 pub const RUN_MANIFEST_NAME: &str = "run.txt";
 
 /// Upper bound on the bytes one retained entry may contribute to the run's retention budget.
@@ -523,10 +531,27 @@ fn initialize_run() -> HarnessResult<()> {
          retained_workspace_count_max = {RETAINED_WORKSPACE_COUNT_MAX}\n\
          # The token identifies this process's run. Within the reports it is written in exactly\n\
          # one place -- the token= field of the generation preamble comment that opens each area\n\
-         # .tsv, where the aggregation check reads it -- and in no rendered table, no summary\n\
-         # field and no diagnostic, so every artifact a maintainer diffs stays byte-identical for\n\
-         # identical inputs. The configuration fingerprint is deterministic and is carried by the\n\
-         # reports throughout, so a reduced run's numbers can never be mistaken for a full run's.\n",
+         # .tsv, where the aggregation check reads it -- and in no rendered table and no\n\
+         # diagnostic.\n\
+         #\n\
+         # What is byte-identical between two runs over identical inputs: the Markdown of every\n\
+         # area report. That is the artifact to diff when asking whether a change altered a\n\
+         # result, and it is stable because no run-specific value is rendered into it.\n\
+         #\n\
+         # What is intentionally run-specific, so that a diff of it is expected to show changes:\n\
+         # the token= field named above; the identity column of every area .tsv row, together\n\
+         # with the configuration digest and fingerprint the summary reports; and the emulator\n\
+         # lines of the summary's environment fingerprint. The last of those is the reason for\n\
+         # the others. Each emulator is attested by being made to print a token derived from this\n\
+         # run and exit with a status derived from it, so a stand-in that ignored its argument\n\
+         # could not satisfy the check by accident; that per-run status is recorded in the\n\
+         # runner's fingerprint line, and the digests computed over the fingerprint therefore\n\
+         # differ from run to run as well. Dropping the evidence would make a silently absent\n\
+         # emulator indistinguishable from a working one, so the variation is kept and stated\n\
+         # here rather than left for a reader to discover against a promise of stability.\n\
+         #\n\
+         # The configuration fingerprint is carried by the reports throughout, so a reduced run's\n\
+         # numbers can never be mistaken for a full run's.\n",
         generation.token(),
         generation.configuration(),
     );
@@ -1279,10 +1304,16 @@ impl Workspace {
     ///
     /// Only the directory this workspace owns is removed, never a parent it merely sits inside.
     /// A cell workspace has no shared parent but the work root, and the grouping directories of
-    /// the audit workspaces are shared by design, so pruning an emptied one would race a sibling
-    /// being created on another thread: the sibling's directory could vanish between its creation
-    /// and its first write. Leaving an empty grouping directory behind costs nothing and keeps
-    /// allocation independent of what any other thread is doing.
+    /// the audit workspaces are shared by design, so pruning an emptied one from *here* would race
+    /// a sibling being created on another thread: the sibling's directory could vanish between its
+    /// creation and its first write. Keeping this method's reach to one directory is what makes it
+    /// safe to call from anywhere, at any time, without knowing what else is running.
+    ///
+    /// The empty grouping directories that follow from that are tidied separately, by
+    /// [`prune_empty_audit_grouping`], which the audit calls once a program has finished with all
+    /// of its gates. That call site is the only one in the suite where a shared parent is provably
+    /// idle — the audit is sequential and runs once per process — which is precisely why the
+    /// tidy-up lives there and not in this method.
     ///
     /// # Errors
     ///
@@ -1730,4 +1761,115 @@ pub fn audit_workspace(
         sanitize_text_for_report(program)
     );
     allocate(&role, root, config.keep_work())
+}
+
+/// Remove the two grouping directories one program's audit gates were nested inside, once they
+/// hold nothing.
+///
+/// [`audit_workspace`] is the only workspace in the suite nested more than one level below
+/// [`work_root`]: its path is `<audit root>/<area>/<program>/<gate>`, because a program has more
+/// than one gate and each gate compiles separately. [`Workspace::discard`] removes the `<gate>`
+/// leaf and, by a deliberate contract documented there, never a parent. Left at that, a clean run
+/// ends with an empty `<area>/<program>` directory for every program audited — scaffolding that
+/// says nothing, since the two single-level roots (`<probe root>/<flag>` and
+/// `<attestation root>/<label>`) leave only their reserved root behind. This restores that
+/// symmetry: after a program whose gates all passed and kept nothing, the audit root is as empty
+/// as the other two.
+///
+/// # Why pruning a shared parent is safe *here* specifically
+///
+/// [`Workspace::discard`] declines to prune a parent for a concrete reason: a grouping directory
+/// is shared, so removing an emptied one could race a sibling being created on another thread and
+/// make that sibling's directory vanish between its creation and its first write. That reason does
+/// not apply to this call, and the difference is a property of the audit rather than an assumption
+/// about it. The audit runs **once per process** — the pre-flight memoizes it — and walks the
+/// corpus **sequentially**, one program and one gate at a time. There is therefore no concurrent
+/// creator of any `<area>/<program>` directory at the moment a program finishes with it. The
+/// narrow interface is part of the argument: this function takes one program's identity and can
+/// only ever reach the two directories that identity names, so it cannot prune a level any other
+/// caller depends on.
+///
+/// Three further properties mean a mistaken call could still not destroy evidence:
+///
+/// * **Emptiness is checked, not inferred.** The directory is listed first and removed only when
+///   the listing yields nothing. An unreadable entry counts as an entry, so an ambiguous listing
+///   leaves the directory alone. (Inferring emptiness from a removal failure would have read more
+///   naturally, but the error kind that reports it stabilized well after this suite's documented
+///   minimum Rust version, and raising that minimum to tidy a directory is not a trade worth
+///   making.)
+/// * **Only the two named levels are reachable, and never the reserved root.** Each is passed
+///   through [`require_beneath_work_root`], which refuses the work root itself and any component
+///   that is not a plain name, and the audit root is simply never a candidate.
+/// * **`fs::remove_dir` removes a directory only.** It is not recursive, so it cannot follow a
+///   symbolic link's target or delete a tree.
+///
+/// # Return value
+///
+/// [`None`] when there was nothing to do or the tidy-up succeeded, and that covers the ordinary
+/// cases: a directory still holding a retained failing gate, a directory kept because the run was
+/// asked to retain every workspace, and a program whose gates never ran because the reference
+/// compiler was absent. Those are not faults and say nothing.
+///
+/// A note otherwise, for a caller to fold into the program's own audit detail. This is cleanup, so
+/// it may never fail a run or colour a verdict — the same rule [`Workspace::discard_advisory`]
+/// follows, and for the same reason: reporting a defect in the compiler where there was only a
+/// defect in the cleanup is the one thing a cleanup step must never do. The note is not routed to
+/// the retention-pruning accounting, which exists to disclose evidence that had to be *dropped* to
+/// stay inside the run's budget; nothing is dropped here, because nothing was there.
+pub fn prune_empty_audit_grouping(area: &str, program: &str) -> Option<String> {
+    let context = format!(
+        "tidying the emptied audit grouping directories of {}/{}",
+        sanitize_text_for_report(area),
+        sanitize_text_for_report(program)
+    );
+    // Encoded exactly as `audit_workspace` encodes them, so this addresses the directories that
+    // function created rather than a second name for them. A component it would have rejected
+    // cannot have produced a directory to tidy, so there is nothing to report.
+    let area_component = encode_component("feature area", area).ok()?;
+    let program_component = encode_component("program", program).ok()?;
+    let area_directory = work_root().join(UB_AUDIT_ROOT_NAME).join(area_component);
+    let program_directory = area_directory.join(program_component);
+    // Innermost first: the area directory cannot be empty until the program directory beneath it
+    // is gone. When the program directory survives, the area directory still holds it and the
+    // second call finds it non-empty and leaves it alone.
+    if let Some(note) = remove_directory_if_empty(&context, &program_directory) {
+        return Some(note);
+    }
+    remove_directory_if_empty(&context, &area_directory)
+}
+
+/// Remove `directory` when it holds nothing, reporting only a genuine obstruction.
+///
+/// The emptiness test and the removal are separate steps on purpose; see
+/// [`prune_empty_audit_grouping`] for why emptiness is established by listing rather than by
+/// interpreting a removal failure, and for why that is sound at the one place this is called.
+fn remove_directory_if_empty(context: &str, directory: &Path) -> Option<String> {
+    if let Err(error) = require_beneath_work_root(context, directory) {
+        return Some(error.to_string());
+    }
+    match fs::read_dir(directory) {
+        Ok(mut entries) => {
+            // An entry that cannot even be read still counts as an entry, so an ambiguous listing
+            // ends the attempt rather than licensing a removal.
+            if entries.next().is_some() {
+                return None;
+            }
+        }
+        // Already gone, or never created because this program's gates did not run.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            return Some(format!(
+                "{} could not be listed: {error}",
+                shown_path(directory)
+            ));
+        }
+    }
+    match fs::remove_dir(directory) {
+        Ok(()) => None,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => Some(format!(
+            "{} could not be removed: {error}",
+            shown_path(directory)
+        )),
+    }
 }

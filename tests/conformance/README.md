@@ -311,6 +311,33 @@ The format is line-oriented and is parsed with no serialization crate.
   `expected_divergence.*` family.
 - Lines are split on any standard line break, so a record saved with CRLF endings parses
   identically to one saved with LF.
+- **A scalar value that holds more than one item is split one of exactly two ways, and which one
+  applies is fixed by the key rather than chosen by the author.** The rule is worth reading once,
+  because two adjacent keys in the reference record below use different separators:
+  - **Whitespace** — for the keys that denote an **argument vector**, a sequence handed to a
+    process: `shared_flags`, `ub_audit_flags`, and the three command templates `bcc_command`,
+    `ref_command` and `run_command`. Whitespace is what a shell and an `argv` already separate on,
+    so a record writes `ub_audit_flags = -Wall -Wextra -pedantic -Wshadow -Werror` with no
+    punctuation. Any run of whitespace collapses, and leading or trailing whitespace is immaterial.
+  - **Commas** — for the keys that denote a **list of names**: `targets`, `opt_levels`, and a
+    marker's `expected_divergence.scope`. Each element is trimmed, so `targets = x86_64, i686`
+    and `targets = x86_64,i686` are the same list. An **empty** element is a hard error rather
+    than a dropped one, for the reason given under
+    [Hard parse errors](#hard-parse-errors).
+
+  The two are **not interchangeable**, and reaching for the wrong one is reported rather than
+  quietly obeyed — neither mistake can widen an argument vector or shrink the matrix in silence.
+  A comma written inside an argument vector becomes part of the token, so `shared_flags = -static,`
+  yields the single item `-static,`, which names no permitted switch and is refused with the stray
+  comma visible in the quoted spelling:
+
+  ```text
+  "-static," is not a flag a record may name. A record may name only the value-free switches …
+  ```
+
+  Whitespace written inside a comma list is likewise absorbed into the element, because elements
+  are trimmed but never split: `targets = x86_64 i686` is read as one element naming no target,
+  and is refused as an unrecognised target rather than silently understood as two.
 
 **The trailing-newline convention is the format's highest-risk detail.** A heredoc value is the
 concatenation of its body lines **with a newline appended to each**, so a body of two lines parses
@@ -558,6 +585,13 @@ Each item below is a **hard error**.
 
 **Flags**
 
+- **Both flag keys are whitespace-separated, not comma-separated** — they are argument vectors, per
+  [Grammar](#grammar) above. Write `shared_flags = -static` and, for a deviation,
+  `ub_audit_flags = -Wall -Wextra -pedantic -Wshadow -Werror`. A comma is not a separator here but
+  a character in the token, so `-static,` is a different string from `-static` and is refused as a
+  flag no record may name; the diagnostic quotes the spelling so the stray comma is visible. This
+  is the one place in the record where an author accustomed to the comma lists that `targets` and
+  `opt_levels` use is likely to be caught out.
 - `shared_flags` must be a subset of the verified shared set and contain nothing forbidden.
   **In practice: use `-static` only.** Specifically:
   - `-static` is **mandatory** — every artifact in the corpus is linked statically, and a record
@@ -1170,7 +1204,7 @@ and cannot be established in each case:
 | Check | Documentation-only checkout | Checkout with the Cargo package |
 | --- | --- | --- |
 | `rustfmt --edition 2021 --check` on each `.rs` file directly | ✅ runs — needs no manifest | ✅ runs |
-| `rustc --edition 2021 --test --emit=metadata tests/conformance.rs` | ✅ runs — type-checks the whole suite, needs no manifest | ✅ runs |
+| `CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata --out-dir target/conformance-typecheck tests/conformance.rs` | ✅ runs — type-checks the whole suite, needs no manifest **but does need `CARGO_MANIFEST_DIR`** ([why](#why-the-direct-rustc-invocation-needs-cargo_manifest_dir)) | ✅ runs |
 | `cargo test --test conformance --no-run` | ❌ **blocked** — no manifest to discover the target from | ✅ runs |
 | `cargo clippy -- -D warnings` | ❌ **blocked** — clippy drives Cargo | ✅ runs |
 | `cargo fmt -- --check` | ❌ **blocked** — `cargo fmt` drives Cargo | ✅ runs |
@@ -1181,6 +1215,45 @@ The two direct invocations in the first two rows are not a substitute for the Ca
 presented as one. They establish the properties that do not depend on packaging — that every file parses,
 type-checks and is correctly formatted — which is exactly the subset a manifest-less checkout can honestly
 claim. The rest is established by placing the suite in a package.
+
+#### Why the direct `rustc` invocation needs `CARGO_MANIFEST_DIR`
+
+The type-check row above is printed with that variable in front of it deliberately, and the two extra
+pieces are not decoration. **Copy the row exactly**; the shorter form fails, and it fails in a way that
+looks like the suite is broken when it is not:
+
+```text
+error: environment variable `CARGO_MANIFEST_DIR` not defined at compile time
+    --> tests/conformance_harness/mod.rs
+     |
+     |     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: there is a similar Cargo environment variable: `CARGO_MANIFEST_DIR`
+
+error: aborting due to 1 previous error
+```
+
+The gutter is elided on purpose: the line the compiler points at is wherever `manifest_dir()` currently sits, and quoting a number here would go stale the first time anything above it is edited — which is the same class of defect as documenting a command that does not run. What is stable, and what to search for, is the message and the `env!` call it names.
+
+`manifest_dir()` in [`../conformance_harness/`](../conformance_harness/) resolves every path the suite
+reads — the corpus, the registers, the fixture header — from the **package root**, through the
+compile-time `env!` macro. That is a requirement rather than a convenience: `cargo test` makes no
+guarantee about a test process's working directory, so a relative path would be resolved against
+something nobody chose. Cargo defines the variable for every target it builds, so `cargo test` and
+`cargo clippy` need nothing extra. A **bare `rustc` is not Cargo** and defines nothing, so a direct
+invocation has to supply it — hence `CARGO_MANIFEST_DIR="$(pwd)"`, run from the repository root.
+
+Note the contrast with the compiler under test, whose resolution is described further down in this
+section: that path is resolved at **run time**, through `option_env!` plus `BCC_BIN`, precisely so a
+package with no `bcc` binary target still compiles. The manifest directory is the one value that cannot
+be treated the same way, because the suite has nowhere else to resolve a corpus path from.
+
+`--out-dir target/conformance-typecheck` is the second addition, and it is there for the same reason
+everything else this suite writes goes beneath the build directory: without it, `--emit=metadata` drops
+`libconformance.rmeta` into whatever directory you ran it from — the repository root — and a
+documentation-only checkout would gain an untracked file from running its own type-check. Directed into
+`target/`, the artifact is covered by the existing `.gitignore` entry and `git status` stays clean.
 
 **Establishing the Cargo gates without adding a manifest to this repository.** The suite's own files are
 copied, byte-for-byte unmodified, into a scratch Cargo package created **outside** the repository, which
@@ -2025,17 +2098,32 @@ partway — would leave the *previous* run's `summary.md` standing as though it 
 whole root is emptied rather than the two known artifacts named, because a list of names has to be
 kept in step with the artifacts written into it and this has no list to fall behind.
 
-The identity of the run is written to `run.txt` beside the reports, and everything the reports
-themselves render is **deterministic**: every `.md` artifact, every data row and every summary field
-is byte-identical across two runs with identical inputs, which is what makes them diffable. What they
-carry for provenance is the **configuration fingerprint**, which is deterministic too — so a reduced
-run's numbers can never be mistaken for a full run's.
+The identity of the run is written to `run.txt` beside the reports. **The artifact to diff is an area
+report's `.md`: it is byte-identical across two runs with identical inputs.** That is stated at
+exactly that scope on purpose, because three provenance fields elsewhere are deliberately
+run-specific:
 
-The process token, which necessarily differs between runs, is written in exactly three places and no
-others: `run.txt`, a finding's `environment.txt`, and the `token=` field of an area report's
-[generation preamble](#the-generation-stamp--why-a-summary-never-reports-another-runs-results) — a
-comment line whose only consumer is the machine check it serves. It appears in no rendered table, in
-no summary field and in no diagnostic, which is why the determinism above still holds as stated.
+| Field | Where | Why it moves |
+| --- | --- | --- |
+| `token=` | The `token=` field of an area `.tsv`'s [generation preamble](#the-generation-stamp--why-a-summary-never-reports-another-runs-results) — a comment line whose only consumer is the machine check it serves | It identifies *this process*, which is the whole point: it is what recognises a report an earlier identically configured run left behind |
+| `identity` | The `identity` column of every area `.tsv` row, and the summary's **`Configuration digest`** | It digests the resolved tool set, and an attested runner's identity includes the run-specific status it had to exit with |
+| `configuration` | `run.txt`, and the summary's **`Configuration fingerprint`** | The same reason |
+
+The last two share one cause, and it is evidence rather than noise. Under strict mode each emulator is
+**attested**: it is required to print a token derived from this run and to exit with a status derived
+from it, so a stand-in that ignored its arguments could not pass by luck. The status it had to produce
+is recorded in that runner's fingerprint line, so any digest computed over the fingerprint differs
+between two runs on one unchanged machine. An attestation whose expected answer never changed could be
+replayed, and a silently absent emulator would then be indistinguishable from a working one — so the
+variation is kept, and documented here, rather than the reports claiming a stability they do not have.
+
+What the fingerprint still does, and what it is carried for, is unchanged: differ in the matrix, the
+policy, the budget or any tool and the digest differs, so **a reduced run's numbers can never be
+mistaken for a full run's.**
+
+The process token is written in exactly three places and no others: `run.txt`, a finding's
+`environment.txt`, and the `token=` field named above. It appears in no rendered table, in no summary
+field and in no diagnostic, which is what keeps the area `.md` free of it.
 
 One qualification, stated because it is real rather than hidden: the byte counts in
 [`## Retained evidence`](#retention-budgets) reflect the order in which concurrently failing cells
@@ -2066,7 +2154,7 @@ Three fields, because they answer three different questions and the check needs 
 | --- | --- | --- |
 | `run` | The **sweep**, as a digest — so a file written under settings this run did not use is recognised as foreign in one comparison | The effective matrix and policy, plus the test-name filters this process was started with, which decide which areas could run at all. Deterministic |
 | `config` | Those settings **spelled out**, so a foreign file's mismatch can be explained rather than merely detected — "that report swept one target at two levels, this run sweeps four at three" is actionable where an opaque digest is not. One field per fact that changes what a report means, ending with a bit per oracle and target, so a machine missing one cross driver is distinguishable from a fully equipped one | The same settings. Deterministic |
-| `token` | The **process** — so a file left behind by an earlier run of an *identical* configuration over an *identical* corpus is recognised too | This process. The one value anywhere in a report that is not a function of the inputs |
+| `token` | The **process** — so a file left behind by an earlier run of an *identical* configuration over an *identical* corpus is recognised too | This process. Not a function of the inputs, and the only such value in an area report's Markdown, which renders none of it |
 
 The first two are pure functions of the run's inputs, and that is exactly why they cannot tell a
 repeat run from the run it repeats: a report an earlier process wrote under the same settings over the
@@ -2077,8 +2165,12 @@ the file survives it, which is precisely the case this check is the last line ag
 field; and hence the deliberately narrow shape of the exception it makes to the determinism rule. The
 token appears in the `token=` field of this comment line and nowhere else in any report: in no
 rendered Markdown, in no field of either summary half, and in no diagnostic — a token-only mismatch is
-described in words rather than by quoting either token. Every artifact a maintainer diffs therefore
-stays byte-identical for identical inputs.
+described in words rather than by quoting either token. The area report's Markdown a maintainer diffs
+therefore stays byte-identical for identical inputs. (The token is not the only field that moves
+between two such runs — the `identity` column and the summary's digests do too, for the separate
+reason given under [the retirement of the report root](#the-report-and-generated-finding-roots-are-retired-at-the-start-of-every-run)
+— but it is the only one this exception is about, and none of the three is rendered into the
+Markdown.)
 
 **A preamble missing any of the three fields is treated as stale**, the token included. A file
 carrying no token cannot be shown to belong to the process reading it, and treating its absence as
@@ -2104,11 +2196,12 @@ would race with a sibling's write.
 
 Two consequences worth knowing:
 
-- **The reports stay byte-identical between runs.** Every Markdown artifact reproduces byte for byte,
-  and so does every data row of every `.tsv`; the only thing that differs between two runs with
-  identical inputs is the `token=` field of that comment line — plus the one qualification recorded
-  above about contended retention ceilings. Diff two runs' area reports and anything else that differs
-  is something the run genuinely found.
+- **An area report's Markdown stays byte-identical between runs.** It reproduces byte for byte, and so
+  does every field of every `.tsv` data row **except `identity`**. Between two runs with identical
+  inputs, exactly three things differ: the `token=` field of that comment line, the `identity` column
+  and the summary digests derived from the same value, and — on a run where the retention ceilings were
+  contended — the byte counts qualified above. Diff two runs' area `.md` files and anything that
+  differs is something the run genuinely found.
 - **A run that could not aggregate all fourteen current reports says so.** With a test-name filter
   active it still publishes a summary — stamped partial, with every area that did not contribute
   listed as absent, stale or unusable — and without one it waits, printing `run summary pending`,
@@ -2258,7 +2351,7 @@ Alongside those, and each present on every run:
 | `## ⚠️ Unavailable oracles` | Every arm that could not be attempted, never silent |
 | `## Recorded, reasoned exclusions — what was deliberately not compared` | So the set of comparisons *not* made is as visible as the set that was |
 | `## Environment fingerprint` | Each compiler, each emulator and the kernel, so a divergence can be attributed to toolchain drift |
-| `## Run configuration` | The effective policy, including a **`Configuration fingerprint`** row — deterministic, so two runs under the same policy agree and a reduced run's numbers cannot be mistaken for a full run's |
+| `## Run configuration` | The effective policy, including a **`Configuration fingerprint`** row — differ in the matrix, the policy, the budget or any tool and it differs, so a reduced run's numbers cannot be mistaken for a full run's. Expect it to differ between two runs configured alike as well: an attested emulator's required exit status is part of a tool's identity |
 | `## Retained evidence` | `retained_workspaces`, `retained_bytes` against the permitted run ceiling, and every `retention_pruning` note |
 | `## Why this report is reduced or partial` | Present whenever a quick matrix, a name filter or `BCC_CONFORMANCE_ONLY` narrowed the run |
 | `## Diagnostics` | Anything the reporting path itself needs the reader to know |

@@ -553,6 +553,33 @@ fn comma_items<'a>(
     Ok(items)
 }
 
+/// Split an **argument vector** on whitespace, the way a shell would.
+///
+/// This is the record format's second and last separator, and the split a key gets is decided by
+/// what the value *is* rather than by preference. `shared_flags`, `ub_audit_flags` and the three
+/// command templates all denote argument vectors — sequences handed to a process, where whitespace
+/// is the separator every shell and every `argv` already uses — so they are split here. `targets`,
+/// `opt_levels` and a marker scope denote lists of names, which is prose, so they are comma lists
+/// split by [`comma_items`]. A record therefore writes `shared_flags = -static` and
+/// `targets = x86_64, i686`, and the two are not interchangeable.
+///
+/// Consistent with that, an author who reaches for the wrong separator is told so rather than
+/// quietly obeyed, and neither mistake can shrink the matrix or widen an argument vector in
+/// silence:
+///
+/// * A comma inside an argument vector becomes **part of the token**, because whitespace is the
+///   only separator here. `shared_flags = -static,` yields the single item `"-static,"`, which is
+///   not a member of [`RECORD_SHARED_FLAGS_PERMITTED`], so [`parse_shared_flags`] rejects the
+///   record and names the offending spelling with its stray comma visible in the quoted form.
+/// * Whitespace inside a comma list likewise becomes part of the element, because
+///   [`comma_items`] trims each element but never splits one. `targets = x86_64 i686` yields the
+///   single element `"x86_64 i686"`, which names no target, so [`parse_targets`] rejects it.
+///
+/// Unlike [`comma_items`] this needs no fallible form. `split_whitespace` yields no empty item and
+/// collapses any run of separators, so the empty-element fault that function must reject cannot
+/// arise, and leading or trailing whitespace needs no prior trim. An entirely blank value yields an
+/// empty vector, which each caller reports in its own terms — for `shared_flags` that `-static` is
+/// missing, for `ub_audit_flags` that an empty deviation is not a deviation.
 fn whitespace_items(value: &str) -> Vec<&str> {
     value.split_whitespace().collect()
 }

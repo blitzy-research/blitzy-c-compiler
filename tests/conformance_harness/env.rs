@@ -3851,8 +3851,11 @@ impl Capabilities {
     ///
     /// The rendering is a pure function of the record, its configuration snapshot and the
     /// once-per-process credential snapshot [`redact_secrets`] holds: no clock, no process
-    /// identifier and no map iteration, so two runs on the same machine produce byte-identical text
-    /// and the report is unaffected by how many threads the test harness uses.
+    /// identifier and no map iteration, so the report is unaffected by how many threads the test
+    /// harness uses and two runs on the same machine differ only where the *record* differs. Under
+    /// strict mode that is not nowhere: an attested runner's provenance names the run-specific exit
+    /// status it was required to produce, so the runner lines move between runs even on an unchanged
+    /// machine. That is evidence rather than noise — see [`Capabilities::render_fingerprint`].
     ///
     /// [`redact_secrets`] is applied to the whole of it on the way out, because this text is printed
     /// to the test runner's output and quoted into two assertion messages — a continuous-integration
@@ -4239,7 +4242,7 @@ impl Capabilities {
         lines
     }
 
-    /// A short, deterministic digest of the configuration this run was performed under.
+    /// A short digest of the configuration this run was performed under.
     ///
     /// # What it covers, and why it covers that much
     ///
@@ -4247,18 +4250,36 @@ impl Capabilities {
     /// it was reduced, the resolved identity of every tool — including the file each name ultimately
     /// runs, so a package rebuilt at the same version reads as a different configuration — the
     /// per-cell budget, and the behavioural settings that decide which verdicts fail a run and which
-    /// programs are attempted at all. Two runs configured alike therefore share this value, and any
-    /// difference in what was asked for or what answered changes it.
+    /// programs are attempted at all. Any difference in what was asked for or what answered changes
+    /// it, which is what makes a reduced run's totals impossible to mistake for a full run's.
+    ///
+    /// # It is a function of the run, not a constant across runs
+    ///
+    /// The digest is computed deterministically from its inputs, but one of those inputs is not
+    /// stable between two runs on one unchanged machine, and a reader comparing two summaries needs
+    /// to know that. Tool identity includes how a tool was established, and under strict mode a
+    /// runner is established by attestation: it must print a token derived from this run and exit
+    /// with a status derived from it, so that a stand-in ignoring its arguments cannot satisfy the
+    /// check by luck. That required status is named in the runner's provenance, so
+    /// [`render_fingerprint`](Capabilities::render_fingerprint) — and therefore this digest — differs
+    /// from run to run whenever any runner was attested.
+    ///
+    /// The variation is the evidence, not a defect: an attestation whose expected answer never
+    /// changed could be replayed, and a silently absent emulator would then be indistinguishable
+    /// from a working one. Requirement-wise this is the emulator half of the environment fingerprint
+    /// a finding must carry, which is what lets a divergence be attributed to toolchain drift.
     ///
     /// # Why a digest rather than the text it digests
     ///
     /// [`render_fingerprint`](Capabilities::render_fingerprint) is many lines long, and this value is
     /// carried on a single line by the run manifest and by every report. Its purpose there is
     /// comparison, not description: a reader who needs the detail has the fingerprint section of the
-    /// same report a few lines away. It carries no timestamp and no process identifier, so it is safe
-    /// to render anywhere in an artifact documented as byte-identical for identical inputs — unlike
-    /// [`RunGeneration::token`](super::RunGeneration::token), which for exactly that reason is
-    /// confined to one comment field of one artifact and appears in no rendered text.
+    /// same report a few lines away. It carries no timestamp and no process identifier, which is
+    /// what makes a difference between two digests attributable to the run's configuration and
+    /// attested tools rather than to when or by which process it ran. The artifact whose bytes are
+    /// promised not to move is an area report's Markdown, which renders neither this digest nor
+    /// [`RunGeneration::token`](super::RunGeneration::token) — the token being confined more tightly
+    /// still, to one comment field of one artifact and no rendered text at all.
     pub fn configuration_fingerprint(&self) -> String {
         let config = &self.config;
         let behaviour = format!(
@@ -4283,8 +4304,16 @@ impl Capabilities {
     /// to the compiler. That distinction is precisely what the repository's own risk register asks
     /// for when it notes that emulator version skew is a hazard for cross-architecture testing.
     ///
-    /// Deterministic and free of any timestamp, so two fingerprints from the same machine compare
-    /// equal and a difference between two fingerprints is always a real difference.
+    /// Free of any timestamp and of any process identifier, so a difference between two fingerprints
+    /// is always a difference in what was discovered rather than in when it was discovered.
+    ///
+    /// It is not, however, constant across runs. A runner attested under strict mode records the
+    /// run-specific exit status it was required to produce, so its line differs between two runs on
+    /// an unchanged machine. Two fingerprints from the same machine therefore compare equal in every
+    /// tool's name, version and resolved file, and differ in the attestation evidence — which is the
+    /// part that proves the runner actually executed for *this* run rather than at some point in the
+    /// past. [`configuration_fingerprint`](Capabilities::configuration_fingerprint) records what that
+    /// means for the digests computed over this text.
     pub fn render_fingerprint(&self) -> String {
         let mut lines = Vec::new();
         lines.push(String::from("# environment fingerprint"));

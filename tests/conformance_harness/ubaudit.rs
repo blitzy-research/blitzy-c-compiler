@@ -470,6 +470,18 @@ impl GateResult {
         format!("{} {} gate: {}", self.status, self.gate, self.detail)
     }
 
+    /// Append a cleanup note to this gate's explanation, leaving its status untouched.
+    ///
+    /// The same sentence shape and the same sanitization [`conclude`] uses when a gate's own
+    /// workspace resists removal, so a reader meets one convention rather than two. Deliberately
+    /// unable to change the status: a tidy-up that did not work is untidy, not a failed gate, and a
+    /// cleanup step that could turn a passing gate into a failing one would report a defect in the
+    /// compiler where there was only a defect in the cleanup.
+    fn note_cleanup(&mut self, note: &str) {
+        self.detail.push_str(". Cleanup note: ");
+        self.detail.push_str(&sanitize_line(note));
+    }
+
     /// Build a result for a gate that was applied.
     fn new(
         gate: Gate,
@@ -1931,7 +1943,7 @@ fn audit_program(
         .map(Manifest::expect_exit)
         .unwrap_or_default();
 
-    let (warning, sanitizer) = match driver {
+    let (warning, mut sanitizer) = match driver {
         None => {
             let diagnosis = caps.ref_cc_native().diagnosis();
             (
@@ -1950,6 +1962,22 @@ fn audit_program(
             (warning, sanitizer)
         }
     };
+
+    // Both gates have concluded, so the grouping directories this program's gate workspaces sat
+    // inside are finished with. Each gate has already discarded or retained its own leaf; what is
+    // left is the `<area>/<program>` scaffolding, which belongs to the program rather than to
+    // either gate and so is tidied here. Attempted only when neither gate is holding a directory:
+    // `GateResult::workspace` is `Some` exactly when something was kept — a failed gate's
+    // evidence, a run asked to retain every workspace, or a leaf whose own removal did not work —
+    // and in every one of those cases the scaffolding must stay so that what was kept remains
+    // reachable. A note comes back only from a genuine obstruction, never from a directory that
+    // still holds evidence, and it is folded into this program's audit detail rather than raised:
+    // cleanup may not colour a gate's verdict.
+    if warning.workspace().is_none() && sanitizer.workspace().is_none() {
+        if let Some(note) = sandbox::prune_empty_audit_grouping(area, program) {
+            sanitizer.note_cleanup(&note);
+        }
+    }
 
     Ok(ProgramAudit {
         area: String::from(area),
