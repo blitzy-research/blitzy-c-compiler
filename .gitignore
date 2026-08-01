@@ -1,0 +1,12 @@
+# Rust / Cargo build output
+/target
+**/*.rs.bk
+
+# Differential conformance suite — transient run artifacts (never committed).
+# Per-cell workspaces, per-area reports, the run summary, and auto-generated
+# finding directories are all written beneath the build directory on every run.
+# The curated finding set under tests/conformance/findings/ is deliberately
+# NOT ignored — it is a committed deliverable.
+/target/conformance-work/
+/target/conformance-report/
+/target/conformance-findings/

@@ -44,11 +44,13 @@
 // that added `classify.rs` and `findings.rs`, on exactly that rule. The module documentation
 // above describes the design; this list describes what is present, and the two now coincide.
 //
-// Declaring them here and satisfying the declarations by creating `Cargo.toml` and
-// `tests/conformance.rs` is not an option: the plan places `Cargo.toml` in the read-only set
-// and states that the layout is designed so that no manifest change is required at all, which
-// is how the "do not modify the compiler's source code" constraint is honoured without
-// qualification. `tests/conformance.rs` is likewise the deliverable of a later boundary.
+// Declaring a module ahead of its file and then satisfying the declaration by creating
+// `Cargo.toml` was never an option: the plan places `Cargo.toml` in the read-only set and states
+// that the layout is designed so that no manifest change is required at all, which is how the
+// "do not modify the compiler's source code" constraint is honoured without qualification.
+// `tests/conformance.rs` now exists and reaches this module as `mod conformance_harness;`, so the
+// list below is exactly what that driver compiles: every entry must continue to name a file that
+// is present in the checkout.
 pub mod classify;
 pub mod compare;
 pub mod compile;
