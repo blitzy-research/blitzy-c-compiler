@@ -266,6 +266,12 @@ does not excuse a divergence on another; a `compile_failure` marker on oracle (a
 expected divergence. When a marker exists but does not cover the observation, the verdict falls
 through to FINDING and the detail states exactly which dimension failed to match.
 
+**This holds for a build refusal too, which is why one is scoped `all oracles`.** A refusal reaches
+classification once per oracle arm, each settled against its own authority, so the oracle dimension
+narrows a real set there as well; a marker meant to document a refusal names every arm it denies.
+See [Every validation the parser enforces](#every-validation-the-parser-enforces) for the exact
+spelling and what happens when a single oracle is named instead.
+
 **A marker never changes what a program does.** A marker changes how a divergence is *classified*,
 never whether the feature is *exercised*, and nothing in the harness may short-circuit a phase
 because a marker exists.
@@ -462,10 +468,12 @@ Three details in it are worth reading rather than skimming, because each is the 
 carrying its weight:
 
 - **`ub_audit_flags` is present, which means this record deviates from the default warning gate.**
-  It drops `-Wconversion` and `-Wsign-conversion`, and the *reason* is written into the notes,
-  naming both flags. A deviation whose flags are named nowhere in either notes block is a hard
-  error — see
-  [The two facts most often misunderstood](#the-two-facts-most-often-misunderstood).
+  It drops `-Wconversion` and `-Wsign-conversion`, and the *reason* is written into
+  `impl_defined_notes` — in a paragraph of its own, naming both flags by their exact spelling. That
+  field is the **only** one searched for it: a deviation whose dropped flags `impl_defined_notes`
+  does not name is a hard error at load time, and naming them in `ub_notes` instead does not satisfy
+  the requirement, because `ub_notes` is not searched for a gate reason at all — see
+  [Recorded reasons](#every-validation-the-parser-enforces).
 - **`ub_notes` distinguishes two kinds of well-definedness.** Narrowing to an **unsigned** type is
   defined for every value — the result is reduced modulo one plus the destination maximum, which is
   why `(unsigned char)(-56)` is `200` and `(unsigned short)(-200)` is `65336` everywhere. Narrowing
@@ -492,12 +500,18 @@ ones that ever do.
 ```text
 expected_divergence.id       = ILLUSTRATION-ONLY-NOT-A-REAL-MARKER
 expected_divergence.class    = compile_failure
-expected_divergence.scope    = oracle_a; all targets; all opt levels
+expected_divergence.scope    = all oracles; all targets; all opt levels
 expected_divergence.basis    = docs/project-guide.md, the section that explicitly documents this limitation
 expected_divergence.observed <<END
 bcc: <the diagnostic as it was actually seen>; reference compiler: <what it actually printed>
 END
 ```
+
+The oracle clause reads `all oracles` because the class is a **build refusal**: no artifact is
+produced, so every oracle arm loses the subject of its comparison and a marker naming one arm would
+leave the other two reported as findings. A marker for a class that *is* a comparison —
+`stdout_mismatch` or `exit_code_mismatch` — names the oracle that made it, since only that arm
+observed anything.
 
 **A marker may not be minted on an omission, and two conditions must both hold.** A marker
 reclassifies a divergence on the authority of a limitation this repository **explicitly documents**.
@@ -505,7 +519,8 @@ An *omission* from a documented inventory is not that: it records that no docume
 construct, not that the implementation rejects it. So:
 
 1. a repository artifact must **explicitly document the limitation**, and the basis must cite that
-   file and section — the file's existence is machine-verified; and
+   file and a locator within it — the document is resolved, contained, read and searched for that
+   locator on every run; and
 2. the divergence must have been **observed and reproduced**, and `expected_divergence.observed`
    must state what was actually seen rather than what someone expects to see.
 
@@ -614,11 +629,32 @@ Each item below is a **hard error**.
   whole dimension — `all oracles`, `all targets`, `all opt levels` — or lists members of exactly one
   dimension as a comma-separated list. An empty clause is rejected at its position rather than
   filtered away.
+- **Scope matching is strict on all four dimensions — oracle, target, optimization level and
+  class — with no exemption for any class.** A marker documenting a build refusal
+  (`compile_failure`, `link_failure`, `run_crash`, `timeout`) must therefore scope **`all
+  oracles`**, because a refusal denies every oracle arm the subject of its comparison. Each arm is
+  settled against its own authority — the same-target reference capture, the baseline capture, the
+  record's `expected_stdout` — so a scope naming one oracle excuses that arm alone and the others
+  are reported as `FINDING`, with the oracle dimension named among the mismatches and the `all
+  oracles` remedy stated in the detail. An arm whose authority this environment cannot supply is
+  reported `UNAVAILABLE` instead and is never classified against a marker at all.
 - `expected_divergence.basis` **must begin with a repository-relative file path**, then `, `, then
-  the section or description that authorises the marker — **and the cited file must exist on disk.**
-  This is machine-verified by `infra_expected_divergence_register`. The path must be relative and
-  must not climb out of the repository; a whole-document citation with no section is rejected,
-  because a citation a reader cannot check is not a basis.
+  the section or description that authorises the marker. The path must be relative and must not climb
+  out of the repository; a whole-document citation with no section is rejected, because a citation a
+  reader cannot check is not a basis. Three properties are then machine-verified by
+  `infra_expected_divergence_register`, all three on the document's own bytes:
+  - **containment** — the *fully resolved* path must lie inside this repository, so no symbolic link
+    along the way can move the answer;
+  - **a real, readable document** — it is read through the suite's bounded reader, which refuses a
+    symbolic link, a device node or a FIFO at the final component and refuses an oversized file.
+    Existence alone is not the property that matters; the document is read so the cited section can be
+    resolved inside it;
+  - **a locator that resolves** — the citation must carry at least one of `line 246`, `lines 696-725`,
+    `§0.6.2` or a backtick-quoted phrase from the document, and every locator it carries must resolve.
+- The marker's six fields must also be mirrored by a **structured entry** in
+  [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md), and every field is compared against this
+  record on every run. That register defines the entry shape and the locator grammar in full; mentioning
+  an identifier there is not documenting a divergence.
 
 ### The command templates and their placeholders
 
@@ -830,7 +866,9 @@ why it is machine-enforced rather than asserted — see the next section.
 
 ## The undefined-behaviour audit gate
 
-Every program passes through two gates, and `infra_ub_audit_gate` runs them.
+Every program passes through two gates. The driver performs them once per run, `infra_ub_audit_gate`
+reports them in full, and **every feature area asserts on the gates covering its own programs** — see
+[Two of those four are gates](#two-of-those-four-are-gates-and-every-area-is-judged-against-them).
 
 ### The warning gate
 
@@ -842,9 +880,11 @@ A record that omits `ub_audit_flags` accepts this default, and that is the norma
 
 **There are exactly two sanctioned deviations.** Each obliges the record to carry a non-empty
 `impl_defined_notes`, and each obliges the reason to **name the dropped flags** — the exact spelling
-of every flag it drops, which the audit accepts in *either* `impl_defined_notes` or `ub_notes`,
-because the gate searches both fields. The full obligation is stated under
-[Recorded reasons](#every-validation-the-parser-enforces):
+of every flag it drops, leading hyphen included. `impl_defined_notes` is the **one** field that
+reason is read from, and `ub_notes` is **not searched for it at all**: a reason recorded only there
+leaves the record unloadable, and the diagnostic names the flag left unexplained rather than the
+field. The full obligation, and the reason for keeping the two fields to one question each, is
+stated under [Recorded reasons](#every-validation-the-parser-enforces):
 
 | Deviation | Where | Why |
 | --- | --- | --- |
@@ -920,9 +960,12 @@ the audit actually applies.
 ## Flag discipline
 
 Only flags that both compilers honour with the same meaning may be passed identically to both. That
-is verified rather than assumed: `infra_flag_capability_probe` asserts an **observable consequence**
-per flag, not mere acceptance, and asserts **negatively** that no non-shared flag has leaked into
-the shared set.
+is verified rather than assumed: the probe asserts an **observable consequence** per flag, not mere
+acceptance, and asserts **negatively** that no non-shared flag has leaked into the shared set. The
+driver performs it once per run, `infra_flag_capability_probe` reports it in full, and — because flag
+parity is a property of the configuration rather than of any one program — **every feature area asserts
+on it**; see
+[Two of those four are gates](#two-of-those-four-are-gates-and-every-area-is-judged-against-them).
 
 ### The flags actually used
 
@@ -1216,6 +1259,71 @@ infra_flag_capability_probe        infra_expected_divergence_register
 infra_ub_audit_gate                infra_oracle_capability_report
 ```
 
+### Two of those four are gates, and every area is judged against them
+
+`infra_flag_capability_probe` and `infra_ub_audit_gate` do not compare anything. They establish the
+two **preconditions** the differential oracles rest on: that every flag a differential invocation
+passes means the same thing to both compilers (requirement 3), and that every program in the corpus is
+free of undefined behaviour (requirement 1). Requirement 1 states the consequence in its own terms — a
+program containing undefined behaviour permits both compilers to do anything — so while either
+precondition is unmet, a PASS is not evidence of agreement and a divergence is not evidence of a
+defect.
+
+Two ordinary tests cannot express that. The built-in harness runs all eighteen concurrently in one
+process with no ordering between them, so "run the gates first" is not something you can arrange and
+not something a test can assert; and a failing gate test would sit beside fourteen area tests each
+reporting a green matrix whose comparisons are not evidence. What the driver does instead:
+
+- each gate is performed **exactly once per process**, memoized, so the cost — two reference-compiler
+  invocations per corpus program for the audit, and a compile with each compiler per flag for the
+  probe — is paid once rather than once for the gate test and again for the areas;
+- every area performs the gates **before its first cell compiles**, so the result is recorded before
+  any artifact is written and **every** artifact names it;
+- every area **asserts** on the gates that govern it, after its report has been written. A failing gate
+  therefore fails the areas it bears on, not only the infrastructure test that noticed it.
+
+The audit's gates are narrowed to the areas whose programs they cover, because a program in one area
+that fails a gate says nothing about another area's programs, and failing all fourteen for it would
+report fourteen defects where there is one. Flag parity is a property of the configuration rather than
+of any program, so its gate governs every area.
+
+An area that `BCC_CONFORMANCE_ONLY` excluded does not assert on the gates: it produced no comparison,
+so it has nothing to distrust. The gate still fails the run, through its own infrastructure test and
+through the summary's verdict.
+
+The two infrastructure tests keep their own, fuller assertions. They render the **whole** gate report —
+every command line and the compiler's own words — which is what an author actually fixes a program
+from, and what an area's one-line gate description deliberately does not try to be.
+
+### What every report says about the gates
+
+Every per-area report and the run summary open with a **`## Preflight gates`** section listing each
+gate, the requirement it establishes, its verdict and what was observed. Three verdicts are used and
+they are not interchangeable:
+
+| Verdict | Meaning | Effect |
+| --- | --- | --- |
+| `HELD` | performed, and its precondition holds | none |
+| `FAILED` | performed, and its precondition does not hold | **always** blocks; the report is stamped **partial** and every area it governs fails |
+| `UNPERFORMED` | could not be performed, so nothing was established either way | the report is stamped **reduced**; blocks only under `BCC_CONFORMANCE_STRICT` |
+
+`UNPERFORMED` follows the rule this suite already applies to an oracle whose tooling is absent: outside
+strict mode the environment rather than the corpus is what is incomplete, so the gap is reported and
+does not fail; under `BCC_CONFORMANCE_STRICT` — the intended continuous-integration setting, where the
+toolchain is installed deliberately — it does. A gate that could not be performed is never silently a
+pass, in either mode.
+
+A run that recorded **no** preflight at all is treated as fail-closed: the section says `NOT RECORDED`,
+the report is stamped partial, and the blocking count reads `1` rather than `0`, because a zero would be
+indistinguishable in every table and every machine-readable field from a preflight that ran and held.
+
+In the summary's machine-readable half the same facts appear as `meta` rows `preflight_gates_blocking`
+and `preflight_held`, and as one `preflight` record per gate carrying its name, its requirement, its
+verdict and its detail. The `meta` row `run_fails` accounts for the gates as well as the outcomes:
+`outcomes_failing_run` and `preflight_gates_blocking` are published separately so a reader can tell
+which of the two it was, but an aggregator reading `run_fails` alone can never see `false` while a
+precondition was unmet.
+
 ### What a retained flag-probe or audit workspace holds
 
 The two probes are held to the same evidence contract as a corpus cell, and it is literal: **every**
@@ -1246,9 +1354,12 @@ requires a summary enumerating **every** outcome — every expected divergence w
 basis, and every finding with its reproducer. Stopping at the first divergence would truncate
 exactly the artifact the requirements ask for.
 
-Each area test therefore runs its entire matrix, accumulates every verdict, and only then asserts
-that no cell produced a FAIL or an XPASS. The failure message reproduces the **complete**
-per-program table, so nothing is lost in the runner output either.
+Each area test therefore runs its entire matrix, accumulates every verdict, and only then asserts —
+first that every preflight gate governing it held, then that no cell produced a FAIL or an XPASS. The
+gate comes first because it decides what the verdicts are worth: an area whose precondition is unmet is
+not a narrower run but a run whose comparisons cannot be read as evidence, so reporting its outcome
+tally as the verdict would publish a green matrix nobody can rely on. The failure message reproduces
+the **complete** per-program table either way, so nothing is lost in the runner output.
 
 ### Reduced runs are always stamped as reduced
 
@@ -1283,7 +1394,7 @@ variable is true when it is set, non-empty and not the single character `0`.
 | `BCC_QEMU_RISCV64` | probe `qemu-riscv64`, then `qemu-riscv64-static` | RISC-V 64 execution runner |
 | `BCC_CONFORMANCE_QUICK` | unset | Reduce the matrix to the native target at `-O0` and `-O2` only; always reported as reduced coverage |
 | `BCC_CONFORMANCE_ONLY` | unset | Restrict the run to one `<area>/<program>` |
-| `BCC_CONFORMANCE_STRICT` | unset | Treat an unavailable oracle as a failure — the intended continuous-integration setting |
+| `BCC_CONFORMANCE_STRICT` | unset | Treat an unavailable oracle — and an `UNPERFORMED` preflight gate — as a failure. The intended continuous-integration setting |
 | `BCC_CONFORMANCE_ALLOW_XPASS` | unset | Downgrade unexpected success from a failure to a warning during a marker-retirement window |
 | `BCC_CONFORMANCE_ALLOW_MISSING_ORACLES` | unset | Explicitly acknowledge a reduced-oracle environment; the gap is still reported, and under strict mode it is still a failure |
 | `BCC_CONFORMANCE_TIMEOUT_SECS` | `30` | Per-cell execution budget, in whole seconds. Accepted range **1–3600**, narrowing to **1–300** when `BCC_CONFORMANCE_STRICT` is set |
@@ -1585,6 +1696,11 @@ oracle indicates a broken workflow rather than a modest environment. Strict mode
 other variable can lower it, and `BCC_CONFORMANCE_ALLOW_MISSING_ORACLES` is an acknowledgement
 recorded in the report, never a suppression.
 
+The same rule governs a preflight gate that could not be applied, because it is the same shape of gap:
+a tool this machine does not have. Outside strict mode it is reported as reduced coverage and the run
+proceeds; under strict mode it fails. What it never is, in either mode, is a pass — see
+[the gate verdicts](#what-every-report-says-about-the-gates).
+
 ---
 
 ## Reproducing a cell by hand
@@ -1861,6 +1977,40 @@ temporary entry created with `create_new`, and the entry is then renamed into pl
 occupied by a link — even a dangling one — is refused rather than followed, so no planted link can
 redirect a write, and no partially written report or finding file is ever observable.
 
+#### What a published report cannot contain
+
+A report is an artifact you publish — attached to an issue, uploaded from CI, committed beside a
+finding — and the one thing in it the suite did not write is captured text: a compiler diagnostic, a
+tool banner, a program's own output. Every such fragment reaches an artifact through one of three
+funnels — one for the machine-readable half, two for the Markdown half — and each applies the same
+three transformations in the same order:
+
+1. **Redaction.** The value of every environment variable whose *name* marks it credential-bearing
+   (`SECRET`, `TOKEN`, `PASSWORD`, `API_KEY`, `AUTH`, `SESSION`, … — deliberately broad, because a
+   false positive costs one redacted field while a false negative commits a credential) is replaced
+   by `[redacted]`: in the `NAME=value` shape an environment listing renders, at **every** length, and
+   wherever the value appears bare provided it is at least **eight characters** long. That length
+   bound is not fussiness. A variable named `TOKENIZERS_PARALLELISM` whose value is `false`, or
+   `XDG_SESSION_ID` whose value is `1`, is not a credential — and replacing so short a value as a
+   substring would rewrite the booleans and digits that carry the report's own evidence, `run_fails`
+   included. Measured in this repository's own container: without the bound, the row `run_fails false`
+   renders as `run_fails [redacted]`.
+2. **Sanitization.** Every control character, every escape introducer and every directional override
+   is escaped, so no field can forge a column, split one row into two or repaint a verdict.
+3. **Markdown escaping**, applied only on the way into the Markdown half, so no printable character
+   that is syntax there can restructure the document.
+
+The order is load-bearing: redaction recognises a value by the characters the environment holds, and a
+value containing a tab or a newline is no longer that value once it has been escaped — redacting
+afterwards would search for text that no longer exists.
+
+Two things are exact rather than redacted, and both live inside a finding directory beneath the build
+directory: the captured streams and the `diff.txt` computed from them, which are evidence and have to
+compare byte for byte, and `commands.sh`, which has to stay runnable — a redacted path is not a path.
+Nothing a corpus program prints can carry a credential in any case: the authoring rules forbid reading
+the environment, and the environment those programs receive is cleared before they run. Everything the
+suite renders as a *report* is redacted.
+
 ### The report and generated-finding roots are retired at the start of every run
 
 Report and finding paths are deterministic, so a previous run's `areas/09_optimization_levels.tsv`
@@ -1875,11 +2025,17 @@ partway — would leave the *previous* run's `summary.md` standing as though it 
 whole root is emptied rather than the two known artifacts named, because a list of names has to be
 kept in step with the artifacts written into it and this has no list to fall behind.
 
-The identity of the run is written to `run.txt` beside the reports and **deliberately nowhere else**:
-the `.md` and `.tsv` files are byte-identical across two runs with identical inputs, which is what
-makes them diffable, so the token that necessarily differs between runs stays out of them. What the
-reports *do* carry is the **configuration fingerprint**, which is deterministic — so a reduced run's
-numbers can never be mistaken for a full run's.
+The identity of the run is written to `run.txt` beside the reports, and everything the reports
+themselves render is **deterministic**: every `.md` artifact, every data row and every summary field
+is byte-identical across two runs with identical inputs, which is what makes them diffable. What they
+carry for provenance is the **configuration fingerprint**, which is deterministic too — so a reduced
+run's numbers can never be mistaken for a full run's.
+
+The process token, which necessarily differs between runs, is written in exactly three places and no
+others: `run.txt`, a finding's `environment.txt`, and the `token=` field of an area report's
+[generation preamble](#the-generation-stamp--why-a-summary-never-reports-another-runs-results) — a
+comment line whose only consumer is the machine check it serves. It appears in no rendered table, in
+no summary field and in no diagnostic, which is why the determinism above still holds as stated.
 
 One qualification, stated because it is real rather than hidden: the byte counts in
 [`## Retained evidence`](#retention-budgets) reflect the order in which concurrently failing cells
@@ -1898,37 +2054,97 @@ evidence of a run a maintainer is still reading.
 ### The generation stamp — why a summary never reports another run's results
 
 A report on disk outlives the run that wrote it, so every machine-readable area report opens with a
-line naming the run that produced it and the configuration it ran under:
+line naming the run that produced it, the configuration it ran under, and the process that wrote it:
 
 ```text
-#generation	run=p12345-t1730000000123456789	config=quick:0;only:-;strict:0;allow_xpass:0;ack_missing:0;timeout:30;targets:x86_64+i686+aarch64+riscv64;levels:O0+O1+O2;oracles:a1111b0111c1111
+#generation	run=3f9c1a04d7e5b268	config=quick:0;only:-;strict:0;allow_xpass:0;ack_missing:0;timeout:30;targets:x86_64+i686+aarch64+riscv64;levels:O0+O1+O2;oracles:a1111b0111c1111	token=6b0e4d21f8a37c95
 ```
 
-`run` identifies the process; `config` identifies the settings, one field per fact that changes what
-a report means, ending with a bit per oracle and target so a machine missing one cross driver is
-distinguishable from a fully equipped one. The same generation is printed as a `Generation:` line in
-each per-area Markdown report and as the run identifier and configuration fingerprint in the
-summary's **Provenance** section.
+Three fields, because they answer three different questions and the check needs all three:
+
+| Field | Identifies | Derived from |
+| --- | --- | --- |
+| `run` | The **sweep**, as a digest — so a file written under settings this run did not use is recognised as foreign in one comparison | The effective matrix and policy, plus the test-name filters this process was started with, which decide which areas could run at all. Deterministic |
+| `config` | Those settings **spelled out**, so a foreign file's mismatch can be explained rather than merely detected — "that report swept one target at two levels, this run sweeps four at three" is actionable where an opaque digest is not. One field per fact that changes what a report means, ending with a bit per oracle and target, so a machine missing one cross driver is distinguishable from a fully equipped one | The same settings. Deterministic |
+| `token` | The **process** — so a file left behind by an earlier run of an *identical* configuration over an *identical* corpus is recognised too | This process. The one value anywhere in a report that is not a function of the inputs |
+
+The first two are pure functions of the run's inputs, and that is exactly why they cannot tell a
+repeat run from the run it repeats: a report an earlier process wrote under the same settings over the
+same corpus is byte-for-byte a report this run could have written, so an identity built only from
+inputs has nothing to object to. Emptying the report root at the start of a run is the primary defence
+and it is **not** sufficient on its own — a purge that cannot remove an entry reports the failure and
+the file survives it, which is precisely the case this check is the last line against. Hence the third
+field; and hence the deliberately narrow shape of the exception it makes to the determinism rule. The
+token appears in the `token=` field of this comment line and nowhere else in any report: in no
+rendered Markdown, in no field of either summary half, and in no diagnostic — a token-only mismatch is
+described in words rather than by quoting either token. Every artifact a maintainer diffs therefore
+stays byte-identical for identical inputs.
+
+**A preamble missing any of the three fields is treated as stale**, the token included. A file
+carrying no token cannot be shown to belong to the process reading it, and treating its absence as
+"belongs to whoever is reading" would reopen the hole the token closes — so a report written by a
+harness that predates the token gets exactly the treatment one predating the whole preamble already
+gets: re-run the area to replace it.
+
+`run` and `config` are additionally printed as a `Generation:` line in each per-area Markdown report
+and as the run identifier and configuration fingerprint in the summary's **Provenance** section. The
+token is not, for the reason just given.
 
 The summary aggregates **only** the area reports carrying the generation of the process reading them.
 An area report from an earlier run is neither counted nor deleted: it is listed by name, with the run
 that wrote it, and it holds the summary back until this run replaces it. A report written before the
 stamp existed has no preamble and is recognised as foreign on its first line. Initialization has
 already retired the previous run's reports by the time any area writes, so a foreign file is the
-exception rather than the rule; the stamp closes the cases initialization cannot — a second suite
-process sharing one build directory, and a file written before the stamp existed. It closes them by
-identity carried inside the file, with no further destructive step and no lock, which is what the
+exception rather than the rule; the stamp closes the three cases initialization cannot — a second
+suite process sharing one build directory, a file written before the stamp existed, and a file an
+earlier identically configured run left behind because the purge could not remove it. It closes them
+by identity carried inside the file, with no further destructive step and no lock, which is what the
 fourteen concurrently running area tests require: a directory-wide delete taken after they start
 would race with a sibling's write.
 
 Two consequences worth knowing:
 
-- **The reports are byte-identical between runs except for that one line.** Diff two runs' area
-  reports and the only difference is the stamp, unless the run genuinely found something different.
+- **The reports stay byte-identical between runs.** Every Markdown artifact reproduces byte for byte,
+  and so does every data row of every `.tsv`; the only thing that differs between two runs with
+  identical inputs is the `token=` field of that comment line — plus the one qualification recorded
+  above about contended retention ceilings. Diff two runs' area reports and anything else that differs
+  is something the run genuinely found.
 - **A run that could not aggregate all fourteen current reports says so.** With a test-name filter
   active it still publishes a summary — stamped partial, with every area that did not contribute
   listed as absent, stale or unusable — and without one it waits, printing `run summary pending`,
   which is the ordinary answer for thirteen of the fourteen area tests.
+
+### The configuration digest covers the corpus's bytes, not its file names
+
+The preamble governs whole *files*. Individual **rows** carry a provenance of their own: every row of
+every area report ends with a `run` column and an `identity` column, and a row is aggregated only when
+both match the run reading it. The summary states both in its **Provenance** section, as a
+**`Run identifier`** and a **`Configuration digest`**.
+
+That digest is not the `config=` fingerprint under another name. The fingerprint spells the *settings*
+out; the digest covers four inputs, two of which the fingerprint says nothing about:
+
+| Input | Why a row's meaning depends on it |
+| --- | --- |
+| The row schema | A row read back under a different column layout would be misread field by field |
+| The effective matrix and policy | The same fact the fingerprint spells out, folded in so one comparison covers everything |
+| The discovered tool set | The same program compared by a different reference compiler, or run under a different emulator, is a different comparison. This is the same inventory the summary's `## Environment fingerprint` section prints — each compiler, each emulator and the kernel — digested |
+| **The corpus that was read** | A verdict is a claim about a specific program and a specific expectation record. If either changed, the verdict describes something that is no longer there |
+
+The corpus input is **the bytes of every program and every expectation record** — not their paths, and
+not the declared program counts. That distinction is the entire point of the field: editing a program
+changes nothing else in the digest — same configuration, same tools, same declared counts — so a digest
+built from names and counts would accept an area report written *before* the edit and add its rows to a
+summary describing the corpus *after* it, with nothing in the artifact saying so. Content is the only
+input that detects it, and it costs no determinism at all: two runs over an unchanged corpus digest
+identically, and two checkouts of one commit at different paths agree, because each file contributes
+its name **relative to** the corpus root rather than its location on disk.
+
+A file that could not be read, or a feature area that could not be enumerated, contributes the *fact*
+that it contributed no bytes — **per file and per area, never all-or-nothing**. That granularity is
+load-bearing on a branch like this one, where five of the fourteen area directories have not landed: a
+digest that collapsed to a single "corpus unreadable" value the moment one area was missing would be a
+constant here, and would detect nothing whatever.
 
 ### What a retained cell workspace holds
 
@@ -2036,7 +2252,8 @@ Alongside those, and each present on every run:
 
 | Section | Content |
 | --- | --- |
-| `## Run verdict` | Whether the run passes, and on what |
+| `## Preflight gates — the preconditions the oracles rest on` | Each gate, its requirement, its verdict and what was observed. Rendered on **every** run, including when nothing was recorded, because the section's presence is what tells a reader the preconditions were considered at all. See [Two of those four are gates](#two-of-those-four-are-gates-and-every-area-is-judged-against-them) |
+| `## Run verdict` | Whether the run passes, and on what — the outcome tally, the **`Preflight gates that did not hold`** count, and a verdict line that accounts for both |
 | `## ⚠️ Unexpected successes (XPASS) — stale expected-divergence markers` | Listed separately and prominently, always |
 | `## ⚠️ Unavailable oracles` | Every arm that could not be attempted, never silent |
 | `## Recorded, reasoned exclusions — what was deliberately not compared` | So the set of comparisons *not* made is as visible as the set that was |
@@ -2047,7 +2264,12 @@ Alongside those, and each present on every run:
 | `## Diagnostics` | Anything the reporting path itself needs the reader to know |
 
 `summary.tsv` carries the same data, one labelled record per line, including
-`retained_workspaces`, `retained_bytes` and one `retention_pruning` record per note.
+`retained_workspaces`, `retained_bytes`, one `retention_pruning` record per note, and one `preflight`
+record per gate. Its `run_fails` field accounts for the preflight as well as the outcomes, so an
+aggregator that reads only that field can never see `false` while a precondition was unmet.
+
+The per-area reports carry the same `## Preflight gates` section, narrowed to the gates that govern
+that area, immediately before `## Area at a glance`.
 
 ### What a finding artifact directory holds
 
@@ -2059,15 +2281,59 @@ A finding is a deliverable, so its directory is designed to be reproducible **wi
 | `reproducer.expected` | Its expectation record, so it remains runnable by the harness too |
 | `MANIFEST.txt` | `finding_id`, an **`identity_digest`**, the area and program, the oracle and its letter, the divergence class, which cells diverged, and a description of what was observed |
 | `commands.sh` | Exact, copy-pasteable compile and run lines for every cell involved. Run it as `sh commands.sh`: it carries a `#!/bin/sh` line but is written without an executable bit, so name the interpreter rather than invoking the path directly |
-| `outputs/<oracle>-<target>-<opt>.{stdout,exit,stderr}` | Captured output per compiler and per backend. Standard error is captured here even though it is never compared, because diagnostic text is often the fastest route to a diagnosis |
+| `outputs/<side>-<target>-<opt>.{stdout,stderr,exit}` | The **program's** two streams byte for byte, and how it ended. Standard error is captured even though it is never compared, because diagnostic text is often the fastest route to a diagnosis |
+| `outputs/<side>-<target>-<opt>.compile.{stdout,stderr,exit}` | The **compiler's** own two streams and build outcome for that same cell, written whenever there was a build |
 | `environment.txt` | Each compiler version, each emulator version, the kernel — plus this run's **`run_token`** and **`configuration`**, so an artifact can be attributed to the run that produced it |
 | `diff.txt` | The computed difference, with the first divergent line and byte offset |
+
+**Reading an `outputs/` name.** `<side>` is `bcc` for the compiler under test — the subject of every
+comparison — and the oracle's own letter (`a`, `b` or `c`) for an authority, so a name states which side
+produced it without needing a legend. `<target>` is the short target name (`x86_64`, `i686`, `aarch64`,
+`riscv64`) and `<opt>` is the optimization level with its hyphen dropped (`O0`, `O1`, `O2`), giving names
+such as `bcc-aarch64-O2.stdout` and `a-aarch64-O2.compile.stderr`.
+
+The rule for which stream lands in which entry has **no exceptions**, and that is deliberate rather than
+incidental. `.stdout` and `.stderr` always hold the *program's* streams and are empty when the program
+never ran; `.exit` always states how the program ended, or that it did not, and never presents a status
+it does not have; `.compile.stdout`, `.compile.stderr` and `.compile.exit` always hold the *compiler's*
+own streams and outcome. A scheme that put compiler diagnostics into `.stderr` whenever a program had not
+run would force a reader opening `a-aarch64-O2.stderr` to work out first whether that side's build
+succeeded, turning every inspection into a case analysis. The compiler's standard output is written even
+though a compiler ordinarily leaves it empty, because `commands.sh` redirects a maintainer's re-run into
+a file of that same name — an entry absent for one build and present for another would make comparing the
+re-run against the recorded evidence a case analysis too.
 
 **The identifier is injective.** It carries the full 64-bit digest of the complete finding identity
 rather than a truncation of it, and before anything is written the identity is verified against any
 `MANIFEST.txt` already at that path. Two distinct findings whose abbreviated names would have
 collided therefore get distinct directories, and a genuine collision is **reported** rather than
 silently overwriting another finding's evidence.
+
+**What is byte-identical between two runs, and the two things that are not.** A finding directory is
+meant to be *diffed* across runs, so almost all of it is a pure function of the divergence. For one
+unchanged divergence, two runs produce the same identifier, the same file set, and byte-identical
+`reproducer.c`, `reproducer.expected`, `MANIFEST.txt`, `commands.sh`, `diff.txt` and
+`.stdout`/`.stderr` captures. Two things legitimately differ, and each is a fact about the **run**
+rather than about the writer:
+
+| Differs | Why it is kept anyway |
+| --- | --- |
+| `duration_ms` in `.exit` and `.compile.exit` | A duration is part of a capture, and for a timeout it is the evidence. Timing telemetry is confined to these two records and kept out of everything a diff reads for whether the divergence changed |
+| `environment.txt` | The tool versions and this run's token are exactly what lets a later reader tell a toolchain change from a compiler change |
+
+Neither is noise; they are simply not the parts of a two-run diff that carry information about whether
+the divergence changed. Diff two runs' finding directories and anything else that differs is something
+the run genuinely found.
+
+**`diff.txt` is stable to its last line, the comparator's verbatim account included.** That property
+is bought by a deliberate split rather than inherited. A build's and an execution's one-line
+description each state the *budget* they were bounded against, which is a pure function of the
+configuration, and neither states the duration it measured. The measured duration is reachable only
+through a separate timing variant of each, and that variant is called only from progress output
+printed to a terminal. The same discipline is what keeps `MANIFEST.txt` stable: a capture's own description carries
+no wall-clock duration even though both underlying observations can report one. Reaching for a timing
+variant in anything written to a file would take this guarantee away silently, which is why the two are
+separate named methods rather than one method with an option.
 
 **`commands.sh` reproduces the whole oracle contract, not half of it.** Every build and every
 execution in it is bounded by the discovered `timeout` utility through a runtime test, so one script
@@ -2120,8 +2386,9 @@ edit is still required, at step 5 below. Then:
       exemplar's conversions and cite the exemplar's measured per-target values; copied unedited
       they would assert something untrue of your program, which is a defect in the record even
       though it parses. Write the undefined-behaviour-freedom argument for the constructs your
-      program actually contains, keep it in `ub_notes`, and if you kept a deviation at step 4 give
-      it its own paragraph naming every dropped flag, per
+      program actually contains and keep it in `ub_notes`; if you kept a deviation at step 4, write
+      its reason into `impl_defined_notes` — not into `ub_notes`, which is never searched for a gate
+      reason — as a paragraph of its own naming every dropped flag, per
       [Recorded reasons](#every-validation-the-parser-enforces). If your program narrows nothing —
       no restricted target list, no disabled oracle, no gate deviation — `impl_defined_notes` may
       be dropped, but state any implementation-defined property you relied on if you relied on one.
@@ -2173,9 +2440,17 @@ contains no `main.rs` and is therefore never a target, and this directory contai
 
 ### C2 — No existing test deleted, skipped, weakened or relaxed
 
-No existing test file is edited. No `#[ignore]` attribute is added or removed anywhere, and the
-repository's ignored-test count stays **exactly 13**, asserted as an invariant rather than merely
-intended.
+No existing test file is edited, and no `#[ignore]` attribute is added or removed anywhere — this suite
+declares none at any depth, and no harness module declares a test function of its own, so it can move
+neither the repository's test count nor its ignored count. That much is mechanical **here**, and it is
+the whole of what a checkout carrying this suite alone can establish.
+
+The count itself — **exactly 13 ignored** — is a property of the *whole repository*, and no integration
+test can read another test target's ignored count, so it is verified by the health gate rather than
+asserted by the suite: `cargo test 2>&1 | grep "test result"` must report `13 ignored`. On a checkout
+without the compiler's Cargo package that gate cannot run at all, for the reasons set out under
+[The Cargo integration precondition](#the-cargo-integration-precondition), so the claim is stated
+here as what must hold and be measured after the merge, not as something already measured.
 
 The reason those 13 stay ignored is worth recording, because it looks like an omission otherwise:
 they are network-dependent, and C4 forbids network access. Re-enabling them would violate C4 while
@@ -2242,10 +2517,12 @@ claims to be one:
 
 - No namespace, `chroot`, seccomp filter or network restriction is applied to any child process.
   Setting a working directory is not confinement.
-- The environment a child inherits is not cleared and `TMPDIR` is not set, so **the external tools
-  keep their own temporaries wherever they normally put them**. `gcc -### -static …` shows the
-  driver writing `/tmp/cc*.s`, `/tmp/cc*.o` and `/tmp/cc*.res` — outside the workspace, every
-  time.
+- The environment a child receives **is** cleared and replaced — see *The environment every child
+  receives* below — and `TMPDIR`, `TMP`, `TEMP` and `HOME` all point at the cell's own workspace. That
+  binds a tool that reads those variables and only such a tool: `gcc -### -static …` shows the driver
+  writing `/tmp/cc*.s`, `/tmp/cc*.o` and `/tmp/cc*.res` from a hard-coded path, so **that** driver
+  keeps its temporaries outside the workspace every time. A variable cannot bind a program that never
+  reads it.
 - The reference compilers, the cross drivers, the QEMU runners and the bounding `timeout` utility
   are installed tools that live and execute outside the build tree; only their *outputs* are placed
   inside it.
@@ -2262,11 +2539,38 @@ a trusted, committed corpus — not an operating-system sandbox**: no `chroot`, 
 namespace, no seccomp filter and no landlock. Two further consequences follow from that, and neither
 is a gap in the authoring policy above:
 
-- The child **inherits the runner's environment**; the harness adds nothing to it and clears nothing
-  from it. A program that read `getenv` could therefore see the environment — which is precisely why
-  the authoring rules forbid reading it, and why the corpus is reviewed rather than merely fenced.
+- The child does **not** inherit the runner's environment: it is cleared and a small, fixed,
+  suite-chosen set is installed in its place, so a program that called `getenv` would see that set and
+  not yours. That closes credential leakage and non-determinism, and it does **not** amount to
+  confinement — the authoring rules still forbid reading the environment, and the corpus is still
+  reviewed rather than merely fenced, because a fixed environment says nothing about the syscalls a
+  program may make.
 - The **artifact path of every cell is checked to be inside that cell's workspace** before it is
   executed, and the three write roots the harness uses all live beneath the Cargo build directory.
+
+#### The environment every child receives
+
+Every spawn site in the harness — both compilers, the three emulators, the bounding `timeout`
+utility, the audit gate's instrumented artefact, and the compiled programs themselves — goes through
+one function that clears the environment and installs exactly this:
+
+| Variable | Value | Why |
+| --- | --- | --- |
+| `PATH` | the entries of your `PATH` that are absolute **and** not writable by an account the suite does not trust | A compiler driver finds its own stages — `cc1`, `as`, `ld`, `collect2` — through `PATH`. Handing it the raw value would let a planted stage be executed by a driver the suite had vetted, substituting the program one level below where tool resolution looked. The pre-flight report prints the exact value and every entry it skipped. |
+| `LANG`, `LC_ALL`, `LANGUAGE` | `C` | Number and message formatting must be invariant, because stdout is compared byte for byte. |
+| `TZ` | `UTC` | Removes any dependence on the host's time zone. |
+| `TERM` | `dumb` | Stops a tool deciding to emit colour escapes into a compared stream. |
+| `ASAN_OPTIONS`, `UBSAN_OPTIONS`, `LSAN_OPTIONS`, `MSAN_OPTIONS`, `TSAN_OPTIONS` | strictest available: abort and print on the first diagnostic | An inherited `ASAN_OPTIONS=detect_leaks=0:halt_on_error=0` would turn a program with undefined behaviour into a clean audit pass, removing the precondition that makes every divergence in this suite meaningful. |
+| `HOME`, `TMPDIR`, `TMP`, `TEMP` | the cell's own workspace | A tool that writes a cache, a history file or a scratch file where these point writes it inside the build directory rather than into your home directory. |
+
+Nothing else is set and nothing else is inherited. In particular `LD_PRELOAD`, `LD_LIBRARY_PATH`,
+`C_INCLUDE_PATH`, `GCC_EXEC_PREFIX` and every credential-bearing variable your CI exports do not
+reach any child.
+
+A finding's `commands.sh` reproduces this same environment through an `isolated()` shell function
+built on `env -i`, and it prints the search path as `CHILD_PATH` so you can adjust the one value that
+belongs to the machine the run happened on. Reproducing a command line without its environment
+reproduces a different invocation.
 
 The guarantee is therefore accurate for what this suite runs — a fixed, reviewed corpus of programs
 that read no input — and it must **not** be read as a promise about arbitrary code. **Anything

@@ -134,10 +134,11 @@
 //! cannot stall the suite.
 //!
 //! That is path discipline over what this module writes, not confinement of what it spawns. No
-//! namespace, `chroot`, syscall filter or network restriction is applied, the inherited
-//! environment is not cleared and `TMPDIR` is not set, so a compiler driver keeps putting its
-//! intermediates wherever it normally does — under the system temporary directory for the
-//! reference driver measured here.
+//! namespace, `chroot`, syscall filter or network restriction is applied. The environment *is*
+//! cleared and replaced — the shared spawn path installs a vetted search path and points `TMPDIR`,
+//! `TMP`, `TEMP` and `HOME` at the probe's own workspace — but a compiler driver that hard-codes a
+//! path under the system temporary directory rather than reading those variables keeps putting its
+//! intermediates there, as the reference driver measured here does.
 //!
 //! A workspace path is a pure function of the flag under examination, so the probe is
 //! deterministic and two runs produce the same report. A workspace is removed when its check
@@ -1790,13 +1791,20 @@ fn report_text(raw: &str) -> String {
     sanitize_text_for_report(&redact_secrets(raw))
 }
 
-/// Sanitize text for a report row and cap its length in characters.
+/// Render text for a report row and cap its length in characters.
+///
+/// Routed through [`report_text`] rather than sanitizing directly, so a captured diagnostic and a
+/// captured output excerpt receive the same redaction every other field of this module's report
+/// does. That matters most here of all: the two callers quote a compiler's own diagnostics and a
+/// program's own standard output, which are the streams a tool would echo an environment variable
+/// into, and this module's report is printed to the test runner's output and therefore into a
+/// continuous-integration log.
 ///
 /// Character-counted rather than byte-counted so that a multi-byte character can never be split
-/// mid-sequence, and sanitized first so no control character, tab or escape introducer can forge
-/// a column, erase a line or begin a terminal sequence.
+/// mid-sequence, and both transformations happen before truncation so the limit bounds what a reader
+/// actually sees and can never leave a half-written escape.
 fn truncate_for_report(raw: &str, limit: usize) -> String {
-    let safe = sanitize_text_for_report(raw);
+    let safe = report_text(raw);
     if safe.chars().count() <= limit {
         return safe;
     }

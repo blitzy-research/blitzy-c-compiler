@@ -14,14 +14,15 @@
 //!
 //! It is **not an operating-system sandbox**, and reading it as one would be a mistake worth
 //! naming explicitly. Nothing here isolates syscalls or the network, enters a namespace or a
-//! `chroot`, clears the environment a child inherits, sets `TMPDIR`, or restricts what an
-//! absolute path handed to an external tool may reach. Three consequences follow directly and
-//! are stated rather than left to be discovered:
+//! `chroot`, or restricts what an absolute path handed to an external tool may reach. Three
+//! consequences follow directly and are stated rather than left to be discovered:
 //!
-//! - **External tools keep their own temporaries wherever they normally put them.** A
-//!   reference compiler driver writes intermediate files under the system temporary directory
-//!   — `gcc -###` shows `/tmp/cc*` entries for the assembler input, the object and the linker
-//!   response file — and this module neither sees nor relocates them.
+//! - **A tool that hard-codes a temporary path keeps its own temporaries there.** The suite does
+//!   clear every child's environment and point `TMPDIR`, `TMP`, `TEMP` and `HOME` at the cell's
+//!   workspace — that happens at the spawn sites, not here — but a reference compiler driver that
+//!   writes intermediate files under the system temporary directory without consulting those
+//!   variables is unaffected: `gcc -###` shows `/tmp/cc*` entries for the assembler input, the
+//!   object and the linker response file, and this module neither sees nor relocates them.
 //! - **The bounding utility and the execution runners live outside the build tree.** The
 //!   system `timeout` utility and the QEMU runners are executed from wherever they are
 //!   installed; only the artifact they are pointed at is required to be inside a workspace.
@@ -439,27 +440,40 @@ pub const RETAINED_WORKSPACE_COUNT_MAX: usize = 512;
 /// All three consumers do refuse it, but discovering it once, up front, and in one wording is what
 /// makes the refusal legible.
 ///
-/// # Why the report root is created but never emptied
+/// # Why no root is emptied here
 ///
-/// Each root is only ever created here, never cleared, and for the report root that is a
-/// correctness requirement rather than an economy. The per-area reports outlive the process that
-/// wrote them, so a later run does find earlier files there — but the fourteen area tests run
-/// concurrently in one process, so whichever area happened to reach a clearing step last would
-/// erase the reports of every area already finished. Emptying the root would therefore trade a
-/// stale-data problem for a lost-data race.
+/// Each root is only ever **created** here, never cleared, and that is a correctness requirement
+/// rather than an economy.
 ///
-/// Staleness is resolved where it can be resolved safely: `report.rs` stamps every area report with
-/// the identity of the run that wrote it and excludes any file carrying a different stamp from the
-/// summary, naming it in the diagnostics. That needs no ordering between the area tests and destroys
-/// nothing.
+/// The three artifact roots are derived from the build directory rather than from the run, so two
+/// concurrent `cargo test` invocations sharing one build directory address the same three paths. A
+/// clearing step in this function would therefore delete a directory another live run is still
+/// writing into — and it could not do otherwise, because it runs before any ownership question has
+/// been asked: this is the function that *creates* the roots, so there is nothing here to consult.
+/// Its own run manifest is the only thing it publishes, by rename over a unique temporary, which
+/// replaces one file and destroys nothing.
+///
+/// Clearing therefore belongs to the module that owns each root, and each of those does it behind one
+/// once-per-process initializer that refuses a **live foreign owner** before it removes anything:
+/// `report::prepare_namespace` for the report root, and `findings::prepare_namespace` for the
+/// findings root. Both stamp this run's ownership afterwards, and both verify every level on the way
+/// down before following one, so a stale run's artifacts are cleared while a live run's are refused.
+///
+/// The per-cell workspace root is never emptied wholesale at all: a workspace is retired by the cell
+/// that owns it, and the retention budget prunes the rest, so no run-wide sweep is needed.
+///
+/// A second layer answers whatever a clearing could not reach. `report.rs` stamps every area report
+/// with the identity *and* the unique per-process token of the run that wrote it and excludes any file
+/// carrying a different stamp from the summary, naming it in the diagnostics. That needs no ordering
+/// between the concurrent area tests and destroys nothing.
 ///
 /// # Errors
 ///
 /// Returns an error naming the absolute path and the underlying cause if a root cannot be created,
-/// if it is not a real directory beneath the build directory, if a previous run's artifacts cannot
-/// be retired, or if the run manifest cannot be published. Every one is a hard failure rather than
-/// a degraded run: a suite that cannot write its workspaces cannot test anything, and a suite that
-/// cannot prove which run its reports belong to cannot report honestly.
+/// if it is not a real directory beneath the build directory, or if the run manifest cannot be
+/// published. Every one is a hard failure rather than a degraded run: a suite that cannot write its
+/// workspaces cannot test anything, and a suite that cannot prove which run its reports belong to
+/// cannot report honestly.
 pub fn ensure_roots() -> HarnessResult<()> {
     static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
     match INITIALIZED.get_or_init(|| initialize_run().map_err(|error| error.to_string())) {
@@ -489,22 +503,12 @@ fn initialize_run() -> HarnessResult<()> {
         require_real_directory_within(&context, &build, &root)?;
     }
 
-    // Retire the previous run's account of itself, whole. Both roots are emptied entry by entry
-    // rather than removed and recreated, so a reader holding a directory open keeps a valid handle,
-    // and every removal refuses to follow a symbolic link.
-    //
-    // The report root is emptied rather than having its two known artifacts named, and that
-    // distinction is load-bearing: the summary pair sits in the root beside the areas directory, and
-    // a rule that retired only the areas directory would leave the previous run's `summary.md` in
-    // place. A run that then never finalized — a filtered run, or one that failed partway — would
-    // leave a reader looking at a complete, plausible summary of a *different* run, with this run's
-    // manifest beside it. Emptying the root has no list to keep in step with the artifacts written
-    // into it, so it cannot fall behind one.
-    retire_directory_contents(
-        "retiring the previous run's generated findings",
-        &findings_root(),
-    )?;
-    retire_directory_contents("retiring the previous run's reports", &report_root())?;
+    // Nothing is removed here, and that is a correctness requirement rather than an omission. See
+    // "Why no root is emptied here" above: retiring the report root or the findings root from this
+    // function would delete a *concurrent* run's ownership stamp and its live artifacts, because this
+    // function has no way to tell one run's directory from another's — it runs before any ownership
+    // question has been asked. Each of those two roots is cleared by the module that owns it, behind
+    // its own once-per-process initializer that refuses a live foreign owner first.
     let areas_dir_name = super::report::AREAS_DIR_NAME;
 
     let manifest = report_root().join(RUN_MANIFEST_NAME);
@@ -517,10 +521,12 @@ fn initialize_run() -> HarnessResult<()> {
          retained_workspace_bytes_max = {RETAINED_WORKSPACE_BYTES_MAX}\n\
          retained_entry_bytes_max = {RETAINED_ENTRY_BYTES_MAX}\n\
          retained_workspace_count_max = {RETAINED_WORKSPACE_COUNT_MAX}\n\
-         # The token identifies this process's run and is deliberately absent from the reports\n\
-         # themselves, which are byte-identical for identical inputs. The configuration\n\
-         # fingerprint is deterministic and is carried by the reports, so a reduced run's numbers\n\
-         # can never be mistaken for a full run's.\n",
+         # The token identifies this process's run. Within the reports it is written in exactly\n\
+         # one place -- the token= field of the generation preamble comment that opens each area\n\
+         # .tsv, where the aggregation check reads it -- and in no rendered table, no summary\n\
+         # field and no diagnostic, so every artifact a maintainer diffs stays byte-identical for\n\
+         # identical inputs. The configuration fingerprint is deterministic and is carried by the\n\
+         # reports throughout, so a reduced run's numbers can never be mistaken for a full run's.\n",
         generation.token(),
         generation.configuration(),
     );
@@ -535,7 +541,16 @@ fn initialize_run() -> HarnessResult<()> {
 ///
 /// The directory itself is left in place, so a concurrent reader's handle stays valid and no
 /// caller has to re-create it. Absence of the directory is success: there is nothing to retire.
-fn retire_directory_contents(context: &str, directory: &Path) -> HarnessResult<()> {
+///
+/// # A caller must have established ownership first
+///
+/// This is the suite's one implementation of "empty a directory", shared rather than copied because a
+/// second copy of a recursive removal is a second chance to get one level wrong. It is deliberately
+/// *only* the removal: it asks no ownership question and cannot, because it does not know which root
+/// it is being pointed at or what a foreign owner of that root would mean. Every caller must
+/// therefore have refused a live foreign owner of `directory` before calling, and must claim ownership
+/// afterwards. `findings::prepare_namespace` is the shape to copy.
+pub(super) fn retire_directory_contents(context: &str, directory: &Path) -> HarnessResult<()> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),

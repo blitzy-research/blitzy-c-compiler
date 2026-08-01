@@ -83,8 +83,9 @@
 //! - The deliberate narrowing-conversion programs drop `-Wconversion` and `-Wsign-conversion`,
 //!   because there a narrowing conversion is the behaviour under test rather than a mistake.
 //!
-//! Both keep every other member, including `-Werror`. A deviation without a recorded reason is
-//! itself a defect in the test and fails the gate, as is an empty `ub_notes`. Every deviation is
+//! Both keep every other member, including `-Werror`. A deviation whose reason is not recorded in
+//! `impl_defined_notes`, naming every flag it drops by that flag's exact spelling, is itself a defect
+//! in the test and fails the gate; so, separately, is an empty `ub_notes`. Every deviation is
 //! listed with its reason in the rendered report, so the complete set of relaxations is auditable
 //! in one place. The gate is never weakened globally to make a stubborn program pass: that would
 //! quietly re-admit the undefined behaviour this suite depends on excluding.
@@ -162,12 +163,15 @@
 //! and treats the corpus as strictly read-only: a program is read and copied *into* a workspace,
 //! never modified.
 //!
-//! The children it spawns are not confined by any of that. No namespace, `chroot`, syscall filter
-//! or network restriction is applied and `TMPDIR` is left alone, so the reference driver keeps its
-//! own intermediates under the system temporary directory, and the sanitizer runtime a gate links
-//! in reports wherever its own configuration says. The claim is about the paths this module builds,
-//! and — for the program being audited — about the corpus-authoring policy that gives every program
-//! its whole input as literals in its own source.
+//! The children it spawns are not confined by any of that. No namespace, `chroot`, syscall filter or
+//! network restriction is applied, so the reference driver that hard-codes intermediates under the
+//! system temporary directory keeps putting them there. Their **environment**, though, is not
+//! inherited: the shared spawn path clears it, installs a vetted search path, points `TMPDIR`, `TMP`,
+//! `TEMP` and `HOME` at the gate's own workspace, and — the part that matters most in this module —
+//! forces `ASAN_OPTIONS` and `UBSAN_OPTIONS` to their strictest values, so an inherited setting
+//! cannot weaken the diagnostic a gate exists to observe. The claim is therefore about the paths this
+//! module builds, about what every child is told, and — for the program being audited — about the
+//! corpus-authoring policy that gives every program its whole input as literals in its own source.
 //!
 //! Every invocation is bounded by the shared timed-wait facility in
 //! [`run_command_captured_with`], using the discovered `timeout` utility when there is one
@@ -1101,7 +1105,6 @@ impl AuditReport {
         out.push_str(&self.render_area_coverage());
         out.push_str(&self.render_deviations());
         out.push_str(&self.render_failures());
-        out.push_str(&self.render_unavailable());
         out.push_str(&self.render_unapplied());
         out.push_str(&self.render_program_table());
         out
@@ -1180,53 +1183,6 @@ impl AuditReport {
             }
         }
         out.push('\n');
-        out
-    }
-
-    /// Every gate that could not be applied, with the program it belongs to and the diagnosis.
-    ///
-    /// Kept separate from the failure listing because the two mean opposite things: a failure is a
-    /// statement about a test program, and an unavailability is a statement about this machine. The
-    /// tallies above count them, but a count is not actionable — an entry here names the program
-    /// that was not audited and the reason, which is what turns "reported rather than skipped
-    /// silently" into something a reader can act on.
-    fn render_unavailable(&self) -> String {
-        let mut entries: Vec<(&ProgramAudit, &GateResult)> = Vec::new();
-        for audit in self.programs() {
-            for result in audit.unavailable() {
-                entries.push((audit, result));
-            }
-        }
-        let mut out = format!("gates that could not be applied ({})\n", entries.len());
-        out.push_str("-----------------------------------\n");
-        if entries.is_empty() {
-            out.push_str("  (none: every gate was applied to every audited program)\n\n");
-            return out;
-        }
-        out.push_str(&indented_block(
-            &format!(
-                "Each entry is a program that was NOT audited under the gate named. This is never a \
-                 pass. It fails the run when {VAR_STRICT} is set, where the toolchain is installed \
-                 deliberately and an absent driver means a broken workflow rather than a modest \
-                 machine.",
-            ),
-            "  ",
-        ));
-        out.push('\n');
-        for (audit, result) in entries {
-            out.push_str(&format!(
-                "  {} — {} gate\n",
-                sanitize_line(&audit.label()),
-                result.gate()
-            ));
-            out.push_str(&format!(
-                "    program : {}\n",
-                sanitize_line(&audit.source().display().to_string())
-            ));
-            out.push_str("    detail  :\n");
-            out.push_str(&indented_block(result.detail(), "      "));
-            out.push('\n');
-        }
         out
     }
 
@@ -1372,14 +1328,27 @@ impl AuditReport {
     fn render_unapplied(&self) -> String {
         let unapplied = self.unapplied();
         let mut out = format!("gates that could not be applied ({})\n", unapplied.len());
-        out.push_str("-------------------------------------\n");
+        out.push_str("------------------------------------\n");
         if unapplied.is_empty() {
             out.push_str("  (none: every gate was applied to every audited program)\n\n");
             return out;
         }
-        out.push_str(&format!(
-            "  Each entry is a gap in THIS MACHINE rather than a defect in the program. The              precondition\n  requirement 1 asks for is unestablished for the program named, and              under {VAR_STRICT} each of\n  these fails the run.\n\n"
+        // Indented by `indented_block` rather than by hand, so every line of the paragraph carries
+        // the section's indent and is sanitized on the same terms as the entries below it. The line
+        // breaks are explicit because this is a plain-text report read in a terminal, and the helper
+        // indents rather than reflows.
+        out.push_str(&indented_block(
+            &format!(
+                "Each entry names a program that was NOT audited under the gate given. This is a \
+                 gap in\nTHIS MACHINE rather than a defect in the program: the precondition \
+                 requirement 1 asks\nfor is unestablished for that program, and it takes part in \
+                 the differential matrix\nregardless. This is never a pass. Under {VAR_STRICT} each \
+                 entry fails the run, because\nthere the toolchain is installed deliberately and an \
+                 absent tool means a broken\nworkflow rather than a modest machine.",
+            ),
+            "  ",
         ));
+        out.push('\n');
         for (audit, result) in unapplied {
             out.push_str(&format!(
                 "  {} / {} — {} gate\n",
@@ -2482,18 +2451,20 @@ fn guard_invocation(
 /// The working directory is the gate's own workspace, per child rather than process-wide: the
 /// feature area tests run concurrently in one process, so changing the shared working directory
 /// would be a data race rather than a confinement. An incidental file a driver writes *beside its
-/// output* therefore lands inside the workspace; one it writes under the system temporary
-/// directory does not, because a working directory is not a confinement and `TMPDIR` is left as
-/// inherited.
+/// output* therefore lands inside the workspace.
+///
+/// The environment is **replaced, not inherited**, with the gate's workspace as the child's private
+/// `HOME`, `TMPDIR`, `TMP` and `TEMP`. A reference driver reads a great many variables that decide
+/// where it looks for headers and libraries and how it behaves, and this gate exists to establish a
+/// property of a *program*. A result that depended on the invoking environment would not be that
+/// property. A driver that ignores those variables and hard-codes a path under the system temporary
+/// directory still writes there — a variable cannot bind a program that never reads it — so the
+/// workspace bounds what this module names and what the child is told, not every byte the child
+/// writes.
 ///
 /// The bound comes from the shared timed-wait facility, using the discovered `timeout` utility when
 /// there is one and a watchdog thread otherwise. Standard input is the null device and both streams
 /// are captured, so nothing can block on input and nothing pollutes the runner's own output.
-///
-/// The environment is **replaced, not inherited**, with the gate's workspace as the child's private
-/// `HOME` and `TMPDIR`. A reference driver reads a great many variables that decide where it looks
-/// for headers and libraries and how it behaves, and this gate exists to establish a property of a
-/// *program*. A result that depended on the invoking environment would not be that property.
 ///
 /// # Errors
 ///

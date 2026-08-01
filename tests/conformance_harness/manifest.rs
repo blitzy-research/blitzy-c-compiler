@@ -101,13 +101,15 @@ use std::path::{Component, Path, PathBuf};
 
 use super::{
     canonical_corpus_root, comma_separated, corpus_root, ensure_within, findings_root,
-    is_forbidden_for_side, is_ub_audit_gate_member, joined_target_names, manifest_dir,
-    must_escape_for_report, posix_command_line, require_contained_corpus_file,
-    require_regular_file, sanitize_text_for_report, shown_path, ub_audit_gate_required, AreaSpec,
-    CellKey, CompilerSide, DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Target,
-    AREAS, BCC_TARGET_FLAG, BCC_TARGET_SELECTORS, DIFFERENTIAL_FLAGS_MINIMAL, EXTENSION_AREA,
-    SHARED_FLAGS_VERIFIED, UB_AUDIT_GATE_DEFAULT, UB_AUDIT_GATE_MANDATORY, UB_AUDIT_GATE_REMOVABLE,
-    UB_GATE_DEFAULT, UB_GATE_WITHOUT_CONVERSION, UB_GATE_WITHOUT_PEDANTIC,
+    fnv1a64_bytes, is_forbidden_for_side, is_ub_audit_gate_member, joined_target_names,
+    manifest_dir, must_escape_for_report, posix_command_line, read_file_bounded,
+    require_contained_corpus_file, require_regular_file, sanitize_text_for_report, shown_path,
+    stable_digest, ub_audit_gate_required, AreaSpec, CellKey, CompilerSide, DivergenceClass,
+    HarnessError, HarnessResult, OptLevel, Oracle, Target, AREAS, BCC_TARGET_FLAG,
+    BCC_TARGET_SELECTORS, DIFFERENTIAL_FLAGS_MINIMAL, DIGEST_HEX_DIGITS, EXTENSION_AREA,
+    MAX_INSPECTED_FILE_BYTES, SHARED_FLAGS_VERIFIED, UB_AUDIT_GATE_DEFAULT,
+    UB_AUDIT_GATE_MANDATORY, UB_AUDIT_GATE_REMOVABLE, UB_GATE_DEFAULT, UB_GATE_WITHOUT_CONVERSION,
+    UB_GATE_WITHOUT_PEDANTIC,
 };
 
 const HEREDOC_OPENER: &str = "<<";
@@ -1537,13 +1539,15 @@ impl fmt::Display for MarkerScope {
 /// — and classification happens at the first terminal outcome or the completed comparison, so
 /// a marker never short-circuits a phase. That is what keeps a difficult feature under test
 /// instead of quietly dropped, including when the divergence being excused is the compile
-/// failing. The basis is carried as both the
-/// original text and the repository-relative path it cites, so the infrastructure test that
-/// audits the register can assert the cited document actually exists.
+/// failing. The basis is carried as three views of one string — the original text, the
+/// repository-relative path it cites, and the citation that follows that path — so the
+/// infrastructure test that audits the register can prove the cited document is contained in this
+/// repository, read it, and resolve the section the citation names inside it.
 /// The fields are private for the same reason the scope's are: this type is the mechanism by which
 /// a failure is reclassified as expected, so every part of it has to keep pointing at the record
 /// and the document it came from. The identifier is what the register is cross-checked against in
-/// both directions, `basis_path` is the path whose existence that cross-check asserts, and
+/// both directions, `basis_path` and `basis_citation` are what that cross-check resolves against the
+/// cited document's own bytes, and
 /// `program_path` is what ties the marker to the one program it may excuse. A writable field would
 /// let a marker be retargeted at another program, or made to cite a document it was never granted,
 /// after every one of those checks had already passed. Parsing a record is the only way in.
@@ -1554,6 +1558,7 @@ pub struct ExpectedDivergence {
     scope: MarkerScope,
     basis: String,
     basis_path: PathBuf,
+    basis_citation: String,
     observed: String,
     program_path: PathBuf,
 }
@@ -1587,6 +1592,18 @@ impl ExpectedDivergence {
     /// assert the cited document exists.
     pub fn basis_path(&self) -> &Path {
         &self.basis_path
+    }
+
+    /// The citation that follows the path: the section or description within the cited document
+    /// that authorises the marker.
+    ///
+    /// Split out so the register cross-check can resolve the **locators** inside it against the
+    /// document's own bytes — a line or line range that must lie within the file, a `§` section
+    /// number that must appear as one of its headings, a backtick-quoted phrase that must occur in
+    /// it verbatim. A citation whose locators resolve to nothing is a citation a reader cannot
+    /// check, which is the one thing a documented basis may not be.
+    pub fn basis_citation(&self) -> &str {
+        &self.basis_citation
     }
 
     /// The divergence as observed, so a reader can recognise it without reproducing the run.
@@ -3237,13 +3254,20 @@ fn validate_marker_scope_intersects(
     Ok(())
 }
 
-/// Parse a marker basis into its verbatim text and the repository-relative path it cites.
+/// Parse a marker basis into its verbatim text, the repository-relative path it cites, and the
+/// citation that follows the path.
 ///
 /// The path is separated from the citation by the first comma. It must be relative and must not
 /// climb out of the repository, because the register audit resolves it against the package root
 /// and asserts the document exists — an absolute or climbing path would let a marker cite
 /// something outside the repository, which is no documented basis at all.
-fn parse_basis(origin: &Path, raw: &RawField) -> HarnessResult<(String, PathBuf)> {
+///
+/// The citation half is returned separately as well as inside the verbatim text, because the
+/// register audit resolves the **locators** it contains against the cited document: a line or line
+/// range must lie within the document, a `§` section number must appear as one of its headings, and
+/// a backtick-quoted phrase must occur in it verbatim. Splitting the halves here is what lets that
+/// check read the citation without re-deriving where the path ended.
+fn parse_basis(origin: &Path, raw: &RawField) -> HarnessResult<(String, PathBuf, String)> {
     let text = raw.value.trim();
     if text.is_empty() {
         return Err(key_error(
@@ -3311,7 +3335,11 @@ fn parse_basis(origin: &Path, raw: &RawField) -> HarnessResult<(String, PathBuf)
             ),
         ));
     }
-    Ok((String::from(text), path.to_path_buf()))
+    Ok((
+        String::from(text),
+        path.to_path_buf(),
+        String::from(citation),
+    ))
 }
 
 /// Parse the optional expected-divergence marker block.
@@ -3404,7 +3432,7 @@ fn parse_marker(
     let scope = parse_scope(origin, scope_field)?;
 
     let basis_field = required_field(fields, origin, KEY_MARKER_BASIS)?;
-    let (basis, basis_path) = parse_basis(origin, basis_field)?;
+    let (basis, basis_path, basis_citation) = parse_basis(origin, basis_field)?;
 
     let observed_field = required_field(fields, origin, KEY_MARKER_OBSERVED)?;
     require_non_empty(
@@ -3422,6 +3450,7 @@ fn parse_marker(
         scope,
         basis,
         basis_path,
+        basis_citation,
         observed: observed_field.value.clone(),
         program_path: program_path.to_path_buf(),
     }))
@@ -4484,35 +4513,42 @@ fn curated_findings_root() -> PathBuf {
     corpus_root().join(CURATED_FINDINGS_DIR_NAME)
 }
 
-/// Read a record's text with every read bounded.
+/// Read a record's text with every read bounded and the opened file proved to be the vetted one.
 ///
-/// Three bounds apply, and each covers a shape the others do not:
+/// Four guarantees apply, and each covers a shape the others do not:
 ///
-/// 1. The file's recorded size is checked **before** the file is opened, so an oversized record is
-///    refused without a single byte being read into memory.
-/// 2. The reader is wrapped in [`std::io::Read::take`] at the same bound, because a file can grow
-///    between the metadata call and the read. This is the check that makes the first one honest
-///    rather than advisory — without it, the size test is a time-of-check-to-time-of-use gap.
-/// 3. The bytes are required to be valid UTF-8, and an invalid record is refused with its byte
+/// 1. The entry is inspected without following a final link and the **opened handle** is proved to be
+///    the entry that was inspected, by `super::open_verified_regular_file`. A record path is derived
+///    from the program's own path and is therefore predictable, so a name re-pointed between the
+///    inspection and the open would otherwise have this function parse a file from anywhere on the
+///    machine as though it were the corpus's own record — golden stdout, command templates and marker
+///    included.
+/// 2. The size reported by that handle is checked **before** any byte is read, so an oversized record
+///    is refused without being held in memory.
+/// 3. The reader is wrapped in [`std::io::Read::take`] one byte past the same bound, because a file
+///    can grow between the metadata call and the read. This is the check that makes the second one
+///    honest rather than advisory, and the extra byte is what makes overflow *detectable* instead of
+///    silently truncating the record to exactly the limit.
+/// 4. The bytes are required to be valid UTF-8, and an invalid record is refused with its byte
 ///    offset named rather than replaced with substitution characters. A record is written into
 ///    reports and reproduction commands verbatim, so silently rewriting its bytes would mean the
 ///    suite reported something the corpus does not contain.
-///
-/// The metadata is taken with [`std::fs::symlink_metadata`] so that the size belongs to the file
-/// itself rather than to whatever a link points at.
 fn read_record_text(path: &Path) -> HarnessResult<String> {
     use std::io::Read;
 
     let context = format!("reading the expectation record {}", shown_path(path));
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
+    // The open and its verification are one step, so the handle is proved to be the entry that was
+    // inspected: a record path is derived from the program's own path and is therefore predictable,
+    // and a name re-pointed between an inspection and an open would have this function parse a file
+    // from anywhere on the machine as though it were the corpus's own record.
+    let (file, metadata) = super::open_verified_regular_file(&context, path).map_err(|error| {
         HarnessError::new(
             context.clone(),
             format!(
-                "{} could not be inspected: {error}; every program in the corpus is paired with a \
-                 sibling `.{RECORD_EXTENSION}` record holding its command templates and its golden \
-                 output, and a record that cannot be read is a corpus defect rather than a reason \
-                 to skip the program",
-                shown_path(path)
+                "{}; every program in the corpus is paired with a sibling `.{RECORD_EXTENSION}` \
+                 record holding its command templates and its golden output, and a record that \
+                 cannot be read is a corpus defect rather than a reason to skip the program",
+                error.cause()
             ),
         )
     })?;
@@ -4529,12 +4565,6 @@ fn read_record_text(path: &Path) -> HarnessResult<String> {
         ));
     }
 
-    let file = fs::File::open(path).map_err(|error| {
-        HarnessError::new(
-            context.clone(),
-            format!("{} could not be opened: {error}", shown_path(path)),
-        )
-    })?;
     let mut bytes: Vec<u8> = Vec::new();
     // Bounded again on the reader: the size above was true when it was taken, and the file may
     // have grown since. One extra byte is permitted so that exceeding the limit is detectable
@@ -4901,6 +4931,108 @@ pub fn discover_all() -> HarnessResult<Vec<PathBuf>> {
         programs.extend(discover_area(area.directory())?);
     }
     Ok(programs)
+}
+
+/// A digest of the corpus **as it is on disk**: every program's bytes and every record's bytes.
+///
+/// Consumed by the reporting module's run identity, which is what decides whether an area report
+/// found on disk may contribute its rows to this run's totals. Nothing else about a run changes when
+/// a program is edited — the configuration is the same, the tool set is the same, the declared program
+/// counts are the same — so a digest derived from anything but the bytes would accept a report written
+/// before the edit and add its rows to a summary describing the corpus after it. That is the failure
+/// the identity exists to prevent, and content is the only thing that detects it.
+///
+/// Deterministic and content-addressed, which keeps the reporting module's determinism rule intact:
+/// two runs over an unchanged corpus produce the same value on any machine and under any toolchain,
+/// because the enumeration order is fixed by [`discover_all`] and [`stable_digest`] is a fixed
+/// specification rather than the standard library's release-unstable hasher. The corpus root's path
+/// is deliberately **not** an input: two checkouts of the same commit at different paths describe the
+/// same corpus, and making the path matter would report a mismatch where there is none.
+///
+/// Infallible by construction, because it is computed on the path that writes a report and a report
+/// must be written even when the corpus is defective. The degradation is **per feature area** rather
+/// than all-or-nothing, and that matters on a checkout carrying some areas but not all: an area that
+/// cannot be enumerated contributes the fact that it could not, while every area that *can* still
+/// contributes its bytes. Aborting the whole digest on the first unreadable area would make it a
+/// constant on such a checkout, so an edit to a program in a readable area would move nothing — which
+/// is the very insensitivity this function exists to remove. The defect itself is reported loudly
+/// elsewhere, by program discovery and by the undefined-behaviour audit, so it is not swallowed here,
+/// merely survived.
+///
+/// A failure contributes the area or file it happened to and nothing more — never the diagnostic
+/// text, which embeds the path it was reported for. Two checkouts of one commit at different paths
+/// would otherwise disagree about a corpus they hold identically. Collapsing an absent area and an
+/// unreadable one to the same component is correct rather than merely convenient: for this digest's
+/// question — did that report describe this corpus? — both mean the same thing, that the area
+/// contributed no bytes at all.
+///
+/// Each file is read through [`read_file_bounded`], so a corpus entry that has become a symbolic
+/// link, a device or a directory is refused rather than followed, and an entry too large to inspect
+/// is refused rather than held in memory. Both refusals land in the same unreadable path as any other.
+pub fn corpus_content_digest() -> String {
+    let context = "digesting the corpus content for this run's report identity";
+    let mut components: Vec<String> = Vec::new();
+    for spec in AREAS.iter() {
+        let area = spec.directory();
+        match discover_area(area) {
+            Ok(programs) => {
+                // The count is carried beside the per-file components so that an area gaining or
+                // losing a pair differs even in the vanishing case where the surviving bytes digest
+                // alike.
+                components.push(format!("{area}:programs={}", programs.len()));
+                for program in &programs {
+                    components.push(corpus_file_component(context, program));
+                    components.push(corpus_file_component(
+                        context,
+                        &program.with_extension(RECORD_EXTENSION),
+                    ));
+                }
+            }
+            Err(_) => components.push(format!("{area}:unenumerable")),
+        }
+    }
+    let borrowed: Vec<&str> = components.iter().map(String::as_str).collect();
+    stable_digest(&borrowed)
+}
+
+/// One corpus file's contribution to [`corpus_content_digest`]: its name, its length and its bytes.
+///
+/// The name is the area-and-file tail rather than the absolute path, for the reason
+/// [`corpus_content_digest`] gives: the checkout's location is not part of what the corpus *is*. The
+/// length is carried beside the byte digest so that a file whose bytes happen to digest alike still
+/// differs when its size does, which costs nothing and removes one whole class of silent collision.
+///
+/// A file that cannot be read contributes `unreadable`, not silence. Silence would let an unreadable
+/// record digest identically to a readable empty one.
+fn corpus_file_component(context: &str, path: &Path) -> String {
+    let name = corpus_relative_name(path);
+    match read_file_bounded(context, path, MAX_INSPECTED_FILE_BYTES) {
+        Ok(bytes) => format!(
+            "{name}:{}:{:0width$x}",
+            bytes.len(),
+            fnv1a64_bytes(&bytes),
+            width = DIGEST_HEX_DIGITS
+        ),
+        Err(_) => format!("{name}:unreadable"),
+    }
+}
+
+/// A corpus path as `<area>/<file>`, falling back to the whole shown path if it lies elsewhere.
+///
+/// The fallback cannot arise for a path [`discover_all`] produced — every one of those is proved
+/// strictly beneath the corpus root — and exists so that this function is total rather than
+/// panicking on a shape it was not given.
+fn corpus_relative_name(path: &Path) -> String {
+    let area = path.parent().and_then(Path::file_name);
+    let file = path.file_name();
+    match (area, file) {
+        (Some(area), Some(file)) => format!(
+            "{}/{}",
+            area.to_string_lossy().as_ref(),
+            file.to_string_lossy().as_ref()
+        ),
+        _ => shown_path(path),
+    }
 }
 
 /// Every expected-divergence marker in the corpus, in area order and then file order.

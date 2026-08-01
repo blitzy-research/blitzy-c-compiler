@@ -201,12 +201,15 @@
 //! "the artifact is inside the workspace" is easily over-read as confinement:
 //!
 //! - **It applies no operating-system isolation.** There is no namespace, no `chroot`, no
-//!   syscall filter and no network restriction; the environment the child inherits is not
-//!   cleared and `TMPDIR` is not set. A program that opened a socket or an absolute path would
-//!   succeed. What keeps a corpus program from doing either is authoring policy — every input is
-//!   a literal in its own source — which is auditable because the corpus is committed. The
+//!   syscall filter and no network restriction, so a program that opened a socket or an absolute
+//!   path would succeed. What keeps a corpus program from doing either is authoring policy — every
+//!   input is a literal in its own source — which is auditable because the corpus is committed. The
 //!   execution runner itself is likewise an installed tool executed from outside the build tree;
-//!   only the artifact it is pointed at is required to be inside a workspace.
+//!   only the artifact it is pointed at is required to be inside a workspace. The **environment** is
+//!   the one thing that *is* enforced: it is cleared and replaced, and `TMPDIR`, `TMP`, `TEMP` and
+//!   `HOME` all point at the cell's workspace, so a program that consults them writes there. That is
+//!   a guarantee about what the child is told, not a namespace — a program that hard-codes a path
+//!   ignores it.
 //! - **It does not decide what happens to a crash dump.** When a child dies from a signal,
 //!   whether a core image is written and where it lands are decided by the host's own
 //!   `kernel.core_pattern` and core-size limit. An absolute pattern therefore writes outside the
@@ -236,7 +239,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::env::{kill_tool, Capabilities};
+use super::env::{confirm_vetted_tools_unchanged, kill_tool, Capabilities};
 use super::sandbox::{
     workspace_path, Workspace, BCC_EXIT_NAME, BCC_STDERR_NAME, BCC_STDOUT_NAME,
     REFERENCE_EXIT_NAME, REFERENCE_STDERR_NAME, REFERENCE_STDOUT_NAME,
@@ -683,17 +686,30 @@ impl RunOutcome {
 
     /// A one-line description for a report row or an outcome detail.
     ///
-    /// Carries the termination, the raw wait status, the byte counts, the duration and the
-    /// command line, which is everything needed to understand the row without re-running it.
-    /// Passed through the report-safe rendering, so no captured path or note can forge a
-    /// column or hide a line.
+    /// Carries the termination, the raw wait status, the **budget**, the byte counts and the command
+    /// line, which is everything needed to understand the row without re-running it. Passed through
+    /// the report-safe rendering, so no captured path or note can forge a column or hide a line.
+    ///
+    /// # Why the measured duration is deliberately absent
+    ///
+    /// This line is what the comparator puts into a divergence's detail, and that detail is rendered
+    /// verbatim into a report row, into the summary and into a finding's `diff.txt`. A wall-clock
+    /// millisecond count in it would make every one of those bytes differ between two runs of the
+    /// same inputs, which would destroy the property those artifacts exist to have: diff two runs and
+    /// anything that differs is something the run genuinely found. The budget is kept because it is a
+    /// pure function of the configuration and is the fact a timeout has to be read against.
+    ///
+    /// The measured duration is not discarded — it is recorded, once, in the `duration_ms` field of
+    /// this execution's own status record, which is where a retained workspace and a finding's
+    /// `.exit` entry both read it from. Timing telemetry lives there and nowhere a diff looks.
+    /// [`RunOutcome::describe_with_timing`] is the terminal-progress variant, mirroring
+    /// `CompileOutcome`'s split for exactly the same reason.
     pub fn describe(&self) -> String {
         let mut described = format!(
-            "{} (raw wait status {}) in {} ms of a {} ms budget, {} stdout bytes, {} stderr \
+            "{} (raw wait status {}) against a {} ms budget, {} stdout bytes, {} stderr \
              bytes, bounded by the {} mechanism, command: {}",
             self.termination,
             self.raw_wait_status,
-            self.duration().as_millis(),
             self.budget().as_millis(),
             self.stdout.len(),
             self.stderr.len(),
@@ -707,6 +723,17 @@ impl RunOutcome {
             described.push_str(note);
         }
         sanitize_text_for_report(&described)
+    }
+
+    /// The same line with the measured duration appended, for progress output only.
+    ///
+    /// Separated from [`RunOutcome::describe`] rather than offered as an option, because the
+    /// distinction being enforced is *where the text may go*: this variant is safe on a terminal and
+    /// never safe in a file whose bytes are compared. Keeping them as two named methods makes the
+    /// wrong choice visible at the call site instead of hiding it in an argument — the same split
+    /// `CompileOutcome` makes, for the same reason.
+    pub fn describe_with_timing(&self) -> String {
+        format!("{} ({} ms)", self.describe(), self.duration().as_millis())
     }
 
     /// Notes a reader must be told about, each already safe to render on one line.
@@ -944,8 +971,10 @@ pub fn budget_for(caps: &Capabilities) -> Duration {
 /// target, which decides how the artifact is launched, and — through
 /// [`workspace_path`] — the one directory the child is permitted to run in. The artifact is
 /// launched directly when the host executes that target natively, and under the emulator `env.rs`
-/// vetted for it otherwise, with no arguments, no environment additions, and the null device as
-/// its standard input; both output streams are captured and neither is inherited.
+/// vetted for it otherwise, with no arguments and the null device as its standard input; both output
+/// streams are captured and neither is inherited. The environment is neither inherited nor added to:
+/// it is **replaced** with the suite's fixed set, so a program that consulted one would see the same
+/// values on every machine.
 ///
 /// Returns [`RunAttempt::RunnerUnavailable`] — never an error and never a silent skip — when a
 /// non-native target has no emulator here.
@@ -1343,8 +1372,12 @@ fn resolve_runner(
 /// 1. The child is given a **process group of its own** before it is spawned, so the whole tree
 ///    can be signalled later rather than only the process this module holds a handle to.
 /// 2. When an artifact is bound to this execution, its **identity is re-checked immediately
-///    before the spawn** — the last statement before it — so a replacement of the leaf during
-///    runner resolution and command assembly cannot be executed.
+///    before the spawn** so a replacement of the leaf during runner resolution and command
+///    assembly cannot be executed, and **every vetted tool named in the launch vector is
+///    re-confirmed** in the same breath — the last two statements before the spawn — so an
+///    emulator or timeout utility exchanged since pre-flight is refused rather than run. The
+///    vector is scanned rather than just its first element, because wrapping moves the emulator
+///    out of the front position and puts the utility there.
 /// 3. The streams are drained by threads that start before the wait does, so a child that fills a
 ///    pipe buffer cannot deadlock the harness. Each buffer is **bounded**, so a child that prints
 ///    without end cannot exhaust the harness either.
@@ -1418,8 +1451,14 @@ fn execute_bounded(
     // this a program that ignored a catchable signal would simply outlive it.
     own_process_group(&mut command);
 
-    // The last statement before the spawn, deliberately. Anything between this check and the
-    // launch is a window in which the file could be exchanged, so there is nothing between them.
+    // The last two statements before the spawn, deliberately. Anything between either check and the
+    // launch is a window in which a file could be exchanged, so there is nothing between them.
+    //
+    // They ask the same question of two different things. The artifact is a product of this run and
+    // is compared against the identity taken when this function's caller inspected it; the tools are
+    // the machine's, and are compared against the identities discovery vetted. Neither substitutes
+    // for the other: a replaced artifact makes the *program* unattributable, while a replaced
+    // emulator or timeout utility makes the whole *observation* unattributable.
     if let Some(bound) = &artifact {
         if let Some(changed) = bound.identity.changed_since(bound.path) {
             return Err(HarnessError::new(
@@ -1432,6 +1471,20 @@ fn execute_bounded(
                 ),
             ));
         }
+    }
+    // The launch vector rather than the one the caller prepared, so the external timeout utility is
+    // covered on the machines that have it: after wrapping it is the program at the front, and the
+    // emulator it wraps is still in the vector and still checked in the same pass.
+    if let Some(change) = confirm_vetted_tools_unchanged(&launch_argv) {
+        return Err(HarnessError::new(
+            format!("launching {}", posix_command_line(&launch_argv)),
+            format!(
+                "a tool this launch is about to execute is no longer the file discovery vetted — \
+                 {change}. Nothing was launched. The vetting that admitted the tool describes a \
+                 file that is no longer there, so neither a passing nor a failing cell could be \
+                 attributed to the toolchain the run reports having used"
+            ),
+        ));
     }
 
     let started = Instant::now();

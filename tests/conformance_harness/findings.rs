@@ -129,17 +129,20 @@
 //! it is why [`Capture::describe`] carries no wall-clock duration even though both underlying
 //! observations can report one.
 //!
-//! Three places legitimately differ, and every one of them is a fact about the **run** rather than
-//! about the writer: the `.exit` and `.compile.exit` records state how long the process they
-//! describe took; [`ENVIRONMENT_NAME`] states the machine's tool versions; and the trailing section
-//! of [`DIFF_NAME`], which reproduces the comparator's own account verbatim, inherits the timings
-//! that account contains. The computed difference above it — the located first divergent byte and
-//! the unified rendering — is byte-identical.
+//! **Two** places legitimately differ, and both are facts about the **run** rather than about the
+//! writer: the `.exit` and `.compile.exit` records state how long the process they describe took,
+//! and [`ENVIRONMENT_NAME`] states the machine's tool versions. Neither is noise — a timing is
+//! part of a capture, and the fingerprint is what lets a later reader tell a toolchain change from a
+//! compiler change — but neither carries information about whether the divergence itself changed.
 //!
-//! None of the three is noise: a timing is part of a capture, the fingerprint is what lets a later
-//! reader tell a toolchain change from a compiler change, and the comparator's verbatim account is
-//! the richest statement of the difference there is. They are simply not the parts of a two-run
-//! diff that carry information about whether the divergence changed.
+//! [`DIFF_NAME`] is byte-identical in full, **including** its trailing section, which reproduces the
+//! comparator's own account verbatim. That holds because the account is built from
+//! [`RunOutcome::describe`] and [`CompileOutcome::describe`], and neither carries a measured
+//! duration: each states the *budget* it was bounded against, which is a pure function of the
+//! configuration. The measured duration is reachable only through `describe_with_timing` on those
+//! same two types, and that variant is called only from progress output printed to a terminal —
+//! never from a file whose bytes are compared. Confining the wall clock to `duration_ms` is what
+//! buys this file its stability, and widening either `describe` would silently take it away.
 //!
 //! # Minimization
 //!
@@ -183,20 +186,23 @@
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use super::compare::{locate_stdout_divergence, unified_diff, Comparison};
 use super::compile::CompileOutcome;
 use super::env::Capabilities;
 use super::execute::{RunOutcome, Termination};
 use super::manifest::{self, Manifest};
-use super::sandbox::{claim_ownership, live_foreign_owner_identity, RUN_OWNER_ENTRY};
+use super::sandbox::{
+    claim_ownership, live_foreign_owner_identity, retire_directory_contents, RUN_OWNER_ENTRY,
+};
 use super::{
     create_directory_chain_below, findings_root, is_forbidden_for_side, posix_quote,
-    publish_bytes_no_follow, publish_text_no_follow, read_file_bounded, redact_secrets,
-    remove_entry, require_contained_corpus_file, require_directory_chain_below,
-    require_replaceable, run_generation, sanitize_text_for_report, shown_path, stable_digest,
-    CellKey, CompilerSide, DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Outcome,
-    Replaceable, Target, Verdict, MAX_INSPECTED_FILE_BYTES,
+    publish_bytes_no_follow, read_file_bounded, redact_secrets, remove_entry,
+    require_contained_corpus_file, require_directory_chain_below, require_replaceable,
+    run_generation, sanitize_text_for_report, shown_path, stable_digest, CellKey, CompilerSide,
+    DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Outcome, Replaceable, Target,
+    Verdict, MAX_INSPECTED_FILE_BYTES,
 };
 
 /// The reproducer: a **verbatim**, byte-for-byte copy of the corpus program.
@@ -1505,6 +1511,92 @@ fn validate_component(context: &str, component: &str) -> HarnessResult<()> {
     Ok(())
 }
 
+/// Claim the generated-findings root for this run, retiring an earlier run's finding directories.
+///
+/// The driver calls this once at start-up, so a conflict with a concurrent run is reported before the
+/// first cell is compiled rather than at the moment a divergence needs filing. [`prepare_directory`]
+/// calls it again on the path that must not depend on the driver having asked: the work is remembered,
+/// so the second call costs nothing and the guarantee is structural rather than a convention.
+///
+/// # Errors
+///
+/// Returns the same explanatory failure [`prepare_directory`] would have returned later — the root
+/// could not be established or verified, another live run owns it, or an earlier run's directories
+/// could not be retired.
+pub fn prepare_namespace() -> HarnessResult<()> {
+    ensure_findings_namespace("preparing the generated-findings directory")
+}
+
+/// Establish this run's ownership of the findings root, exactly once per process.
+///
+/// [`OnceLock::get_or_init`] blocks every other feature-area thread until the first one has finished,
+/// which is the whole of the coordination needed, and the outcome is remembered so a failure is
+/// reported identically to every caller rather than retried once per finding.
+fn ensure_findings_namespace(context: &str) -> HarnessResult<()> {
+    static PREPARED: OnceLock<Result<(), String>> = OnceLock::new();
+    match PREPARED
+        .get_or_init(|| prepare_findings_namespace().map_err(|error| String::from(error.cause())))
+    {
+        Ok(()) => Ok(()),
+        Err(cause) => Err(HarnessError::new(
+            String::from(context),
+            format!("the generated-findings directory for this run could not be prepared: {cause}"),
+        )),
+    }
+}
+
+/// Retire the previous run's finding directories and claim the root for this one.
+///
+/// # Why the root is retired at all
+///
+/// A finding directory is named from the divergence itself, so it is rewritten in place when the same
+/// divergence recurs — that is the documented idempotence [`prepare_directory`] relies on. What that
+/// leaves behind is the opposite case: a directory for a divergence this run *does not* reproduce.
+/// Nothing in this run's rows refers to it, so no report mentions it, and it sits in the generated set
+/// looking exactly like a current deliverable to the next maintainer who opens that directory. Since
+/// the whole value of a finding is that a reader can trust it describes the run that produced it, the
+/// previous run's set is retired whole rather than left to be told apart by hand.
+///
+/// # Why the order is exactly this order
+///
+/// A **live foreign owner is refused before anything is removed**, so a run that finds another run
+/// still filing findings here destroys nothing — the removal is the destructive step, and once it has
+/// happened no later check can undo it. The retirement then happens, entry by entry and following no
+/// symbolic link, so the directory itself stays valid for a concurrent reader's handle. Only then is
+/// this run's stamp written, so a process that dies midway leaves a directory the next run will
+/// retire again rather than one it believes is owned.
+///
+/// This is deliberately *not* done by the function that creates the three artifact roots. That
+/// function runs before any ownership question has been asked — it is what creates the directory the
+/// stamp would live in — so a removal there could not tell one run's findings from another's, and
+/// would delete a live run's evidence. Only a *live* foreign stamp refuses: a stamp from a run that
+/// has exited is stale and is replaced, which is what keeps a sequential re-run working.
+fn prepare_findings_namespace() -> HarnessResult<()> {
+    let context = "preparing the generated-findings directory for this run";
+    let root = findings_root();
+    create_directory_chain_below(context, &root, &root)?;
+
+    if let Some((run, pid)) = live_foreign_owner_identity(&root) {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{} is already owned by run {} (process {}), which is still running. A finding \
+                 directory is named from the divergence itself so that a register row leads straight \
+                 to it, which means two concurrent runs address the same directories; retiring them \
+                 here would destroy the evidence that run is still writing, and leaving them would \
+                 put its findings in this run's generated set. Let that run finish, or set \
+                 CARGO_TARGET_DIR to a different build directory for this one",
+                shown_path(&root),
+                sanitize_text_for_report(&run),
+                pid
+            ),
+        ));
+    }
+
+    retire_directory_contents(context, &root)?;
+    claim_ownership(context, &root)
+}
+
 /// Require that `candidate` lies strictly beneath [`findings_root`], deciding it lexically.
 ///
 /// Deliberately **lexical** rather than resolved: [`super::ensure_within`] answers the same question
@@ -1661,9 +1753,21 @@ fn write_bytes(context: &str, path: &Path, bytes: &[u8]) -> HarnessResult<()> {
     })
 }
 
-/// Publish text at `path` as UTF-8, with the same refusal to follow a link.
+/// Publish text at `path` as UTF-8, through **exactly** the guards [`write_bytes`] applies.
+///
+/// One funnel rather than two, and that is the whole point of this function existing at all. It used
+/// to call the shared publisher directly, which meant three of the four guards above — the lexical
+/// containment beneath [`findings_root`], the resolved directory chain down to the parent, and the
+/// refusal of a leaf that is not already a regular file — applied to the captured streams and *not* to
+/// the manifest, the reproduction commands, the environment fingerprint or the diff. Those are the
+/// artifacts a maintainer actually reads and executes, so the weaker path was guarding the less
+/// valuable half of the deliverable. A sibling writer that quietly skips its siblings' checks is also
+/// exactly the shape of defect that survives maintenance, because both names read as equivalent at
+/// every call site.
+///
+/// UTF-8 text is bytes here, so the conversion is the whole of the difference between the two.
 fn write_text(context: &str, path: &Path, text: &str) -> HarnessResult<()> {
-    publish_text_no_follow(context, path, text)
+    write_bytes(context, path, text.as_bytes())
 }
 
 /// Copy a corpus file into the finding directory.
@@ -1732,6 +1836,10 @@ fn copy_corpus_file(context: &str, source: &Path, destination: &Path) -> Harness
 /// so nothing else can write to it, and it is not among the entries a [`FindingArtifacts`] reports.
 fn prepare_directory(id: &FindingId) -> HarnessResult<(PathBuf, PathBuf)> {
     let context = format!("preparing the artifact directory for finding {id}");
+    // The root is claimed and retired before the first finding directory is created inside it, so a
+    // previous run's set cannot survive beside this one's. Remembered per process: this is a no-op
+    // after the driver's own call, and correct even if the driver never made one.
+    ensure_findings_namespace(&context)?;
     let directory = id.directory();
     require_beneath_findings_root(&context, &directory)?;
     require_no_foreign_occupant(&context, id, &directory)?;
@@ -1790,20 +1898,48 @@ fn prepare_directory(id: &FindingId) -> HarnessResult<(PathBuf, PathBuf)> {
 /// partial output from an interrupted run and is rewritten: refusing there would leave a run
 /// unable to make progress after a crash, and there is no other finding's evidence to protect.
 ///
+/// # The inspection is itself guarded, because it happens first
+///
+/// This check runs before the directory has been created under verification, which makes *it* the
+/// first thing to touch a predictable path — so it cannot borrow the later steps' guarantees. Three
+/// things follow, in this order: the resolved chain from the findings root down is verified **before**
+/// a byte is read, so a link planted at any level is refused rather than followed; the manifest path
+/// is built through the shared containment helper rather than joined by hand; and the read is
+/// **bounded** and refuses a link or a special file, so an entry at that name can neither decide how
+/// much memory this process uses nor block the run without end.
+///
 /// # Errors
 ///
 /// Returns an explanatory failure naming both identifiers when the occupant declares a different
-/// one. The caller turns that into a `FAIL` verdict rather than a `FINDING`, because a divergence
-/// whose evidence could not be filed has not been delivered.
+/// one, and one naming the offending level or entry when the chain or the manifest cannot be trusted.
+/// The caller turns either into a `FAIL` verdict rather than a `FINDING`, because a divergence whose
+/// evidence could not be filed has not been delivered.
 fn require_no_foreign_occupant(
     context: &str,
     id: &FindingId,
     directory: &Path,
 ) -> HarnessResult<()> {
-    let manifest = directory.join(MANIFEST_NAME);
-    let Ok(text) = fs::read_to_string(&manifest) else {
+    // A directory that is not there has no occupant, and this is the ordinary first-write case. It is
+    // asked before the chain is verified because the chain verification requires every level to
+    // already exist, which on a first write none of them do.
+    if fs::symlink_metadata(directory).is_err() {
         return Ok(());
-    };
+    }
+    // Verified **before** a byte is read, not after. The lexical check the caller performed says the
+    // spelling lies beneath the findings root; it says nothing about what the names resolve to, so a
+    // link planted at any level would have the read below take its bytes from wherever that link
+    // pointed. A finding directory's name is derived from the divergence, so it is predictable before
+    // the run that will write it — which is exactly the precondition such a link needs.
+    require_directory_chain_below(context, &findings_root(), directory)?;
+    let manifest = guarded_path(context, directory, &[MANIFEST_NAME])?;
+    if fs::symlink_metadata(&manifest).is_err() {
+        return Ok(());
+    }
+    // Bounded, and refusing a link or a special file. The previous unbounded read let an entry at a
+    // predictable name decide how much memory this process used, and let a link at that name be
+    // followed to any file on the machine — a directory or a FIFO there would have blocked without end.
+    let bytes = read_file_bounded(context, &manifest, MAX_INSPECTED_FILE_BYTES)?;
+    let text = String::from_utf8_lossy(&bytes);
     let Some(occupant) = declared_finding_id(&text) else {
         return Ok(());
     };
@@ -1900,6 +2036,38 @@ const VAR_TIMEOUT: &str = "TIMEOUT";
 
 /// Shell variable holding the per-execution budget, in whole seconds, that the recorded run used.
 const VAR_BUDGET: &str = "BUDGET_SECS";
+
+/// Shell variable holding the search path every reproduced invocation is given.
+///
+/// Declared separately from the other assignments in the isolation function so a reader on another
+/// machine can change it in one place — it is the one value in that environment that is a property of
+/// the machine the run happened on rather than of the suite.
+const VAR_CHILD_PATH: &str = "CHILD_PATH";
+
+/// The shell function through which every reproduced invocation is run.
+///
+/// # Why an invocation is not simply run
+///
+/// The harness does not spawn a compiler or a program with the environment it inherited: it clears the
+/// environment and installs a small fixed set. Every one of those variables changes an observable
+/// result. `LC_ALL=C` fixes number and message formatting, and a reader whose locale prints a decimal
+/// comma would see a stdout difference that is theirs and not the compiler's. `ASAN_OPTIONS` and
+/// `UBSAN_OPTIONS` are forced to their strictest values, and a reader with
+/// `ASAN_OPTIONS=halt_on_error=0` exported would watch an instrumented artefact pass where the run
+/// recorded a diagnostic. `TERM=dumb` stops a tool emitting colour escapes into a stream that is
+/// compared byte for byte. `PATH` is the vetted list, so a compiler driver finds the same `cc1` and
+/// `as` the run used. `HOME` and the three temporary-directory names point at the scratch directory,
+/// so nothing is written into the reader's own home.
+///
+/// A script that reproduced the command line but not the environment would therefore be reproducing a
+/// *different* invocation, and the two ways that can go wrong are both bad: it can fail to show the
+/// divergence, which reads as a finding that was never real, or it can show a different one, which
+/// sends a reader after a defect that is not there.
+///
+/// It is a function rather than a variable holding a command prefix because a prefix has to be left
+/// unquoted to be split into words, and a search path containing a space in a directory name would
+/// then be split into two arguments. `"$@"` passes the invocation through element for element.
+const SH_ISOLATED: &str = "isolated";
 
 /// Exit status GNU `timeout` reports when it terminates the command it was bounding.
 ///
@@ -2020,14 +2188,29 @@ fn collect_shell_variables(finding: &Finding) -> ShellVariables {
                 variables.declare(&runner_variable_name(capture.target()), text);
             }
         }
-        // The timeout utility and the budget the run was bounded with, taken from the launch vector
-        // the harness actually spawned rather than from the capability record, for the same reason
-        // every other tool path here is: the script must state what ran, not what was discovered.
+        // The timeout utility and the budget, taken from the vector the harness actually spawned
+        // rather than from the capability record, for the same reason every other tool path here is:
+        // the script must state what ran, not what was discovered.
         //
         // A wrapped launch is `<timeout> <secs> <program> ...`, so the utility is its first element.
-        // When the run was not wrapped the harness enforced the budget with its own watchdog and no
+        // When the launch was not wrapped the harness enforced the budget with its own watchdog and no
         // utility appears in the vector; the budget is still declared, so a reader whose machine does
         // have the utility can bound the reproduction with the same number.
+        //
+        // Declared from the **build** as well as the execution, and that is the load-bearing half. A
+        // finding whose compiler refused the program has no execution at all, so a collection that
+        // looked only at executions would declare neither variable for it — and
+        // `render_bounded_invocation` would then take its unbounded branch for the build line. That
+        // leaves precisely the class of finding most dangerous to reproduce, a compiler that never
+        // returns, reproduced with no bound. The budget is also declared from the build so that a
+        // build-only finding still carries the number the run used, rather than falling back to the
+        // script's default.
+        if let Some(compile) = capture.compile() {
+            if let Some(tool) = compile.timeout_tool() {
+                variables.declare(VAR_TIMEOUT, tool);
+            }
+            variables.declare(VAR_BUDGET, &compile.budget().as_secs().to_string());
+        }
         if let Some(run) = capture.run() {
             if run.launch_was_wrapped() {
                 if let Some(tool) = run.launch_argv().first() {
@@ -2223,6 +2406,15 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
     ));
     script.push_str("#\n");
     script.push_str(&comment(&format!(
+        "Every command runs through the {SH_ISOLATED} function below, which reproduces the \
+         environment and the working directory the run used — a cleared environment with a fixed C \
+         locale, fixed sanitizer options, the vetted search path, and the scratch directory as HOME \
+         and TMPDIR. A command line alone is not the invocation: an exported LD_PRELOAD, a locale \
+         that prints a decimal comma, or a relaxed ASAN_OPTIONS each change the result, so the \
+         environment is reproduced rather than assumed."
+    )));
+    script.push_str("#\n");
+    script.push_str(&comment(&format!(
         "Scratch output goes to ${VAR_WORK}. By default the script creates that directory for itself \
          with `mktemp -d` under a 077 umask — an unpredictable name, created exclusively, readable \
          only by you — and removes it again however the script exits. Set {VAR_KEEP}=1 to keep it, \
@@ -2279,6 +2471,13 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
         "{VAR_SOURCE}=\"${VAR_FINDING_DIR}/{REPRODUCER_SOURCE_NAME}\"\n"
     ));
     script.push_str(&render_scratch_setup());
+
+    // After the scratch setup, because the isolation points the private-directory variables at
+    // `$WORK` and therefore needs it to exist and to be known; and before the first capture block,
+    // because every one of them runs through it.
+    script.push('\n');
+    script.push_str(&render_isolated_environment());
+    script.push_str(&render_working_directory());
 
     for capture in &captures {
         script.push_str(&render_capture_block(capture, &variables));
@@ -2399,6 +2598,120 @@ fn render_scratch_setup() -> String {
     text
 }
 
+/// Render the working-directory change every reproduced invocation inherits.
+///
+/// The harness gives each spawned command the cell's own workspace as its working directory, and that
+/// is not cosmetic: a compiler driver writes its intermediate files relative to where it was started,
+/// an executed program that opened a relative path would resolve it there, and a diagnostic that
+/// mentions a relative path means something different from a different directory. A reproduction run
+/// from wherever the reader's shell happened to be is a different invocation in exactly the way that
+/// matters — its scratch files land outside the scratch directory, which contradicts the hermeticity
+/// this script otherwise establishes.
+///
+/// `cd` is used once for the whole script rather than per invocation, because the script writes nothing
+/// by relative path: every scratch target it names is `"$WORK"/…` and every input is `"$SRC"`, both
+/// absolute. So the change of directory affects the *children* — which is where it is needed — and
+/// leaves every path the script itself spells unaffected.
+fn render_working_directory() -> String {
+    let mut text = String::new();
+    text.push_str(&comment(
+        "--- working directory -------------------------------------------------------",
+    ));
+    text.push_str(&comment(&format!(
+        "The run spawned every command with the cell's own workspace as its working directory, so a \
+         tool that writes an intermediate file relative to where it started wrote it inside the \
+         workspace. {VAR_WORK} is this script's equivalent. Every path the script itself names is \
+         absolute — ${VAR_WORK}/… or ${VAR_SOURCE} — so this changes where the tools write and \
+         nothing else."
+    )));
+    text.push_str(&format!("CDPATH= cd -- \"${VAR_WORK}\" || exit 1\n\n"));
+    text
+}
+
+/// Render the shell function that gives every reproduced invocation the run's own environment.
+///
+/// The set installed is read from [`super::child_fixed_environment`],
+/// [`super::CHILD_PRIVATE_DIRECTORY_VARIABLES`] and [`super::env::sanitized_search_path`] — the
+/// same three sources [`super::isolate_child_environment`] installs on a spawned command — so the
+/// script and the harness cannot describe different environments. A variable added to the
+/// harness's set appears here on the next run without this function being edited.
+///
+/// # Why `env -i` and not a series of exports
+///
+/// Exporting the values would add them to whatever the reader already has exported, and the harness
+/// *cleared* the environment first. The variables that matter most are the ones the suite does not
+/// name: an inherited `LD_PRELOAD` loads a library into every program the script runs, an inherited
+/// `GCC_EXEC_PREFIX` or `C_INCLUDE_PATH` changes what the reference compiler accepts, and neither
+/// would be visible in a report. `env -i` starts from nothing, which is the state the run was in.
+///
+/// `env` is required rather than probed for the same reason `mktemp` is: it is specified by POSIX and
+/// present wherever a reproduction is plausible, and a missing one is reported as the environment
+/// problem it is instead of being silently worked around by running unisolated — which would produce a
+/// result the reader could not trust and would have no way to know not to trust.
+///
+/// The private-directory variables point at the reader's own scratch directory rather than at the
+/// workspace the run used, which no longer exists on any machine and never existed on theirs. That is
+/// the one deliberate difference from the recorded environment, and it is the one that makes the
+/// script hermetic on the reader's machine rather than on the machine that produced the finding.
+fn render_isolated_environment() -> String {
+    let mut text = String::new();
+    text.push_str(&comment(
+        "--- the environment every invocation below is given -------------------------",
+    ));
+    text.push_str(&comment(
+        "The suite does not spawn a compiler with the environment it inherited: it clears the \
+         environment and installs exactly the set below. Reproducing the command line without the \
+         environment reproduces a different invocation — a locale that prints a decimal comma, an \
+         exported ASAN_OPTIONS that suppresses a diagnostic, or a PATH entry holding a substituted \
+         `cc1` are each enough to change the result and none of them would be visible in the output.",
+    ));
+    text.push_str(&comment(&format!(
+        "{VAR_CHILD_PATH} is the search path the run gave every child: the entries of PATH that were \
+         neither relative nor writable by an account the suite does not trust. It is the one value \
+         here that belongs to the machine the run happened on, so it is the one to adjust if a tool \
+         below cannot be found."
+    )));
+    text.push_str(&format!(
+        "{VAR_CHILD_PATH}={}\n",
+        posix_quote(&match super::env::sanitized_search_path() {
+            Some(path) => path.to_string_lossy().into_owned(),
+            None => String::new(),
+        })
+    ));
+    text.push_str(&comment(&format!(
+        "{}, {} and the three temporary-directory names point at this script's own scratch \
+         directory, so nothing a tool writes for itself lands in your home directory.",
+        super::CHILD_PRIVATE_DIRECTORY_VARIABLES
+            .first()
+            .copied()
+            .unwrap_or("HOME"),
+        super::CHILD_PRIVATE_DIRECTORY_VARIABLES
+            .get(1)
+            .copied()
+            .unwrap_or("TMPDIR"),
+    )));
+    text.push_str(&format!("{SH_ISOLATED}() {{\n"));
+    text.push_str("    if ! command -v env > /dev/null 2>&1; then\n");
+    text.push_str(
+        "        printf 'env is required: the recorded run cleared the environment before spawning, \
+         and reproducing a build under an inherited environment would reproduce a different \
+         invocation\\n' >&2\n",
+    );
+    text.push_str("        exit 1\n");
+    text.push_str("    fi\n");
+    text.push_str("    env -i \\\n");
+    text.push_str(&format!("        PATH=\"${VAR_CHILD_PATH}\" \\\n"));
+    for (name, value) in super::child_fixed_environment() {
+        text.push_str(&format!("        {name}={} \\\n", posix_quote(value)));
+    }
+    for name in super::CHILD_PRIVATE_DIRECTORY_VARIABLES {
+        text.push_str(&format!("        {name}=\"${VAR_WORK}\" \\\n"));
+    }
+    text.push_str("        \"$@\"\n");
+    text.push_str("}\n\n");
+    text
+}
+
 /// Render the build-and-run block for one capture.
 fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String {
     let stem = capture.file_stem();
@@ -2449,13 +2762,16 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
             ));
         }
     }
-    if let Some(source) = capture.compile().and_then(|compile| {
-        compile
-            .argv()
-            .iter()
-            .find(|argument| argument.ends_with(".c"))
-    }) {
-        substitutions.push((source.clone(), format!("\"${VAR_SOURCE}\"")));
+    // The program is taken from the build's own typed record of what it compiled, never inferred from
+    // the argument text. A search for the first argument ending `.c` would match a compiler installed
+    // at a path that happens to end that way — `…/cc-13.c`, or any driver under a directory so named —
+    // and would then substitute the *compiler* with the reproducer beside the script. The resulting
+    // line reads exactly like the invocation the run performed and reproduces nothing.
+    if let Some(source) = capture
+        .compile()
+        .and_then(|compile| compile.source().to_str())
+    {
+        substitutions.push((String::from(source), format!("\"${VAR_SOURCE}\"")));
     }
 
     if let Some(compile) = capture.compile() {
@@ -2580,13 +2896,17 @@ fn describe_compile_termination(compile: &CompileOutcome) -> String {
 fn render_bounded_invocation(invocation: &str, stdout_file: &str, stderr_file: &str) -> String {
     let mut rendered = String::from("status=0\n");
     rendered.push_str(&format!("if [ -n \"${{{VAR_TIMEOUT}:-}}\" ]; then\n"));
+    // The isolation wraps the *timeout utility* as well as the command, which is what the harness
+    // does: it installs the environment on the one command it spawns, and that command is already the
+    // wrapped vector. Isolating only the inner command would leave the utility running under the
+    // reader's environment and pass that environment on to the program it bounds.
     rendered.push_str(&format!(
-        "    \"${VAR_TIMEOUT}\" \"${{{VAR_BUDGET}:-30}}\" {invocation} > {stdout_file} 2> \
-         {stderr_file} || status=$?\n"
+        "    {SH_ISOLATED} \"${VAR_TIMEOUT}\" \"${{{VAR_BUDGET}:-30}}\" {invocation} > \
+         {stdout_file} 2> {stderr_file} || status=$?\n"
     ));
     rendered.push_str("else\n");
     rendered.push_str(&format!(
-        "    {invocation} > {stdout_file} 2> {stderr_file} || status=$?\n"
+        "    {SH_ISOLATED} {invocation} > {stdout_file} 2> {stderr_file} || status=$?\n"
     ));
     rendered.push_str("fi\n");
     rendered
@@ -3243,9 +3563,13 @@ fn write_capture(context: &str, outputs: &Path, capture: &Capture) -> HarnessRes
     written.push(exit);
 
     if let Some(compile) = capture.compile() {
-        // Written even though a compiler ordinarily prints nothing here, because `commands.sh`
-        // directs a maintainer's re-run into `<stem>.compile.stdout` — so without this entry the
-        // reproduction would produce a file with nothing from this run to compare it against.
+        // Written once, and written even though a compiler ordinarily prints nothing here, for two
+        // reasons that both hold. `commands.sh` directs a maintainer's re-run into
+        // `<stem>.compile.stdout`, so without this entry the reproduction would produce a file with
+        // nothing from this run to compare it against. And an empty entry states that the stream was
+        // captured and was empty, which is a different fact from an entry that was never written at
+        // all — a compiler that does print here on the program that provoked the finding would
+        // otherwise leave its only clue unrecorded.
         let compile_stdout = guarded_path(context, outputs, &[&format!("{stem}.compile.stdout")])?;
         write_bytes(context, &compile_stdout, compile.stdout())?;
         written.push(compile_stdout);
@@ -3253,14 +3577,6 @@ fn write_capture(context: &str, outputs: &Path, capture: &Capture) -> HarnessRes
         let compile_stderr = guarded_path(context, outputs, &[&format!("{stem}.compile.stderr")])?;
         write_bytes(context, &compile_stderr, compile.stderr())?;
         written.push(compile_stderr);
-
-        // Written even though a compiler ordinarily prints nothing here. An empty entry states
-        // that the stream was captured and was empty, which is a different fact from an entry
-        // that was never written at all — and a compiler that does print here on the program
-        // that provoked the finding would otherwise leave its only clue unrecorded.
-        let compile_stdout = guarded_path(context, outputs, &[&format!("{stem}.compile.stdout")])?;
-        write_bytes(context, &compile_stdout, compile.stdout())?;
-        written.push(compile_stdout);
 
         if let Some(report) = capture.compile_report() {
             let compile_exit = guarded_path(context, outputs, &[&format!("{stem}.compile.exit")])?;

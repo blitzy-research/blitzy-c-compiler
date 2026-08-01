@@ -59,6 +59,27 @@
 //! ask for. The failure message therefore reproduces the complete per-program verdict table,
 //! so nothing is lost in the runner output either.
 //!
+//! # The two preconditions are gates, not peers
+//!
+//! Two of the four infrastructure tests establish preconditions rather than compare anything: that
+//! every flag a differential invocation passes means the same thing to both compilers (requirement
+//! 3), and that the corpus is free of undefined behaviour (requirement 1). Requirement 1 states the
+//! consequence in its own terms — a program containing undefined behaviour permits both compilers to
+//! do anything — so while either is unmet, a `PASS` is not evidence of agreement and a divergence is
+//! not evidence of a defect.
+//!
+//! They therefore cannot be eighteen-way peers whose failure leaves fourteen area verdicts standing.
+//! The built-in harness runs all eighteen tests concurrently in one process with no ordering between
+//! them, so "run the gates first" is not something a caller can arrange and not something a test can
+//! assert. What [`preflight`] does instead is perform each gate **once per process**, record it in the
+//! report module before any artifact is written, and hand it to every area — which names it in its
+//! report, counts it in the run's verdict, and **asserts** on the gates that govern it. A gate that
+//! could not be applied at all is not silently a pass either: it is reported as unproven and
+//! escalated to a failure under the strict setting, the same rule the suite applies to an oracle
+//! whose tooling is absent. The two infrastructure tests keep their own, fuller assertions, because
+//! the whole gate report — every command line and the compiler's own words — is what an author fixes
+//! a program from.
+//!
 //! The verdict space is closed and has no silent-skip member. `PASS`, `XFAIL`, `FINDING` and
 //! `UNAVAILABLE` are permitted in a passing run and every one of them is still reported;
 //! `FAIL` and `XPASS` fail it. An unexpected success fails by default because a stale marker
@@ -137,6 +158,7 @@ mod conformance_harness;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use conformance_harness::classify::{self, Attribution};
 use conformance_harness::compare::{self, Comparison, RefusedSide};
@@ -150,11 +172,12 @@ use conformance_harness::report;
 use conformance_harness::sandbox::{self, Workspace};
 use conformance_harness::ubaudit;
 use conformance_harness::{
-    corpus_root, findings_root, manifest_dir, report_root, shown_path, target_dir_rejection,
-    work_root, AreaSpec, Cell, CellKey, DivergenceClass, HarnessError, OptLevel, Oracle, Outcome,
-    Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT, MIN_PROGRAMS_PER_MANDATED_AREA,
-    OPT_LEVEL_COUNT, ORACLE_A_COMPARISON_COUNT, ORACLE_B_COMPARISON_COUNT,
-    ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT, TARGET_COUNT, TOTAL_ASSERTION_COUNT,
+    corpus_root, findings_root, manifest_dir, redact_secrets, report_root, shown_path,
+    target_dir_rejection, work_root, AreaSpec, Cell, CellKey, DivergenceClass, HarnessError,
+    OptLevel, Oracle, Outcome, Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT,
+    MIN_PROGRAMS_PER_MANDATED_AREA, OPT_LEVEL_COUNT, ORACLE_A_COMPARISON_COUNT,
+    ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT, TARGET_COUNT,
+    TOTAL_ASSERTION_COUNT,
 };
 
 // =================================================================================================
@@ -292,23 +315,19 @@ fn area_14_abi_calling_convention() {
 /// mere acceptance, and asserts **negatively** that no reference-compiler-only and no bcc-only flag
 /// has leaked into the shared set. Acceptance alone would have been a false positive: both
 /// compilers accept control-flow protection, and their default scopes differ.
+///
+/// The probe itself is performed by [`preflight`] rather than here, and this test reads the memoized
+/// result. Two reasons: it is then performed once per process instead of once here and once for the
+/// areas, and — the reason that matters — the same result is recorded in every area report and
+/// asserted by every area, so a failure here can no longer sit beside fourteen areas each reporting a
+/// green matrix whose comparisons are not evidence. What this test adds is the **full** account: every
+/// row, both command lines and the observable that did not hold, which is what a reader acts on.
 #[test]
 fn infra_flag_capability_probe() {
     let caps = oracle_capabilities();
+    prepare_roots();
     begin_report_session();
-    let probe = match flagprobe::run(&caps) {
-        Ok(probe) => probe,
-        Err(error) => panic!(
-            "{}",
-            infrastructure_failure(
-                "infra_flag_capability_probe",
-                "the flag-capability probe could not be performed at all, so requirement 3 is \
-                 unverified and every differential comparison in this suite would rest on an \
-                 unchecked assumption",
-                &error,
-            )
-        ),
-    };
+    let probe = preflight(&caps).flag_probe("infra_flag_capability_probe");
 
     println!("{}", probe.render());
     if !probe.satisfied() {
@@ -329,23 +348,18 @@ fn infra_flag_capability_probe() {
 /// reference-compiler-only, so requirement 3's shared-flag discipline is untouched, and neither
 /// renders a verdict about bcc: a gate failure is a defect in the **test program**, because a
 /// program containing undefined behaviour makes any divergence it provokes unattributable.
+///
+/// As with the flag probe, the audit is performed by [`preflight`] and this test reads the memoized
+/// result, so the same audit that every area is judged against is the one reported here — and every
+/// area whose programs failed a gate fails with it, rather than this test failing alone while fourteen
+/// areas report clean matrices. Two reference-compiler invocations per corpus program is also
+/// precisely the cost that must not be paid twice.
 #[test]
 fn infra_ub_audit_gate() {
     let caps = oracle_capabilities();
+    prepare_roots();
     begin_report_session();
-    let audit = match ubaudit::run(&caps) {
-        Ok(audit) => audit,
-        Err(error) => panic!(
-            "{}",
-            infrastructure_failure(
-                "infra_ub_audit_gate",
-                "the undefined-behaviour audit could not enumerate or gate the corpus, so no \
-                 program in the matrix has been shown free of undefined behaviour and a \
-                 divergence could not be attributed to either compiler",
-                &error,
-            )
-        ),
-    };
+    let audit = preflight(&caps).ub_audit("infra_ub_audit_gate");
 
     println!("{}", audit.render());
     if let Some(reason) = audit.unavailable_reason() {
@@ -384,10 +398,21 @@ fn infra_ub_audit_gate() {
 /// Requirement 5 — an expected divergence is marked, never silently excluded.
 ///
 /// Asserts consistency in **both** directions, which is what stops the marker set from decaying
-/// into stale documentation: every marker committed in a program's expectation record appears in
-/// the register, every identifier the register lists corresponds to a real marker, and every cited
-/// basis names a file that actually exists in this repository. A marker changes how a divergence is
-/// *classified*; it never changes whether the feature is *exercised*.
+/// into stale documentation:
+///
+/// - **forward, mention** — every marker committed in a program's expectation record appears in the
+///   register;
+/// - **forward, description** — every such marker has exactly one *structured entry* there, and all
+///   six of its fields agree with the record. Being mentioned is not being described: an identifier
+///   can sit in a heading while the register says nothing checkable, and the register could then
+///   drift away from the record it mirrors with no run noticing;
+/// - **reverse** — every identifier the register lists corresponds to a real, active marker;
+/// - **basis** — every cited document is contained in this repository on its *resolved* path, is
+///   readable as a committed regular file through the suite's bounded reader, and actually contains
+///   the section the citation names. Existence alone was never the property that mattered.
+///
+/// A marker changes how a divergence is *classified*; it never changes whether the feature is
+/// *exercised*.
 #[test]
 fn infra_expected_divergence_register() {
     // Deliberately does not call `oracle_capabilities()`: this reads committed files only, so it
@@ -426,6 +451,7 @@ fn infra_expected_divergence_register() {
     };
 
     let registered = registered_identifiers(&register);
+    let entries = parse_register_entries(&register);
     let mut violations: Vec<String> = Vec::new();
 
     for marker in &markers {
@@ -441,16 +467,47 @@ fn infra_expected_divergence_register() {
             ));
         }
 
-        let basis = marker.basis_absolute_path();
-        if !basis.is_file() {
-            violations.push(format!(
-                "marker {} cites the basis {:?}, which resolves to {} and is not a file; a marker \
-                 without a real documented basis reclassifies a divergence on no authority at all",
+        // Being mentioned is not being described. An identifier can appear in a table row, a
+        // heading or a sentence while the register says nothing checkable about the divergence, and
+        // a register that merely mentions a marker is the stale documentation this audit exists to
+        // prevent — so a structured entry, with every field agreeing, is required as well.
+        let matching: Vec<&RegisterEntry> = entries
+            .iter()
+            .filter(|entry| entry.identifier == marker.id())
+            .collect();
+        match matching.as_slice() {
+            [] => violations.push(format!(
+                "marker {} has no structured entry in {}; an entry is a heading naming the marker \
+                 followed by a table stating {}. Mentioning an identifier is not documenting a \
+                 divergence: without the fields there is nothing for this audit to compare, and the \
+                 register can drift away from the record it is supposed to mirror without any run \
+                 noticing",
                 marker.id(),
-                marker.basis(),
-                shown_path(&basis),
-            ));
+                classify::EXPECTED_DIVERGENCE_REGISTER,
+                comma_list(&REGISTER_ENTRY_FIELDS),
+            )),
+            [entry] => {
+                for mismatch in register_entry_mismatches(marker, entry) {
+                    violations.push(format!("marker {} {mismatch}", marker.id()));
+                }
+            }
+            many => violations.push(format!(
+                "marker {} has {} structured entries in {}, at lines {}; one marker is one \
+                 investigation and must have one entry, or a reader cannot tell which of them is \
+                 the authority and this audit cannot tell which to compare against",
+                marker.id(),
+                many.len(),
+                classify::EXPECTED_DIVERGENCE_REGISTER,
+                comma_list(
+                    &many
+                        .iter()
+                        .map(|entry| entry.heading_line.to_string())
+                        .collect::<Vec<String>>()
+                ),
+            )),
         }
+
+        violations.extend(basis_violations(marker));
     }
 
     for identifier in &registered {
@@ -511,7 +568,11 @@ fn infra_oracle_capability_report() {
 
     println!("{}", caps.render_report());
     println!("{}", matrix_statement(config));
-    println!("{}", caps.render_fingerprint());
+    // The capability report redacts itself; the fingerprint does not, because its text is also an
+    // input to the run identity digest and redacting it there would tie a provenance value to which
+    // credential-bearing variables happened to be set. It is redacted at every sink instead, here and
+    // in the two report artifacts that carry it.
+    println!("{}", redact_secrets(&caps.render_fingerprint()));
 
     let unavailable = caps.unavailable_oracle_arms();
     if unavailable.is_empty() {
@@ -977,7 +1038,13 @@ impl<'a> CellPlan<'a> {
                 // both sides is the difference between a finding a maintainer can act on and a
                 // verdict that only asserts something went wrong.
                 let reference = self.observe_reference();
-                let outcomes = self.subject_refused(&build, &reference);
+                // The baseline observation is passed in, because oracle (b)'s precondition is the
+                // baseline's own state and the refusal path has to resolve it exactly as the path
+                // where bcc built does. It is read before the assignment below, which is correct
+                // ordering rather than an accident: on the baseline target itself there is no
+                // separate baseline to compare against, and `refusal_under_oracle_b` handles that
+                // case by target rather than by whatever this cell is about to store.
+                let outcomes = self.subject_refused(&build, &reference, baseline.as_ref());
                 if self.key.target() == Target::BASELINE {
                     // A build whose result could not be established is this suite's fault, so
                     // the three dependent targets must inherit a failure rather than a refusal
@@ -1363,13 +1430,44 @@ impl<'a> CellPlan<'a> {
     /// the reference compiler also rejects indicts the test material or the record's reference
     /// command; a program it accepts and bcc rejects is the divergence this suite exists to find.
     ///
-    /// What the refusal does **not** do is depend on that arm. That the reference compiler accepts
-    /// the program is not re-established per cell, because requirement 1's audit gate establishes it
-    /// for the whole corpus before any cell runs — which is precisely why a refusal here is
-    /// attributed to bcc alone. So on a machine with no cross driver for this target the refusal is
-    /// still delivered as a complete artifact directory, with the absence named rather than left
-    /// blank, and a finding is never degraded by an absent oracle.
-    fn subject_refused(&self, build: &CompileOutcome, reference: &ReferenceArm) -> Vec<Outcome> {
+    /// What the refusal does **not** do is depend on that arm's *content*. That the reference
+    /// compiler accepts the program is not re-established per cell, because requirement 1's audit
+    /// gate establishes it for the whole corpus before any cell runs — which is precisely why a
+    /// refusal here is attributed to bcc alone.
+    ///
+    /// # Why each oracle's own precondition is still resolved first
+    ///
+    /// "Every oracle blocked by the same absence" is true only of oracles that were *asked*. An
+    /// oracle whose own precondition fails was never asked, and settling it against the refusal
+    /// would state an outcome for a comparison that could not have happened:
+    ///
+    /// - An oracle the program's **own record disables** must report as excluded. Recording it as an
+    ///   expected divergence or a finding would contradict the record and, worse, would put an arm
+    ///   the corpus deliberately narrowed away into the register or the finding set — the opposite of
+    ///   the reasoned, recorded exclusion requirement 5 asks for.
+    /// - Oracle (a) with **no reference driver at all** must report as unavailable. There is no
+    ///   authority on this machine, so "bcc disagrees with the reference compiler" is a claim about a
+    ///   comparison nobody made. `UNAVAILABLE` is loud and never a pass, which is the honest answer.
+    /// - Oracle (b) with **no runner for this target, or no baseline observation**, is the same
+    ///   situation one oracle over.
+    /// - An arm this suite's **own machinery lost** must fail the run, not become a divergence.
+    ///
+    /// This is exactly the precondition ladder [`CellPlan::oracle_a`], [`CellPlan::oracle_b`] and
+    /// [`CellPlan::oracle_c`] apply on the path where bcc *did* build, and it has to be the same
+    /// ladder: an oracle's availability is a property of the machine and the record, not of whether
+    /// the compiler under test happened to accept the program.
+    ///
+    /// Oracle (c) has no precondition beyond the record, because its authority is the `expected_stdout`
+    /// committed in the record itself — which is present by construction and needs no tool. So a
+    /// refusal is **always** settled through at least one oracle, and therefore always delivered as a
+    /// complete artifact directory rather than dropped: a machine with no reference driver and no
+    /// emulator still reports the refusal, with the absent arms named rather than left blank.
+    fn subject_refused(
+        &self,
+        build: &CompileOutcome,
+        reference: &ReferenceArm,
+        baseline: Option<&Baseline>,
+    ) -> Vec<Outcome> {
         // Asked before anything else, because a refusal whose result this process could not
         // establish is the harness's own defect rather than an observation about any compiler: it
         // has to fail the run, where a refusal attributable to the compiler or to this machine is
@@ -1395,32 +1493,246 @@ impl<'a> CellPlan<'a> {
                 })
                 .collect();
         }
-        // Rendered once: every oracle blocked by this one refusal is settled against the same
-        // evidence, and the phrase is part of that evidence.
+        // Rendered once: every oracle that *is* settled against this one refusal is settled against
+        // the same evidence, and the phrase is part of that evidence.
         let reference_arm = describe_reference_arm(reference);
         self.oracles
             .iter()
-            .map(|oracle| {
-                self.settle_refusal(
-                    *oracle,
-                    build,
-                    RefusedSide::UnderTest,
-                    Side::refused(CaptureRole::UnderTest, self.key.target(), build),
-                    // The arm becomes the finding's counterpart capture only when it actually ran.
-                    // Every other ending is carried as the phrase below instead, because there are
-                    // no captured bytes to attach and an empty capture would claim there were.
-                    match reference {
-                        ReferenceArm::Ran(authority) => Some(Side::ran(
-                            CaptureRole::ReferenceCompiler,
-                            self.key.target(),
-                            authority,
-                        )),
-                        _ => None,
-                    },
-                    Some(&reference_arm),
-                )
+            .map(|oracle| match oracle {
+                Oracle::ReferenceCompiler => {
+                    self.refusal_under_oracle_a(build, reference, &reference_arm)
+                }
+                Oracle::CrossBackend => {
+                    self.refusal_under_oracle_b(build, baseline, &reference_arm)
+                }
+                Oracle::GoldenRecord => {
+                    self.refusal_under_oracle_c(build, reference, &reference_arm)
+                }
             })
             .collect()
+    }
+
+    /// The refusal as oracle (a) sees it, after that oracle's own precondition is resolved.
+    ///
+    /// The ladder is [`CellPlan::oracle_a`]'s, applied to the same six reference-arm endings, and only
+    /// the last of them reaches the marker logic. The others each name a reason this oracle was never
+    /// asked, which is a different statement from "bcc diverged from the reference compiler" and must
+    /// not be rendered as one.
+    fn refusal_under_oracle_a(
+        &self,
+        build: &CompileOutcome,
+        reference: &ReferenceArm,
+        reference_arm: &str,
+    ) -> Outcome {
+        let oracle = Oracle::ReferenceCompiler;
+        match reference {
+            ReferenceArm::ExcludedByRecord => self.excluded(oracle),
+            ReferenceArm::DriverAbsent => classify::unavailable_oracle(self.caps, self.key, oracle),
+            ReferenceArm::Unrunnable(diagnosis) => classify::judge(
+                &classify::Observation::ToolingAbsent {
+                    diagnosis: diagnosis.as_str(),
+                },
+                Some(self.record),
+                self.key,
+                oracle,
+            ),
+            ReferenceArm::Internal(cause) => classify::unexplained(
+                self.key,
+                oracle,
+                &format!("comparing {} against the reference compiler", self.key),
+                &format!(
+                    "the compiler under test refused the program, and this arm was never observed \
+                     because this suite's own machinery failed while attempting it: {cause}. The \
+                     refusal is reported through the other oracles; this arm is a failure of the \
+                     harness rather than an unavailable oracle, because an absence the run would not \
+                     fail for is how a cell that was launched and lost comes to look like a pass"
+                ),
+            ),
+            // The reference compiler refused the program too. That indicts the test material or the
+            // record's reference command, so it is reported at its own scope exactly as it is on the
+            // path where bcc built — not folded into bcc's refusal, which would attribute one
+            // program's defect to the compiler under test.
+            ReferenceArm::Refused {
+                class,
+                summary,
+                attribution: attribution @ (Attribution::Environment | Attribution::Indeterminate),
+            } => classify::build_failure(
+                self.record,
+                self.key,
+                oracle,
+                *class,
+                *attribution,
+                summary,
+            ),
+            ReferenceArm::Refused {
+                summary,
+                attribution: Attribution::Compiler,
+                ..
+            } => classify::unexplained(
+                self.key,
+                oracle,
+                &format!("comparing {} against the reference compiler", self.key),
+                &format!(
+                    "both compilers refused the program. The reference compiler is the authority for \
+                     this oracle, so its refusal ({summary}) is a defect in the test program or in \
+                     the record's reference command rather than a divergence attributable to the \
+                     compiler under test — requirement 1's audit gate is where a program the \
+                     reference compiler rejects must be corrected. The compiler under test's own \
+                     refusal is reported through the other oracles"
+                ),
+            ),
+            // The one ending with an authority to compare against: the reference compiler accepted
+            // the program and bcc did not, which is the divergence this suite exists to find.
+            ReferenceArm::Ran(authority) => self.settle_refusal(
+                oracle,
+                build,
+                RefusedSide::UnderTest,
+                Side::refused(CaptureRole::UnderTest, self.key.target(), build),
+                Some(Side::ran(
+                    CaptureRole::ReferenceCompiler,
+                    self.key.target(),
+                    authority,
+                )),
+                Some(reference_arm),
+            ),
+        }
+    }
+
+    /// The refusal as oracle (b) sees it, after that oracle's own precondition is resolved.
+    ///
+    /// The ladder is [`CellPlan::oracle_b`]'s. The refusal itself is the divergence in the last two
+    /// cases, and the baseline's own state decides the rest: an absent runner is an absent oracle, a
+    /// baseline this suite lost is a harness failure, and a record that enables the oracle without
+    /// listing the baseline target is a corpus defect rather than a compiler one.
+    fn refusal_under_oracle_b(
+        &self,
+        build: &CompileOutcome,
+        baseline: Option<&Baseline>,
+        reference_arm: &str,
+    ) -> Outcome {
+        let oracle = Oracle::CrossBackend;
+        if !self.record.oracle_enabled(oracle) {
+            return self.excluded(oracle);
+        }
+        if !self.caps.oracle_available(oracle, self.key.target()) {
+            return classify::unavailable_oracle(self.caps, self.key, oracle);
+        }
+        // This cell *is* the baseline, so there is no separate baseline observation to require: the
+        // refusal being judged is the baseline's own. `applicable_oracles` normally keeps oracle (b)
+        // off the baseline target, and this arm is written for the case where it does not rather than
+        // relying on that — a settled refusal is a correct answer here either way.
+        if self.key.target() == Target::BASELINE {
+            return self.settle_refusal(
+                oracle,
+                build,
+                RefusedSide::UnderTest,
+                Side::refused(CaptureRole::UnderTest, self.key.target(), build),
+                None,
+                Some(reference_arm),
+            );
+        }
+        match baseline {
+            // The baseline ran and this target's compiler refused the program: a genuine
+            // cross-backend divergence, settled against the refusal's own evidence.
+            Some(Baseline::Observed(authority)) => self.settle_refusal(
+                oracle,
+                build,
+                RefusedSide::UnderTest,
+                Side::refused(CaptureRole::UnderTest, self.key.target(), build),
+                Some(Side::ran(
+                    CaptureRole::Baseline,
+                    Target::BASELINE,
+                    authority,
+                )),
+                Some(reference_arm),
+            ),
+            // Both this target and the baseline were refused by the same compiler. One refusal, one
+            // class: settled once against this cell's own build, with no counterpart capture, because
+            // two refusals of the same program are not a cross-backend difference.
+            Some(Baseline::Refused(_)) => self.settle_refusal(
+                oracle,
+                build,
+                RefusedSide::UnderTest,
+                Side::refused(CaptureRole::UnderTest, self.key.target(), build),
+                None,
+                Some(reference_arm),
+            ),
+            Some(Baseline::Unrunnable(diagnosis)) => classify::judge(
+                &classify::Observation::ToolingAbsent {
+                    diagnosis: diagnosis.as_str(),
+                },
+                Some(self.record),
+                self.key,
+                oracle,
+            ),
+            Some(Baseline::Internal(cause)) => classify::unexplained(
+                self.key,
+                oracle,
+                &format!("comparing {} against the cross-backend baseline", self.key),
+                &format!(
+                    "the compiler under test refused the program, and the {} baseline this arm \
+                     compares against was never observed because this suite's own machinery failed \
+                     while attempting it: {cause}. The refusal is reported through the other oracles; \
+                     this arm is a failure rather than an unavailable oracle",
+                    Target::BASELINE.triple(),
+                ),
+            ),
+            None => classify::unexplained(
+                self.key,
+                oracle,
+                &format!("comparing {} against the cross-backend baseline", self.key),
+                &format!(
+                    "this program's expectation record enables the cross-backend oracle but omits \
+                     {} from its target list, so the authority this arm compares against is never \
+                     observed. Either list the baseline target or record the cross-backend exclusion \
+                     with its reason; comparing against a baseline that was never run would mean \
+                     inventing an authority, and dropping the arm silently is the exclusion \
+                     requirement 5 forbids",
+                    Target::BASELINE.triple(),
+                ),
+            ),
+        }
+    }
+
+    /// The refusal as oracle (c) sees it, after that oracle's own precondition is resolved.
+    ///
+    /// The only precondition is the record's own toggle. This oracle's authority is the
+    /// `expected_stdout` committed in the record beside the program, so it needs no compiler, no
+    /// driver and no emulator: a program that produced no artifact produced none of those bytes, which
+    /// is a divergence from the golden record that is always observable.
+    ///
+    /// That is what makes the "a refusal is never dropped" claim hold on the barest machine. Whatever
+    /// the other two arms report, this one settles the refusal and therefore delivers the artifact
+    /// directory — unless the record disables it, in which case the record has said in writing that
+    /// this program has no golden authority, and the exclusion is reported as such.
+    fn refusal_under_oracle_c(
+        &self,
+        build: &CompileOutcome,
+        reference: &ReferenceArm,
+        reference_arm: &str,
+    ) -> Outcome {
+        let oracle = Oracle::GoldenRecord;
+        if !self.record.oracle_enabled(oracle) {
+            return self.excluded(oracle);
+        }
+        self.settle_refusal(
+            oracle,
+            build,
+            RefusedSide::UnderTest,
+            Side::refused(CaptureRole::UnderTest, self.key.target(), build),
+            // The reference arm becomes a capture only when it actually ran. Every other ending is
+            // carried as the phrase instead, because there are no captured bytes to attach and an
+            // empty capture would claim there were.
+            match reference {
+                ReferenceArm::Ran(authority) => Some(Side::ran(
+                    CaptureRole::ReferenceCompiler,
+                    self.key.target(),
+                    authority,
+                )),
+                _ => None,
+            },
+            Some(reference_arm),
+        )
     }
 
     /// Tooling this cell needs is absent: every applicable oracle is unavailable, never a pass.
@@ -1600,6 +1912,16 @@ fn observe(
     match attempt {
         RunAttempt::Ran(run) => {
             require_recorded_run_command(record, substitutions, &run)?;
+            // Printed as it happens, and only when the execution is divergent by its own shape: a
+            // crash or a hang is a divergence however the streams are later compared, so it is
+            // always worth reading, and how long it took is part of reading it — a program that dies
+            // in three milliseconds is a different story from one killed at the budget. This is
+            // terminal progress output, the only place a measured time is allowed; the same line
+            // without the timing is what reaches the report, the summary and a finding's diff, so
+            // those stay byte-stable.
+            if run.divergence_class().is_some() {
+                println!("  run diverged by shape: {}", run.describe_with_timing());
+            }
             Ok(Observed::Ran(Box::new(Authority { build, run: *run })))
         }
         RunAttempt::RunnerUnavailable(unavailable) => {
@@ -1698,6 +2020,10 @@ fn run_area(area: &str) {
     let caps = oracle_capabilities();
     prepare_roots();
     begin_report_session();
+    // Before the first cell of this area compiles, so the preconditions the oracles rest on are
+    // established and recorded before any artifact is written. Performed once per process and
+    // memoized, so the thirteen areas that arrive after the first pay nothing for it.
+    let gates = preflight(&caps);
 
     let programs = select_programs(spec, &caps);
     let mut outcomes: Vec<Outcome> = Vec::new();
@@ -1708,7 +2034,7 @@ fn run_area(area: &str) {
     let digest = area_digest(spec, &programs, &outcomes, caps.config());
     println!("{digest}");
     publish(spec, &outcomes, &caps);
-    conclude(spec, &programs, &outcomes, &digest, caps.config());
+    conclude(spec, &programs, &outcomes, &digest, caps.config(), gates);
 }
 
 /// Resolve the oracles once, or refuse to start.
@@ -1748,7 +2074,7 @@ fn area_spec(area: &str) -> &'static AreaSpec {
     }
 }
 
-/// Discard the previous run's report artifacts, so this run's summary can only describe this run.
+/// Claim the report directory for this run, discarding the previous run's artifacts.
 ///
 /// Every one of the eighteen tests calls this, including the four infrastructure tests that write
 /// no area report at all — precisely because they write none. Without it, a run restricted to the
@@ -1756,10 +2082,17 @@ fn area_spec(area: &str) -> &'static AreaSpec {
 /// report root where the next reader would take it for the current verdict. The harness performs the
 /// work exactly once per process and blocks concurrent callers until it is done, so calling it from
 /// every test costs one directory scan for the whole run.
+///
+/// It is deliberately the **same** entry point `prepare_roots` uses, and there is no second, lighter
+/// one. Clearing the report root is a destructive step, and every destructive step in this suite has
+/// to refuse a live foreign owner before it removes anything and verify every level on the way down
+/// before it follows one. A separate "just invalidate the artifacts" route would be able to delete a
+/// concurrent run's reports, and to do it through a redirected directory, from the four tests least
+/// likely to be looked at when a report went missing.
 fn begin_report_session() {
-    if let Err(error) = report::begin_session() {
+    if let Err(error) = report::prepare_namespace() {
         panic!(
-            "the previous run's report artifacts could not be cleared.\n\n{error}\n\nThe run \
+            "the run's report directory could not be claimed and cleared.\n\n{error}\n\nThe run \
              summary is assembled from the per-area report files on disk, so an artifact this run \
              did not write would be aggregated into this run's summary and reported as its result. \
              This fails rather than proceeding, because a summary that silently blends two runs is \
@@ -1768,14 +2101,366 @@ fn begin_report_session() {
     }
 }
 
-/// Create the build-directory roots every cell writes beneath, and claim this run's report tree.
+// =================================================================================================
+// The preflight gates
+//
+// Two of this file's eighteen tests establish preconditions rather than compare anything: the
+// flag-capability probe establishes that every flag a differential invocation passes means the same
+// thing to both compilers (requirement 3), and the undefined-behaviour audit establishes that the
+// corpus is free of undefined behaviour (requirement 1). Requirement 1 states the consequence in its
+// own terms — a program containing undefined behaviour permits both compilers to do anything — so
+// while either precondition is unmet a PASS is not evidence of agreement and a divergence is not
+// evidence of a defect.
+//
+// Two independent `#[test]` functions cannot express that. The built-in harness runs all eighteen
+// tests concurrently in one process with no ordering between them, so "run the gates first" is not
+// something a caller can arrange and not something a test can assert; and a failing infrastructure
+// test leaves all fourteen area verdicts standing beside it, each reporting a green matrix whose
+// comparisons are not evidence.
+//
+// What is achievable, and what this section implements, is:
+//
+//   * each gate is performed **exactly once per process**, memoized below, so every test — area or
+//     infrastructure — observes the same result at the cost of one execution rather than two;
+//   * every area calls this before its first cell compiles, so the result is recorded in the report
+//     module before any artifact is written and every artifact therefore names it;
+//   * every area **asserts** on the gates that govern it, so an unmet precondition fails the areas it
+//     bears on rather than only the infrastructure test that noticed it.
+//
+// The two infrastructure tests keep their own, fuller assertions: they render the whole gate report,
+// which is what an author actually fixes a program from. They now read the memoized result instead of
+// performing the gate a second time.
+// =================================================================================================
+
+/// The two preflight gates, performed once per process. See [`preflight`].
+static PREFLIGHT: OnceLock<PreflightGates> = OnceLock::new();
+
+/// This run's preflight gates, and the record every report renders from them.
+struct PreflightGates {
+    /// The flag-capability probe, or the reason it could not be performed at all.
+    probe: Result<flagprobe::FlagProbeReport, HarnessError>,
+    /// The undefined-behaviour audit, or the reason it could not be performed at all.
+    audit: Result<ubaudit::AuditReport, HarnessError>,
+    /// The same gates in the form the report module records and renders.
+    ///
+    /// Held here as well as recorded there so that an area's assertion and the artifact that area
+    /// wrote are derived from one object. Recomputing the blocking set at the assertion would give
+    /// two answers a maintainer could not reconcile if they ever disagreed.
+    recorded: report::Preflight,
+}
+
+/// Perform both preflight gates once, record them, and return them for every later reader.
 ///
-/// Called by every area and idempotent in both halves, so no ordering between the fourteen area
-/// tests is needed. The report half is done here, before the first cell of the first area is
-/// compiled, rather than left to the moment an area publishes: clearing the previous run's
-/// artifacts and claiming the directory up front means a conflict with a concurrent run is
-/// reported in seconds instead of after a full matrix, and it means the directory holds *this*
-/// run's reports for the whole of this run.
+/// Memoized in a `OnceLock`, which is sufficient here and needs no on-disk state: every one of the
+/// eighteen tests is a thread in a single process, so the first caller performs the gates and the
+/// rest block until it is done. A second caller never re-performs them, which matters — the audit is
+/// two reference-compiler invocations per corpus program, and the probe compiles with both compilers
+/// for every flag it checks.
+///
+/// The gates are performed **before** any area compiles its first cell, and the record is published
+/// to the report module inside the same initialization, so no report can be written that does not
+/// carry the preconditions it rests on.
+fn preflight(caps: &Capabilities) -> &'static PreflightGates {
+    PREFLIGHT.get_or_init(|| {
+        let mut gates = PreflightGates {
+            probe: flagprobe::run(caps),
+            audit: ubaudit::run(caps),
+            recorded: report::Preflight::default(),
+        };
+        let recorded = gates.assemble(caps.config());
+        gates.recorded = recorded.clone();
+        // `get_or_init` runs this closure exactly once for the whole process, so this records the
+        // preflight exactly once and the `false` return that a second recording would give cannot
+        // arise. It is asserted rather than ignored, because a silent failure to record would leave
+        // every report stamped "NOT RECORDED" while the gates had in fact been performed.
+        assert!(
+            report::record_preflight(recorded),
+            "this run's preflight gates were performed but could not be recorded, because a \
+             preflight had already been recorded. The gates are performed exactly once per process \
+             and recorded from that one place, so this means a second recording path exists — and \
+             while it does, the reports may describe a preflight the areas were not judged against."
+        );
+        gates
+    })
+}
+
+impl PreflightGates {
+    /// Express the two gates in the form the report module records and renders.
+    ///
+    /// The flag probe contributes one gate governing every area, because flag parity is a property
+    /// of the configuration rather than of any program. The audit contributes gates narrowed to the
+    /// areas they bear on: a program in one area whose gate did not hold says nothing about another
+    /// area's programs, and failing all fourteen for it would report fourteen defects where there is
+    /// one.
+    fn assemble(&self, config: &RunConfig) -> report::Preflight {
+        let mut gates = vec![self.flag_gate()];
+        gates.extend(self.audit_gates(config));
+        report::Preflight::new(gates)
+    }
+
+    /// The flag-capability probe as one gate governing the whole run.
+    fn flag_gate(&self) -> report::PreflightGate {
+        let probe = match &self.probe {
+            Ok(probe) => probe,
+            // The probe machinery itself failed, so nothing was checked. That is `Unperformed`
+            // rather than `Failed` — no flag was shown to mean two things — and it blocks
+            // unconditionally, because a probe that cannot run establishes nothing at all and the
+            // strict setting's licence covers an absent tool, not a broken harness.
+            Err(error) => {
+                return report::PreflightGate::new(
+                    FLAG_GATE_NAME,
+                    REQUIREMENT_FLAGS,
+                    report::GateVerdict::Unperformed,
+                    format!(
+                        "the probe could not be performed at all, so no flag this suite passes has \
+                         been shown to mean the same thing to both compilers: {error}"
+                    ),
+                    Vec::new(),
+                    true,
+                );
+            }
+        };
+        let failures = probe.failures();
+        let unavailable = probe.unavailable();
+        let (verdict, detail) = if !failures.is_empty() {
+            (
+                report::GateVerdict::Failed,
+                format!(
+                    "{} of {} check(s) did not hold: {}",
+                    failures.len(),
+                    probe.checks().len(),
+                    failures
+                        .iter()
+                        .map(|check| check.subject().to_string())
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                ),
+            )
+        } else if !unavailable.is_empty() {
+            (
+                report::GateVerdict::Unperformed,
+                format!(
+                    "{} of {} check(s) could not be performed because a tool is absent, so the \
+                     flag(s) they cover are unverified rather than verified: {}",
+                    unavailable.len(),
+                    probe.checks().len(),
+                    unavailable
+                        .iter()
+                        .map(|check| check.subject().to_string())
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                ),
+            )
+        } else {
+            (
+                report::GateVerdict::Held,
+                format!(
+                    "all {} check(s) held, {} of them for acceptance only with the limitation \
+                     recorded",
+                    probe.checks().len(),
+                    probe.limitations().len()
+                ),
+            )
+        };
+        report::PreflightGate::new(
+            FLAG_GATE_NAME,
+            REQUIREMENT_FLAGS,
+            verdict,
+            detail,
+            Vec::new(),
+            probe.fails_run(),
+        )
+    }
+
+    /// The undefined-behaviour audit as up to two gates, each narrowed to the areas it bears on.
+    ///
+    /// A clean audit contributes exactly one `Held` gate. An audit with failures contributes a
+    /// `Failed` gate naming the areas whose programs did not satisfy a gate, and an audit with gates
+    /// that could not be applied contributes a separate `Unperformed` one — separate because the two
+    /// carry different policy: a failure always blocks, while a gate that could not be applied blocks
+    /// only under the strict setting, exactly as `AuditReport::fails_run` decides it.
+    fn audit_gates(&self, config: &RunConfig) -> Vec<report::PreflightGate> {
+        let audit = match &self.audit {
+            Ok(audit) => audit,
+            // As with the probe: nothing was audited, so no program in the matrix has been shown
+            // free of undefined behaviour and every divergence the run produces is unattributable.
+            Err(error) => {
+                return vec![report::PreflightGate::new(
+                    UB_GATE_NAME,
+                    REQUIREMENT_UB,
+                    report::GateVerdict::Unperformed,
+                    format!(
+                        "the corpus could not be enumerated or gated at all, so no program has been \
+                         shown free of undefined behaviour: {error}"
+                    ),
+                    Vec::new(),
+                    true,
+                )];
+            }
+        };
+        let failed_areas = distinct_areas(&audit.failures());
+        let unapplied_areas = distinct_areas(&audit.unapplied());
+        if failed_areas.is_empty() && unapplied_areas.is_empty() {
+            return vec![report::PreflightGate::new(
+                UB_GATE_NAME,
+                REQUIREMENT_UB,
+                report::GateVerdict::Held,
+                format!(
+                    "all {} audited program(s) satisfied both gates in {} invocation(s), and {} of \
+                     them record the written freedom argument",
+                    audit.program_count(),
+                    audit.invocations_performed(),
+                    audit.ub_notes_recorded_count()
+                ),
+                Vec::new(),
+                false,
+            )];
+        }
+        let mut gates: Vec<report::PreflightGate> = Vec::new();
+        if !failed_areas.is_empty() {
+            gates.push(report::PreflightGate::new(
+                format!("{UB_GATE_NAME} — gates that did not hold"),
+                REQUIREMENT_UB,
+                report::GateVerdict::Failed,
+                format!(
+                    "{} gate(s) across {} program(s) were not satisfied, in area(s) {}. Correct the \
+                     TEST PROGRAM the audit names — never the compiler — or record a reasoned gate \
+                     deviation in the program's own expectation record",
+                    audit.failures().len(),
+                    audit.program_count(),
+                    failed_areas.join(", ")
+                ),
+                failed_areas,
+                true,
+            ));
+        }
+        if !unapplied_areas.is_empty() {
+            gates.push(report::PreflightGate::new(
+                format!("{UB_GATE_NAME} — gates that could not be applied"),
+                REQUIREMENT_UB,
+                report::GateVerdict::Unperformed,
+                format!(
+                    "{} gate(s) could not be applied on this machine, in area(s) {}, so the \
+                     programs they cover are unproven rather than proven or disproven{}",
+                    audit.unapplied().len(),
+                    unapplied_areas.join(", "),
+                    match audit.unavailable_reason() {
+                        Some(reason) => format!(" — {reason}"),
+                        None => String::new(),
+                    }
+                ),
+                unapplied_areas,
+                config.strict(),
+            ));
+        }
+        gates
+    }
+
+    /// The flag-capability probe, or the message a test should fail with instead.
+    fn flag_probe(&self, test: &str) -> &flagprobe::FlagProbeReport {
+        match &self.probe {
+            Ok(probe) => probe,
+            Err(error) => panic!(
+                "{}",
+                infrastructure_failure(
+                    test,
+                    "the flag-capability probe could not be performed at all, so requirement 3 is \
+                     unverified and every differential comparison in this suite would rest on an \
+                     unchecked assumption",
+                    error,
+                )
+            ),
+        }
+    }
+
+    /// The undefined-behaviour audit, or the message a test should fail with instead.
+    fn ub_audit(&self, test: &str) -> &ubaudit::AuditReport {
+        match &self.audit {
+            Ok(audit) => audit,
+            Err(error) => panic!(
+                "{}",
+                infrastructure_failure(
+                    test,
+                    "the undefined-behaviour audit could not enumerate or gate the corpus, so no \
+                     program in the matrix has been shown free of undefined behaviour and a \
+                     divergence could not be attributed to either compiler",
+                    error,
+                )
+            ),
+        }
+    }
+}
+
+/// The name the reports give the flag-capability gate.
+const FLAG_GATE_NAME: &str = "flag-capability probe";
+
+/// The name the reports give the undefined-behaviour gate.
+const UB_GATE_NAME: &str = "undefined-behaviour audit";
+
+/// The requirement the flag-capability gate establishes.
+const REQUIREMENT_FLAGS: &str = "requirement 3 — verified flag handling";
+
+/// The requirement the undefined-behaviour gate establishes.
+const REQUIREMENT_UB: &str = "requirement 1 — undefined-behaviour freedom";
+
+/// The distinct feature areas named by a list of audit results, in the order the corpus gave them.
+fn distinct_areas(results: &[(&ubaudit::ProgramAudit, &ubaudit::GateResult)]) -> Vec<String> {
+    let mut areas: Vec<String> = Vec::new();
+    for (audit, _) in results {
+        if !areas.iter().any(|area| area == audit.area()) {
+            areas.push(audit.area().to_string());
+        }
+    }
+    areas
+}
+
+/// Why an area fails when a precondition it depends on did not hold.
+///
+/// Carried by the area assertion rather than only by the infrastructure test, which is the whole
+/// point: an area that reported a clean matrix while its precondition was unmet would be publishing
+/// a green result over comparisons that are not evidence.
+fn preflight_gap(area: &str, blocking: &[&report::PreflightGate]) -> String {
+    let mut text = format!(
+        "the feature area {area:?} did not run against sound preconditions: {} preflight gate(s) \
+         that govern it did not hold.\n\n",
+        blocking.len(),
+    );
+    for gate in blocking {
+        text.push_str("   ");
+        text.push_str(&gate.describe());
+        text.push('\n');
+    }
+    text.push_str(
+        "\nThese gates are not comparisons and they are not verdicts about the compiler under \
+         test. They establish the two preconditions the differential oracles rest on: that every \
+         flag this suite passes means the same thing to both compilers (requirement 3), and that \
+         every program in the corpus is free of undefined behaviour (requirement 1). Requirement 1 \
+         states the consequence in its own terms — a program containing undefined behaviour permits \
+         both compilers to do anything — so while a gate is unmet this area's PASSes are not \
+         evidence of agreement and its divergences are not evidence of a defect. That is why the \
+         area fails here rather than reporting a matrix nobody can read.\n\n\
+         This area's report was still written, and every outcome in it is still enumerated, so the \
+         correction can be checked against what was observed. Fix the TEST PROGRAM the audit names \
+         — never the compiler — or install the tool the probe names, and run again. The full gate \
+         reports, with every command line and the compiler's own words, are printed by \
+         `cargo test --test conformance infra_ -- --nocapture`.",
+    );
+    text
+}
+
+/// Create the build-directory roots every cell writes beneath, and claim this run's report and
+/// generated-findings trees.
+///
+/// Called by every area, and by the two infrastructure tests that perform a preflight gate — the flag
+/// probe and the undefined-behaviour audit each allocate workspaces beneath the work root, so a run
+/// restricted to them writes there too. Every one of the three halves is idempotent, so no ordering
+/// between the sixteen callers is needed.
+///
+/// The report and findings halves are done here, before the first cell of the first area is compiled,
+/// rather than left to the moment an area publishes or a divergence needs filing: clearing the previous
+/// run's artifacts and claiming the directories up front means a conflict with a concurrent run is
+/// reported in seconds instead of after a full matrix, and it means those directories hold *this* run's
+/// artifacts for the whole of this run.
 fn prepare_roots() {
     if let Err(error) = sandbox::ensure_roots() {
         panic!(
@@ -1792,6 +2477,16 @@ fn prepare_roots() {
              bound to this run's identity. A directory that cannot be cleared and claimed would \
              leave an earlier run's rows in place to be counted, so the run stops here rather than \
              producing a summary describing a matrix it did not execute.",
+        );
+    }
+    if let Err(error) = findings::prepare_namespace() {
+        panic!(
+            "the run's generated-findings directory could not be prepared.\n\n{error}\n\nA finding \
+             is a deliverable, and its directory is named from the divergence itself, so a previous \
+             run's set left standing beside this one's would present a divergence this run never \
+             reproduced as a current deliverable. Claiming and retiring the directory up front means \
+             a conflict with a concurrent run is reported in seconds rather than at the moment a \
+             divergence needs filing.",
         );
     }
 }
@@ -2217,6 +2912,7 @@ fn conclude(
     outcomes: &[Outcome],
     digest: &str,
     config: &RunConfig,
+    gates: &PreflightGates,
 ) {
     if programs.is_empty() {
         // A filter naming another area excludes this one deliberately; anything else is a gap.
@@ -2229,6 +2925,23 @@ fn conclude(
         );
         return;
     }
+
+    // The preconditions settle the area before its outcomes are consulted, because they decide what
+    // those outcomes are worth. An area whose gate did not hold is not a narrower run: it is a run
+    // whose comparisons cannot be read as evidence about a compiler, so reporting its outcome tally
+    // as the verdict would publish a green matrix nobody can rely on. Deliberately placed after
+    // `publish`, keeping this file's report-before-assert discipline: the area's report and every
+    // outcome in it survive, so the correction can be checked against what was observed.
+    //
+    // An area excluded by the program filter returns above without reaching this, and rightly: it
+    // produced no comparison, so it has nothing to distrust. A gate that fails there still fails the
+    // run, through its own infrastructure test and through the run summary's verdict.
+    let blocking = gates.recorded.blocking_area(spec.directory());
+    assert!(
+        blocking.is_empty(),
+        "{}",
+        preflight_gap(spec.directory(), &blocking)
+    );
 
     assert!(
         !outcomes.is_empty() || config.is_reduced_run(),
@@ -2391,27 +3104,560 @@ fn matrix_statement(config: &RunConfig) -> String {
     text
 }
 
+/// The six fields a register entry must state, in the order the audit reports them.
+///
+/// Held in one place so that the parser, the comparison and the diagnostics cannot disagree about
+/// what an entry consists of. `Program` is included because an entry that named the wrong program
+/// would send a reader to a construct the marker never governed, and `Observed` because an entry
+/// that omitted it would describe an authority without describing what it excuses.
+const REGISTER_ENTRY_FIELDS: [&str; 6] = [
+    "Identifier",
+    "Class",
+    "Scope",
+    "Program",
+    "Basis",
+    "Observed",
+];
+
+/// One structured entry parsed out of the expected-divergence register.
+///
+/// The register is a committed deliverable rather than a generated artifact, so it is prose with a
+/// small, checkable skeleton inside it: a heading naming the marker, then a two-column table whose
+/// left column names a field. Everything the audit compares comes from that table, and the heading
+/// line is retained so a diagnostic can point a maintainer at the entry rather than at the file.
+#[derive(Debug)]
+struct RegisterEntry {
+    identifier: String,
+    heading_line: usize,
+    fields: Vec<(String, String)>,
+}
+
+impl RegisterEntry {
+    /// The value the entry states for `field`, if it states it at all.
+    fn value(&self, field: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(name, _)| name == field)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// Every structured entry the register contains, in document order.
+///
+/// An entry begins at any Markdown heading whose text contains an `XD-` identifier and ends at the
+/// next heading of any level, so a section cannot silently absorb the tables of the one after it.
+/// Inside that span every two-column table row whose left cell names one of
+/// [`REGISTER_ENTRY_FIELDS`] contributes a field; every other row, and all surrounding prose, is
+/// ignored, because an entry is allowed to explain itself at whatever length the divergence
+/// deserves.
+///
+/// A `|` inside a value is written `\|`, as a Markdown table requires, and is unescaped here so the
+/// comparison sees the value the author meant. A value wrapped in a single pair of backticks is
+/// unwrapped for the same reason: the surrounding pair is this document's way of rendering a literal,
+/// not part of the literal.
+fn parse_register_entries(register: &str) -> Vec<RegisterEntry> {
+    let lines: Vec<&str> = register.lines().collect();
+    // Fenced blocks are excluded from the structure entirely, in one pre-pass rather than in each
+    // scan below. The register documents its own entry shape inside a fence, so a `#` line there is
+    // an illustration: counting it as a heading would end the entry it appears in, and counting a
+    // row there as a field would compare a marker against a template.
+    let fenced = fenced_lines(&lines);
+    let is_heading = |index: usize| !fenced[index] && lines[index].trim_start().starts_with('#');
+
+    let mut entries: Vec<RegisterEntry> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if !is_heading(index) {
+            continue;
+        }
+        let heading = line.trim_start().trim_start_matches('#');
+        let Some(identifier) = first_identifier(heading) else {
+            continue;
+        };
+        entries.push(RegisterEntry {
+            identifier,
+            heading_line: index + 1,
+            fields: Vec::new(),
+        });
+    }
+    // A second pass fills each entry from the lines between its heading and the next one. Doing it
+    // this way rather than inside the first pass keeps the span rule in one expression — an entry
+    // owns everything up to the next heading — instead of spread across a running state machine.
+    for entry in &mut entries {
+        let start = entry.heading_line;
+        let end = (start..lines.len())
+            .find(|index| is_heading(*index))
+            .unwrap_or(lines.len());
+        let mut fields: Vec<(String, String)> = Vec::new();
+        for index in start..end {
+            if fenced[index] {
+                continue;
+            }
+            if let Some((name, value)) = parse_register_row(lines[index]) {
+                if REGISTER_ENTRY_FIELDS.contains(&name.as_str())
+                    && !fields.iter().any(|(existing, _)| existing == &name)
+                {
+                    fields.push((name, value));
+                }
+            }
+        }
+        entry.fields = fields;
+    }
+    entries
+}
+
+/// Which lines lie inside a fenced code block, fence lines included.
+///
+/// A fence is three or more backticks or tildes at the start of a line, and a fence of one character
+/// does not close a fence of the other — which is what lets the register show a backtick fence inside
+/// a tilde fence, or the reverse, without the structure of the document changing underneath it.
+fn fenced_lines(lines: &[&str]) -> Vec<bool> {
+    let mut inside: Vec<bool> = Vec::with_capacity(lines.len());
+    let mut opener: Option<char> = None;
+    for line in lines {
+        let trimmed = line.trim_start();
+        let fence = ['`', '~']
+            .into_iter()
+            .find(|character| trimmed.starts_with(&character.to_string().repeat(3)));
+        match (opener, fence) {
+            (None, Some(character)) => {
+                opener = Some(character);
+                inside.push(true);
+            }
+            (Some(open), Some(character)) if open == character => {
+                opener = None;
+                inside.push(true);
+            }
+            (state, _) => inside.push(state.is_some()),
+        }
+    }
+    inside
+}
+
+/// One `| Field | value |` row, reduced to its two cells.
+///
+/// `None` for anything that is not a two-cell row: prose, a fence, a separator row, or a table with
+/// a different shape. The left cell is stripped of the emphasis markers a register author may use to
+/// make the field name stand out, so `| **Basis** | ... |` and `| Basis | ... |` are the same row.
+fn parse_register_row(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('|') || !trimmed.ends_with('|') || trimmed.len() < 2 {
+        return None;
+    }
+    // Split on unescaped pipes only, so a value containing `\|` stays one cell.
+    let mut cells: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for character in trimmed[1..trimmed.len() - 1].chars() {
+        match (escaped, character) {
+            (true, '|') => {
+                current.push('|');
+                escaped = false;
+            }
+            (true, other) => {
+                current.push('\\');
+                current.push(other);
+                escaped = false;
+            }
+            (false, '\\') => escaped = true,
+            (false, '|') => {
+                cells.push(current.clone());
+                current.clear();
+            }
+            (false, other) => current.push(other),
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    cells.push(current);
+    if cells.len() != 2 {
+        return None;
+    }
+    let name = cells[0].trim().trim_matches('*').trim().to_string();
+    let value = unwrap_code_span(cells[1].trim());
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, value))
+}
+
+/// `text` without one surrounding pair of backticks, if it carries one.
+///
+/// The register renders a literal — a scope, a class, a path — as a code span so it reads correctly,
+/// while the program's record holds the bare literal. Unwrapping exactly one pair keeps the two
+/// comparable without letting a value that legitimately contains a backtick be altered.
+fn unwrap_code_span(text: &str) -> String {
+    let inner = text
+        .strip_prefix('`')
+        .and_then(|rest| rest.strip_suffix('`'))
+        .filter(|inner| !inner.contains('`'));
+    match inner {
+        Some(inner) => inner.trim().to_string(),
+        None => text.to_string(),
+    }
+}
+
+/// The first `XD-` identifier in `text`, if it holds one.
+///
+/// Shares the tokenizer with [`registered_identifiers`] so that a heading the reverse check sees an
+/// identifier in is an entry the forward check can also find. Two different notions of "contains an
+/// identifier" is exactly how one direction of the audit would start passing while the other failed.
+fn first_identifier(text: &str) -> Option<String> {
+    identifier_tokens(text).into_iter().next()
+}
+
+/// Every `XD-` identifier in `text`, in order, with duplicates retained.
+fn identifier_tokens(text: &str) -> Vec<String> {
+    text.split(|character: char| {
+        !(character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    })
+    .filter_map(|token| {
+        let candidate = token.trim_matches('-');
+        match candidate.starts_with("XD-") && candidate.len() > "XD-".len() {
+            true => Some(candidate.to_string()),
+            false => None,
+        }
+    })
+    .collect()
+}
+
 /// Every `XD-` identifier the register mentions, deduplicated and ordered.
 ///
 /// Deliberately tolerant of the surrounding markup: identifiers are whitespace-free by
 /// construction, so splitting on all that cannot appear inside one finds them whether it spells
-/// them in a table cell, a heading, a list item or a code span.
+/// them in a table cell, a heading, a list item or a code span. This is the reverse direction of the
+/// audit, and its tolerance is the point — an identifier written anywhere in the document, including
+/// in prose or as a leftover from a retirement, must resolve to a live marker or fail the run.
 fn registered_identifiers(register: &str) -> Vec<String> {
     let mut identifiers: Vec<String> = Vec::new();
-    for token in register.split(|character: char| {
-        !(character.is_ascii_alphanumeric() || character == '-' || character == '_')
-    }) {
-        let candidate = token.trim_matches('-');
-        if !candidate.starts_with("XD-") || candidate.len() <= "XD-".len() {
-            continue;
-        }
-        let identifier = candidate.to_string();
+    for identifier in identifier_tokens(register) {
         if !identifiers.contains(&identifier) {
             identifiers.push(identifier);
         }
     }
     identifiers.sort();
     identifiers
+}
+
+/// Every way in which the register's entry for `marker` fails to describe it.
+///
+/// Empty when the entry states all six fields and every one agrees with the record. A mismatch is
+/// reported per field, with both readings quoted, so a maintainer sees which document is wrong rather
+/// than only that the two disagree.
+///
+/// Comparison is exact after trimming for the five single-line fields, because §2.4 of the register
+/// requires one canonical rendering reproduced character for character. `Observed` is compared with
+/// runs of whitespace collapsed, and only because a Markdown table cell cannot contain a newline
+/// while the record's `observed` field is a heredoc that frequently does: the alternative would be a
+/// rule no author could satisfy, which is a rule that ends up unenforced.
+fn register_entry_mismatches(
+    marker: &manifest::ExpectedDivergence,
+    entry: &RegisterEntry,
+) -> Vec<String> {
+    let mut mismatches: Vec<String> = Vec::new();
+    let program = marker.program_label();
+    let expected: [(&str, &str); 6] = [
+        ("Identifier", marker.id()),
+        ("Class", marker.class().label()),
+        ("Scope", marker.scope().raw()),
+        ("Program", &program),
+        ("Basis", marker.basis()),
+        ("Observed", marker.observed()),
+    ];
+    for (field, recorded) in expected {
+        let Some(stated) = entry.value(field) else {
+            mismatches.push(format!(
+                "its entry at line {} states no {field} field; the six fields {} are each required, \
+                 because an entry that omits one describes an authority the record does not, and \
+                 the two accounts then differ in a way no reader can reconcile. The record says \
+                 {}",
+                entry.heading_line,
+                comma_list(&REGISTER_ENTRY_FIELDS),
+                quoted_for_diagnostic(recorded),
+            ));
+            continue;
+        };
+        let agrees = match field {
+            "Observed" => collapse_whitespace(stated) == collapse_whitespace(recorded),
+            _ => stated.trim() == recorded.trim(),
+        };
+        if !agrees {
+            mismatches.push(format!(
+                "its entry at line {} states {field} as {} while the record says {}; §2.4 of the \
+                 register requires one canonical rendering reproduced character for character, \
+                 because two slightly different accounts of the same authority leave the next \
+                 reader to decide which one is the marker",
+                entry.heading_line,
+                quoted_for_diagnostic(stated),
+                quoted_for_diagnostic(recorded),
+            ));
+        }
+    }
+    mismatches
+}
+
+/// Every way in which the document a marker cites fails to be a basis a reader can check.
+///
+/// Three properties are asserted, and each closes a distinct way a basis can be hollow:
+///
+/// - **Containment.** The cited path is resolved and required to lie beneath the package root, so a
+///   marker cannot reclassify a divergence on the authority of something outside this repository.
+///   Containment is decided on the fully resolved path, so no symbolic link along the way changes
+///   the answer.
+/// - **A real, readable, bounded document.** The document is read through
+///   [`conformance_harness::read_file_bounded`], which refuses a symbolic link, a device node or a
+///   FIFO at the final component, proves the opened handle is the entry it inspected, and refuses a
+///   file past the inspection ceiling. The previous shape of this check — `Path::is_file` — followed
+///   a link and asserted only existence, so a basis could point through a link at anything readable
+///   and the check would still pass.
+/// - **A locator that resolves.** The citation half must name something findable *inside* the
+///   document, and everything it names must be found. A citation that resolves to nothing is a
+///   citation a reader cannot check, which is the one thing a documented basis may not be.
+fn basis_violations(marker: &manifest::ExpectedDivergence) -> Vec<String> {
+    let context = format!("auditing the documented basis of marker {}", marker.id());
+    let absolute = marker.basis_absolute_path();
+    if let Err(error) = conformance_harness::ensure_within(&context, &manifest_dir(), &absolute) {
+        return vec![format!(
+            "marker {} cites the basis {:?}, which does not resolve to a document inside this \
+             repository: {error}. A marker reclassifies a failure on the authority of something \
+             this repository documents, so a basis that leaves the repository is no authority at \
+             all",
+            marker.id(),
+            marker.basis(),
+        )];
+    }
+    let bytes = match conformance_harness::read_file_bounded(
+        &context,
+        &absolute,
+        conformance_harness::MAX_INSPECTED_FILE_BYTES,
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return vec![format!(
+                "marker {} cites the basis {:?}, which resolves to {} and could not be read as a \
+                 committed document: {error}. Existence alone was never the property that matters — \
+                 the audit reads the document so that the section the marker cites can be resolved \
+                 inside it",
+                marker.id(),
+                marker.basis(),
+                shown_path(&absolute),
+            )]
+        }
+    };
+    let document = String::from_utf8_lossy(&bytes);
+    match resolve_locators(marker.basis_citation(), &document) {
+        Ok(resolved) => {
+            println!(
+                "  basis of {} resolved in {}: {}",
+                marker.id(),
+                shown_path(&absolute),
+                comma_list(&resolved),
+            );
+            Vec::new()
+        }
+        Err(reason) => vec![format!(
+            "marker {} cites {:?} in {}, but {reason}. A basis names a section a reader can turn to: \
+             write a line number (`line 246`), a line range (`lines 696-725`), a section number \
+             (`§0.6.2`) or a backtick-quoted phrase from the document, so that the citation can be \
+             followed rather than taken on trust",
+            marker.id(),
+            marker.basis_citation(),
+            shown_path(&absolute),
+        )],
+    }
+}
+
+/// Resolve every locator a citation contains against the cited document.
+///
+/// `Ok` carries a description of each locator that resolved, for the audit's own output — a maintainer
+/// reading a passing run sees which sections were actually checked, not merely that something was.
+/// `Err` carries the first reason the citation cannot be followed.
+///
+/// Three locator forms are recognised, and they are the three a citation in this repository naturally
+/// uses, because §7 of the register already writes bases this way:
+///
+/// - `line N` and `lines N-M` (any dash, including an en dash) — `N` and `M` must be real line
+///   numbers of the document, and a range must not run backwards;
+/// - `§X` — the document must carry a Markdown heading whose text begins with `X`;
+/// - a backtick-quoted phrase — it must occur in the document verbatim.
+///
+/// **Every** locator present must resolve, and **at least one** must be present. Requiring all of
+/// them is what stops a correct locator from carrying an incorrect one alongside it; requiring one is
+/// what stops a citation from being unfalsifiable prose.
+fn resolve_locators(citation: &str, document: &str) -> Result<Vec<String>, String> {
+    let lines: Vec<&str> = document.lines().collect();
+    let mut resolved: Vec<String> = Vec::new();
+
+    for phrase in backtick_phrases(citation) {
+        if !document.contains(&phrase) {
+            return Err(format!(
+                "the quoted phrase `{phrase}` does not occur in that document"
+            ));
+        }
+        resolved.push(format!("phrase `{phrase}`"));
+    }
+
+    for section in section_locators(citation) {
+        let found = lines.iter().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with('#') && trimmed.trim_start_matches('#').trim_start() == section
+                || trimmed.starts_with('#')
+                    && trimmed
+                        .trim_start_matches('#')
+                        .trim_start()
+                        .starts_with(&format!("{section} "))
+        });
+        if !found {
+            return Err(format!(
+                "that document carries no heading for section {section}"
+            ));
+        }
+        resolved.push(format!("section {section}"));
+    }
+
+    for (first, last) in line_locators(citation) {
+        if first == 0 || last < first {
+            return Err(format!(
+                "the line reference {first}-{last} is not a range that can be read"
+            ));
+        }
+        if last > lines.len() {
+            return Err(format!(
+                "the line reference {first}-{last} runs past the end of that document, which has \
+                 {} line(s)",
+                lines.len()
+            ));
+        }
+        match first == last {
+            true => resolved.push(format!("line {first}")),
+            false => resolved.push(format!("lines {first}-{last}")),
+        }
+    }
+
+    match resolved.is_empty() {
+        true => Err(String::from(
+            "that citation carries no locator the audit can resolve inside the document",
+        )),
+        false => Ok(resolved),
+    }
+}
+
+/// Every backtick-quoted phrase in `citation`.
+///
+/// Only balanced pairs count, and an empty pair is skipped: a stray backtick is a typographical
+/// accident rather than a locator, and treating it as one would fail a citation for a reason that has
+/// nothing to do with whether it can be followed.
+fn backtick_phrases(citation: &str) -> Vec<String> {
+    let mut phrases: Vec<String> = Vec::new();
+    let mut rest = citation;
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else { break };
+        let phrase = after[..close].trim();
+        if !phrase.is_empty() {
+            phrases.push(phrase.to_string());
+        }
+        rest = &after[close + 1..];
+    }
+    phrases
+}
+
+/// Every `§`-prefixed section number in `citation`.
+///
+/// A section number is the run of digits and dots that follows the sign, so `§0.6.2` yields `0.6.2`
+/// and a trailing sentence-ending dot is not mistaken for part of it.
+fn section_locators(citation: &str) -> Vec<String> {
+    let mut sections: Vec<String> = Vec::new();
+    for fragment in citation.split('§').skip(1) {
+        let number: String = fragment
+            .chars()
+            .take_while(|character| character.is_ascii_digit() || *character == '.')
+            .collect();
+        let number = number.trim_end_matches('.').to_string();
+        if !number.is_empty() && !sections.contains(&number) {
+            sections.push(number);
+        }
+    }
+    sections
+}
+
+/// Every `line N` or `lines N-M` reference in `citation`, as an inclusive pair.
+///
+/// A single line yields the pair `(N, N)`, so the caller has one shape to check. Any dash spelling
+/// separates a range, because a citation written by hand uses a hyphen and one copied out of a
+/// rendered document uses an en dash, and refusing the second would be refusing a correct citation
+/// for its typography.
+///
+/// The word must stand on its own: `multiline 5` is not a line reference, and treating it as one
+/// would invent a locator the author never wrote and then hold the citation to it.
+fn line_locators(citation: &str) -> Vec<(usize, usize)> {
+    const DASHES: [char; 4] = ['-', '\u{2010}', '\u{2013}', '\u{2014}'];
+    let lowered = citation.to_ascii_lowercase();
+    let mut locators: Vec<(usize, usize)> = Vec::new();
+    let mut rest = lowered.as_str();
+    let mut consumed = 0usize;
+    while let Some(position) = rest.find("line") {
+        let starts_word = lowered[..consumed + position]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !character.is_ascii_alphanumeric());
+        let after = &rest[position + "line".len()..];
+        let after = after.strip_prefix('s').unwrap_or(after);
+        consumed = lowered.len() - after.len();
+        rest = after;
+        if !starts_word {
+            continue;
+        }
+        let after = after.trim_start();
+        let first: String = after
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect();
+        if first.is_empty() {
+            continue;
+        }
+        let Ok(first) = first.parse::<usize>() else {
+            continue;
+        };
+        let tail = after
+            .trim_start_matches(|character: char| character.is_ascii_digit())
+            .trim_start();
+        let mut last = first;
+        if let Some(tail) = tail.strip_prefix(DASHES) {
+            let second: String = tail
+                .trim_start()
+                .chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect();
+            if let Ok(second) = second.parse::<usize>() {
+                last = second;
+            }
+        }
+        let locator = (first, last);
+        if !locators.contains(&locator) {
+            locators.push(locator);
+        }
+    }
+    locators
+}
+
+/// `text` with every run of whitespace collapsed to one space and the ends trimmed.
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<&str>>().join(" ")
+}
+
+/// `text` rendered for a diagnostic: quoted, and with newlines made visible rather than wrapping.
+fn quoted_for_diagnostic(text: &str) -> String {
+    format!("{:?}", collapse_whitespace(text))
+}
+
+/// `items` as one comma-separated list, for a diagnostic that has to name a fixed set.
+fn comma_list(items: &[impl AsRef<str>]) -> String {
+    items
+        .iter()
+        .map(|item| item.as_ref().to_string())
+        .collect::<Vec<String>>()
+        .join(", ")
 }
 
 /// The corpus markers as one readable list, for a message that has to name them all.

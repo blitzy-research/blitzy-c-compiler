@@ -98,28 +98,37 @@
 //! That is why a `compile_failure` marker is meaningful at all — the cell it excuses never
 //! reaches a comparison, so a rule that required one would make the class unreachable.
 //!
-//! # A refusal is not a comparison, and is matched accordingly
+//! # A refusal is matched on every dimension, oracle included
 //!
-//! Strict scope matching presupposes that exactly one oracle made the observation, which is true
-//! of a comparison and false of a build that produced nothing. The compiler under test is invoked
-//! once per cell, before any oracle is asked, and a refusal removes the authority *every* oracle
-//! needs: the same-target reference comparison, the cross-backend comparison and the golden record
-//! alike. There is one observation, of one class, on one cell.
+//! Scope matching is **strict on all four dimensions — oracle, target, optimization level and
+//! class — for every divergence this module classifies**, whether it came from a comparison that
+//! differed or from a build that produced nothing. There is no shape-dependent exemption, because
+//! the register states the rule without one, and code that honoured it in one shape while relaxing
+//! it in another would leave the two describing different contracts.
 //!
-//! A refusal is therefore matched on **class, target and optimization level** — all three as
-//! strictly as ever — and the **oracle dimension is not consulted**, because no oracle made it.
-//! This is strictness applied correctly rather than strictness relaxed. Requiring a marker to
-//! enumerate every oracle separately would take one documented limitation and manufacture an
-//! undocumented finding for each oracle the marker's author did not list, which is the opposite of
-//! what requirement 5 asks: the divergence is documented, and the register explains it. The worked
-//! example is the case-range program, whose documented compile failure would otherwise be recorded
-//! as one expected divergence and twenty-one findings for the very same defect.
+//! The oracle dimension is meaningful for a refusal because a refusal reaches this module **once
+//! per oracle arm, settled against that arm's own authority** — the same-target reference capture
+//! for oracle (a), the baseline capture for oracle (b), the record's own `expected_stdout` for
+//! oracle (c). An arm whose authority this environment cannot supply never arrives here: it is
+//! reported as an unavailable oracle, loudly and in the summary. An arm the program's own record
+//! disables never arrives here either: it is a recorded exclusion. So the arms that do arrive are
+//! exactly the arms that held an authority and lost the comparison to a refusal, and naming an
+//! oracle in a scope narrows a real set rather than a notional one.
 //!
-//! Nothing is widened by this. The marker's scope is untouched, the register is unchanged, and the
-//! outcome detail names both the oracle the scope covers and the oracle being judged, so the
-//! classification is auditable from the verdict row. Staleness detection is unaffected: it runs on
-//! agreement, through the oracle the marker's scope *does* name, so a refusal that disappears still
-//! produces an unexpected success and still fails the run until the marker is retired.
+//! What this asks of an author is one word. A marker meant to excuse a build refusal scopes
+//! **`all oracles`**, because a refusal denies every arm its subject; the scope grammar has that
+//! token, so the intent is written in the register where a reader finds it, instead of being
+//! inferable only from this file. A marker that names a single oracle and then meets a refusal is
+//! reported as non-covering, the oracle dimension is named among the mismatches, and the detail
+//! spells out the `all oracles` remedy — so the corpus is corrected by editing a scope, never by
+//! this module quietly deciding a basis covers arms it never mentioned.
+//!
+//! The relaxed alternative is the dangerous direction, which is why it is not taken: an `oracle_a`
+//! marker recording that the reference compiler accepts a construct bcc rejects would, under it,
+//! also excuse the cross-backend and golden-record arms — two authorities that basis says nothing
+//! whatever about. Staleness detection is unaffected either way: it runs on agreement, through any
+//! oracle the marker's scope names, so a refusal that disappears still produces an unexpected
+//! success and still fails the run until the marker is retired.
 //!
 //! # A recorded exclusion is an expected divergence, not a missing oracle
 //!
@@ -342,38 +351,50 @@ impl fmt::Display for Attribution {
     }
 }
 
-/// Whether a divergence was observed by one oracle's comparison, or by a refusal that blocks
-/// every oracle at once.
+/// Whether a divergence was observed by one oracle's comparison, or by a refusal that removed
+/// the authority one oracle arm needed.
 ///
-/// # Why this distinction decides which marker dimensions are matched
+/// # What this distinction does, and what it deliberately does not do
 ///
-/// [`covers`] is strict on four dimensions — oracle, target, optimization level and class — and
-/// that strictness exists to stop a marker for one defect absorbing a genuine second defect. It
-/// presupposes something that is true of a comparison and false of a refusal: that exactly one
-/// oracle made the observation, so that naming an oracle in a marker's scope narrows anything at
-/// all.
+/// It decides **which account the outcome detail gives**, and nothing else. Marker matching is
+/// uniformly [`covers`] — strict on all four dimensions, oracle included — for both shapes.
 ///
-/// A refusal is not made by an oracle. The compiler under test is invoked once per cell, before
-/// any oracle is asked, and when it produces no artifact it removes the authority *every* oracle
-/// needs — the same-target reference comparison, the cross-backend comparison and the golden
-/// record alike. There is one observation, of one class, on one cell. Requiring a marker to name
-/// each oracle separately would therefore not be strict, it would be wrong: it would take a single
-/// documented limitation and manufacture an undocumented finding for every oracle the marker's
-/// author did not think to enumerate — which is exactly what requirement 5 forbids, since the
-/// divergence *is* documented and the register *does* explain it.
+/// # Why the oracle dimension is matched for a refusal too
 ///
-/// So a refusal is matched on class, target and optimization level, all three strictly, and the
-/// oracle dimension is not consulted. Nothing is widened by this: the marker's own scope is
-/// unchanged, the register still documents exactly what it says it documents, and the outcome
-/// detail states which oracle the marker names and which oracle is being judged, so a reader is
-/// never left to infer it. And a marker is still detected as stale through the oracle its scope
-/// *does* name: if the refusal disappears, that oracle's comparison agrees, [`scope_marker`] finds
-/// the marker, and the run fails with an unexpected success until the marker is retired.
+/// A single build refusal reaches the classifier once per oracle arm, not once per cell, and each
+/// arm is settled against its own authority: the same-target reference capture for oracle (a), the
+/// baseline capture for oracle (b), the record's own `expected_stdout` for oracle (c). An arm whose
+/// authority is absent — a reference driver this environment does not have, an emulator it does not
+/// have, an oracle the record itself disables — never reaches this classification at all; it is
+/// reported as unavailable or as a recorded exclusion by the driver. So the arms that do reach here
+/// are exactly the arms that had an authority and lost the comparison to a refusal, and naming an
+/// oracle in a marker's scope narrows a real set.
+///
+/// The register states the matching rule in one sentence — a marker excuses a divergence only when
+/// its scope covers this oracle **and** this target **and** this optimization level **and** its
+/// class equals the class observed — and states it without carving out a shape. Honouring it for a
+/// comparison while relaxing it for a refusal would make the code and the register describe
+/// different contracts, and the relaxed direction is the dangerous one: an `oracle_a` marker
+/// documenting that the reference compiler accepts a construct bcc rejects would silently also
+/// excuse the cross-backend and golden-record arms, which that basis says nothing about.
+///
+/// # What an author must therefore write
+///
+/// A marker intended to excuse a build refusal must scope **`all oracles`**, because a refusal
+/// denies every arm its subject. The scope grammar has that token, so the requirement costs one
+/// word rather than a code exemption, and it makes the intent legible in the register instead of
+/// inferable only from this file. A marker that names one oracle and then meets a refusal is
+/// reported as non-covering, with the oracle dimension named among the mismatches and the
+/// `all oracles` remedy spelled out in the detail — see [`marker_non_coverage`].
+///
+/// Staleness detection is unaffected: if the refusal disappears and the comparisons agree,
+/// [`scope_marker`] finds the marker on any oracle its scope names and the run fails with an
+/// unexpected success until the marker is retired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DivergenceShape {
     /// One oracle compared two observations and they differed.
     Compared,
-    /// A build produced no artifact, so no oracle could compare anything for this cell.
+    /// A build produced no artifact, so this oracle arm lost the subject of its comparison.
     Refused,
 }
 
@@ -607,15 +628,12 @@ pub fn judge(
             ),
         );
     };
-    // The dimensions a marker must match depend on the shape of the divergence, and only on
-    // that: a comparison was made by exactly one oracle, so its marker must name that oracle,
-    // while a refusal was made by none of them, so there is no oracle for a marker to name.
-    // See [`DivergenceShape`] for why that is strictness applied correctly rather than
-    // strictness relaxed.
-    let marker = match shape {
-        DivergenceShape::Compared => covering_marker(manifest, key, oracle, class),
-        DivergenceShape::Refused => refusal_marker(manifest, key, class),
-    };
+    // Marker matching does not depend on the shape of the divergence: every observation that
+    // reaches this point was made under one oracle arm, against that arm's own authority, so all
+    // four dimensions — oracle, target, optimization level and class — narrow a real set and all
+    // four are matched strictly. `shape` decides only which account the detail gives. See
+    // [`DivergenceShape`] for why a refusal is no exception, and what an author writes instead.
+    let marker = covering_marker(manifest, key, oracle, class);
     match marker {
         // Step 4: a marker documents this divergence.
         Some(marker) => xfail_divergence_outcome(key, oracle, class, marker, evidence, shape),
@@ -834,32 +852,6 @@ pub fn covering_marker<'a>(
         .filter(|marker| covers(marker, key, oracle, class))
 }
 
-/// The marker that documents a build refusal of this class for this cell, if any.
-///
-/// Class, target and optimization level must all match, exactly as strictly as they must for a
-/// diverging comparison. The oracle dimension is deliberately not consulted, and
-/// [`DivergenceShape`] carries the whole argument for why that is the correct match rather than a
-/// weakened one: a refusal is not a comparison, so no oracle made it, so there is nothing for a
-/// per-oracle scope to narrow.
-///
-/// A consequence worth stating outright: a marker whose scope names one oracle documents the
-/// refusal for **all** of them, because there is one refusal. That is not the marker growing — its
-/// scope is untouched and the register is unchanged — it is the observation being smaller than the
-/// scope language can express. The outcome detail says so explicitly, so the difference between
-/// "the marker names this oracle" and "the marker documents the refusal this oracle was blocked by"
-/// is visible in the summary rather than hidden in this function.
-fn refusal_marker<'a>(
-    manifest: &'a Manifest,
-    key: &CellKey,
-    class: DivergenceClass,
-) -> Option<&'a ExpectedDivergence> {
-    manifest.marker().filter(|marker| {
-        marker.class() == class
-            && marker.scope().targets().contains(&key.target())
-            && marker.scope().opt_levels().contains(&key.opt())
-    })
-}
-
 /// What one divergence class means, in one sentence, for the outcome detail.
 ///
 /// The `match` is exhaustive with **no wildcard arm**, and that is load-bearing rather than
@@ -1014,10 +1006,10 @@ fn scope_marker<'a>(
 /// maintainer reading this row can see immediately whether the honest fix is a second marker, a
 /// widened scope that the register also documents, or a finding.
 ///
-/// The `shape` decides whether the oracle dimension is named at all. For a refusal it is not,
-/// because it was never consulted — see [`DivergenceShape`] — and listing a dimension that played
-/// no part in the decision would send a maintainer to widen a scope that would not have changed
-/// the verdict.
+/// The `shape` decides only whether the closing sentence names the `all oracles` remedy. Every
+/// dimension is matched for both shapes — see [`DivergenceShape`] — so every dimension that failed
+/// is reported for both, and a maintainer is never sent to widen a scope while a second mismatch
+/// they were not shown would still have produced a finding.
 fn marker_non_coverage(
     manifest: &Manifest,
     key: &CellKey,
@@ -1026,11 +1018,7 @@ fn marker_non_coverage(
     shape: DivergenceShape,
 ) -> Option<String> {
     let marker = manifest.marker()?;
-    let covered = match shape {
-        DivergenceShape::Compared => covers(marker, key, oracle, class),
-        DivergenceShape::Refused => refusal_marker(manifest, key, class).is_some(),
-    };
-    if covered {
+    if covers(marker, key, oracle, class) {
         return None;
     }
     let mut mismatches: Vec<String> = Vec::new();
@@ -1040,11 +1028,17 @@ fn marker_non_coverage(
             marker.class()
         ));
     }
-    if shape == DivergenceShape::Compared && !marker.scope().oracles().contains(&oracle) {
-        mismatches.push(format!(
-            "its scope covers {} while this comparison was made by {oracle}",
-            joined(marker.scope().oracles())
-        ));
+    if !marker.scope().oracles().contains(&oracle) {
+        mismatches.push(match shape {
+            DivergenceShape::Compared => format!(
+                "its scope covers {} while this comparison was made by {oracle}",
+                joined(marker.scope().oracles())
+            ),
+            DivergenceShape::Refused => format!(
+                "its scope covers {} while this observation was made by {oracle}",
+                joined(marker.scope().oracles())
+            ),
+        });
     }
     if !marker.scope().targets().contains(&key.target()) {
         mismatches.push(format!(
@@ -1063,9 +1057,10 @@ fn marker_non_coverage(
     let dimensions = match shape {
         DivergenceShape::Compared => "",
         DivergenceShape::Refused => {
-            " No artifact was produced for this cell, so no oracle made this observation and the \
-             oracle dimension of the marker's scope was not consulted: only class, target and \
-             optimization level were, and the mismatch above is among those."
+            " No artifact was produced for this cell, so this oracle arm lost the subject of its \
+             comparison. A refusal denies every arm its subject, so a marker meant to document one \
+             must scope `all oracles`; a marker naming a single oracle documents that oracle's \
+             comparison and nothing else."
         }
     };
     Some(format!(
@@ -1303,9 +1298,10 @@ fn xpass_outcome(
 /// - [`DivergenceShape::Compared`] — this oracle made a comparison, it differed, and the marker's
 ///   own scope names this oracle. The ordinary expected divergence.
 /// - [`DivergenceShape::Refused`] — the compiler under test produced no artifact for this cell, so
-///   this oracle had nothing to compare, and the marker documents that refusal. Where the marker's
-///   scope does not itself name this oracle, the detail says so and says why the marker still
-///   applies, so the classification is auditable from the row rather than only from this file.
+///   this oracle arm lost the subject of its comparison, and the marker documents that refusal.
+///   Reaching this arm means the marker's scope names this oracle, because matching is strict on
+///   every dimension for both shapes; the detail says which arm lost what, so the classification
+///   is auditable from the row rather than only from this file.
 fn xfail_divergence_outcome(
     key: &CellKey,
     oracle: Oracle,
@@ -1326,30 +1322,20 @@ fn xfail_divergence_outcome(
             significance = class_significance(class)
         ),
         DivergenceShape::Refused => format!(
-            "expected divergence: no artifact was produced for {key}, so {oracle} had nothing to \
-             compare, and that {class} is documented by {reference}. {scope_note} A refusal is not \
-             a comparison: the compiler under test is invoked once per cell, before any oracle is \
-             asked, and a refusal removes the authority every one of them needs — so the marker is \
-             matched on class, target and optimization level, and the oracle dimension is not \
-             consulted. The marker's own scope is NOT widened by this classification and \
-             {register} still documents exactly what it says it documents; recording one \
-             documented limitation as an undocumented finding on every oracle its author did not \
-             enumerate would be the opposite of what the expected-divergence requirement asks for. \
-             In general, {significance}. A marker changes how a divergence is CLASSIFIED, never \
+            "expected divergence: no artifact was produced for {key}, so {oracle} lost the subject \
+             of its comparison, and that {class} is documented by {reference}, whose scope names \
+             {oracle} among {named}. Matching is strict on every dimension for a refusal exactly \
+             as it is for a comparison: this arm had an authority to compare against — an arm \
+             whose authority this environment cannot supply is reported as unavailable, and one \
+             the record itself disables as a recorded exclusion — so naming an oracle narrows a \
+             real set, and {register} therefore documents precisely the arms it says it does. In \
+             general, {significance}. A marker changes how a divergence is CLASSIFIED, never \
              whether the feature is EXERCISED: this program was compiled in full and the \
              compiler's own diagnostics are recorded. If the refusal ever disappears, the \
-             comparison the marker's scope names becomes an unexpected success and fails the run \
+             comparison this marker's scope names becomes an unexpected success and fails the run \
              so that the marker is retired. The refusal was: {evidence}",
             reference = marker_reference(marker),
-            scope_note = match marker.scope().oracles().contains(&oracle) {
-                true => format!("The marker's scope names {oracle} directly."),
-                false => format!(
-                    "The marker's scope names {named}, not {oracle}; this arm is recorded as an \
-                     expected divergence traceable to that same single documented root cause \
-                     rather than as a second, undocumented one.",
-                    named = joined(marker.scope().oracles())
-                ),
-            },
+            named = joined(marker.scope().oracles()),
             register = EXPECTED_DIVERGENCE_REGISTER,
             significance = class_significance(class)
         ),

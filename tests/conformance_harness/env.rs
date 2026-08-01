@@ -121,12 +121,15 @@
 //! wider harness writes lives beneath the Cargo build directory, under [`super::work_root`],
 //! [`super::report_root`] and [`super::findings_root`].
 //!
-//! A probe target is an installed tool, executed from wherever it lives, with the environment
-//! this process inherited. Nothing here isolates a syscall or the network, enters a namespace,
-//! clears that environment or sets `TMPDIR`, so whatever a probed tool does on its own account —
-//! reading a configuration file, writing under the system temporary directory — it goes on doing.
-//! The guarantee is about the paths *this* module constructs, which is none, and the bound below
-//! is what keeps a badly behaved tool from stalling the run.
+//! A probe target is an installed tool, executed from wherever it lives, and — like every other
+//! child in this suite — under the fixed environment [`super::isolate_child_environment`] installs:
+//! the environment is cleared, the search path is [`sanitized_search_path`] rather than the inherited
+//! one, and `TMPDIR`, `TMP`, `TEMP` and `HOME` point beneath the build directory. Nothing here
+//! isolates a syscall or the network or enters a namespace, so a probed tool that reads a
+//! configuration file by absolute path or writes to a hard-coded directory goes on doing so — a
+//! variable cannot bind a program that never reads it. The guarantee is about the paths *this* module
+//! constructs, which is none, plus what every child is told; the bound below is what keeps a badly
+//! behaved tool from stalling the run.
 //!
 //! # Every pre-flight subprocess is bounded
 //!
@@ -1198,11 +1201,45 @@ impl ToolIdentity {
     /// location check, the wrapper attestation, the declared target — a statement about a file that
     /// no longer exists.
     ///
-    /// Called immediately before a tool is spawned, which narrows the time-of-check-to-time-of-use
-    /// window to the interval between this call and `execve`. That interval cannot be closed without
-    /// holding an open handle and spawning through it, which the standard library offers no way to
-    /// do; narrowing it to microseconds and *reporting* a change that did happen is what is
-    /// achievable here, and it converts a silent substitution into a named refusal.
+    /// # Where this is called from, so the claim can be checked
+    ///
+    /// Immediately before a tool is spawned, at every place in the suite that spawns one, and as the
+    /// last statement before the launch in each:
+    ///
+    /// - [`confirm_vetted_tools_unchanged`], reached from `compile`'s own bounded spawn and from
+    ///   `execute`'s single bounded launch. Those two cover every build, every cell execution, both
+    ///   audit-gate invocations and every flag-probe invocation, because the audit and the probe
+    ///   both launch through `execute`.
+    /// - [`confirm_vetted_tool_unchanged`], reached from the process-group sweep, which spawns the
+    ///   `kill` utility with a signal and a group identifier and therefore has the same substitution
+    ///   concern as any other tool.
+    /// - [`attest_runners`], which asks the question a second time for an emulator, because
+    ///   attestation is the first thing that ever runs one and is therefore the earliest point at
+    ///   which the answer is useful.
+    ///
+    /// Discovery's own subprocesses — the banner reads and the runner attestation's build-and-run —
+    /// are the one place a spawn is *not* preceded by this check, and necessarily so: they run while
+    /// the tools are being vetted, and a tool with no earlier vetting has no earlier identity to be
+    /// compared against.
+    ///
+    /// # Two residuals, stated rather than implied
+    ///
+    /// **The interval to `execve` is narrowed, not closed.** Closing it needs an open handle spawned
+    /// through, which the standard library offers no way to do. Narrowing it to microseconds and
+    /// *reporting* a change that did happen is what is achievable here, and it converts a silent
+    /// substitution into a named refusal — which is the difference that matters, because a
+    /// substitution reported as a refusal cannot be mistaken for evidence about a compiler.
+    ///
+    /// **An inode number can be reused, so a same-path delete-and-recreate can compare equal.**
+    /// Measured on the reference host rather than assumed: writing a file, removing it and writing a
+    /// different one at the same name returned the identical device and inode pair, while renaming a
+    /// second file over the first returned a different one. What this comparison therefore catches is
+    /// a tool that was removed, replaced by something that is not a regular file, left dangling, or
+    /// renamed over — and what it can miss is an in-place recreate that the allocator happened to
+    /// give the same inode. Closing that too would mean stamping content, which at the size of a
+    /// compiler driver would be paid on every one of the spawns this check exists to guard and would
+    /// buy a narrower improvement than its cost. The limit is recorded here so a reader takes the
+    /// guarantee for what it is rather than for what its name suggests.
     ///
     /// Device and inode numbers are compared where the platform exposes them, because they see
     /// through every spelling. When it does not, the canonical path is compared instead and the two
@@ -1789,6 +1826,76 @@ fn search_path() -> &'static (Vec<PathBuf>, Vec<String>) {
     })
 }
 
+/// What a child's `PATH` is, spelled for a report rather than for a child.
+///
+/// Kept beside [`sanitized_search_path`] so the two cannot describe different values, and returning a
+/// sentence rather than an empty string in the `None` case, because an empty field in a fingerprint
+/// reads as "not recorded" and this state — every entry refused — is a fact a reader must not
+/// mistake for a gap in the record.
+fn describe_child_search_path() -> String {
+    match sanitized_search_path() {
+        Some(path) => path.to_string_lossy().into_owned(),
+        None => String::from(
+            "(unset: no PATH entry survived the trust filter, so every child is given none)",
+        ),
+    }
+}
+
+/// The value of `PATH` every child of this suite receives: the trustworthy entries and no others.
+///
+/// # Why the child cannot be given the process's own `PATH`
+///
+/// [`search_path`] refuses an untrusted entry for tool *resolution*, so the reference compiler this
+/// suite selects is never a file an untrusted account planted. That protects the driver and stops
+/// there. A compiler driver is not one program: it locates and executes its own stages — `cc1`,
+/// `cc1plus`, `as`, `ld`, `collect2` — and for the stages it does not find beside itself it searches
+/// `PATH`. Handing the child the raw inherited `PATH` therefore reinstates, one level down, exactly
+/// the substitution the resolution filter refused one level up: a `cc1` or an `as` planted in a
+/// world-writable directory would be executed by a driver this suite had vetted, and every artefact
+/// would still name the vetted driver. The same applies to each emulator, which reads `PATH` to
+/// resolve helpers, and to the optional timeout utility.
+///
+/// The filter therefore has to hold for the whole process tree, not merely for the first process in
+/// it, which is why the sanitized value is computed here and installed by
+/// [`super::isolate_child_environment`] at every spawn site rather than at each call site's
+/// discretion.
+///
+/// # Why it is memoized, and why it is exactly `search_path`'s accepted list
+///
+/// `PATH` belongs to the process and cannot change between two spawns within one run, so the value
+/// is computed once. It is deliberately assembled from [`search_path`]'s accepted entries, in their
+/// original order, rather than filtered again here: two filters that answer the same question are
+/// two chances for the answers to differ, and a reader comparing the pre-flight report's list of
+/// skipped entries against what a child actually received must find them consistent by construction.
+///
+/// # Why `None` is a value and not an error
+///
+/// `None` means no entry survived the filter — either `PATH` was unset, or every entry was relative
+/// or writable by an account this suite does not trust. `PATH` is then left **unset** for the child
+/// rather than set to the empty string, because an empty `PATH` is read as the current directory by
+/// the same conventions that make an empty entry hazardous, so setting it would reintroduce the
+/// hazard the filter exists to remove. A reference compilation then fails loudly with a driver that
+/// cannot find its own stages, which is the correct outcome: on a machine whose entire search path is
+/// writable by anyone, there is no honest oracle to be had, and failing to compile states that far
+/// better than compiling with whatever was planted.
+///
+/// [`env::join_paths`] can only fail on an entry containing the separator, which an entry produced by
+/// [`env::split_paths`] cannot contain. It is handled rather than unwrapped anyway, and it fails
+/// closed to `None` for the reason above, because a control that panics is a control a maintainer
+/// disables.
+pub fn sanitized_search_path() -> Option<&'static OsString> {
+    static SANITIZED: OnceLock<Option<OsString>> = OnceLock::new();
+    SANITIZED
+        .get_or_init(|| {
+            let (accepted, _) = search_path();
+            if accepted.is_empty() {
+                return None;
+            }
+            env::join_paths(accepted.iter()).ok()
+        })
+        .as_ref()
+}
+
 /// Resolve one tool name to an executable file.
 ///
 /// A name containing a separator is treated as an explicit path and checked directly, so an
@@ -2135,16 +2242,49 @@ fn terminate_group_of(group: u32) {
 /// and must not resolve, vet and memoize a second copy: two independently discovered `kill`
 /// utilities could disagree about which file was trusted.
 pub(super) fn kill_tool() -> Option<&'static Path> {
-    static KILL_TOOL: OnceLock<Option<PathBuf>> = OnceLock::new();
+    signalling_tool().map(|(path, _)| path)
+}
+
+/// The signalling utility together with the identity recorded when it was resolved.
+///
+/// One memo rather than two, so the path every caller spawns and the identity
+/// [`confirm_signalling_tool_unchanged`] compares can never describe different files. The identity is
+/// itself optional: a utility whose identity could not be captured stays usable, because group
+/// termination degrading to a single child is a worse outcome than an unconfirmed sweep, and the
+/// absence is then simply nothing to confirm rather than a refusal.
+fn signalling_tool() -> Option<(&'static Path, Option<&'static ToolIdentity>)> {
+    static KILL_TOOL: OnceLock<Option<(PathBuf, Option<ToolIdentity>)>> = OnceLock::new();
     KILL_TOOL
         .get_or_init(|| {
             let resolved = resolve_tool(KILL_TOOL_NAME)?;
             if untrusted_reason(&resolved).is_some() {
                 return None;
             }
-            Some(resolved)
+            let identity = ToolIdentity::of(&resolved);
+            Some((resolved, identity))
         })
-        .as_deref()
+        .as_ref()
+        .map(|(path, identity)| (path.as_path(), identity.as_ref()))
+}
+
+/// Confirm `program` is still the signalling utility that was resolved, or say how it has changed.
+///
+/// Kept apart from [`Capabilities::confirm_tool_unchanged`] because the two tables have different
+/// lifetimes: the capability record is built once, at pre-flight, while this utility is resolved
+/// lazily the first time a process group has to be swept — which happens *during* pre-flight, on the
+/// cleanup path of the very probes that build the capability record. Folding it into that record
+/// would make its confirmation unavailable at exactly the moments it is first used.
+///
+/// Returns [`None`] when `program` is not that utility, when it was never resolved, when its identity
+/// could not be captured, and when it is unchanged.
+fn confirm_signalling_tool_unchanged(program: &Path) -> Option<String> {
+    let (path, identity) = signalling_tool()?;
+    if path != program {
+        return None;
+    }
+    identity?
+        .changed_since_vetting(program)
+        .map(|change| format!("process-group signalling utility: {change}"))
 }
 
 /// The name under which the process-group signalling utility is looked up.
@@ -3472,6 +3612,58 @@ impl Capabilities {
             .and_then(|record| record.path())
     }
 
+    /// Every tool this record vetted, in the order the pre-flight report names them.
+    ///
+    /// The array is the single enumeration of what "a vetted tool" means, so a tool added to the
+    /// record is added to identity confirmation by appearing here and nowhere else. Records with no
+    /// resolved path are included deliberately: they answer "not this one" in a single comparison,
+    /// and omitting them would put a condition in the list that a future edit could get wrong.
+    fn vetted_records(&self) -> [&ToolRecord; 10] {
+        [
+            &self.bcc,
+            &self.ref_cc_native,
+            &self.ref_cc_i686,
+            &self.ref_cc_aarch64,
+            &self.ref_cc_riscv64,
+            &self.runner_i686,
+            &self.runner_aarch64,
+            &self.runner_riscv64,
+            &self.timeout_tool,
+            &self.reducer,
+        ]
+    }
+
+    /// Confirm `program` is still the file this record vetted, or say how it has changed.
+    ///
+    /// Returns [`None`] both when `program` names no vetted tool — there is then nothing this record
+    /// has anything to say about — and when it names one that is unchanged. The two are deliberately
+    /// the same answer, because the question this asks is "has anything I vouched for been swapped",
+    /// and a path I never vouched for cannot have been.
+    ///
+    /// # Why this lives on the record rather than beside the spawn
+    ///
+    /// The vetted identity and the vetting decisions that rest on it — the location check, the
+    /// wrapper attestation, the declared target — are all held here, so this is the only place that
+    /// can answer without a second, necessarily weaker, notion of what was checked. See
+    /// [`ToolIdentity::changed_since_vetting`] for what "changed" is decided on and why the window
+    /// it closes cannot be closed completely with the standard library alone.
+    ///
+    /// A path is compared exactly as discovery recorded it. That is sound rather than lax: every
+    /// argument vector the suite launches takes its tool path *from* this record, so a spelling that
+    /// differed would mean a caller had invented a path of its own, which is a defect this
+    /// comparison should not paper over by canonicalizing until it matches.
+    pub fn confirm_tool_unchanged(&self, program: &Path) -> Option<String> {
+        self.vetted_records().into_iter().find_map(|record| {
+            if record.path() != Some(program) {
+                return None;
+            }
+            record
+                .identity()?
+                .changed_since_vetting(program)
+                .map(|change| format!("{}: {change}", record.role()))
+        })
+    }
+
     /// How a binary built for `target` is to be executed, or `None` when it cannot be.
     ///
     /// # Why this exists rather than a bare runner path
@@ -3657,10 +3849,16 @@ impl Capabilities {
     /// Coverage is reported as the enumerable matrix rather than as a ratio, because no ratio can
     /// be measured without instrumentation the project's dependency rule forbids.
     ///
-    /// The rendering is a pure function of the record and its configuration snapshot: no clock,
-    /// no process identifier, no map iteration and no fresh environment read, so two runs on the
-    /// same machine produce byte-identical text and the report is unaffected by how many threads
-    /// the test harness uses.
+    /// The rendering is a pure function of the record, its configuration snapshot and the
+    /// once-per-process credential snapshot [`redact_secrets`] holds: no clock, no process
+    /// identifier and no map iteration, so two runs on the same machine produce byte-identical text
+    /// and the report is unaffected by how many threads the test harness uses.
+    ///
+    /// [`redact_secrets`] is applied to the whole of it on the way out, because this text is printed
+    /// to the test runner's output and quoted into two assertion messages — a continuous-integration
+    /// log, in other words — and it carries discovered tool paths and refusal reasons, which the
+    /// per-banner redaction performed at capture time does not cover. Applying it once here rather
+    /// than at each of the three consumers is what makes the property structural.
     pub fn render_report(&self) -> String {
         let (targets, opt_levels) = self.config.effective_matrix();
         let mut lines = Vec::new();
@@ -3748,6 +3946,26 @@ impl Capabilities {
             ));
             lines.push(String::new());
         }
+
+        // Stated unconditionally, unlike the skipped entries above, because the value a child
+        // receives is a fact about every invocation in the run rather than an exception worth
+        // mentioning only when it occurs. It is also the one line that lets a maintainer see that the
+        // filter reaches the *whole* process tree: a compiler driver executes its own stages, and if
+        // this line showed the inherited path, a stage could be substituted from a directory the list
+        // above says was refused.
+        lines.push(String::from(
+            "Search path given to every child process — computed, never inherited",
+        ));
+        lines.push(format!(
+            "  PATH={}",
+            sanitize_text_for_report(&redact_secrets(&describe_child_search_path()))
+        ));
+        lines.push(String::from(
+            "  consequence: a compiler driver, an emulator and the timeout utility resolve their own \
+             helpers only within these directories, so a substituted `cc1`, `as` or `ld` cannot be \
+             reached from an entry that tool resolution refused",
+        ));
+        lines.push(String::new());
 
         // The static-link runtimes, in detail. `render_target_block` states each target's one-line
         // verdict; this states *which* input was found *where*, which is the only form that helps a
@@ -3932,7 +4150,7 @@ impl Capabilities {
              in the run summary",
         ));
 
-        lines.join("\n")
+        redact_secrets(&lines.join("\n"))
     }
 
     fn render_target_block(&self, target: Target, in_matrix: &[Target]) -> Vec<String> {
@@ -4037,9 +4255,10 @@ impl Capabilities {
     /// [`render_fingerprint`](Capabilities::render_fingerprint) is many lines long, and this value is
     /// carried on a single line by the run manifest and by every report. Its purpose there is
     /// comparison, not description: a reader who needs the detail has the fingerprint section of the
-    /// same report a few lines away. It carries no timestamp and no process identifier, so unlike
-    /// [`RunGeneration::token`](super::RunGeneration::token) it is safe to render into an artifact
-    /// documented as byte-identical for identical inputs.
+    /// same report a few lines away. It carries no timestamp and no process identifier, so it is safe
+    /// to render anywhere in an artifact documented as byte-identical for identical inputs — unlike
+    /// [`RunGeneration::token`](super::RunGeneration::token), which for exactly that reason is
+    /// confined to one comment field of one artifact and appears in no rendered text.
     pub fn configuration_fingerprint(&self) -> String {
         let config = &self.config;
         let behaviour = format!(
@@ -4088,6 +4307,17 @@ impl Capabilities {
         lines.push(format!("host-arch: {}", self.host_arch));
         lines.push(format!("host-os: {}", self.host_os));
         lines.push(format!("kernel: {}", self.kernel));
+        // The search path the *children* received, which is not the search path this process has.
+        // A divergence that turns out to have been produced by a substituted compiler stage is only
+        // attributable if the fingerprint records which directories that stage could have come from,
+        // and a maintainer comparing two machines needs to see that this one skipped an entry the
+        // other kept. Redacted before sanitization for the same reason every other recorded value is:
+        // a directory name is not a likely place for a credential, but the cost of assuming so is a
+        // credential committed inside a finding.
+        lines.push(format!(
+            "child-search-path: {}",
+            sanitize_text_for_report(&redact_secrets(&describe_child_search_path()))
+        ));
         lines.push(format!(
             "per-cell-timeout-secs: {}",
             self.config.timeout_secs()
@@ -4216,8 +4446,63 @@ fn join_opt_levels(levels: &[OptLevel]) -> String {
 /// legitimately lack is never an error, and neither is a tool that had to be terminated during its
 /// banner probe: both are recorded and both appear in the report.
 pub fn discover() -> HarnessResult<Capabilities> {
-    static CACHE: OnceLock<HarnessResult<Capabilities>> = OnceLock::new();
-    CACHE.get_or_init(discover_once).clone()
+    CAPABILITY_CACHE.get_or_init(discover_once).clone()
+}
+
+/// The one discovery this process performs, kept so a spawn path can borrow it.
+///
+/// Hoisted out of [`discover`] rather than nested inside it for a single reason:
+/// [`confirm_vetted_tools_unchanged`] has to read the vetted identities from the deepest frame in
+/// the harness — the statement before a `spawn` — where no capability record is in scope and where
+/// threading one down would mean an `Option` parameter through four modules whose `None` case would
+/// be a silent hole in the check. Borrowing the record every caller already shares closes that hole
+/// without changing a single signature.
+static CAPABILITY_CACHE: OnceLock<HarnessResult<Capabilities>> = OnceLock::new();
+
+/// Confirm that every vetted tool named anywhere in `argv` is still the file discovery inspected.
+///
+/// Returns [`None`] when nothing in `argv` names a vetted tool, or when each one that does is
+/// unchanged. Returns the first change found otherwise, already phrased for a diagnostic.
+///
+/// # Why the whole vector rather than its first element
+///
+/// The program actually executed is not always the tool under test. When the external `timeout`
+/// utility is present the launch becomes `<timeout> <seconds> <program> <arguments...>`, so the
+/// compiler or emulator whose identity matters has moved to the middle of the vector while the
+/// utility now occupies the front. Checking only the front would silently stop checking the
+/// compiler on precisely the machines that have the utility installed. Scanning every element
+/// checks both, in one pass, and needs no caller to say which shape it built.
+///
+/// Elements that name no vetted tool cost a handful of string comparisons and no system call, so a
+/// flag, a source path or an output path is skipped without touching the file system. A path is
+/// matched exactly as discovery recorded it, which is sound because every one of these vectors is
+/// assembled *from* the capability record: nothing re-spells a tool path between resolution and
+/// launch.
+///
+/// # Before discovery has completed this is honestly silent
+///
+/// [`CAPABILITY_CACHE`] is read with [`OnceLock::get`] and never initialized here. Discovery's own
+/// banner probes spawn the very tools it is in the middle of vetting, and a tool being vetted right
+/// now has no earlier vetting to be compared against; answering [`None`] states that, where
+/// triggering discovery from inside a spawn path would be a re-entrant call on a lock that is
+/// already held.
+pub fn confirm_vetted_tools_unchanged(argv: &[String]) -> Option<String> {
+    argv.iter()
+        .find_map(|argument| confirm_vetted_tool_unchanged(Path::new(argument)))
+}
+
+/// The same question asked about one path, for a caller that spawns a tool rather than a vector.
+///
+/// Both vetting tables are consulted, in the order a diagnostic should prefer: the capability record
+/// first, because a change there invalidates a comparison, and the process-group signalling utility
+/// second, because a change there invalidates a *sweep*. A path in neither table is not a vetted tool
+/// and produces [`None`].
+pub fn confirm_vetted_tool_unchanged(program: &Path) -> Option<String> {
+    CAPABILITY_CACHE
+        .get()
+        .and_then(|cached| cached.as_ref().ok())
+        .and_then(|capabilities| capabilities.confirm_tool_unchanged(program))
+        .or_else(|| confirm_signalling_tool_unchanged(program))
 }
 
 fn discover_once() -> HarnessResult<Capabilities> {

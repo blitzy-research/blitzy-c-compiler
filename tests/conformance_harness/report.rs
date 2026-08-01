@@ -89,19 +89,30 @@
 //! name-filtered run would be worse still — it writes no area file at all, so a previous full
 //! summary would simply survive and go on looking like this run's verdict.
 //!
-//! [`begin_session`] closes both holes. Exactly once per process, guarded by a [`OnceLock`] so
-//! that concurrent callers block until it has finished rather than racing it, it removes the two
-//! summary artifacts and every per-area artifact that existed when the process started. Every
-//! artifact this run then writes is stamped with a **session signature**: a deterministic,
-//! content-derived rendering of the effective matrix, the program filter, the verdict policies,
-//! the per-cell budget and the test-name filters this process was started with — the configuration
-//! that decides what a row means. [`try_finalize`] reads that stamp back and refuses to aggregate
-//! an artifact carrying any other signature, so two configurations can never be merged into one
-//! summary even if the invalidation was somehow defeated.
+//! [`prepare_namespace`] closes both holes, and it is the **only** path that clears anything here.
+//! Exactly once per process, guarded by a [`OnceLock`] so that concurrent callers block until it has
+//! finished rather than racing it, it refuses a live foreign owner, removes the two summary artifacts
+//! and the whole per-area directory, purges any temporary a crashed run left behind, recreates the
+//! per-area directory, and stamps the root with this run's ownership. Every level on the way to each
+//! of those removals is verified to be a real directory rather than a link first.
 //!
-//! Both [`write_area`] and [`try_finalize`] begin the session themselves before touching the
+//! There is deliberately no second, lighter entry point that merely scans the per-area directory and
+//! deletes the report-shaped files it finds. Clearing this directory is destructive, and a route that
+//! removed without first refusing a live foreign owner would delete a concurrent run's artifacts,
+//! while one that removed without verifying each level would follow a planted link and delete
+//! somewhere else entirely. Both hazards are real precisely because the four artifact paths are
+//! deterministic, so their names are predictable before the run that will write them.
+//!
+//! Every artifact this run then writes is stamped with a **session signature**: a rendering of the
+//! effective matrix, the program filter, the verdict policies, the per-cell budget and the test-name
+//! filters this process was started with — the configuration that decides what a row means — plus a
+//! token unique to this process. [`try_finalize`] reads that stamp back and refuses to aggregate an
+//! artifact carrying any other signature, so neither two configurations nor two runs of one
+//! configuration can be merged into one summary even if the clearing was somehow defeated.
+//!
+//! Both [`write_area`] and [`try_finalize`] prepare the namespace themselves before touching the
 //! report root, so the guarantee is structural rather than a convention the callers must remember:
-//! no artifact can be written and none can be read before invalidation has completed.
+//! no artifact can be written and none can be read before the clearing has completed.
 //!
 //! # Generation identity — why a summary never aggregates another run's file
 //!
@@ -113,14 +124,23 @@
 //! configuration. That is the one failure mode a report must never have, because its whole value is
 //! that a reader can trust what it says was actually run.
 //!
-//! Every machine-readable area report therefore opens with a generation preamble naming the run
-//! that wrote it and the configuration it ran under — see [`Generation`] — and [`try_finalize`]
-//! aggregates **only** files stamped with the generation of the process reading them. A file from
-//! another run is neither used nor deleted: it is listed as stale, by name and by the generation it
-//! carries, and it holds the summary back until this run replaces it. Clearing the report directory
-//! instead would be the wrong instrument, because the fourteen area tests run concurrently and a
-//! directory-wide delete would race with a sibling's write; an identity in the file achieves the
-//! same guarantee with no destructive step and no lock.
+//! Every machine-readable area report therefore opens with a generation preamble naming the run that
+//! wrote it, the configuration it ran under and the process that wrote it — see [`Generation`] — and
+//! [`try_finalize`] aggregates **only** files stamped with the generation of the process reading them.
+//! A file from another run is neither used nor deleted: it is listed as stale, by name and by the
+//! generation it carries, and it holds the summary back until this run replaces it. Clearing the
+//! report directory instead would be the wrong instrument on its own, because the fourteen area tests
+//! run concurrently and a directory-wide delete would race with a sibling's write; an identity in the
+//! file achieves the same guarantee with no destructive step and no lock.
+//!
+//! The identity is built from the run's actual inputs rather than a description of them. The sweep
+//! digest covers the effective matrix, every verdict policy and the test-name filters; the
+//! configuration digest covers those plus the discovered tool set and **the bytes of every program and
+//! every record in the corpus**, so a report written before a program was edited is recognised as
+//! describing a different corpus even though nothing about the configuration moved. And because two
+//! runs of one configuration over one corpus are by construction indistinguishable by any
+//! deterministic value, the preamble carries a per-process token as well — the single, narrowly drawn
+//! exception to the determinism rule below, argued in full where it is written.
 //!
 //! # Completeness is one predicate, used everywhere
 //!
@@ -135,7 +155,13 @@
 //!
 //! Identical inputs produce byte-identical reports. There is no wall-clock timestamp, no elapsed
 //! duration, no process identifier and no iteration over an unordered collection anywhere in the
-//! rendered text: rows are sorted by program, then target in [`Target::ALL`] order, then level in
+//! **rendered text** — meaning every Markdown artifact, every data row and every field of either
+//! summary. The one value in this module that is none of those is the `token=` field of an area
+//! report's generation preamble: a comment line, never rendered into a report a maintainer diffs, and
+//! present because without it a report an earlier identically configured run left behind cannot be
+//! refused. The reasoning, and the exact bound on where the token may appear, are recorded under
+//! "Generation identity". Everything else obeys the rule without exception: rows are sorted by
+//! program, then target in [`Target::ALL`] order, then level in
 //! [`OptLevel::ALL`] order, then oracle in [`Oracle::ALL`] order, and every map is ordered. A
 //! report that reordered itself between runs would produce phantom differences and lose exactly
 //! the regression value it exists to provide. The session signature obeys the same rule: it is
@@ -175,6 +201,7 @@
 //! suppresses no lint. Edition 2021, minimum supported Rust 1.70.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -188,14 +215,14 @@ use super::findings::{FindingId, COMMANDS_NAME};
 use super::manifest::{self, ExpectedDivergence};
 use super::sandbox::{claim_ownership, live_foreign_owner_identity, RUN_OWNER_ENTRY};
 use super::{
-    corpus_root, create_directory_chain_below, escape_markdown_inline, posix_quote,
-    read_file_bounded, remove_entry, report_root, require_directory_chain_below,
-    require_replaceable, run_generation, sanitize_text_for_report, shown_path, stable_digest,
-    stage_bytes_no_follow, AreaSpec, DivergenceClass, HarnessError, HarnessResult, OptLevel,
-    Oracle, Outcome, Replaceable, Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT,
-    MAX_INSPECTED_FILE_BYTES, MIN_PROGRAMS_PER_MANDATED_AREA, ORACLE_A_COMPARISON_COUNT,
-    ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT,
-    REFERENCE_CROSS_CELL_COUNT_MAX, REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
+    create_directory_chain_below, escape_markdown_inline, posix_quote, read_file_bounded,
+    redact_secrets, remove_entry, report_root, require_directory_chain_below, require_replaceable,
+    run_generation, sanitize_text_for_report, shown_path, stable_digest, stage_bytes_no_follow,
+    AreaSpec, DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Outcome, Replaceable,
+    Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT, MAX_INSPECTED_FILE_BYTES,
+    MIN_PROGRAMS_PER_MANDATED_AREA, ORACLE_A_COMPARISON_COUNT, ORACLE_B_COMPARISON_COUNT,
+    ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT, REFERENCE_CROSS_CELL_COUNT_MAX,
+    REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
 };
 
 /// Directory beneath [`report_root`] that holds the per-area reports.
@@ -308,6 +335,7 @@ const RECORD_UNAVAILABLE: &str = "unavailable";
 const RECORD_EXCLUSION: &str = "exclusion";
 const RECORD_DIAGNOSTIC: &str = "diagnostic";
 const RECORD_FINGERPRINT: &str = "fingerprint";
+const RECORD_PREFLIGHT: &str = "preflight";
 
 /// Longest free-text cell rendered into a Markdown table before it is truncated.
 ///
@@ -344,12 +372,34 @@ const TSV_SEPARATOR: char = '\t';
 // ---------------------------------------------------------------------------------------------
 // Generation identity
 //
-// One line, at the top of every machine-readable area report, saying which run wrote it and under
-// what configuration. It exists so that aggregation can be restricted to one run: a report file
-// outlives the process that wrote it, and a summary assembled from whatever happens to be on disk
-// would present another run's results as this one's. The line begins with `#`, so it is visibly not
-// a data row, and it is the first line of the file, so a file that lacks it is recognised as
-// predating the stamp on the very first read rather than after fourteen rows have been counted.
+// One line, at the top of every machine-readable area report, saying which run wrote it, under what
+// configuration, and — uniquely — which *process*. It exists so that aggregation can be restricted to
+// one run: a report file outlives the process that wrote it, and a summary assembled from whatever
+// happens to be on disk would present another run's results as this one's. The line begins with `#`,
+// so it is visibly not a data row, and it is the first line of the file, so a file that lacks it is
+// recognised as predating the stamp on the very first read rather than after fourteen rows have been
+// counted.
+//
+// # The one place a process token is written, and why it is here
+//
+// This module's determinism rule is that identical inputs produce byte-identical reports, and a
+// per-process token breaks that for whatever carries it. It is carried here anyway, in exactly one
+// field of exactly one line, because the alternative is worse: without it, a report left behind by an
+// earlier run of the *same configuration over the same corpus* is byte-for-byte a report this run
+// could have written, and the identity check that exists to refuse it cannot. Clearing the report
+// directory at the start of a run is the primary defence and it is not sufficient on its own — a
+// purge that cannot remove an entry reports the failure and the file survives it, which is exactly
+// the case this check is the last line against.
+//
+// The exception is kept as narrow as it can be:
+//
+//   * the token appears **only** in the `token=` field of an area report's generation preamble, which
+//     is a comment line whose sole consumer is the aggregation check it serves;
+//   * it appears in **no** rendered Markdown, in **no** summary field of either half, and in **no**
+//     diagnostic — a token-only mismatch is described in words rather than by quoting either token —
+//     so every artifact a maintainer diffs between runs stays byte-identical for identical inputs;
+//   * `run` and `config` are unchanged and still derived from configuration alone, so a *differently*
+//     configured file is still recognised by a deterministic value and can still be explained.
 // ---------------------------------------------------------------------------------------------
 
 /// First token of the generation preamble, which is also how a preamble is recognised.
@@ -367,17 +417,29 @@ const GENERATION_KEY_RUN: &str = "run";
 /// Preamble key naming the configuration the run was executed under.
 const GENERATION_KEY_CONFIG: &str = "config";
 
-/// Which run wrote an artifact, and under what configuration it ran.
+/// Preamble key naming the process that wrote the file.
+const GENERATION_KEY_TOKEN: &str = "token";
+
+/// Which run wrote an artifact, under what configuration it ran, and which process it was.
 ///
-/// The two halves answer different questions and both are needed. `run` identifies the **sweep** as
-/// a digest, so a file written under settings this run did not use is recognised as foreign in one
-/// comparison. `config` spells those settings out, so a foreign file's mismatch can be explained to
-/// a reader — "that report swept one target at two levels, this run sweeps four at three" is
-/// actionable, where an opaque identifier alone is not.
+/// The three fields answer three different questions and all three are needed.
+///
+/// - `run` identifies the **sweep** as a digest, so a file written under settings this run did not
+///   use is recognised as foreign in one comparison.
+/// - `config` spells those settings out, so a foreign file's mismatch can be explained to a reader —
+///   "that report swept one target at two levels, this run sweeps four at three" is actionable, where
+///   an opaque identifier alone is not.
+/// - `token` identifies the **process**, so a file left behind by an earlier run of an *identical*
+///   configuration over an *identical* corpus is recognised too. The first two fields are pure
+///   functions of the run's inputs and therefore cannot tell a repeat run from the run it repeats;
+///   this one can, and it is the only reason it exists. It is written into no other artifact and into
+///   no diagnostic — see the section comment above for why the determinism exception is drawn exactly
+///   here and nowhere wider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Generation {
     run: String,
     config: String,
+    token: String,
 }
 
 impl Generation {
@@ -390,6 +452,7 @@ impl Generation {
         Generation {
             run: String::from(run_identifier(caps)),
             config: configuration_fingerprint(caps),
+            token: String::from(run_generation().token()),
         }
     }
 
@@ -402,8 +465,9 @@ impl Generation {
     fn preamble(&self) -> String {
         format!(
             "{GENERATION_PREAMBLE_PREFIX}{TSV_SEPARATOR}{GENERATION_KEY_RUN}={}\
-             {TSV_SEPARATOR}{GENERATION_KEY_CONFIG}={}",
-            self.run, self.config
+             {TSV_SEPARATOR}{GENERATION_KEY_CONFIG}={}\
+             {TSV_SEPARATOR}{GENERATION_KEY_TOKEN}={}",
+            self.run, self.config, self.token
         )
     }
 
@@ -424,21 +488,34 @@ impl Generation {
         }
         let mut run = None;
         let mut config = None;
+        let mut token = None;
         for field in fields {
             let (key, value) = field.split_once('=')?;
             match key {
                 GENERATION_KEY_RUN => run = Some(String::from(value)),
                 GENERATION_KEY_CONFIG => config = Some(String::from(value)),
+                GENERATION_KEY_TOKEN => token = Some(String::from(value)),
                 _ => {}
             }
         }
+        // Every key is required, the process token included. A file that carries no token cannot be
+        // shown to belong to this process, so treating its absence as "belongs to whoever is reading"
+        // would reopen the hole the token closes. A file written by a harness that predates the token
+        // is therefore stale, which is the same treatment a file predating the whole preamble already
+        // receives: re-run the area to replace it.
         Some(Generation {
             run: run?,
             config: config?,
+            token: token?,
         })
     }
 
     /// How a generation is named in a diagnostic or a report table.
+    ///
+    /// The process token is deliberately omitted. This string is rendered into the area report's
+    /// Markdown, which is documented as byte-identical for identical inputs, and a token would change
+    /// it on every run for no reader's benefit — the token exists to be *compared*, not read. The
+    /// token-only mismatch is described in words where it arises, in [`read_area`].
     fn describe(&self) -> String {
         format!("run `{}`, configuration `{}`", self.run, self.config)
     }
@@ -453,10 +530,11 @@ impl Generation {
 ///
 /// Derived from configuration alone and memoized for the life of the process, so two identically
 /// configured runs stamp identical bytes — the determinism rule this module opens with. A run that
-/// merely *repeats* an earlier one is therefore indistinguishable by stamp, and deliberately so:
-/// recognising an earlier run's leftover file is [`begin_session`]'s job, which removes it before
-/// this run writes anything, while the stamp catches the file that purge could not reach — one
-/// written under different settings, or by a concurrently running sweep.
+/// merely *repeats* an earlier one is therefore indistinguishable **by this value**, which is why it
+/// is not the only thing stamped: [`prepare_namespace`] removes an earlier run's artifacts before this
+/// run writes anything, [`Generation`] additionally carries this process's own
+/// [`super::RunGeneration::token`], and this value is what makes a *differently configured* file
+/// recognisable as foreign and explainable to a reader.
 fn run_identifier(caps: &Capabilities) -> &'static str {
     &RunIdentity::of(caps).run
 }
@@ -641,20 +719,26 @@ impl RunIdentity {
 
     /// Derive the provenance from the things a report's meaning depends on.
     ///
-    /// Both halves are derived from configuration alone — never from a clock, a process identifier
-    /// or a counter — so two identically configured runs stamp identical bytes and their reports
-    /// stay diffable, which is the determinism rule this module opens with. Recognising an earlier
-    /// run's file does not need a varying token: [`begin_session`] removes the previous run's
-    /// artifacts before this run writes any, and the stamp then catches whatever that purge could
-    /// not reach.
+    /// Both halves are derived from configuration and corpus content alone — never from a clock, a
+    /// process identifier or a counter — so two identically configured runs over an unchanged corpus
+    /// stamp identical bytes and their reports stay diffable, which is the determinism rule this
+    /// module opens with. Recognising a file written by *another* run of the same configuration over
+    /// the same corpus is deliberately not this value's job: [`prepare_namespace`] removes the previous
+    /// run's artifacts before this run writes any, and [`Generation`]'s per-process token catches
+    /// whatever that purge could not reach.
     ///
     /// `run` digests the sweep that was configured: the effective matrix and policy above, plus
     /// the test-name filters this process was started with, which decide which areas could run at
     /// all. `identity` digests what the sweep ran against: the row schema, the effective matrix and
-    /// policy, the discovered tool set, and the corpus this run read. Each is recorded in the summary beside the digest, so a
-    /// mismatch can be diagnosed rather than merely detected. [`stable_digest`] is a fixed
-    /// specification rather than the standard library's hasher, whose output is documented as
-    /// unstable between releases and would make one run's rows unrecognisable to the next.
+    /// policy, the discovered tool set, and the corpus this run read — the latter as
+    /// [`manifest::corpus_content_digest`], which is the **bytes** of every program and every record
+    /// rather than their paths or their declared counts. That distinction is the whole point of the
+    /// field: an edit to a program changes nothing else in this digest, so a path-and-count derivation
+    /// would accept a report written before the edit and add its rows to a summary describing the
+    /// corpus after it. Each input is recorded in the summary beside the digest, so a mismatch can be
+    /// diagnosed rather than merely detected. [`stable_digest`] is a fixed specification rather than
+    /// the standard library's hasher, whose output is documented as unstable between releases and
+    /// would make one run's rows unrecognisable to the next.
     fn compute(caps: &Capabilities) -> RunIdentity {
         let config = caps.config();
         let (targets, levels) = config.effective_matrix();
@@ -676,10 +760,13 @@ impl RunIdentity {
             config.keep_work(),
         );
         let tools = caps.render_fingerprint();
-        let mut corpus = shown_path(&corpus_root());
-        for spec in AREAS.iter() {
-            corpus.push_str(&format!(";{}={}", spec.directory(), spec.program_count()));
-        }
+        // The corpus's own bytes, not its path and not the declared program counts. Everything else
+        // in this digest is unchanged by an edit to a program or a record — same configuration, same
+        // tools, same declared counts — so a digest derived from anything but the content would
+        // accept an area report written before the edit and add its rows to a summary describing the
+        // corpus after it. Content is the only input that detects that, and it costs no determinism:
+        // two runs over an unchanged corpus still digest identically.
+        let corpus = format!("content={}", manifest::corpus_content_digest());
         let names = libtest_filter_selection().all();
         let sweep = format!(
             "{matrix};filters={}",
@@ -736,92 +823,6 @@ impl RunIdentity {
              included it would describe a matrix this run did not execute."
         )
     }
-}
-
-// ---------------------------------------------------------------------------------------------
-// The report session
-//
-// The summary is assembled from the per-area files on disk, which is what buys once-only
-// finalization without a fifteenth test. The cost of that choice is that a file has no inherent
-// provenance: without one, an artifact left behind by an earlier run reads exactly like one this
-// run wrote. Two independent layers supply the missing provenance. This one removes the previous
-// run's artifacts exactly once per process, so the ordinary case never has a stale file to
-// confuse. [`RunIdentity`] above supplies the other: every artifact carries the configuration
-// that produced it and one stamped differently is refused rather than aggregated, so even a
-// failed invalidation cannot blend two runs into one summary.
-// ---------------------------------------------------------------------------------------------
-
-/// Invalidate the previous run's report artifacts, exactly once in this process.
-///
-/// Removes both summary artifacts and every per-area artifact that exists at the moment of the
-/// call, so that no file this run did not write can be aggregated into this run's summary, and so
-/// that a run which writes no area file at all — an infrastructure-only run, or one restricted by
-/// a test-name filter — cannot leave a previous full summary standing where a reader would take it
-/// for the current verdict.
-///
-/// Idempotent and safe to call from every test on every thread. The work is performed by whichever
-/// caller arrives first; [`OnceLock::get_or_init`] blocks the others until it has finished, so no
-/// thread can write an artifact into a directory another thread is still clearing. Both
-/// [`write_area`] and [`try_finalize`] call it before they touch the report root, which is what
-/// makes that ordering a property of this module rather than a rule its callers must remember.
-///
-/// # Errors
-///
-/// Fails when an existing artifact cannot be removed or the per-area report directory cannot be
-/// scanned. The failure is deliberately fatal and is returned to every subsequent caller: a run
-/// that could not establish a clean slate cannot distinguish its own results from the previous
-/// run's, and reporting that as a clean run is precisely the confusion this exists to prevent.
-pub fn begin_session() -> HarnessResult<()> {
-    static SESSION: OnceLock<HarnessResult<()>> = OnceLock::new();
-    SESSION.get_or_init(invalidate_prior_artifacts).clone()
-}
-
-/// Remove every report artifact of a previous run. The body of [`begin_session`].
-fn invalidate_prior_artifacts() -> HarnessResult<()> {
-    let context = "starting a differential conformance report session";
-    remove_if_present(context, &summary_markdown_path())?;
-    remove_if_present(context, &summary_tsv_path())?;
-    let areas = areas_dir();
-    let entries = match fs::read_dir(&areas) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(HarnessError::new(
-                String::from(context),
-                format!(
-                    "the per-area report directory {} could not be read, so artifacts of a \
-                     previous run could not be removed and this run's summary could have \
-                     aggregated them as if they were its own: {error}",
-                    shown_path(&areas)
-                ),
-            ));
-        }
-    };
-    // Only the two extensions this module publishes are removed, and only directly inside the
-    // per-area directory. A file the suite did not write is left exactly where it is: clearing a
-    // path is warranted for an artifact this module owns and would otherwise misread, and for
-    // nothing else.
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            HarnessError::new(
-                String::from(context),
-                format!(
-                    "an entry of the per-area report directory {} could not be read, so \
-                     artifacts of a previous run could not be removed: {error}",
-                    shown_path(&areas)
-                ),
-            )
-        })?;
-        let path = entry.path();
-        let is_report = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension == MARKDOWN_EXTENSION || extension == TSV_EXTENSION);
-        if is_report && path.is_file() {
-            remove_if_present(context, &path)?;
-        }
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1008,27 +1009,6 @@ fn purge_stale_temporaries(context: &str, root: &Path) -> HarnessResult<()> {
     Ok(())
 }
 
-/// Remove one file, treating an absent file as success.
-///
-/// An artifact that is not there is already in the state this wants it in, and two processes
-/// clearing the same stale file is a benign race rather than a failure.
-fn remove_if_present(context: &str, path: &Path) -> HarnessResult<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(HarnessError::new(
-            String::from(context),
-            format!(
-                "the report artifact {} is left over from a previous run and could not be \
-                 removed: {error}. It is not removed for tidiness: this run's summary is \
-                 assembled from the files in this directory, so a file another run wrote would \
-                 be reported as this run's result.",
-                shown_path(path)
-            ),
-        )),
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // Writing
 //
@@ -1154,7 +1134,7 @@ fn write_report_pair(
 // into a line-oriented artifact, and the functions below are the only places that decide how each
 // is made safe.
 //
-// Two distinct hazards are answered, and they need different treatments:
+// Three distinct hazards are answered, and they need different treatments:
 //
 // - **A line-oriented artifact can be forged.** A tab forges a column, a line feed splits one
 //   record into two, an escape introducer repaints a terminal, a directional override makes a line
@@ -1165,6 +1145,30 @@ fn write_report_pair(
 //   renderer honours raw HTML, and a link, an emphasis run or a code-span introducer can
 //   restructure the document around it. [`escape_markdown_inline`] neutralizes those, and is
 //   applied **only** on the way into the Markdown half.
+// - **A credential can be committed.** A report is an artifact a maintainer publishes, attaches to
+//   an issue or uploads from continuous integration, and captured text is the one thing in it the
+//   suite did not write: a compiler that echoes an environment variable back in a diagnostic, a tool
+//   banner that prints a licence key, a path assembled from a variable that holds one.
+//   [`redact_secrets`] removes what the environment says is a credential, and is applied to
+//   *everything*, in both artifacts, for the same reason sanitization is — a rule applied at some
+//   sinks is a rule a new sink will be written without.
+//
+// All three are applied at the same three funnels, and the order between them is fixed and
+// load-bearing: **redact, then sanitize, then escape for Markdown**. Redaction must come first
+// because it recognises a credential by the characters the environment holds, and a value containing
+// a tab, a newline or a byte sanitization spells out is no longer that value once it has been
+// escaped — redacting afterwards would search for text that no longer exists. This is the same order
+// `ubaudit.rs` and `flagprobe.rs` already apply to a command line, stated here once for every sink.
+//
+// Two things are deliberately **not** redacted, and both are outside this module. A finding's
+// captured streams and the diff computed from them hold the exact bytes a program produced, because
+// they are evidence rather than prose and a reproduction has to be able to compare them byte for
+// byte. And a finding's `commands.sh` holds exact paths, because a redacted command is not a runnable
+// command and the script's whole purpose is to be run. The trade is therefore bounded rather than
+// absent: exact bytes and exact commands only inside a finding directory beneath the build directory,
+// redacted text in everything the suite renders as a report. Nothing a *corpus program* prints can
+// carry a credential in any case — the authoring rules forbid reading the environment, and the child
+// environment those programs receive is cleared before they run.
 //
 // The rule the whole module follows, stated once so it can be checked: *untrusted text is escaped
 // for Markdown exactly once, at the moment it is placed into a Markdown-bearing string, and never
@@ -1189,12 +1193,16 @@ fn write_report_pair(
 
 /// One field of a machine-readable report.
 ///
-/// [`sanitize_text_for_report`] escapes every control character — including the tab and the line
-/// feed — and every formatting character that could make a line render as something other than
-/// what it says. A field therefore cannot forge a column, cannot split one record into two and
+/// [`redact_secrets`] first, for the reason the section comment above gives: this is one of the three
+/// funnels, and redacting here is what makes the machine-readable half safe as a whole rather than
+/// one sink at a time.
+///
+/// Then [`sanitize_text_for_report`], which escapes every control character — including the tab and
+/// the line feed — and every formatting character that could make a line render as something other
+/// than what it says. A field therefore cannot forge a column, cannot split one record into two and
 /// cannot repaint a verdict, which is what lets a row be counted as one outcome.
 fn tsv_field(raw: &str) -> String {
-    sanitize_text_for_report(raw)
+    sanitize_text_for_report(&redact_secrets(raw))
 }
 
 /// Assemble one machine-readable row from its fields, tab-separated.
@@ -1279,13 +1287,18 @@ fn quoted_block(raw: &str) -> Vec<String> {
 
 /// One fragment of untrusted text, safe in Markdown inline position.
 ///
-/// Sanitized first, so no control character or directional override survives, and then escaped for
-/// Markdown, so no character that is syntax there can act. The order matters: sanitization inserts
-/// backslash escapes of its own, and escaping for Markdown afterwards escapes those backslashes
-/// too, which is why `\x1b` renders as the four characters a reader can search for rather than as an
-/// escape Markdown then swallows.
+/// Three transformations in a fixed order, and every one of them depends on being where it is.
+/// [`redact_secrets`] first, because it matches the characters the environment holds and neither of
+/// the two escapings preserves them. Sanitization second, so no control character or directional
+/// override survives. Markdown escaping last, so no character that is syntax there can act —
+/// sanitization inserts backslash escapes of its own, and escaping for Markdown afterwards escapes
+/// those backslashes too, which is why `\x1b` renders as the four characters a reader can search for
+/// rather than as an escape Markdown then swallows.
+///
+/// This is the funnel the Markdown half rests on: [`table_cell`], [`optional_cell`], [`quoted_block`]
+/// and every direct interpolation of untrusted text reach a document through here.
 fn md(raw: &str) -> String {
-    escape_markdown_inline(&sanitize_text_for_report(raw))
+    escape_markdown_inline(&sanitize_text_for_report(&redact_secrets(raw)))
 }
 
 /// One fragment of untrusted text inside a Markdown code span, with the delimiters included.
@@ -1296,8 +1309,15 @@ fn md(raw: &str) -> String {
 /// replaced by the same visible escape spelling [`sanitize_text_for_report`] uses for a character it
 /// refuses to emit. Everything else passes through as the text it is, which is the point: an
 /// identifier, a path or a command reads correctly only if it is not littered with backslashes.
+///
+/// [`redact_secrets`] is applied first, as it is in the other two funnels. A code span is the sink
+/// that renders a path and a command line, so it is the likeliest of the three to carry a value an
+/// environment variable supplied.
 fn md_code(raw: &str) -> String {
-    format!("`{}`", sanitize_text_for_report(raw).replace('`', "\\x60"))
+    format!(
+        "`{}`",
+        sanitize_text_for_report(&redact_secrets(raw)).replace('`', "\\x60")
+    )
 }
 
 /// A filesystem path inside a Markdown code span.
@@ -2344,6 +2364,372 @@ fn render_matrix_table(dimensions: &[MatrixDimension]) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The preflight gates
+//
+// Two gates establish the preconditions the two differential oracles rest on, and neither is a
+// comparison: the flag-capability probe establishes that every flag a differential invocation passes
+// means the same thing to both compilers (requirement 3), and the undefined-behaviour audit
+// establishes that the corpus is free of undefined behaviour (requirement 1). While either is
+// unsatisfied, a PASS is not evidence of agreement and a divergence is not evidence of a defect —
+// requirement 1 says so in those terms, because a program containing undefined behaviour permits
+// both compilers to do anything.
+//
+// They therefore cannot be independent tests whose failure leaves every area's verdict standing.
+// Under the built-in harness the eighteen tests run concurrently in one process with no ordering
+// between them, so "run the gate test first" is not something a caller can arrange and not something
+// a test can assert. What is achievable, and what this section implements, is:
+//
+//   * the driver performs each gate **once per process**, memoized, so every test — area or
+//     infrastructure — observes the same result at the cost of one execution;
+//   * that result is **recorded here**, once, so that every artifact this module renders carries it
+//     without the gate having to be threaded through a dozen signatures or re-run per area;
+//   * a gate that did not hold is **named in the area report and in the run summary**, counted in
+//     the run's verdict, and asserted on by every area it governs.
+//
+// A gate that could not be performed at all is deliberately not the same as one that failed, and
+// neither is silently a pass. A gate that was performed and did not hold is a defect in the test
+// material: it blocks, always, and no setting excuses it. A gate that could not be performed because
+// the tool it needs is absent is the environment's incompleteness rather than the corpus's, so it is
+// reported as reduced coverage and escalated to a failure only under the strict setting — the same
+// rule the suite already applies to an oracle whose tooling is missing, and the same rule
+// `AuditReport::fails_run` and `FlagProbeReport::fails_run` already implement. Either way the gate is
+// named in every artifact, so neither shape can be mistaken for a pass, and the wording tells a
+// reader whether to fix a program or fix the machine.
+// ---------------------------------------------------------------------------------------------
+
+/// What one preflight gate established, or did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateVerdict {
+    /// The gate was performed and its precondition holds.
+    Held,
+    /// The gate was performed and its precondition does not hold.
+    Failed,
+    /// The gate could not be performed, so nothing has been established either way.
+    Unperformed,
+}
+
+impl GateVerdict {
+    /// The word the reports use.
+    pub fn label(self) -> &'static str {
+        match self {
+            GateVerdict::Held => "HELD",
+            GateVerdict::Failed => "FAILED",
+            GateVerdict::Unperformed => "UNPERFORMED",
+        }
+    }
+}
+
+impl fmt::Display for GateVerdict {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+/// One preflight gate as the reports record it.
+#[derive(Debug, Clone)]
+pub struct PreflightGate {
+    name: String,
+    requirement: String,
+    verdict: GateVerdict,
+    detail: String,
+    /// Areas whose comparisons this gate's outcome bears on. Empty means every area, which is the
+    /// ordinary case: a corpus-wide or configuration-wide precondition governs the whole run.
+    areas: Vec<String>,
+    /// Whether this gate's outcome forbids the comparisons it governs from being trusted.
+    blocks: bool,
+}
+
+impl PreflightGate {
+    /// Record one gate.
+    ///
+    /// `requirement` names the numbered requirement the gate establishes, and `detail` is the
+    /// sentence a report prints beside the verdict — for a gate that did not hold it must say what
+    /// was observed, because a bare `FAILED` sends a reader to the harness rather than to the
+    /// program or the machine that caused it.
+    ///
+    /// `areas` narrows the gate to the areas it actually bears on. The undefined-behaviour audit
+    /// uses that: a program in one area whose gate failed says nothing about another area's
+    /// programs, and failing every area for it would report thirteen defects where there is one.
+    ///
+    /// # Why `blocks` is given rather than derived from the verdict
+    ///
+    /// The verdict is an **observation** and `blocks` is a **policy decision**, and the two come
+    /// apart in exactly one case that the suite's own rules settle: a gate that could not be applied
+    /// because the tool it needs is absent. That is `Unperformed`, and it fails the run only under
+    /// the strict setting intended for continuous integration — outside it the gap is reported and
+    /// does not fail, because there the environment rather than the corpus is what is incomplete.
+    /// Deriving `blocks` from the verdict here would either contradict that rule or force the verdict
+    /// word to lie about what was observed.
+    ///
+    /// A `Failed` gate always blocks, whatever the caller passes, because a precondition that was
+    /// tested and does not hold is a defect in the test material and no setting excuses it.
+    pub fn new(
+        name: impl Into<String>,
+        requirement: impl Into<String>,
+        verdict: GateVerdict,
+        detail: impl Into<String>,
+        areas: Vec<String>,
+        blocks: bool,
+    ) -> PreflightGate {
+        PreflightGate {
+            name: name.into(),
+            requirement: requirement.into(),
+            verdict,
+            detail: detail.into(),
+            areas,
+            blocks: blocks || verdict == GateVerdict::Failed,
+        }
+    }
+
+    /// The gate's name, as the reports print it.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The numbered requirement this gate establishes.
+    pub fn requirement(&self) -> &str {
+        &self.requirement
+    }
+
+    /// What the gate established, or did not.
+    pub fn verdict(&self) -> GateVerdict {
+        self.verdict
+    }
+
+    /// What was observed, in the sentence a report prints beside the verdict.
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    /// Whether this gate's outcome forbids the comparisons it governs from being read as evidence.
+    pub fn blocks(&self) -> bool {
+        self.blocks
+    }
+
+    /// Whether this gate's outcome bears on the given area.
+    ///
+    /// A gate with no recorded areas governs every one of them, which is what a configuration-wide
+    /// precondition such as flag parity actually does.
+    pub fn governs(&self, area: &str) -> bool {
+        self.areas.is_empty() || self.areas.iter().any(|recorded| recorded == area)
+    }
+
+    /// The one-line account a report prints: verdict, requirement and detail.
+    pub fn describe(&self) -> String {
+        // Read through this type's own accessors rather than its fields, here and at every other
+        // read in this module, so a gate has exactly one read path and a future accessor cannot
+        // drift away from what is rendered. The same discipline the flag probe's row type follows.
+        format!(
+            "{} — {} ({}): {}",
+            self.verdict().label(),
+            self.name(),
+            self.requirement(),
+            self.detail()
+        )
+    }
+}
+
+/// Every preflight gate this run performed.
+#[derive(Debug, Clone, Default)]
+pub struct Preflight {
+    gates: Vec<PreflightGate>,
+}
+
+impl Preflight {
+    /// Assemble a preflight from its gates.
+    pub fn new(gates: Vec<PreflightGate>) -> Preflight {
+        Preflight { gates }
+    }
+
+    /// The gates, in the order they were recorded.
+    pub fn gates(&self) -> &[PreflightGate] {
+        &self.gates
+    }
+
+    /// Every gate that forbids the comparisons it governs from being read as evidence.
+    pub fn blocking(&self) -> Vec<&PreflightGate> {
+        self.gates.iter().filter(|gate| gate.blocks()).collect()
+    }
+
+    /// Every gate that blocks the given area, which is what an area asserts on.
+    pub fn blocking_area(&self, area: &str) -> Vec<&PreflightGate> {
+        self.blocking()
+            .into_iter()
+            .filter(|gate| gate.governs(area))
+            .collect()
+    }
+
+    /// Every gate that was not performed and, by the policy in force, does not block.
+    ///
+    /// Reported as reduced coverage rather than as a failure: nothing was established, so the report
+    /// may not call itself full, but the gap belongs to the machine rather than to the corpus and the
+    /// suite's own rule is that only the strict setting escalates it.
+    pub fn unperformed_permitted(&self) -> Vec<&PreflightGate> {
+        self.gates
+            .iter()
+            .filter(|gate| !gate.blocks() && gate.verdict() == GateVerdict::Unperformed)
+            .collect()
+    }
+}
+
+/// Record this run's preflight once, so that every artifact this module renders carries it.
+///
+/// The driver performs the gates and calls this exactly once per process. Recording rather than
+/// threading is deliberate: the summary is finalized by whichever area finishes last, on whichever
+/// thread that is, and the area reports are written by fourteen different threads. Passing the
+/// preflight down every one of those paths would mean fourteen chances to pass it and one to forget,
+/// and a renderer that had not been given it would silently omit the precondition instead of naming
+/// it.
+///
+/// Returns whether this call was the one that recorded it. A second call is a no-op and returns
+/// `false` rather than replacing the record: a preflight that could be overwritten mid-run would let
+/// a later, narrower gate result stand in for the one the areas were actually judged against.
+pub fn record_preflight(preflight: Preflight) -> bool {
+    RECORDED_PREFLIGHT.set(preflight).is_ok()
+}
+
+/// This run's recorded preflight, or `None` when the driver has not recorded one.
+///
+/// `None` is treated as fail-closed everywhere it is read: the reports say the gates were not
+/// recorded and stamp themselves partial, rather than rendering a section that looks like a clean
+/// preflight. A report that omitted the preconditions silently would invite exactly the reading the
+/// gates exist to prevent.
+fn recorded_preflight() -> Option<&'static Preflight> {
+    RECORDED_PREFLIGHT.get()
+}
+
+/// This run's preflight, recorded once by the driver. See [`record_preflight`].
+static RECORDED_PREFLIGHT: OnceLock<Preflight> = OnceLock::new();
+
+/// Record what the preflight means for a report's coverage claim.
+///
+/// Shared by the area assessment and the run assessment so the two cannot describe the same preflight
+/// differently. `area` narrows the blocking set to the gates that bear on one area; `None` reports the
+/// whole run's.
+///
+/// Two distinct facts are recorded under the two words this module already uses. A **blocking** gate
+/// makes the report *partial*: its comparisons are not evidence, so the report may not claim to
+/// describe one coherent result. A gate that merely could not be applied, and which the policy in
+/// force does not escalate, makes the report *reduced*: something the full sweep would have
+/// established was not established, which is the same shape as an oracle whose tooling is absent.
+fn note_preflight(coverage: &mut Coverage, area: Option<&str>) {
+    let Some(preflight) = recorded_preflight() else {
+        coverage.note_partial(String::from(
+            "This run's preflight gates were not recorded, so neither flag parity (requirement 3) \
+             nor undefined-behaviour freedom (requirement 1) has been established for the \
+             comparisons below. Nothing here may be read as evidence about a compiler.",
+        ));
+        return;
+    };
+    let blocking = match area {
+        Some(area) => preflight.blocking_area(area),
+        None => preflight.blocking(),
+    };
+    if !blocking.is_empty() {
+        coverage.note_partial(format!(
+            "{} preflight gate(s) did not hold, so the preconditions the differential oracles rest \
+             on are unmet and no comparison below is evidence about a compiler: {}",
+            blocking.len(),
+            blocking
+                .iter()
+                .map(|gate| gate.describe())
+                .collect::<Vec<String>>()
+                .join(" | ")
+        ));
+    }
+    let permitted: Vec<&PreflightGate> = preflight
+        .unperformed_permitted()
+        .into_iter()
+        .filter(|gate| area.map(|area| gate.governs(area)).unwrap_or(true))
+        .collect();
+    if !permitted.is_empty() {
+        coverage.note_reduced(format!(
+            "{} preflight gate(s) could not be applied on this machine, so the precondition each \
+             one establishes is unproven rather than proven or disproven. Under the policy in force \
+             that is reported and does not fail the run; {VAR_STRICT} escalates it: {}",
+            permitted.len(),
+            permitted
+                .iter()
+                .map(|gate| gate.describe())
+                .collect::<Vec<String>>()
+                .join(" | ")
+        ));
+    }
+}
+
+/// The preflight section every report carries, as Markdown lines.
+///
+/// Rendered whether or not the gates held, and rendered when they were not recorded at all, because
+/// the section's presence is what tells a reader the preconditions were considered. `area` narrows
+/// the blocking set to the gates that bear on one area; `None` reports the whole run's.
+fn render_preflight_section(area: Option<&str>) -> Vec<String> {
+    let mut lines = vec![
+        String::from("## Preflight gates — the preconditions the oracles rest on"),
+        String::new(),
+    ];
+    let Some(preflight) = recorded_preflight() else {
+        lines.push(String::from(
+            "**⚠️ NOT RECORDED.** This run did not record its preflight gates, so neither flag \
+             parity (requirement 3) nor undefined-behaviour freedom of the corpus (requirement 1) \
+             has been established. Every comparison below was still performed and is still \
+             reported, but none of it is evidence about a compiler: a program containing undefined \
+             behaviour permits both compilers to do anything, and a flag that means two things \
+             makes two invocations incomparable.",
+        ));
+        lines.push(String::new());
+        return lines;
+    };
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for gate in preflight.gates() {
+        rows.push((
+            format!("{} — {}", gate.name(), gate.requirement()),
+            format!("{} — {}", gate.verdict().label(), table_cell(gate.detail())),
+        ));
+    }
+    let blocking = match area {
+        Some(area) => preflight.blocking_area(area),
+        None => preflight.blocking(),
+    };
+    rows.push((
+        String::from("Verdict"),
+        match blocking.is_empty() {
+            true => String::from("✅ every gate that governs this report held"),
+            false => format!(
+                "⚠️ {} gate(s) did not hold, so no comparison here is evidence about a compiler",
+                blocking.len()
+            ),
+        },
+    ));
+    lines.extend(property_table(&rows));
+    lines.push(String::new());
+    if !blocking.is_empty() {
+        lines.push(String::from(
+            "A gate that did not hold is a defect in the **test material or the machine**, never a \
+             verdict about the compiler under test. Correct the program the audit names, or install \
+             the tool the probe names, and run again; the comparisons below are retained so the \
+             correction can be checked against them, not so they can be relied on.",
+        ));
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// How many recorded gates block, for a caller that needs the count alone.
+///
+/// `area` narrows the count to the gates that bear on one area; `None` counts the whole run's.
+///
+/// A run that recorded no preflight counts as **one** blocking gate rather than none. That is the
+/// fail-closed reading and it is deliberate: `0` would be indistinguishable, in every table and every
+/// machine-readable field, from a preflight that ran and held.
+fn blocking_gate_count(area: Option<&str>) -> usize {
+    match (recorded_preflight(), area) {
+        (Some(preflight), Some(area)) => preflight.blocking_area(area).len(),
+        (Some(preflight), None) => preflight.blocking().len(),
+        (None, _) => 1,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Coverage stamping
 //
 // A report that could be mistaken for a complete one is worse than no report, because it invites a
@@ -2442,6 +2828,10 @@ fn assess_area_coverage(
 ) -> Coverage {
     let mut coverage = Coverage::default();
     note_configuration_reductions(caps, &mut coverage);
+    // The preconditions come first, because they decide what the rest of the assessment is worth. An
+    // area whose gate did not hold is not a smaller run, it is a run whose comparisons cannot be read
+    // as evidence, so the report may never call itself full.
+    note_preflight(&mut coverage, Some(report.spec.directory()));
     let unavailable = report.tally.get(Verdict::Unavailable);
     if unavailable > 0 {
         coverage.note_reduced(format!(
@@ -2480,6 +2870,9 @@ fn assess_run_coverage(
 ) -> Coverage {
     let mut coverage = Coverage::default();
     note_configuration_reductions(caps, &mut coverage);
+    // As in the per-area assessment, and for the same reason: an unmet precondition is not a narrower
+    // run but a run whose comparisons are not evidence, so it settles the coverage claim first.
+    note_preflight(&mut coverage, None);
     let unavailable = run.tally.get(Verdict::Unavailable);
     if unavailable > 0 {
         coverage.note_reduced(format!(
@@ -2769,14 +3162,33 @@ fn true_false(value: bool) -> &'static str {
 ///
 /// The single authority on that question, so the table cell a reader sees and the diagnostic that
 /// makes the run notice cannot disagree about whether a finding is complete.
+///
+/// # Why neither test follows a final symbolic link
+///
+/// A finding directory's name is derived deterministically from the divergence, so both of the names
+/// checked here are predictable before the run that will publish them — which is exactly the
+/// precondition a planted link needs. [`Path::is_dir`] and [`Path::is_file`] answer about a link's
+/// *target*, so a link at either name would be certified as a present artifact, and this row sits
+/// beside [`reproduce_command`], which tells a reader to **execute** the script named. Metadata is
+/// therefore read without following, exactly as the findings writer's own completeness check does at
+/// the moment of publication: [`fs::symlink_metadata`] reports a link as a link, so `is_dir` and
+/// `is_file` on its result are false for one. The writer publishes a directory and regular files and
+/// nothing else, so anything else at one of these names was not published by this run and is reported
+/// as absent rather than as the artifact it is standing in for.
 fn finding_artifact_defect(directory: &Path) -> Option<&'static str> {
-    if !directory.is_dir() {
-        Some(FINDING_DEFECT_NO_DIRECTORY)
-    } else if !directory.join(COMMANDS_NAME).is_file() {
-        Some(FINDING_DEFECT_NO_COMMANDS)
-    } else {
-        None
+    let published_directory = fs::symlink_metadata(directory)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+    if !published_directory {
+        return Some(FINDING_DEFECT_NO_DIRECTORY);
     }
+    let published_commands = fs::symlink_metadata(directory.join(COMMANDS_NAME))
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false);
+    if !published_commands {
+        return Some(FINDING_DEFECT_NO_COMMANDS);
+    }
+    None
 }
 
 /// The state of a finding's artifact directory, checked rather than assumed.
@@ -2784,12 +3196,10 @@ fn finding_artifact_defect(directory: &Path) -> Option<&'static str> {
 /// A report that named a directory nobody could open would be worse than one that admitted the
 /// artifacts are missing, because the reproduction commands are the whole point of a finding.
 ///
-/// The check does not follow a final symbolic link, and that matters more here than anywhere else in
-/// this module: the row this feeds sits beside [`reproduce_command`], which tells a reader to
-/// **execute** the script named. A test that asked `is_file` would answer about a link's *target*, so
-/// a link planted at `commands.sh` would be reported as present and a reader would be directed to run
-/// whatever it pointed at. The finding writer publishes only regular files, so anything else at one
-/// of these names was not published by this run and is reported as what it is.
+/// The question itself is answered in exactly one place, [`finding_artifact_defect`], which is also
+/// where the reason the checks do not follow a final symbolic link is recorded. This function only
+/// puts that answer into the words the table uses, so the cell a reader sees and the diagnostic that
+/// makes the run notice can never describe different states.
 fn finding_artifact_state(directory: &Path) -> &'static str {
     match finding_artifact_defect(directory) {
         None => "✅ present",
@@ -3150,6 +3560,11 @@ fn render_area_markdown(
     ));
     lines.push(String::new());
 
+    // Ahead of the verdicts, deliberately. Requirement 1 makes undefined-behaviour freedom the
+    // precondition that makes both oracles sound, and requirement 3 does the same for flag parity, so
+    // a reader has to learn whether those held before reading a single comparison as evidence.
+    lines.extend(render_preflight_section(Some(spec.directory())));
+
     lines.push(String::from("## Area at a glance"));
     lines.push(String::new());
     lines.extend(property_table(&[
@@ -3168,6 +3583,16 @@ fn render_area_markdown(
         (
             String::from("Comparisons recorded"),
             report.tally.total().to_string(),
+        ),
+        (
+            String::from("Preflight gates governing this area that did not hold"),
+            match blocking_gate_count(Some(spec.directory())) {
+                0 => String::from("0 — every precondition this area rests on held"),
+                blocking => format!(
+                    "⚠️ {blocking} — no comparison in this area is evidence about a compiler; see \
+                     the Preflight gates section above"
+                ),
+            },
         ),
         (
             String::from("Per-cell execution budget"),
@@ -3637,6 +4062,12 @@ fn render_summary_markdown(
 
     lines.extend(render_provenance_section(run, generation));
 
+    // Before the verdict, because the verdict below depends on it: a run whose preconditions did not
+    // hold cannot report "no outcome fails this run" as though the comparisons meant something.
+    lines.extend(render_preflight_section(None));
+
+    let blocking_gates = blocking_gate_count(None);
+
     lines.push(String::from("## Run verdict"));
     lines.push(String::new());
     lines.extend(property_table(&[
@@ -3673,11 +4104,21 @@ fn render_summary_markdown(
             failing.to_string(),
         ),
         (
+            String::from("Preflight gates that did not hold"),
+            blocking_gates.to_string(),
+        ),
+        (
             String::from("Verdict"),
-            if failing == 0 {
-                String::from("✅ no outcome fails this run")
-            } else {
-                format!("⚠️ {failing} outcome(s) fail this run")
+            match (failing, blocking_gates) {
+                (0, 0) => String::from("✅ no outcome fails this run and every preflight gate held"),
+                (0, gates) => format!(
+                    "⚠️ no outcome fails this run, but {gates} preflight gate(s) did not hold, so \
+                     no outcome above is evidence about a compiler"
+                ),
+                (failing, 0) => format!("⚠️ {failing} outcome(s) fail this run"),
+                (failing, gates) => format!(
+                    "⚠️ {failing} outcome(s) fail this run and {gates} preflight gate(s) did not hold"
+                ),
             },
         ),
     ]));
@@ -3886,11 +4327,20 @@ fn render_summary_markdown(
     ));
     lines.push(String::new());
     // Rendered as an indented block, which Markdown treats as literal code: nothing inside one is
-    // document syntax, so sanitization for the line is the whole of what this sink needs and the
-    // banners read exactly as their tools printed them. Every fragment of it — tool paths included —
-    // has already been redacted of anything that looked like a credential by the capability record.
+    // document syntax, so escaping for Markdown is the one transformation this sink does not need and
+    // the banners read exactly as their tools printed them.
+    //
+    // The other two are still applied, and redaction is applied *here* rather than relied upon
+    // upstream. A tool banner is redacted by the capability record as it is captured, but a
+    // fingerprint line also carries a discovered tool path and a refusal reason, and neither of those
+    // passes through that redaction — so a directory name taken from a credential-bearing variable
+    // would otherwise reach the published summary. This is the same rule the three funnels apply; the
+    // only difference is which of the three transformations a code block needs.
     for line in caps.render_fingerprint().lines() {
-        lines.push(format!("    {}", sanitize_text_for_report(line)));
+        lines.push(format!(
+            "    {}",
+            sanitize_text_for_report(&redact_secrets(line))
+        ));
     }
     lines.push(String::new());
 
@@ -4065,7 +4515,10 @@ fn render_summary_markdown(
         ));
         lines.push(String::new());
         for note in &pruning {
-            lines.push(format!("- {}", sanitize_text_for_report(note)));
+            // Through `md` rather than sanitization alone: a note names a pruned path, so it is
+            // untrusted text in Markdown inline position exactly like every other, and this sink is
+            // no more entitled to skip the funnel than any other is.
+            lines.push(format!("- {}", md(note)));
         }
     }
     lines.push(String::new());
@@ -4280,10 +4733,25 @@ fn render_summary_tsv(
             .set(COL_LABEL, "outcomes_failing_run")
             .set(COL_COUNT, failing.to_string()),
     );
+    // The run's own verdict field accounts for the preconditions as well as the outcomes, because an
+    // aggregator that read `run_fails=false` while a gate was unmet would publish a green result for a
+    // matrix whose comparisons are not evidence. The two contributions are also published separately —
+    // `outcomes_failing_run` and `preflight_gates_blocking` — so a reader can tell which one it was.
+    let blocking_gates = blocking_gate_count(None);
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "preflight_gates_blocking")
+            .set(COL_COUNT, blocking_gates.to_string()),
+    );
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "preflight_held")
+            .set(COL_DETAIL, true_false(blocking_gates == 0)),
+    );
     rows.push(
         SummaryRow::new(RECORD_META)
             .set(COL_LABEL, "run_fails")
-            .set(COL_DETAIL, true_false(failing > 0)),
+            .set(COL_DETAIL, true_false(failing > 0 || blocking_gates > 0)),
     );
     rows.push(
         SummaryRow::new(RECORD_META)
@@ -4374,6 +4842,34 @@ fn render_summary_tsv(
 
     for reason in &coverage.reasons {
         rows.push(SummaryRow::new(RECORD_COVERAGE_REASON).set(COL_DETAIL, reason.clone()));
+    }
+
+    // One row per gate, so an aggregator reading only this half learns which precondition failed and
+    // what was observed, rather than only that the count above was not zero. A run that recorded no
+    // preflight emits one row saying exactly that: silence here would be indistinguishable from an
+    // aggregator that did not look.
+    match recorded_preflight() {
+        Some(preflight) => {
+            for gate in preflight.gates() {
+                rows.push(
+                    SummaryRow::new(RECORD_PREFLIGHT)
+                        .set(COL_LABEL, gate.name())
+                        .set(COL_REFERENCE, gate.requirement())
+                        .set(COL_VERDICT, gate.verdict().label())
+                        .set(COL_DETAIL, gate.detail()),
+                );
+            }
+        }
+        None => rows.push(
+            SummaryRow::new(RECORD_PREFLIGHT)
+                .set(COL_LABEL, "not_recorded")
+                .set(COL_VERDICT, GateVerdict::Unperformed.label())
+                .set(
+                    COL_DETAIL,
+                    "the driver recorded no preflight, so neither flag parity nor \
+                     undefined-behaviour freedom has been established for this run",
+                ),
+        ),
     }
 
     // The same dimension list the Markdown table and the coverage stamp were derived from, so the
@@ -4804,11 +5300,15 @@ pub fn write_area(area: &str, outcomes: &[Outcome], caps: &Capabilities) -> Harn
         )
     })?;
 
-    // Before anything is written: clear the previous run's artifacts, exactly once per process.
-    // Doing it here rather than trusting the caller is what makes the guarantee structural — no
-    // area file can reach the report root ahead of the invalidation that would have removed a
-    // stale one, on any thread, however the tests are filtered or ordered.
-    begin_session()?;
+    // Before anything is written: establish this run's ownership of the report directory and clear
+    // the previous run's artifacts, exactly once per process. Doing it here rather than trusting the
+    // caller is what makes the guarantee structural — no area file can reach the report root ahead of
+    // the clearing that would have removed a stale one, on any thread, however the tests are filtered
+    // or ordered. It is the *ownership-aware* preparation and the only clearing path there is: a
+    // second route that scanned and removed without first refusing a live foreign owner and without
+    // verifying every level on the way down would be able to delete a concurrent run's artifacts, and
+    // to do it through a redirected directory.
+    ensure_report_namespace(&format!("writing the report of feature area `{area}`"))?;
 
     let mut report = AreaReport::from_outcomes(spec, outcomes);
     let facts = CorpusFacts::for_area(spec);
@@ -5013,16 +5513,30 @@ fn read_area(spec: &'static AreaSpec, current: &Generation, identity: &RunIdenti
         // The configuration is named only when it differs, because the sweep digest alone already
         // settles that the file is foreign and repeating an identical fingerprint would crowd out the
         // one fact a reader needs.
-        let note = if generation.config == current.config {
+        //
+        // Neither token is quoted, in any branch. A token is unique to a process, so printing one
+        // here would put a value that changes on every run into the summary's stale-area list and
+        // cost this module its determinism rule for a string no reader can act on. What a reader
+        // needs is which of the three fields disagreed, and that is said in words.
+        let note = if generation.run != current.run && generation.config == current.config {
             format!(
                 "it names sweep `{}` though its configuration matches this run's, so it was \
                  written by a concurrent run; this run is `{}`.",
                 generation.run, current.run
             )
-        } else {
+        } else if generation.run != current.run || generation.config != current.config {
             format!(
                 "it was written by run `{}` under a different configuration, `{}`.",
                 generation.run, generation.config
+            )
+        } else {
+            String::from(
+                "it names this run's sweep and this run's configuration but a different process, so \
+                 it is an artifact of an earlier run over the same corpus under the same settings — \
+                 one that survived the clearing this run performs before it writes anything, or a \
+                 concurrent run of an identical configuration. Its rows are excluded rather than \
+                 counted: a total that included them would describe a matrix executed by a process \
+                 whose result nothing here can vouch for.",
             )
         };
         return AreaState::Stale(StaleArea {
@@ -5140,7 +5654,10 @@ fn read_area(spec: &'static AreaSpec, current: &Generation, identity: &RunIdenti
 /// whole summary because one file of fourteen was unreadable would hide thirteen areas' worth of
 /// results to punish one.
 pub fn try_finalize(caps: &Capabilities) -> HarnessResult<bool> {
-    begin_session()?;
+    // The same ownership-aware preparation `write_area` performs, and for the same reason: this
+    // function *reads* the report root, so it must not read it before an earlier run's artifacts
+    // have been cleared out of it. Remembered per process, so this is a no-op after the first area.
+    ensure_report_namespace("finalizing the differential conformance run summary")?;
     let Some(specs) = claim_finalization() else {
         return Ok(false);
     };

@@ -36,9 +36,12 @@ consistency in **both** directions on every run, plus the existence of every cit
 
 | Direction | Assertion | Why it exists |
 |---|---|---|
-| **Forward** | Every `expected_divergence.id` committed in any `.expected` record appears in this register. | An unregistered marker is exactly the silent exclusion requirement 5 forbids. |
+| **Forward — mention** | Every `expected_divergence.id` committed in any `.expected` record appears in this register. | An unregistered marker is exactly the silent exclusion requirement 5 forbids. |
+| **Forward — description** | Every such marker has exactly **one structured entry** here (§1.3), and every one of the entry's six fields — Identifier, Class, Scope, Program, Basis, Observed — **agrees with the record**. | Being mentioned is not being described. An identifier can sit in a heading while the register says nothing checkable, and the register could then drift away from the record it mirrors with no run noticing. |
 | **Reverse** | Every identifier appearing in this register corresponds to a real, **active** marker in a real `.expected` record. | The register must describe divergences that are actually exercised, not ones retired without retiring the entry. |
-| **Basis** | Every cited basis names a file that exists in this repository. | A marker without a real documented basis reclassifies a divergence on no authority at all. |
+| **Basis — containment** | Every cited path resolves to a document **inside this repository**, containment being decided on the fully resolved path. | A basis outside the repository is not something this repository documents, and an intermediate symbolic link must not be able to move the answer. |
+| **Basis — a real document** | Every cited document is **read**, through the suite's bounded reader: a symbolic link, a device node or a FIFO at the final component is refused, the opened handle is proved to be the entry that was inspected, and an oversized file is refused. | Existence was never the property that mattered. The earlier check followed a link and asserted only that *something* was there, so a basis could point through a link at anything readable and still pass. |
+| **Basis — a resolvable locator** | Every locator the citation contains resolves **inside** that document, and at least one locator is present (§2.4). | A citation a reader cannot follow is not a basis. This is what stops "the section that documents this limitation" from counting as an authority. |
 
 Two consequences follow, and both are load-bearing:
 
@@ -91,6 +94,48 @@ The register only makes sense against the closed verdict space the suite uses. I
 There is deliberately **no "skip because unsupported" verdict**. This register is what makes `XFAIL`
 reachable — so that a divergence can be *explained* — without letting `PASS` absorb a divergence
 nobody explained, and without a feature quietly disappearing from the corpus to avoid the question.
+
+### 1.3 The shape of a structured entry
+
+An entry is a **heading whose text contains the marker's identifier**, followed anywhere before the
+next heading by a **two-column table** stating six fields. The heading is what binds the entry to the
+marker; the table is what the audit compares. Everything else in the section is free prose, at
+whatever length the divergence deserves — an entry is expected to *explain* itself, and the skeleton
+exists so that the explanation cannot quietly disagree with the record beside the program.
+
+```text
+### <n> <identifier> — <short title>
+
+| Field | Value |
+|---|---|
+| Identifier | <the marker's expected_divergence.id, verbatim> |
+| Class | <one of the six class identifiers> |
+| Scope | <the marker's expected_divergence.scope, verbatim> |
+| Program | <area>/<program> |
+| Basis | <the marker's expected_divergence.basis, verbatim> |
+| Observed | <the marker's expected_divergence.observed> |
+```
+
+Five mechanical details, each of which exists because the alternative is a rule an author cannot
+satisfy or an audit that cannot decide:
+
+- **Field names may be emphasised.** `| **Basis** | … |` and `| Basis | … |` are the same row.
+- **A value may be wrapped in one pair of backticks.** The register renders a literal as a code span
+  so it reads correctly; the record holds the bare literal. Exactly one surrounding pair is unwrapped
+  before comparison, so `` `all oracles; all targets; all opt levels` `` matches the scope the record
+  writes plainly.
+- **A `|` inside a value is written `\|`**, as any Markdown table requires, and is unescaped before
+  comparison.
+- **`Program` is `<area>/<program>`** — the directory name and the program's file stem, without the
+  `.c` suffix. An entry naming the wrong program would send a reader to a construct the marker never
+  governed.
+- **`Observed` is compared with runs of whitespace collapsed**, and only because a table cell cannot
+  contain a newline while the record's `observed` field routinely does. The other five fields are
+  compared **exactly** after trimming, which is §2.4's character-for-character rule made mechanical
+  rather than merely asked for.
+
+Two entries for one identifier is a failure, not a redundancy: one marker is one investigation, and a
+reader faced with two entries cannot tell which is the authority.
 
 ## 2. The marker contract
 
@@ -159,6 +204,30 @@ expected one while the register still documented only the first. When a marker e
 cover the observation, the verdict falls through to `FINDING` and the detail names exactly which
 dimension failed to match.
 
+**Strictness has no shape exemption, so a build refusal must be scoped `all oracles`.** The four
+build-refusal classes — `compile_failure`, `link_failure`, `run_crash` and `timeout` — reach
+classification once per **oracle arm**, not once per cell, because each arm is settled against its
+own authority: the same-target reference capture for (a), the baseline capture for (b), the
+record's own `expected_stdout` for (c). An arm whose authority this environment cannot supply is
+reported `UNAVAILABLE` and never reaches classification; an arm the program's own record disables
+is a recorded exclusion and never reaches it either. So the arms that are classified are exactly
+the arms that held an authority, and the oracle dimension narrows a real set for a refusal just as
+it does for a comparison.
+
+A refusal denies **every** arm its subject, so a marker that documents one is scoped `all oracles`:
+
+```text
+expected_divergence.scope = all oracles; all targets; all opt levels
+```
+
+Writing `oracle_a` instead documents only the same-target reference comparison, and the
+cross-backend and golden-record arms of the same refusal are then reported as `FINDING` — the
+detail names the oracle dimension among the mismatches and states the `all oracles` remedy. That is
+the correct reading rather than a rough edge: an `oracle_a` basis records what the *reference
+compiler* accepts, which is evidence about one authority and says nothing about the other two. The
+fix is one word in the scope, in this register and in the program's record together, never a
+per-shape exemption in the matcher.
+
 ### 2.4 The basis grammar
 
 The value of `expected_divergence.basis` **must begin with a repository-relative file path**, then
@@ -171,17 +240,38 @@ docs/project-guide.md, the open risk register entry that this limitation belongs
 - The path is relative to the repository root. An absolute path is rejected, and so is any path
   containing a parent-directory component — a basis cites a repository artifact, not something
   outside it.
-- **The cited file must exist on disk.** This is machine-verified: the register audit resolves the
-  path against the package root and asserts it is a file.
+- **The cited document must exist, lie inside this repository, and be readable as a committed file.**
+  This is machine-verified. The audit resolves the path and requires the *fully resolved* result to
+  lie beneath the package root, so no symbolic link along the way can move the answer; then it
+  **reads** the document through the suite's bounded reader, which refuses a symbolic link, a device
+  node or a FIFO at the final component, proves the opened handle is the entry it inspected, and
+  refuses a file past the inspection ceiling. Existence alone was never the property that mattered —
+  the document is read because the section the marker cites has to be resolved inside it.
 - A basis that names a file but cites no section within it is rejected. A whole-document citation
   cannot be checked by a reader, which is the entire point of recording one.
+- **The citation must carry at least one locator, and every locator it carries must resolve.** This
+  is machine-verified against the document's own bytes. Three forms are recognised, and they are the
+  three §7's inventory already uses:
+
+  | Locator | Written as | Resolves when |
+  |---|---|---|
+  | A line | `line 246` | the document has at least that many lines |
+  | A line range | `lines 696-725`, or with an en dash | both ends are real line numbers and the range does not run backwards |
+  | A section number | `§0.6.2` | the document carries a Markdown heading for that number |
+  | A quoted phrase | `` `Explicitly Out of Scope` `` | the phrase occurs in the document verbatim |
+
+  Requiring **every** locator to resolve is what stops a correct one from carrying a stale one
+  alongside it — a line range that has drifted since it was written is exactly the kind of citation a
+  reader gives up on. Requiring **at least one** is what stops a citation from being unfalsifiable
+  prose: "the section that documents this limitation" names nothing a run or a reader can turn to, so
+  it is refused rather than accepted on trust.
 - **One canonical rendering, reproduced verbatim.** The string in the program's record is the
-  canonical one. Wherever this register mirrors it — the summary-table row in §4 and the detailed
-  subsection's **Basis** field — it must be reproduced **character for character**, including
-  punctuation and the exact list of items it enumerates. The path's existence is machine-verified;
-  the agreement between the record's wording and this register's is **not**, so a paraphrase in
-  either place is a defect no run will catch for you, and it leaves two slightly different accounts
-  of the same authority for the next reader to reconcile.
+  canonical one. Wherever this register mirrors it — the summary-table row in §4 and the structured
+  entry's **Basis** field — it must be reproduced **character for character**, including punctuation
+  and the exact list of items it enumerates. The structured entry's rendering **is** machine-verified
+  against the record (§1.1, §1.3), so a paraphrase there fails the run rather than surviving as a
+  second account of the same authority. A paraphrase in the §4 summary row is still a defect no run
+  will catch for you, because that row is prose the audit does not compare.
 
 In practice the only two files that qualify as a basis today are
 [`docs/technical-specifications.md`](../../docs/technical-specifications.md) and
@@ -495,12 +585,6 @@ existed, the cell would agree, the verdict would be `XPASS`, and **the run would
 in the test material rather than a defect in the compiler. Worse, the marker would blind the suite to
 a genuine future regression in exactly that construct.
 
-**Until then, a divergence here is a `FINDING`** — and that is the correct outcome, not a
-compromise: an undocumented divergence is precisely what requirement 6 defines a finding to be, and
-it is delivered as a reproducer with exact reproduction commands and a recorded minimization status,
-rather than excused. A run performs no automated reduction, so the manifest states that status
-instead of the artifact being described as reduced.
-
 **Until then, a divergence here is a `FINDING`** — and that is the correct outcome, not a compromise:
 an undocumented divergence is precisely what requirement 6 defines a finding to be. It is delivered
 as a **verbatim** reproducer — a byte-for-byte copy of this program — together with its recorded
@@ -714,7 +798,8 @@ compared at all, so it cannot diverge, and no marker may claim otherwise.
 ## 7. Documented bases available for future markers
 
 A marker may only reclassify a divergence on the authority of something this repository already
-documents, and the cited file must exist on disk (§2.4). Today that means one of exactly two files.
+documents, and the cited document must be contained, readable and carry the locator the citation
+names (§2.4). Today that means one of exactly two files.
 The list below is the inventory of citable sections, so that a maintainer minting a marker can find
 a real basis instead of inventing one — or discover that there is no documented basis, in which case
 the divergence is a **finding**, not an expected divergence.
@@ -770,9 +855,9 @@ text of any rule added later.
 | Constraint | What it requires | Consequence here |
 |---|---|---|
 | **C1 — no compiler source change** | `src/**`, `include/**`, `build.rs`, `Cargo.toml` and `Cargo.lock` are read-only reference material. | Nothing in this suite modifies any of them. **This directory contains no `.rs` file at any depth** — that is precisely what keeps Cargo blind to it, so it is never a build target and the package manifest needs no change at all. |
-| **C2 — no existing test weakened** | No existing test may be deleted, skipped, weakened or relaxed; no `#[ignore]` attribute may be added or removed. | The repository's ignored-test count stays **exactly 13**, asserted as an invariant rather than merely intended. No marker in this register changes an existing test, and the suite adds no ignored test of its own. |
+| **C2 — no existing test weakened** | No existing test may be deleted, skipped, weakened or relaxed; no `#[ignore]` attribute may be added or removed. | No marker in this register changes an existing test, and the suite declares no ignored test and no harness test function of its own, so it can move neither the repository's test count nor its ignored count — which is the part that is mechanical here. The count itself, **exactly 13 ignored**, is a whole-repository property no integration test can read, so it is measured by the health gate (`cargo test 2>&1 | grep "test result"`) once this suite and the compiler are on one branch. |
 | **C3 — never exclude a feature because it is difficult** | If a feature cannot be tested, say so explicitly and explain why, rather than dropping it. | **Every entry in §4 exists because of C3.** Case ranges (§4.1) are absent from every documented inventory and are tested anyway, with **no** marker minted on that omission; the wide and Unicode literal prefixes (§4.3) are likewise unenumerated and likewise fully tested; and `long double` (§4.2) has three different representations across four targets and is analysed here so that it is written rather than dropped when the floating-point area lands. Where a comparison genuinely cannot be made, the exclusion is narrowed to a **single oracle**, the program keeps running under the remaining oracles, and the reason is recorded in the program's own record — never here alone. |
-| **C4 — contained execution** | Generated programs may not reach the network or any path outside the sandbox working directory. | Discharged by two separate mechanisms, and keeping them apart is what makes the claim checkable. **Corpus-authoring policy:** every input is a literal in the program source; no program opens a socket or reads a file, and the whole corpus has exactly **one** fixture file — the header used by the include-path flag probe. **Path discipline:** each cell is launched with its own workspace as its working directory, and the harness confines every path it constructs to roots beneath the build directory. Neither is an operating-system sandbox: there is no namespace, `chroot`, seccomp filter, landlock profile or network restriction around any child, the child inherits the runner's environment, the external tools keep their own temporaries wherever they normally do, and whether a crash writes a core image outside the workspace is decided by the host's `kernel.core_pattern` and core-size limit rather than by the harness — see `README.md` §"C4 — Contained execution". Untrusted input must be run under an external sandbox. |
+| **C4 — contained execution** | Generated programs may not reach the network or any path outside the sandbox working directory. | Discharged by two separate mechanisms, and keeping them apart is what makes the claim checkable. **Corpus-authoring policy:** every input is a literal in the program source; no program opens a socket or reads a file, and the whole corpus has exactly **one** fixture file — the header used by the include-path flag probe. **Path discipline:** each cell is launched with its own workspace as its working directory, and the harness confines every path it constructs to roots beneath the build directory. **Environment isolation:** every child is spawned with the environment cleared and a small fixed set installed in its place — a search path restricted to the `PATH` entries that are absolute and not writable by an untrusted account, a fixed C locale, `TZ=UTC`, `TERM=dumb`, the strictest sanitizer options, and the cell's workspace under `HOME`, `TMPDIR`, `TMP` and `TEMP` — so no credential and no behaviour-changing variable reaches a program the suite does not control, and a compiler driver cannot be made to execute a substituted `cc1` or `as` from a directory tool resolution refused. None of the three is an operating-system sandbox: there is no namespace, `chroot`, seccomp filter, landlock profile or network restriction around any child; a tool that hard-codes a temporary path rather than reading `TMPDIR` keeps its own temporaries where it always did; and whether a crash writes a core image outside the workspace is decided by the host's `kernel.core_pattern` and core-size limit rather than by the harness — see `README.md` §"C4 — Contained execution". Untrusted input must be run under an external sandbox. |
 
 **Zero External Crate Dependency Rule.** Quoted verbatim from `docs/technical-specifications.md`
 §0.7: *"The `[dependencies]` section of `Cargo.toml` must remain completely empty at all times"*;
@@ -835,17 +920,24 @@ you skip one:
    on a clean workspace, on more than one run. Capture the output from each compiler and each
    backend involved.
 2. **Identify and verify the documented basis.** Find the actual file and section that
-   **explicitly documents the limitation** — §7 is the inventory of citable sections — and confirm
-   the file exists. An **omission** from an inventory is not a documented limitation: it records
-   that nothing mentions the construct, not that the implementation rejects it. **If there is no
-   documented basis, there is no expected divergence:** the correct outcome is a finding, recorded
+   **explicitly documents the limitation** — §7 is the inventory of citable sections — and write the
+   citation with a **locator the audit can resolve**: a line, a line range, a `§` section number or a
+   backtick-quoted phrase (§2.4). An **omission** from an inventory is not a documented limitation: it
+   records that nothing mentions the construct, not that the implementation rejects it. **If there is
+   no documented basis, there is no expected divergence:** the correct outcome is a finding, recorded
    in the findings register `tests/conformance/FINDINGS.md` (planned) with its reproducer.
 3. **Add all five `expected_divergence.*` keys** to the program's `.expected` record. Keep the scope
    no wider than the oracle, targets, levels and class actually observed (§2.3), keep the oracle it
-   describes enabled (§3.3), and write the observation as it was actually seen.
-4. **Add the summary-table row in §4 and a detailed subsection**, reproducing the record's basis
-   string **verbatim** in both places — one canonical rendering, character for character (§2.4) —
-   so that the record and this register cannot give two accounts of the same authority.
+   describes enabled (§3.3), and write the observation as it was actually seen. For one of the four
+   **build-refusal** classes the observed oracle set is *every* arm, because no artifact exists for
+   any of them to compare — so `all oracles` is the accurate scope there, not a wider one (§2.3).
+4. **Add the summary-table row in §4 and a structured entry** in the shape §1.3 defines: a heading
+   naming the marker, then a table stating Identifier, Class, Scope, Program, Basis and Observed.
+   Reproduce the record's basis string **verbatim** in both places — one canonical rendering,
+   character for character (§2.4) — so that the record and this register cannot give two accounts of
+   the same authority. The entry's six fields are compared against the record on every run, so a
+   mismatch fails immediately and names both readings; the §4 summary row is prose and is not
+   compared, so it is the one place a paraphrase can survive.
 5. **Re-run the audit** — `cargo test --test conformance infra_expected_divergence_register`, on
    the package-complete branch (§1.1) — and then the owning area, to confirm the divergence now
    classifies as `XFAIL` rather than `FINDING`.

@@ -36,14 +36,24 @@
 //! # What that write invariant does not claim
 //!
 //! It is a statement about **paths this harness constructs**, not an operating-system
-//! sandbox. Nothing here isolates syscalls or the network, enters a namespace or a `chroot`,
-//! clears the environment a child inherits, or sets `TMPDIR`, so an external tool the harness
-//! spawns keeps its own temporaries wherever it normally puts them, the bounding utility and
-//! the execution runners are executed from wherever they are installed, and a crash dump lands
-//! where the host's `kernel.core_pattern` says. What keeps the *programs under test* off the
-//! network and out of the wider filesystem is corpus-authoring policy — every program takes its
-//! whole input from literals in its own source — rather than enforcement in this code. The
-//! module documentation of `sandbox` states the full boundary in one place.
+//! sandbox. Nothing here isolates syscalls or the network, enters a namespace or a `chroot`, so a
+//! program that opened a socket or an absolute path would succeed; the bounding utility and the
+//! execution runners are executed from wherever they are installed; and a crash dump lands where
+//! the host's `kernel.core_pattern` says, which no safe standard-library API lets this code change
+//! between the fork and the exec. What keeps the *programs under test* off the network and out of
+//! the wider filesystem is corpus-authoring policy — every program takes its whole input from
+//! literals in its own source — rather than enforcement in this code. The module documentation of
+//! `sandbox` states the full boundary in one place.
+//!
+//! What this harness *does* enforce about a child, at every spawn site without exception, is its
+//! **environment**: [`isolate_child_environment`] clears it and installs only a computed search
+//! path, a fixed set of locale, time-zone, terminal and sanitizer settings, and the cell's own
+//! workspace under each of `HOME`, `TMPDIR`, `TMP` and `TEMP`. So a tool that writes a cache or a
+//! scratch file where those variables point does write inside the build directory. A driver that
+//! ignores them and hard-codes a path — `gcc -###` shows `/tmp/cc*` for the assembler input and the
+//! linker response file — is unaffected, because a variable cannot bind a program that never reads
+//! it. Environment isolation is therefore a real guarantee about what a child is *told* and not a
+//! guarantee about where every child writes.
 //!
 //! Edition 2021, minimum supported Rust 1.70.
 
@@ -76,10 +86,11 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Expected size of the build matrix. `report.rs` re-reports these counts on every run
 // and treats a discovered count that disagrees with one of them as a corpus defect.
@@ -2150,28 +2161,20 @@ fn validated_target_dir() -> Result<Option<PathBuf>, String> {
         manifest_dir().join(configured)
     };
 
-    // If the directory is already there, it must be a real directory. An entry that exists and is a
-    // symbolic link is refused rather than followed: it would silently relocate every workspace,
-    // every report and every finding this run publishes, while each artifact still named the path
-    // the caller asked for. A path that does not exist yet is accepted — the build directory is
-    // ordinarily created on first use, and refusing that would reject a legitimate first run.
-    match fs::symlink_metadata(&resolved) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(format!(
-                "{VAR_CARGO_TARGET_DIR} is set to {shown:?}, which is a symbolic link; it is \
-                 refused rather than followed, because a link at the build root would redirect \
-                 every workspace, report and finding this run publishes while each artifact still \
-                 named this path. The package-relative default build directory is used instead"
-            ));
-        }
-        Ok(metadata) if !metadata.is_dir() => {
-            return Err(format!(
-                "{VAR_CARGO_TARGET_DIR} is set to {shown:?}, which exists but is not a directory, \
-                 so nothing can be published beneath it; the package-relative default build \
-                 directory is used instead"
-            ));
-        }
-        _ => {}
+    // **Every existing level** of the resolved path must be a real directory — not merely the final
+    // component. Checking the leaf alone would leave the more dangerous arrangement untouched: a
+    // link planted at any level *above* the build directory relocates every workspace, every report
+    // and every finding this run publishes, and relocates the ownership-aware purges those roots
+    // perform, so a removal aimed inside the build tree would execute outside it — while the leaf
+    // itself was a perfectly ordinary directory and every artifact still named the path that was
+    // asked for. A level that does not exist yet ends the walk and is accepted, because the build
+    // directory is ordinarily created on first use and refusing that would reject a legitimate
+    // first run; `create_directory_chain_below` then verifies each level as it establishes it.
+    if let Some(defect) = directory_ancestry_defect(&resolved) {
+        return Err(format!(
+            "{VAR_CARGO_TARGET_DIR} is set to {shown:?}, whose chain of directories cannot be \
+             trusted: {defect}. The package-relative default build directory is used instead"
+        ));
     }
 
     Ok(Some(resolved))
@@ -2508,15 +2511,41 @@ pub fn fnv1a64(components: &[&str]) -> u64 {
     let mut hash = FNV_OFFSET_BASIS;
     for (index, component) in components.iter().enumerate() {
         if index > 0 {
-            hash ^= u64::from(DIGEST_SEPARATOR);
-            hash = hash.wrapping_mul(FNV_PRIME);
+            hash = fnv1a64_step(hash, DIGEST_SEPARATOR);
         }
-        for byte in component.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
+        hash = fnv1a64_bytes_from(hash, component.as_bytes());
     }
     hash
+}
+
+/// Hash one byte slice with FNV-1a, 64-bit, under the same specification as [`fnv1a64`].
+///
+/// Exists because the corpus-content identity has to digest **bytes**, not text. Converting a file
+/// lossily to a string first would map every invalid UTF-8 sequence to the same replacement
+/// character, so two files differing only in such a sequence would digest alike — which is precisely
+/// the silent equality a content identity exists to rule out.
+///
+/// The arithmetic is shared with [`fnv1a64`] through [`fnv1a64_bytes_from`] rather than repeated,
+/// for the reason [`stable_digest`] gives: two copies of a hash are two chances for one of them to
+/// drift, and a digest that differs by call site reports a mismatch between two artefacts that
+/// describe the same thing.
+pub fn fnv1a64_bytes(bytes: &[u8]) -> u64 {
+    fnv1a64_bytes_from(FNV_OFFSET_BASIS, bytes)
+}
+
+/// Absorb a byte slice into an in-progress FNV-1a accumulator.
+fn fnv1a64_bytes_from(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash = fnv1a64_step(hash, *byte);
+    }
+    hash
+}
+
+/// Absorb one byte into an in-progress FNV-1a accumulator: exclusive-or, then multiply.
+///
+/// The single copy of the arithmetic in this suite.
+fn fnv1a64_step(hash: u64, byte: u8) -> u64 {
+    (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
 }
 
 /// A component list as [`DIGEST_HEX_DIGITS`] lower-case hexadecimal digits.
@@ -2546,9 +2575,15 @@ pub fn digest_hex(components: &[&str]) -> String {
 //
 // - [`RunGeneration::token`] identifies *this process's* run. It is unpredictable, which is what
 //   makes it useful for claiming a one-shot action and for naming a temporary file no concurrent
-//   writer can also choose. It is deliberately **never** rendered into a report's Markdown or
-//   tab-separated bytes, because those artifacts are documented as byte-identical for identical
-//   inputs and a token would break that on every run.
+//   writer can also choose. It is deliberately **never** rendered into a report's Markdown or into
+//   any field of either summary, because those artifacts are documented as byte-identical for
+//   identical inputs and a token would break that on every run. It appears in exactly two places
+//   outside those artifacts: the `token=` field of an area report's generation preamble, which is a
+//   comment line whose only consumer is the machine check that refuses a report an earlier run of an
+//   identical configuration left behind; and the `run_token` line of a finding's `environment.txt`,
+//   so a maintainer holding a copied or archived finding can tell which run produced it. Both are
+//   argued where they are written, in `report.rs`'s generation-identity section and in
+//   `findings.rs`'s environment renderer.
 // - [`RunGeneration::configuration`] identifies the *configuration* the run was performed under. It
 //   is a pure function of that configuration, so it is stable across runs that were configured
 //   alike and differs the moment one of them was reduced, filtered or pointed at another compiler.
@@ -2571,8 +2606,11 @@ pub struct RunGeneration {
 impl RunGeneration {
     /// The token identifying this process's run.
     ///
-    /// Sixteen lower-case hexadecimal characters. Used to claim a one-shot action and to name a
-    /// temporary file, and never written into a report body.
+    /// Sixteen lower-case hexadecimal characters. Used to claim a one-shot action, to name a
+    /// temporary file, to stamp an area report's generation preamble so that an earlier run's file
+    /// cannot be aggregated into this run's totals, and to attribute a finding artifact to the run
+    /// that produced it. Never written into a report's rendered Markdown or into a summary field, for
+    /// the determinism reason the section comment above gives.
     pub fn token(&self) -> &str {
         &self.token
     }
@@ -2947,6 +2985,105 @@ pub fn require_real_directory(context: &str, path: &Path) -> HarnessResult<()> {
     Ok(())
 }
 
+/// The first *existing* level of `path` that is not a real directory, described, or `None`.
+///
+/// Walks from the filesystem root downwards and inspects every level of an absolute path with
+/// [`fs::symlink_metadata`], stopping at the first component that does not exist yet. A level that
+/// exists must be a real directory; a level that is a symbolic link, or that exists and is not a
+/// directory, is reported. A path whose levels are all real directories, and a path whose existing
+/// prefix is all real directories with the remainder simply absent, both answer `None`.
+///
+/// # Why the *whole* ancestry has to be walked, not just the leaf
+///
+/// Checking only the final component leaves the most useful attack completely unaddressed. The three
+/// build roots are derived from one configurable directory, so a link planted at *any* level above
+/// them relocates every workspace, every report and every finding this run publishes — and, worse,
+/// relocates the ownership-aware purges those roots perform, so a destructive step aimed inside the
+/// build tree would execute outside it. The leaf check would report nothing at all, because the leaf
+/// itself is a perfectly ordinary directory sitting under a redirected parent.
+///
+/// A level that does not exist yet is accepted and ends the walk. That is the ordinary first-run
+/// case — the build directory is created on demand — and the creating counterpart,
+/// [`create_directory_chain_below`], re-verifies each level it creates, so the missing remainder is
+/// established beneath a parent this walk has just confirmed.
+///
+/// The message is already report-safe: every path is rendered through [`shown_path`].
+fn directory_ancestry_defect(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return Some(format!(
+            "{} is not an absolute path, so the chain of directories above it cannot be identified, \
+             let alone verified",
+            shown_path(path)
+        ));
+    }
+    let mut walked = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => walked.push(prefix.as_os_str()),
+            Component::RootDir => walked.push(Component::RootDir.as_os_str()),
+            Component::Normal(name) => walked.push(name),
+            Component::CurDir | Component::ParentDir => {
+                return Some(format!(
+                    "{} contains a relative directory component, so the level it names cannot be \
+                     verified without resolving it; it is refused instead",
+                    shown_path(path)
+                ));
+            }
+        }
+        match fs::symlink_metadata(&walked) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Some(format!(
+                    "{} is a symbolic link, and it is a level above {}; a link anywhere on this \
+                     chain would redirect every artefact written beneath it — and every removal \
+                     performed beneath it — while each report still named the path that was asked \
+                     for, so it is refused rather than followed",
+                    shown_path(&walked),
+                    shown_path(path)
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Some(format!(
+                    "{} exists but is not a directory, and it is a level above {}, so nothing can \
+                     be published beneath it",
+                    shown_path(&walked),
+                    shown_path(path)
+                ));
+            }
+            Ok(_) => {}
+            // The first absent level ends the walk: everything below it is absent too, and the
+            // creating counterpart verifies each level as it establishes it.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                return Some(format!(
+                    "{} could not be inspected: {error}; it is a level above {}, and a chain that \
+                     cannot be verified is refused rather than assumed sound",
+                    shown_path(&walked),
+                    shown_path(path)
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Require every existing level of the absolute path `path` to be a real directory.
+///
+/// The ancestry counterpart of [`require_real_directory`], which inspects one level. See
+/// [`directory_ancestry_defect`] for why the whole chain has to be walked and why an absent level
+/// ends the walk rather than failing it.
+///
+/// # Errors
+///
+/// Returns an explanatory failure naming the first existing level that is a symbolic link, is not a
+/// directory, or could not be inspected — and naming the path whose ancestry was being verified, so
+/// a reader learns both which level is wrong and what it was blocking.
+pub fn require_real_directory_ancestry(context: &str, path: &Path) -> HarnessResult<()> {
+    match directory_ancestry_defect(path) {
+        None => Ok(()),
+        Some(defect) => Err(HarnessError::new(String::from(context), defect)),
+    }
+}
+
 /// Require that every directory from `root` down to `directory` inclusive is a real directory.
 ///
 /// `root` must already have been established — it is one of the three build roots — and is
@@ -3021,8 +3158,14 @@ pub fn require_directory_chain_below(
 /// real-directory check as every level below it, so a link *at* the root is refused just as one below
 /// it is. It is attempted rather than required to exist because the roots are established once by the
 /// driver, and losing an artefact to an absent parent directory would report a real result as a
-/// harness failure — which is worse than either. The root's own parent is the Cargo build directory,
-/// whose every ancestor was validated when [`build_root`] derived it.
+/// harness failure — which is worse than either.
+///
+/// The root's own **ancestry is verified first**, by [`require_real_directory_ancestry`], because
+/// `fs::create_dir_all` follows a symbolic link at any level and reports success. Verifying only the
+/// root after the fact would accept a root that had been created *through* a redirected parent, which
+/// is the one arrangement this walk exists to refuse — and it must be refused here rather than left
+/// to [`build_root`], because a caller may pass any root and the guarantee has to hold for whichever
+/// one it passes.
 ///
 /// The creating counterpart of [`require_directory_chain_below`], and the single implementation of
 /// this walk: `findings.rs` and `report.rs` both publish into deterministically named directories
@@ -3038,6 +3181,10 @@ pub fn create_directory_chain_below(
     root: &Path,
     directory: &Path,
 ) -> HarnessResult<()> {
+    // Before the creation, never after it: `fs::create_dir_all` follows a symbolic link at any level
+    // and reports success, so a root created through a redirected parent would pass the
+    // real-directory check below while sitting entirely outside the build tree.
+    require_real_directory_ancestry(context, root)?;
     // Normally a no-op: the driver establishes the three build roots before any area begins. The
     // outcome is deliberately ignored in favour of the verification on the next line, which is what
     // actually decides whether publication may proceed.
@@ -3092,11 +3239,6 @@ pub fn create_directory_chain_below(
         require_real_directory(context, &walked)?;
     }
     Ok(())
-}
-
-/// [`publish_bytes_no_follow`] for an artifact that is genuinely text.
-pub fn publish_text_no_follow(context: &str, path: &Path, text: &str) -> HarnessResult<()> {
-    publish_bytes_no_follow(context, path, text.as_bytes())
 }
 
 /// Require that `path` is either absent or a regular file, without following a final link.
@@ -3459,30 +3601,47 @@ pub fn require_replaceable(context: &str, path: &Path, kind: Replaceable) -> Har
 /// service with no compensating benefit: nothing the suite decides needs more bytes than this.
 pub const MAX_INSPECTED_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Read the whole of a regular file, refusing a link, a special file or an oversized one.
+/// Open `path` as a regular file, refusing a link or a special file, and prove the **opened handle**
+/// is the entry that was inspected.
 ///
-/// Three properties hold together, and each closes a distinct hazard:
+/// Returns the handle and the metadata read *from that handle*, so a caller sizes its buffer and
+/// bounds its read from the object it is actually holding rather than from a name that may since have
+/// been re-pointed.
 ///
-/// - the entry is inspected with [`std::fs::symlink_metadata`], so a symbolic link is refused
-///   rather than followed and a device node or FIFO — which can block without end — is refused
-///   rather than read;
-/// - the declared length is compared against `limit` **before** any byte is read, so an oversized
-///   file costs one metadata call rather than its own size in memory;
-/// - the read itself is bounded by [`std::io::Read::take`] as well, so a file that grew between
-///   the two calls still cannot exceed the limit.
+/// # The window this closes, and why the inspection alone does not close it
 ///
-/// # Errors
+/// Inspecting a name and then opening it are two operations on a *name*, and every path this suite
+/// reads is deterministic — a workspace is named after its cell, a report after its area, a finding
+/// after its identity — so the name is predictable before the run that will use it. Between the
+/// inspection and the open, that name can be replaced by a symbolic link to anywhere on the machine.
+/// The inspection would report a perfectly ordinary regular file and the open would read the link's
+/// target, while every diagnostic still named the path that was asked for. Nothing in the two-call
+/// sequence can detect that.
 ///
-/// Returns an explanatory failure naming the path for each of the conditions above and for an
-/// unreadable file.
-pub fn read_file_bounded(context: &str, path: &Path, limit: u64) -> HarnessResult<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
+/// So the identity is compared **after** the open, from the handle itself:
+///
+/// - the handle's own metadata must still describe a regular file, which is the check that cannot be
+///   raced at all, because it interrogates the object rather than the name;
+/// - on a platform that exposes them, the handle's device and inode numbers must equal the ones read
+///   before the open. They see through every spelling, so a replacement is caught whatever it was
+///   replaced with;
+/// - where they are not exposed, the regular-file check on the handle stands alone and the two
+///   answers are never mixed, so an absent identity cannot be mistaken for a match.
+///
+/// This does not make the sequence atomic — the standard library offers no way to open a path with
+/// `O_NOFOLLOW`, and no `unsafe` block or `libc` dependency is permitted here. What it does is convert
+/// a silent substitution into a named refusal, which is the achievable property.
+fn open_verified_regular_file(
+    context: &str,
+    path: &Path,
+) -> HarnessResult<(File, std::fs::Metadata)> {
+    let before = fs::symlink_metadata(path).map_err(|error| {
         HarnessError::new(
             String::from(context),
             format!("{} could not be inspected: {error}", shown_path(path)),
         )
     })?;
-    let file_type = metadata.file_type();
+    let file_type = before.file_type();
     if file_type.is_symlink() {
         return Err(HarnessError::new(
             String::from(context),
@@ -3504,6 +3663,95 @@ pub fn read_file_bounded(context: &str, path: &Path, limit: u64) -> HarnessResul
             ),
         ));
     }
+
+    let file = File::open(path).map_err(|error| {
+        HarnessError::new(
+            String::from(context),
+            format!("{} could not be opened: {error}", shown_path(path)),
+        )
+    })?;
+    let opened = file.metadata().map_err(|error| {
+        HarnessError::new(
+            String::from(context),
+            format!(
+                "{} was opened but the open file could not be inspected: {error}; without that \
+                 answer there is no way to show the handle describes the entry that was vetted, so \
+                 nothing is read from it",
+                shown_path(path)
+            ),
+        )
+    })?;
+    if !opened.file_type().is_file() {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{} was a regular file when it was inspected and the opened handle is not one, so \
+                 the entry was replaced between the two; nothing is read from it",
+                shown_path(path)
+            ),
+        ));
+    }
+    if let (Some(vetted), Some(held)) = (identity_of(&before), identity_of(&opened)) {
+        if vetted != held {
+            return Err(HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} is not the file that was inspected: it was device {} inode {} and the \
+                     opened handle is device {} inode {}, so the name was re-pointed between the \
+                     inspection and the open. Nothing is read from it, because bytes this suite \
+                     cannot attribute to a known file are not evidence",
+                    shown_path(path),
+                    vetted.0,
+                    vetted.1,
+                    held.0,
+                    held.1
+                ),
+            ));
+        }
+    }
+    Ok((file, opened))
+}
+
+/// The device and inode numbers of an entry, where the platform exposes them.
+///
+/// `None` on a platform that does not, which every caller must treat as "no answer" rather than as a
+/// match: mixing the two would let an absent identity read as an established one.
+fn identity_of(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+/// Read the whole of a regular file, refusing a link, a special file or an oversized one.
+///
+/// Four properties hold together, and each closes a distinct hazard:
+///
+/// - the entry is inspected with [`std::fs::symlink_metadata`], so a symbolic link is refused
+///   rather than followed and a device node or FIFO — which can block without end — is refused
+///   rather than read;
+/// - the **opened handle** is proved to be the entry that was inspected, by
+///   [`open_verified_regular_file`], so a name re-pointed between the inspection and the open is a
+///   named refusal rather than a silent read of somewhere else;
+/// - the length reported by that handle is compared against `limit` **before** any byte is read, so
+///   an oversized file costs one metadata call rather than its own size in memory;
+/// - the read itself takes `limit + 1` bytes and **refuses** the result when more than `limit`
+///   arrive. Taking exactly `limit` would return a prefix and call it the file: a file that grew
+///   after its length was read would be silently truncated, and a truncated artefact compared
+///   against a whole one is reported as a divergence in the compiler.
+///
+/// # Errors
+///
+/// Returns an explanatory failure naming the path for each of the conditions above and for an
+/// unreadable file.
+pub fn read_file_bounded(context: &str, path: &Path, limit: u64) -> HarnessResult<Vec<u8>> {
+    let (file, metadata) = open_verified_regular_file(context, path)?;
     if metadata.len() > limit {
         return Err(HarnessError::new(
             String::from(context),
@@ -3517,19 +3765,28 @@ pub fn read_file_bounded(context: &str, path: &Path, limit: u64) -> HarnessResul
         ));
     }
 
-    let file = File::open(path).map_err(|error| {
-        HarnessError::new(
-            String::from(context),
-            format!("{} could not be opened: {error}", shown_path(path)),
-        )
-    })?;
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
-    file.take(limit).read_to_end(&mut bytes).map_err(|error| {
-        HarnessError::new(
+    // One byte past the ceiling, so that overflow is *observed* rather than silently cut off.
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            HarnessError::new(
+                String::from(context),
+                format!("{} could not be read: {error}", shown_path(path)),
+            )
+        })?;
+    if bytes.len() as u64 > limit {
+        return Err(HarnessError::new(
             String::from(context),
-            format!("{} could not be read: {error}", shown_path(path)),
-        )
-    })?;
+            format!(
+                "{} grew past the {limit}-byte ceiling while it was being read, so what was \
+                 collected is a prefix rather than the file; it is refused instead of returned, \
+                 because a truncated artefact compared against a whole one would be reported as a \
+                 divergence in the compiler",
+                shown_path(path)
+            ),
+        ));
+    }
     Ok(bytes)
 }
 
@@ -3792,22 +4049,41 @@ pub fn escape_markdown_inline(raw: &str) -> String {
 //   silently remove the precondition that makes every divergence in this suite meaningful. The
 //   dynamic loader reads `LD_PRELOAD` and `LD_LIBRARY_PATH`; a compiler driver reads a dozen
 //   `*_INCLUDE_PATH` and `*_OPTIONS` variables that change the language it accepts.
+// - **A variable decides which program the child executes.** `PATH` is the case that matters, and
+//   it is the one variable a child genuinely needs, so it cannot simply be dropped: a compiler
+//   driver finds its own stages through it. It is therefore rebuilt from the vetted entries rather
+//   than inherited, because a driver handed the raw value would search directories that tool
+//   resolution had already refused — substituting a stage instead of the driver, one level below
+//   where the filter looked.
 //
-// The response is the same in both cases and is not negotiable per call site: clear the
-// environment and put back a small, documented, entirely suite-chosen set.
+// The response is the same in every case and is not negotiable per call site: clear the
+// environment and put back a small, documented, entirely suite-chosen set, in which even `PATH` is
+// a suite-computed value rather than an inherited one.
 // ---------------------------------------------------------------------------------------------
 
-/// The only variables a child of this suite inherits, and the reason each is required.
+/// `PATH` is the one variable a child needs from outside this file, and it is **not inherited**.
 ///
-/// `PATH` is kept because a compiler driver locates its own stages — `cc1`, `as`, `ld` — through
-/// it, and clearing it entirely makes every reference-compiler invocation fail with "cannot
-/// execute `cc1`". It is the one inherited value, and `env.rs` already refuses any entry of it
-/// that anyone on the machine could write into.
-const INHERITED_CHILD_VARIABLES: &[&str] = &["PATH"];
+/// A child does need a search path: a compiler driver locates its own stages — `cc1`, `as`, `ld`,
+/// `collect2` — through it, and clearing it entirely makes every reference-compiler invocation fail
+/// with "cannot execute `cc1`". What it must not receive is the *inherited* value.
+///
+/// [`env::sanitized_search_path`] supplies the trustworthy entries and nothing else — the same
+/// accepted list tool resolution used, so what a child searches and what the pre-flight report says
+/// was searched cannot disagree. Passing the raw value instead would reinstate one level down the
+/// substitution the resolution filter refused one level up: a `cc1` or an `as` planted in a
+/// world-writable directory would be executed by a driver this suite had vetted, while every artefact
+/// still named the vetted driver. That module documents the reasoning in full, including why an empty
+/// result leaves `PATH` unset rather than empty.
+///
+/// Nothing else is inherited, so there is no whitelist of inherited names to keep in step with this
+/// comment — the absence of such a list is the invariant.
+const CHILD_SEARCH_PATH_VARIABLE: &str = "PATH";
 
-/// The environment every child of this suite is given, beyond [`INHERITED_CHILD_VARIABLES`].
+/// The environment every child of this suite is given, alongside a computed
+/// [`CHILD_SEARCH_PATH_VARIABLE`] and the four names in [`CHILD_PRIVATE_DIRECTORY_VARIABLES`].
 ///
-/// Fixed rather than inherited, and chosen so that output is byte-reproducible: the C locale
+/// Fixed rather than inherited — nothing at all is inherited, which is the invariant recorded on
+/// [`CHILD_SEARCH_PATH_VARIABLE`] — and chosen so that output is byte-reproducible: the C locale
 /// makes number and message formatting invariant, `TZ=UTC` removes any dependence on the host's
 /// time zone, and `TERM=dumb` stops a tool deciding to emit colour escapes into a stream this
 /// suite compares byte for byte.
@@ -3846,32 +4122,65 @@ const FORCED_SANITIZER_VARIABLES: &[(&str, &str)] = &[
 
 /// Give `command` the suite's fixed environment, and nothing else.
 ///
-/// `private_directory` becomes both `HOME` and `TMPDIR`, so a tool that writes a cache, a history
-/// file or a scratch file puts it inside the cell's own workspace rather than into the invoking
-/// user's home directory or a shared temporary directory. That is what makes the hermeticity
-/// claim true of the *children* as well as of the harness: nothing outside the build directory is
-/// written even by a program the suite did not write.
+/// Three groups, and nothing outside them: the computed search path from
+/// [`env::sanitized_search_path`], the fixed names and values from [`child_fixed_environment`], and
+/// `private_directory` installed under each of [`CHILD_PRIVATE_DIRECTORY_VARIABLES`].
 ///
 /// Called by every spawn site in this suite without exception. A site that forgot it would
 /// silently reinstate the whole inherited environment, which is why there is no variant that
 /// takes an opt-out.
+///
+/// The set is enumerated by the two items above rather than written out here, because a finding's
+/// reproduction script has to install the *same* environment for its own invocations. One
+/// enumeration consumed twice cannot drift; two copies would, and the copy that drifted would be
+/// the one a reader on another machine actually ran.
 pub fn isolate_child_environment(command: &mut Command, private_directory: &Path) {
     command.env_clear();
-    for name in INHERITED_CHILD_VARIABLES {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
+    // Set from the vetted entries rather than inherited. `None` leaves it unset, which is the
+    // fail-closed outcome documented on `env::sanitized_search_path`: on a machine whose whole search
+    // path is writable by anyone there is no honest oracle, and a driver that cannot find `cc1` states
+    // that far better than one that silently runs whatever was planted.
+    if let Some(path) = env::sanitized_search_path() {
+        command.env(CHILD_SEARCH_PATH_VARIABLE, path);
     }
-    for (name, value) in FIXED_CHILD_VARIABLES {
+    for (name, value) in child_fixed_environment() {
         command.env(name, value);
     }
-    for (name, value) in FORCED_SANITIZER_VARIABLES {
-        command.env(name, value);
+    for name in CHILD_PRIVATE_DIRECTORY_VARIABLES {
+        command.env(name, private_directory);
     }
-    command.env("HOME", private_directory);
-    command.env("TMPDIR", private_directory);
-    command.env("TMP", private_directory);
-    command.env("TEMP", private_directory);
+}
+
+/// The variables pointed at the cell's own workspace, so a child writes its scratch state there.
+///
+/// A tool that writes a cache, a history file or a temporary file puts it inside the cell's workspace
+/// rather than into the invoking user's home directory or a shared temporary directory. That is what
+/// makes the hermeticity claim true of the *children* as well as of the harness. All four names are
+/// set because the three temporary-directory spellings are consulted by different tools and a tool
+/// that reads only the one this suite left unset would fall back to the shared directory.
+///
+/// Public because a finding's reproduction script has to set the same four, pointed at the reader's
+/// own scratch directory. Two lists would be two things to keep in step; this is one.
+pub const CHILD_PRIVATE_DIRECTORY_VARIABLES: &[&str] = &["HOME", "TMPDIR", "TMP", "TEMP"];
+
+/// Every fixed name and value a child of this suite receives, in the order they are applied.
+///
+/// The single enumeration of that set. [`isolate_child_environment`] installs it on a [`Command`],
+/// and a finding's reproduction script writes it into the shell function through which it runs every
+/// invocation, so a reproduction is performed under the environment the run used rather than under
+/// whatever the reader happens to have exported. Deriving both from one function is what makes that
+/// claim structurally true instead of a comment asserting it: a variable added to either table
+/// appears in both places, and one added to the script alone cannot exist.
+///
+/// Excluded deliberately, because neither is fixed: `PATH`, which is computed by
+/// [`env::sanitized_search_path`], and the four names in [`CHILD_PRIVATE_DIRECTORY_VARIABLES`], whose
+/// value is the cell's own workspace and therefore differs per cell and per machine.
+pub fn child_fixed_environment() -> Vec<(&'static str, &'static str)> {
+    FIXED_CHILD_VARIABLES
+        .iter()
+        .chain(FORCED_SANITIZER_VARIABLES.iter())
+        .copied()
+        .collect()
 }
 
 /// Substrings that mark an environment variable as likely to hold a credential.
@@ -3903,6 +4212,53 @@ const SECRET_NAME_MARKERS: &[&str] = &[
 /// What a redacted value is replaced by, spelled once so a reader can search for it.
 pub const REDACTED_PLACEHOLDER: &str = "[redacted]";
 
+/// Shortest value that is replaced wherever it appears, rather than only in its named form.
+///
+/// The bare-occurrence rule in [`redact_secrets`] is a substring replacement, so it cannot tell a
+/// credential from ordinary text that happens to spell the same characters. That is harmless for a
+/// value of credential length and destructive below it: a session identifier of `1` — and
+/// `XDG_SESSION_ID=1` is an entirely ordinary variable on a systemd host, whose name contains
+/// `SESSION` — would rewrite the digit in every count, every digest and every triple in every
+/// artifact the suite writes, replacing the whole of a report's evidence in order to hide one
+/// character that is not secret in the first place.
+///
+/// Eight is chosen because nothing shorter is a credential worth protecting by substring match, and
+/// because the two other defences still cover such a value completely: the `NAME=value` rule below
+/// is applied at **every** length, which is the shape an environment listing actually renders, and
+/// [`isolate_child_environment`] stops the value reaching a spawned tool at all, so there is no path
+/// by which a child can echo it back.
+const BARE_REDACTION_MIN_CHARS: usize = 8;
+
+/// Every credential-bearing variable of this process, read once and ordered for repeatability.
+///
+/// Read once because [`redact_secrets`] is applied to every field of every report row, and because
+/// a fresh read per field would make the result depend on when it was taken — two rows of one report
+/// could then be redacted under two different rules. One snapshot gives the whole run one rule,
+/// which is what the reporting module's determinism claim rests on.
+///
+/// Ordered by **descending value length**, then by name, because the replacements are applied in
+/// sequence and [`std::env::vars`] yields no defined order. Where one secret's value is a prefix of
+/// another's, replacing the shorter first would leave the tail of the longer one exposed —
+/// `abc` redacted before `abcdef` yields `[redacted]def`. Longest-first cannot do that, and fixing
+/// the order also makes the output a function of the environment rather than of iteration order.
+fn secret_variables() -> &'static [(String, String)] {
+    static SECRETS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    SECRETS.get_or_init(|| {
+        let mut found: Vec<(String, String)> = std::env::vars()
+            .filter(|(name, value)| !value.is_empty() && secret_bearing_variable(name))
+            .collect();
+        found.sort_by(|left, right| {
+            right
+                .1
+                .chars()
+                .count()
+                .cmp(&left.1.chars().count())
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        found
+    })
+}
+
 /// True when a variable of this name is treated as holding a credential.
 pub fn secret_bearing_variable(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
@@ -3922,18 +4278,35 @@ pub fn secret_bearing_variable(name: &str) -> bool {
 /// Two shapes are recognised, which between them cover how a value is actually rendered: the
 /// `NAME=value` form an environment listing uses, and the bare occurrence of a value the suite
 /// can still see in its own environment. The second is what catches a banner that prints a token
-/// without naming it.
+/// without naming it, and it is the one bounded by [`BARE_REDACTION_MIN_CHARS`] — for the reason
+/// recorded there, which is that a substring rule shorter than that destroys evidence instead of
+/// protecting it.
+///
+/// Cheap enough to sit on the hot path. The environment is read once by [`secret_variables`] and an
+/// environment holding no credential-bearing variable — the ordinary case, and the case in this
+/// suite's own sandbox — makes this an immediate return of the input, so applying it at every
+/// reporting sink costs nothing when there is nothing to redact.
 pub fn redact_secrets(raw: &str) -> String {
+    let secrets = secret_variables();
+    if secrets.is_empty() {
+        return String::from(raw);
+    }
     let mut text = String::from(raw);
-    for (name, value) in std::env::vars() {
-        if !secret_bearing_variable(&name) || value.is_empty() {
+    for (name, value) in secrets {
+        // Checked before either replacement, because `String::replace` allocates a fresh string
+        // whether or not it matched anything, and on the reporting path this runs for every field of
+        // every row. The named form contains the value as a substring, so a value that is absent
+        // rules both shapes out in one scan.
+        if !text.contains(value.as_str()) {
             continue;
         }
         text = text.replace(
             &format!("{name}={value}"),
             &format!("{name}={REDACTED_PLACEHOLDER}"),
         );
-        text = text.replace(&value, REDACTED_PLACEHOLDER);
+        if value.chars().count() >= BARE_REDACTION_MIN_CHARS {
+            text = text.replace(value.as_str(), REDACTED_PLACEHOLDER);
+        }
     }
     text
 }
@@ -4036,23 +4409,13 @@ pub fn terminate_process_group(pgid: u32, kill_tool: Option<&Path>) -> GroupTerm
     // "the group is already empty", which a kill of an empty group reports with the same non-zero
     // status as a kill that failed for any other reason.
     match signal_group(tool, "-0", &group) {
-        None => {
-            return GroupTermination::Unsupervised(format!(
-                "the `kill` utility at {} could not be run, so only the immediate child was \
-                 terminated and a descendant may have survived",
-                shown_path(tool)
-            ))
-        }
+        None => return GroupTermination::Unsupervised(unswept_reason(tool)),
         // No member at all: there is nothing to signal, and the postcondition already holds.
         Some(false) => return GroupTermination::Cleared,
         Some(true) => {}
     }
     if signal_group(tool, "-KILL", &group).is_none() {
-        return GroupTermination::Unsupervised(format!(
-            "the `kill` utility at {} could not be run, so only the immediate child was \
-             terminated and a descendant may have survived",
-            shown_path(tool)
-        ));
+        return GroupTermination::Unsupervised(unswept_reason(tool));
     }
     match signal_group(tool, "-0", &group) {
         // Exit status zero from a bare existence check means at least one member is still there.
@@ -4064,19 +4427,117 @@ pub fn terminate_process_group(pgid: u32, kill_tool: Option<&Path>) -> GroupTerm
     }
 }
 
+/// How long one `kill` invocation is given to finish before it is itself terminated.
+///
+/// Generous against any plausible honest duration — signalling a process group is a single system
+/// call and the utility around it does nothing else — and short against the run it must not stall.
+/// Up to three invocations are made per cleanup, so this is also a third of the worst case a single
+/// cleanup can cost.
+const GROUP_SIGNAL_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How often a `kill` invocation is polled while it is being waited for.
+///
+/// A poll rather than a blocking wait because the standard library offers no timed wait on a child,
+/// and short enough that the ordinary case — a utility that has already finished — adds no
+/// measurable delay to a cleanup that happens after every one of the suite's several thousand
+/// invocations.
+const GROUP_SIGNAL_POLL: Duration = Duration::from_millis(20);
+
+/// Why a sweep did not happen, distinguishing a refusal from an ordinary failure to run.
+///
+/// Computed only on the path where the sweep already failed, so the ordinary case pays nothing for
+/// it. The distinction is worth drawing because the two causes call for opposite responses: a utility
+/// that could not be executed is a condition of the machine, whereas one that is no longer the file
+/// that was resolved is a substitution, and reporting the second as the first is exactly the silence
+/// the pre-spawn confirmation exists to remove.
+fn unswept_reason(tool: &Path) -> String {
+    match env::confirm_vetted_tool_unchanged(tool) {
+        Some(change) => format!(
+            "the `kill` utility is no longer the file that was resolved — {change} — so it was \
+             not run; only the immediate child was terminated and a descendant may have survived. \
+             Refusing is deliberate: handing a signal and a process-group identifier to a program \
+             nothing vetted is worse than an unswept group, which this verdict states plainly"
+        ),
+        None => format!(
+            "the `kill` utility at {} could not be run, so only the immediate child was terminated \
+             and a descendant may have survived",
+            shown_path(tool)
+        ),
+    }
+}
+
 /// Send one signal to one process group, reporting whether the utility itself succeeded.
 ///
-/// `None` means the utility could not be run at all, which is a different fact from the group
-/// being absent and is why the return type is not a bare boolean.
+/// `None` means the utility could not be run, could not be waited for, **or was refused because it
+/// is no longer the file that was resolved** — each a different fact from the group being absent,
+/// which is why the return type is not a bare boolean. [`unswept_reason`] tells the last of the three
+/// apart from the other two when the caller reports it.
+///
+/// # Why the wait is bounded
+///
+/// This runs on the cleanup path, and the cleanup path is what a per-cell timeout depends on: the
+/// harness's watchdog fires, terminates the child, and then sweeps the child's process group so a
+/// descendant cannot outlive it holding a capture pipe. An unbounded wait here therefore turns the
+/// one mechanism that bounds a hung compiler into a hang of its own — and there is no outer bound
+/// left to catch it, because this *is* the outer bound. That is a worse failure than the one being
+/// cleaned up: a hung cell is reported as a timeout, whereas a hung cleanup stops the whole run with
+/// no verdict for anything.
+///
+/// The wait can genuinely fail to return. The utility is resolved from the machine, so it may be a
+/// script or a wrapper rather than the expected binary; and a `kill` invocation contends for the
+/// same process table as everything else on a loaded machine. Neither needs to be likely for the
+/// bound to be worth having, because the cost of the bound is one polled loop and the cost of its
+/// absence is the entire run.
+///
+/// On expiry the utility is itself killed and reaped, and the outcome is reported as "could not be
+/// run". That is accurate: an invocation that did not complete has established nothing about the
+/// group, and [`terminate_process_group`] turns it into an `Unsupervised` verdict, which states that
+/// a descendant may have survived rather than claiming a sweep that did not happen. The reap is
+/// bounded too, so a child that cannot be reaped leaves one zombie rather than a stalled run.
 fn signal_group(tool: &Path, signal: &str, group: &str) -> Option<bool> {
     let mut command = Command::new(tool);
     command.arg(signal).arg("--").arg(group);
     command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     isolate_child_environment(&mut command, &build_root());
-    command.status().ok().map(|status| status.success())
+    // The last statement before the launch. This utility is handed a signal and a process-group
+    // identifier, so a substitution after it was resolved would hand both to a program nothing
+    // vetted. Refusing produces `None`, which [`terminate_process_group`] reports as an honest
+    // `Unsupervised` verdict rather than a claimed sweep, and [`unswept_reason`] then names the
+    // substitution rather than filing it under the generic "could not be run".
+    if env::confirm_vetted_tool_unchanged(tool).is_some() {
+        return None;
+    }
+    let mut child = command.spawn().ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            // Still running. Fall through to the deadline test rather than sleeping first, so a
+            // utility that has already exited by the time of the second poll is not made to wait.
+            Ok(None) => {}
+            // The child can no longer be waited for at all, so no answer about the group is
+            // obtainable from it.
+            Err(_) => return None,
+        }
+        if started.elapsed() >= GROUP_SIGNAL_DEADLINE {
+            let _ = child.kill();
+            // Reaped rather than abandoned, so a cleanup that had to terminate its own helper does
+            // not accumulate a zombie for every cell it ran on. Bounded for the same reason the wait
+            // above is: this is the outermost bound in the suite, and nothing would catch it.
+            let killed_at = Instant::now();
+            while killed_at.elapsed() < GROUP_SIGNAL_DEADLINE {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) => thread::sleep(GROUP_SIGNAL_POLL),
+                }
+            }
+            return None;
+        }
+        thread::sleep(GROUP_SIGNAL_POLL);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

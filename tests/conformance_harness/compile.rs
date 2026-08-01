@@ -93,12 +93,16 @@
 //! writing over each other's binary and leaving a comparison to be made against a single file
 //! twice.
 //!
-//! Setting a working directory is not confinement, and the difference is worth stating: a
-//! driver that puts its intermediates under the system temporary directory instead — `gcc -###`
-//! shows `/tmp/cc*` for the assembler input, the object and the linker response file — keeps
-//! doing so, because nothing here sets `TMPDIR`, enters a namespace or filters a syscall. The
-//! guarantee is that *this module* constructs no path outside the cell's workspace and requires
-//! the artifact it goes on to execute to be inside it.
+//! Setting a working directory is not confinement, and the difference is worth stating. The
+//! environment *is* replaced rather than inherited — `isolate_child_environment` clears it and
+//! points `TMPDIR`, `TMP`, `TEMP` and `HOME` at the cell's own workspace — so a driver that
+//! consults those variables writes its intermediates inside the workspace. A driver that instead
+//! hard-codes a path under the system temporary directory — `gcc -###` shows `/tmp/cc*` for the
+//! assembler input, the object and the linker response file — keeps doing so, because a variable
+//! cannot bind a program that never reads it, and nothing here enters a namespace or filters a
+//! syscall. The guarantee is that *this module* constructs no path outside the cell's workspace,
+//! requires the artifact it goes on to execute to be inside it, and tells every child to keep its
+//! scratch state there.
 //!
 //! Standard input is the null device, both output streams are captured as raw bytes through
 //! pipes, and every invocation is bounded in time twice over: by the system timeout utility
@@ -144,7 +148,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::env::{kill_tool, Capabilities};
+use super::env::{confirm_vetted_tools_unchanged, kill_tool, Capabilities};
 use super::execute::TIMEOUT_UTILITY_OUTER_MARGIN;
 use super::manifest::{CommandSubstitutions, Manifest};
 use super::sandbox::{
@@ -889,6 +893,7 @@ pub struct CompileOutcome {
     stderr: Vec<u8>,
     stdout_integrity: CaptureIntegrity,
     stderr_integrity: CaptureIntegrity,
+    source: PathBuf,
     artifact: PathBuf,
     artifact_size: Option<u64>,
     duration: Duration,
@@ -951,6 +956,26 @@ impl CompileOutcome {
     /// own watchdog.
     pub fn timeout_tool_used(&self) -> bool {
         self.timeout_tool_used
+    }
+
+    /// The timeout utility this build was wrapped in, when it was wrapped in one.
+    ///
+    /// The first element of the spawned vector, which is where the wrapper sits: a wrapped launch is
+    /// `<utility> <seconds> <compiler> …`. Taken from the vector that was **spawned** rather than
+    /// from the capability record, for the same reason every other tool path a finding publishes is:
+    /// the artifact must state what ran, not what happened to be discovered.
+    ///
+    /// This exists because a finding whose compiler *refused* the program has no execution, and a
+    /// reproduction script that derived its bound only from an execution would then bound nothing —
+    /// leaving the one class of finding most likely to hang a reader's shell, a build that never
+    /// returns, reproduced without a bound. `None` means the run had no utility available and the
+    /// harness's own watchdog was the only bound, which no script can reproduce; the script says so
+    /// rather than pretending otherwise.
+    pub fn timeout_tool(&self) -> Option<&str> {
+        if !self.timeout_tool_used {
+            return None;
+        }
+        self.spawned_argv.first().map(String::as_str)
     }
 
     /// The per-invocation budget in force.
@@ -1053,6 +1078,23 @@ impl CompileOutcome {
     /// as the compiler's own diagnostics contain nothing this harness wrote.
     pub fn notes(&self) -> &[String] {
         &self.notes
+    }
+
+    /// The program this build compiled.
+    ///
+    /// Carried as its own field rather than recovered from [`CompileOutcome::argv`], because
+    /// recovering it means guessing: the only textual cue is the `.c` suffix, and the vector's first
+    /// element is a compiler path that a maintainer is entitled to have named `…/cc-13.c` or to have
+    /// installed in a directory ending that way. A finding's reproduction script substitutes this
+    /// argument with a path beside the script, so guessing wrong replaces the *compiler* with the
+    /// reproducer and the script silently reproduces nothing — while still reading, line for line,
+    /// like the invocation the run performed.
+    ///
+    /// The request that produced this outcome already had the answer as a typed path, and it has been
+    /// through the containment and regular-file checks [`CompileRequest`] performs on construction, so
+    /// keeping it costs one `PathBuf` and removes the guess entirely.
+    pub fn source(&self) -> &Path {
+        &self.source
     }
 
     /// Where the artifact was asked to be written.
@@ -1339,6 +1381,7 @@ pub fn build(request: &CompileRequest<'_>, caps: &Capabilities) -> HarnessResult
         stderr: capture.stderr,
         stdout_integrity: capture.stdout_integrity,
         stderr_integrity: capture.stderr_integrity,
+        source: request.source().to_path_buf(),
         artifact,
         artifact_size,
         duration: capture.duration,
@@ -2067,6 +2110,10 @@ impl StreamHarvest {
 ///   blocked writing into a pipe nobody is reading cannot occur. Stopping the reader at the cap
 ///   would close the first hazard and reopen the second, so the surplus is read and discarded
 ///   rather than left in the pipe, and the discarded quantity is reported on the outcome.
+/// - **Every vetted tool named in the argument vector is re-confirmed as the last statement before
+///   the launch**, so a compiler — or the timeout utility wrapping it — exchanged since pre-flight
+///   is refused rather than run. The whole vector is scanned rather than just its first element,
+///   because wrapping moves the compiler out of the front position and puts the utility there.
 /// - **The child is spawned into its own process group**, and the group — not merely the direct
 ///   child — is what gets signalled when the watchdog fires. A compiler driver's sub-processes
 ///   are the ordinary case here, and killing only the driver leaves the assembler or the linker
@@ -2125,6 +2172,25 @@ fn spawn_bounded(
     // already-wrapped vector, so nothing downstream can rebuild it and lose the clear.
     isolate_child_environment(&mut command, working_directory);
     own_process_group(&mut command);
+    // The last statement before the launch, deliberately, and it scans the whole vector rather than
+    // its first element: when the external timeout utility wraps the build the compiler has moved to
+    // the middle of the vector and the utility occupies the front, so both are vetted tools and both
+    // are checked here. Anything placed between this and the spawn would reopen the window it exists
+    // to narrow.
+    if let Some(change) = confirm_vetted_tools_unchanged(argv) {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "a tool this invocation is about to execute is no longer the file discovery \
+                 vetted — {change}. Nothing was launched. Every decision the pre-flight report \
+                 records about that tool, and the whole comparison this cell would have \
+                 contributed to, describes a file that is no longer there, so a build performed \
+                 anyway could not be attributed to the compiler the run claims to be testing. The \
+                 command was: {}",
+                posix_command_line(argv)
+            ),
+        ));
+    }
     let started = Instant::now();
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -2927,18 +2993,27 @@ fn first_non_empty_line(text: &str) -> Option<&str> {
 
 /// Render captured text so it is safe to place in a report, and short enough to belong in one.
 ///
-/// Two transformations, in this order and for two different reasons. Escaping comes first,
-/// because captured bytes are untrusted: a tab would forge a column in a tab-separated report, a
-/// carriage return would erase the line it ends, and an escape introducer would begin a terminal
-/// sequence that could repaint a verdict the run never reached. Truncation comes second, because a
-/// summary is one line and a compiler can print a great deal — and it is applied to the escaped
-/// text so the limit bounds what a reader actually sees.
+/// Three transformations, in this order and for three different reasons.
+///
+/// [`redact_secrets`] comes first, because it recognises a credential by the characters the
+/// environment holds and escaping would have altered them: a value containing a tab or a byte
+/// sanitization spells out is no longer the value being searched for once it has been escaped. This
+/// is an ordinary diagnostic excerpt rather than a command line, and it needs the same treatment for
+/// the same reason — a compiler that echoes an environment variable back in a warning puts it into
+/// every artifact this string reaches.
+///
+/// Escaping comes second, because captured bytes are untrusted: a tab would forge a column in a
+/// tab-separated report, a carriage return would erase the line it ends, and an escape introducer
+/// would begin a terminal sequence that could repaint a verdict the run never reached.
+///
+/// Truncation comes last, because a summary is one line and a compiler can print a great deal — and
+/// it is applied to the escaped text so the limit bounds what a reader actually sees.
 ///
 /// The elision is marked, so a truncated line is visibly truncated rather than merely short. The
 /// unabridged bytes remain in [`CompileOutcome::stderr`] and are what a finding artifact records,
 /// so nothing is lost by shortening what a summary shows.
 fn truncate_for_summary(text: &str) -> String {
-    let safe = sanitize_text_for_report(text.trim());
+    let safe = sanitize_text_for_report(&redact_secrets(text.trim()));
     let mut kept = String::with_capacity(safe.len().min(SUMMARY_EXCERPT_CHARS_MAX));
     for character in safe.chars().take(SUMMARY_EXCERPT_CHARS_MAX) {
         kept.push(character);
