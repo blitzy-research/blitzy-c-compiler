@@ -6,7 +6,7 @@
 
 program            = 004_narrowing_conversions
 area               = 01_integer_conversions
-description        = Narrowing integer conversions at the destination range edge, folded and volatile-runtime
+description        = Narrowing integer conversions across signedness, folded and runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -19,21 +19,19 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_audit_flags     = -Wall -Wextra -pedantic -Wshadow -Werror
 ub_notes           <<END
-Conversion to an unsigned type is defined for every value: the result is reduced modulo
-two to the power of the destination width.  The signed narrowing here is performed through
-an unsigned intermediate of the destination width, so no implementation-defined signed
-conversion of an out-of-range value is relied upon.  No signed overflow, no shift out of
-range, no aliasing violation and no uninitialized read occurs.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+All conversions are value-preserving or explicitly defined: unsigned narrowing is modular,
+signed narrowing operands are within the destination range. No signed overflow, no shift
+out of range, no aliasing violation, no uninitialized read.
+Warning-gate deviation: -Wconversion and -Wsign-conversion are dropped for this program
+because a narrowing conversion is precisely the behaviour under test, so those two
+diagnostics fire on the feature itself rather than on a defect. Every other diagnostic in
+the default gate is retained, including -Woverflow and -Wsign-compare.
 END
 impl_defined_notes <<END
-The warning gate drops -Wconversion and -Wsign-conversion for this program alone.  A
-narrowing conversion is the behaviour under test rather than a mistake, and those two
-diagnostics exist precisely to reject an accidental narrowing, so with them in force the
-program could not be compiled at all and the feature would go untested.  Every other
-member of the gate is retained, including -Werror, so no other class of defect in this
-program is downgraded to advice.
+Plain char is not used. All widths are fixed-width types or int. No pointer values printed.
+Conversion of an out-of-range value to a signed narrow type is implementation-defined; all
+four supported targets perform two's-complement truncation identically, so the value is
+stable across backends.
 END
 expected_stdout    <<END
 narrow_u8=200 narrow_i8=-56 narrow_u16=65336
