@@ -82,6 +82,8 @@ int main(void)
     volatile int vc = -1000;
     int fa, fs, fx, fsn, fxn;
     int ra, rs, rx, rsn, rxn;
+    int sa, sb, sc;
+    int chain_sub, chain_xor, chain;
     int matches;
 
     fa  = asm_add(1000, 37);
@@ -90,11 +92,34 @@ int main(void)
     fsn = asm_sub(37, 1000);
     fxn = asm_xor(-1000, 37);
 
-    ra  = asm_add((int)va, (int)vb);
-    rs  = asm_sub((int)va, (int)vb);
-    rx  = asm_xor((int)va, (int)vb);
-    rsn = asm_sub((int)vb, (int)va);
-    rxn = asm_xor((int)vc, (int)vb);
+    /* Each volatile object is read exactly once, and each read is a statement of its
+     * own.  An access to a volatile object is an observable side effect, and the
+     * relative order of side effects within a single argument list is unspecified,
+     * so passing two volatile operands directly to one call -- as an earlier form of
+     * this program did -- made the sequence of observable accesses depend on
+     * unspecified evaluation order.  Snapshotting first separates every volatile
+     * access from the next by a sequence point.  It costs the test nothing: the
+     * snapshots are still loaded from volatile storage, so the backend must emit
+     * genuine loads and the asm operands still consume runtime values rather than
+     * folded constants. */
+    sa = va;
+    sb = vb;
+    sc = vc;
+
+    ra  = asm_add(sa, sb);
+    rs  = asm_sub(sa, sb);
+    rx  = asm_xor(sa, sb);
+    rsn = asm_sub(sb, sa);
+    rxn = asm_xor(sc, sb);
+
+    /* The chain is computed in three separate statements rather than as nested call
+     * arguments.  Nested, the evaluation order of the two inner calls relative to
+     * each other would be unspecified, and each of them read two volatile objects;
+     * sequenced, the three asm bodies still execute with two live intermediate
+     * results, so register allocation is exercised across them exactly as before. */
+    chain_sub = asm_sub(sa, sb);
+    chain_xor = asm_xor(sa, sb);
+    chain     = asm_add(chain_sub, chain_xor);
 
     matches = (fa == 1000 + 37) && (fs == 1000 - 37) && (fx == (1000 ^ 37))
            && (fsn == 37 - 1000) && (fxn == (-1000 ^ 37))
@@ -112,7 +137,7 @@ int main(void)
     printf("asm_runtime_xor=%d\n", rx);
     printf("asm_runtime_sub_neg=%d\n", rsn);
     printf("asm_runtime_xor_neg=%d\n", rxn);
-    printf("asm_chain=%d\n", asm_add(asm_sub((int)va, (int)vb), asm_xor((int)va, (int)vb)));
+    printf("asm_chain=%d\n", chain);
     printf("asm_matches_c=%d\n", matches);
     return 0;
 }

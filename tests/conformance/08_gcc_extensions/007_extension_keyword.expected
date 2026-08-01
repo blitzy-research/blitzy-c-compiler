@@ -13,6 +13,25 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
 ub_notes           <<END
+UB-FREEDOM ARGUMENT. There is no signed overflow: the int computations are 4+9, 13*2,
+6*6+1, 4*3+1 and 13+87, all tiny, and the long long values 1234567890123 and
+1000000000000+23 are far from the 64-bit limits. No shift operator is used. No pointer,
+array or aggregate is used, so there is no aliasing violation and no one-past-end pointer.
+Every object is initialized before it is read, including every statement-expression local.
+No object is modified twice between sequence points. Every printf call receives at most one
+side-effecting argument. Nothing depends on padding bytes or on the addresses of unrelated
+objects.
+
+MACRO LOCAL NAMES ARE DISJOINT AND NO MACRO IS NESTED INSIDE ITSELF. Nesting a
+statement-expression macro inside itself is a real hazard under this program's own gate:
+EXT_MAX(EXT_MAX(1, 7), 5) produces "error: declaration of 'ext_max_x_' shadows a previous
+local [-Werror=shadow]", because the inner expansion's locals shadow the outer's.
+-Wshadow is in the area gate and -Werror makes it fatal. Two differently named macros
+therefore exist: EXT_MAX uses ext_max_x_ and ext_max_y_, EXT_MIN uses ext_min_p_ and
+ext_min_q_, so the nesting EXT_MAX(EXT_MIN(7, 1), 5) is safe. Every inline statement
+expression likewise has a uniquely suffixed local.
+END
+impl_defined_notes <<END
 UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
 -pedantic from the default warning gate. Reason: the constructs under test are
 non-standard GCC extensions by definition, and -pedantic exists precisely to reject
@@ -31,25 +50,6 @@ forbids braced-groups within expressions [-Werror=pedantic]". Within the suite t
 observable assertion is that the wrapped constructs compile and behave correctly, which
 oracle a and oracle b both verify from the printed output.
 
-UB-FREEDOM ARGUMENT. There is no signed overflow: the int computations are 4+9, 13*2,
-6*6+1, 4*3+1 and 13+87, all tiny, and the long long values 1234567890123 and
-1000000000000+23 are far from the 64-bit limits. No shift operator is used. No pointer,
-array or aggregate is used, so there is no aliasing violation and no one-past-end pointer.
-Every object is initialized before it is read, including every statement-expression local.
-No object is modified twice between sequence points. Every printf call receives at most one
-side-effecting argument. Nothing depends on padding bytes or on the addresses of unrelated
-objects.
-
-MACRO LOCAL NAMES ARE DISJOINT AND NO MACRO IS NESTED INSIDE ITSELF. This is the hazard
-that broke an earlier draft of this program: EXT_MAX(EXT_MAX(1, 7), 5) produces "error:
-declaration of 'ext_max_x_' shadows a previous local [-Werror=shadow]", because the inner
-expansion's locals shadow the outer's. -Wshadow is in the area gate and -Werror makes it
-fatal. Two differently named macros therefore exist: EXT_MAX uses ext_max_x_ and
-ext_max_y_, EXT_MIN uses ext_min_p_ and ext_min_q_, so the nesting
-EXT_MAX(EXT_MIN(7, 1), 5) is safe. Every inline statement expression likewise has a
-uniquely suffixed local.
-END
-impl_defined_notes <<END
 Nothing implementation-defined is observed, so no target restriction is needed and all
 four targets are compared.
 

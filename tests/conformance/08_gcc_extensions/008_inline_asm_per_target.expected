@@ -13,15 +13,6 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
 ub_notes           <<END
-UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
--pedantic from the default warning gate. Reason: the constructs under test are
-non-standard GCC extensions by definition, and -pedantic exists precisely to reject
-them; retaining it would fail every program in the area for doing exactly what it is
-meant to do. This is the only area-wide deviation in the corpus. No other warning is
-relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0.
-
 UB-FREEDOM ARGUMENT. There is no signed overflow: the computations are 1000+37, 1000-37,
 37-1000, 1000 xor 37 and -1000 xor 37, all far from INT_MIN and INT_MAX. No shift operator
 is used. No pointer, array or aggregate is used, so there is no aliasing violation and no
@@ -30,6 +21,19 @@ initialized from the first operand before a read-write "+r" operand is applied, 
 by the assembly through a "=r" output operand before it is returned. No object is modified
 twice between sequence points. Every printf call receives at most one side-effecting
 argument. Nothing depends on padding bytes or on the addresses of unrelated objects.
+
+NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, AND THIS IS ENFORCED STRUCTURALLY RATHER
+THAN ARGUED. An access to a volatile object is an observable side effect, and the relative
+order of side effects within a single argument list is unspecified, so a call that reads two
+volatile operands directly has an unspecified order of observable accesses even when the
+values it computes are stable. This program therefore reads each volatile object exactly
+once, in a statement of its own -- sa = va; sb = vb; sc = vc; -- and passes only those
+snapshots to the assembly wrappers. No argument list anywhere in the program contains more
+than one volatile access, and asm_chain is computed in three separate statements rather than
+as nested call arguments, so the two inner results are sequenced before the outer call
+instead of being evaluated in an unspecified order relative to each other. The snapshots do
+not weaken the runtime variant: they are themselves loads from volatile storage, so the
+backend must still emit genuine instructions and cannot substitute a folded constant.
 
 NO REGISTER IS CLOBBERED WITHOUT BEING DECLARED. On x86_64 and i386 the addl, subl and
 xorl instructions write the condition flags, so those branches declare the "cc" clobber;
@@ -44,6 +48,15 @@ compiler would be free to delete or hoist the instruction once it proved the res
 or invariant, which would silently stop the program from testing code generation.
 END
 impl_defined_notes <<END
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
+gcc 13.3.0.
+
 PER-TARGET ASSEMBLY DESIGN. All four branches perform the SAME logical 32-bit integer
 operation and assign the result to int, so every printed value is identical on every
 target. Only register constraints are used -- "r", "=r", "+r" and the matching "0" -- and
@@ -103,9 +116,10 @@ instead diagnoses PREDEFINED-MACRO SUPPORT, which is itself worth knowing, and i
 the failure impossible to miss. Verified with gcc 13.3.0: compiling with -U__x86_64__
 -U__amd64__ fires the #error as intended. Each guard also accepts alternate spellings --
 __x86_64__ or __amd64__, __i386__ or __i386, __aarch64__ or __arm64__, __riscv or
-__riscv__ -- as resilience against a compiler that defines only one spelling of a pair.
-Note that the plan places a dedicated predefined-macro program in area 12, so the plan does
-assume these macros are defined.
+__riscv__ -- as resilience against a compiler that defines only one spelling of a pair. A
+dedicated predefined-macro program belongs to area 12, so the suite already relies on
+these macros being defined; this guard is what turns that reliance into a diagnosable
+condition rather than a silent assumption.
 
 asm_matches_c IS A GENUINE INDEPENDENT CROSS-CHECK, not decoration. It compares every
 assembly result against the same computation written in plain C inside the SAME binary,
@@ -115,10 +129,32 @@ golden record captured from the same bug. If that line ever prints 0, the assemb
 disagrees with plain C in the same binary and there is a real defect regardless of what the
 other oracles say.
 
-The folded variant uses literal arguments the optimizer can fold through, while the runtime
-variant and asm_chain are driven by volatile int operands so the backend must emit genuine
-instructions; asm_chain additionally nests three asm calls, forcing register allocation
-across them.
+The two variants, stated precisely, because asm volatile changes what "folded" can mean here.
+Every helper's assembly is __asm__ __volatile__, so no optimizer at any level may delete it,
+reorder it across another volatile operation, or substitute an equivalent computation: the
+instruction is emitted in all twelve cells. Neither group is therefore a folded variant in the
+ordinary sense, and the two are not distinguished by whether the assembly survives.
+
+What the two groups actually vary is the ORIGIN OF THE ASM OPERANDS, which is what changes the
+work the backend must do. The literal-input group -- asm_add(1000, 37) and its siblings -- passes
+compile-time constants, so the compiler may propagate those constants into the operands and
+materialize them ahead of the instruction, exercising constant propagation INTO an asm operand
+together with the "r" and "+r" constraint machinery on constant-derived inputs. The
+volatile-input group -- asm_add(sa, sb) and its siblings -- takes its operands from snapshots of
+volatile int objects, so each load must actually occur and the backend must place a genuine
+runtime value into a constraint-satisfying register. asm_chain drives three asm bodies -- a
+subtract and an exclusive-or whose results both feed an add -- so two intermediate results are
+live across the second and third asm, which is what exercises register allocation between them.
+The three calls are written as three sequenced statements rather than nested arguments, for the
+evaluation-order reason recorded in the UB-freedom argument above; chaining, not nesting, is what
+creates the register pressure, so making the order well defined costs the test nothing.
+
+Genuinely foldable arithmetic does appear in this program, on the C side of asm_matches_c: the
+comparisons against 1000 + 37, 1000 - 37 and 1000 ^ 37 are ordinary constant expressions the
+optimizer folds, and asserting the assembly results equal them is the independent cross-check
+described above. The program therefore contains both a foldable and an unfoldable computation of
+the same values; it places the foldable one on the C side of the comparison rather than inside the
+assembly, which is the only place asm volatile permits it to be.
 
 Inline assembly with operand constraints is documented as supported at
 docs/technical-specifications.md lines 13, 107 and 761, with the spellings asm and

@@ -25,6 +25,7 @@
 //! | The comparison agrees and no marker governs the cell | `PASS` | no |
 //! | The comparison agrees and a marker covers this cell and oracle | `XPASS` | **yes**, unless `BCC_CONFORMANCE_ALLOW_XPASS` |
 //! | A divergence, and a marker covers this oracle, target, level **and** class | `XFAIL` | no |
+//! | A build produced no artifact, and a marker covers this target, level **and** class | `XFAIL` on every oracle the refusal blocked | no |
 //! | A divergence with no covering marker | `FINDING` | no — a finding is a deliverable |
 //! | Not attempted because the record narrows coverage, and a marker covers the scope | `XFAIL` citing the marker | no |
 //! | Not attempted because the record narrows coverage, with no covering marker | `XFAIL` citing the record's own recorded reason | no |
@@ -75,17 +76,50 @@
 //!
 //! # Scope matching is strict
 //!
-//! A marker excuses a divergence only when its scope covers this oracle, this target and this
-//! optimization level **and** its class equals the class observed — see [`covers`]. A marker
-//! for `compile_failure` on oracle (a) must not absorb a `stdout_mismatch` on oracle (b):
-//! that would launder a genuine second defect into an expected divergence. When a marker
-//! exists but does not cover the observation, the verdict falls through to
-//! [`Verdict::Finding`] and the detail says exactly which dimension failed to match.
+//! A marker excuses a **diverging comparison** only when its scope covers this oracle, this
+//! target and this optimization level **and** its class equals the class observed — see
+//! [`covers`]. A marker for `compile_failure` on oracle (a) must not absorb a
+//! `stdout_mismatch` on oracle (b): that would launder a genuine second defect into an
+//! expected divergence. When a marker exists but does not cover the observation, the verdict
+//! falls through to [`Verdict::Finding`] and the detail says exactly which dimension failed to
+//! match. A **refusal** is matched on three of those four dimensions for the reason the next
+//! section gives.
 //!
 //! A marker changes how a divergence is **classified**, never whether the feature is
-//! **exercised**. Nothing here can short-circuit execution because a marker exists: this
-//! module is reached only after the cell has been compiled, run and compared, and it is
-//! handed no means of preventing any of that.
+//! **exercised**. Nothing here can short-circuit execution because a marker exists: the
+//! applicable phases are attempted in order — compile, link, run, compare — and this module
+//! is handed no means of preventing any of them.
+//!
+//! Classification happens at the **first terminal outcome or the completed comparison**, not
+//! after every phase has run. A compile failure, a link failure, a crash and a timeout are
+//! terminal outcomes reached before any comparison exists, and each is classified where it
+//! occurred: [`build_failure`] is the entry point for those, while [`classify`] is the entry
+//! point for a comparison that completed, and both reduce to the one policy in [`judge`].
+//! That is why a `compile_failure` marker is meaningful at all — the cell it excuses never
+//! reaches a comparison, so a rule that required one would make the class unreachable.
+//!
+//! # A refusal is not a comparison, and is matched accordingly
+//!
+//! Strict scope matching presupposes that exactly one oracle made the observation, which is true
+//! of a comparison and false of a build that produced nothing. The compiler under test is invoked
+//! once per cell, before any oracle is asked, and a refusal removes the authority *every* oracle
+//! needs: the same-target reference comparison, the cross-backend comparison and the golden record
+//! alike. There is one observation, of one class, on one cell.
+//!
+//! A refusal is therefore matched on **class, target and optimization level** — all three as
+//! strictly as ever — and the **oracle dimension is not consulted**, because no oracle made it.
+//! This is strictness applied correctly rather than strictness relaxed. Requiring a marker to
+//! enumerate every oracle separately would take one documented limitation and manufacture an
+//! undocumented finding for each oracle the marker's author did not list, which is the opposite of
+//! what requirement 5 asks: the divergence is documented, and the register explains it. The worked
+//! example is the case-range program, whose documented compile failure would otherwise be recorded
+//! as one expected divergence and twenty-one findings for the very same defect.
+//!
+//! Nothing is widened by this. The marker's scope is untouched, the register is unchanged, and the
+//! outcome detail names both the oracle the scope covers and the oracle being judged, so the
+//! classification is auditable from the verdict row. Staleness detection is unaffected: it runs on
+//! agreement, through the oracle the marker's scope *does* name, so a refusal that disappears still
+//! produces an unexpected success and still fails the run until the marker is retired.
 //!
 //! # A recorded exclusion is an expected divergence, not a missing oracle
 //!
@@ -116,10 +150,13 @@
 //!
 //! A [`Verdict::Finding`] does not fail the run, and the asymmetry against [`Verdict::Fail`]
 //! is deliberate. A finding is an *explained* result: an undocumented divergence, delivered
-//! as a self-contained artifact directory — minimized reproducer, its expectation record, a
-//! manifest, exact reproduction commands, the captured outputs per compiler and per backend,
-//! an environment fingerprint and the computed diff — plus an entry in the register at
-//! [`FINDINGS_REGISTER`]. **No compiler source change is ever made in response to one.** A
+//! as a self-contained artifact directory — a verbatim reproducer, its expectation record, a
+//! manifest recording the minimization status, exact reproduction commands, the captured
+//! outputs per compiler and per backend, an environment fingerprint and the computed diff —
+//! plus an entry in the register at [`FINDINGS_REGISTER`]. The reproducer is a byte-for-byte
+//! copy of the corpus program; automated reduction is never performed during a run, and
+//! reduction is a supervised activity performed on the copy before a finding is promoted to
+//! the curated set. **No compiler source change is ever made in response to one.** A
 //! [`Verdict::Fail`] is an *unexplained* result — harness-level breakage, an internal
 //! inconsistency, a corpus defect — and it fails the run because nobody can act on a result
 //! whose meaning is unknown. An internal error is never allowed to masquerade as a pass.
@@ -164,13 +201,14 @@
 use std::fmt;
 
 use super::compare::Comparison;
+use super::compile::FailureScope;
 use super::env::{
     Capabilities, RunConfig, VAR_ALLOW_MISSING_ORACLES, VAR_ALLOW_XPASS, VAR_QEMU_AARCH64,
     VAR_QEMU_I386, VAR_QEMU_RISCV64, VAR_REF_CC, VAR_REF_CC_AARCH64, VAR_REF_CC_I686,
     VAR_REF_CC_RISCV64, VAR_STRICT,
 };
 use super::manifest::{ExpectedDivergence, Manifest};
-use super::{CellKey, DivergenceClass, HarnessError, Oracle, Outcome, Target, Verdict};
+use super::{shown_path, CellKey, DivergenceClass, HarnessError, Oracle, Outcome, Target, Verdict};
 
 /// Repository-relative path of the expected-divergence register.
 ///
@@ -206,16 +244,26 @@ const INLINE_REASON_TRUNCATION: &str = " [...truncated; the full reason is in th
 
 /// Who is answerable for an observation the build layer reported.
 ///
-/// This is a deliberate local mirror of the build layer's own scope judgement rather than an
-/// import of it, for two reasons. It keeps this module's dependencies to the four files it is
-/// declared against, so the policy can be read — and reasoned about — without the build layer
-/// in front of you. And it keeps the classifier honest about where the judgement was made:
-/// the decision that a link failure is the machine's fault and not the compiler's is taken
-/// where the evidence is, by the layer that ran the compiler and read its diagnostics, and
-/// this module consumes that decision rather than second-guessing it.
+/// This is a deliberate local mirror of the build layer's own scope judgement rather than a reuse
+/// of it. The mirror keeps the classifier honest about where the judgement was made: the decision
+/// that a link failure is the machine's fault and not the compiler's is taken where the evidence
+/// is, by the layer that ran the compiler and read its diagnostics, and this module consumes that
+/// decision rather than second-guessing it. It also lets an observation be constructed by a caller
+/// that never ran a compiler at all — a harness inconsistency, an absent oracle — without
+/// inventing a build failure to carry the scope.
 ///
-/// Callers holding a build failure convert with [`Attribution::for_environment`], passing that
-/// failure's own environment predicate.
+/// # Why the build layer's scope type is nevertheless imported
+///
+/// A mirror is only safe while the two sides cannot disagree, and the one thing that guarantees
+/// that is a `match` the compiler checks for exhaustiveness. [`Attribution::of_scope`] is
+/// that `match`: adding a further scope to the build layer stops this file compiling until the
+/// policy says what the new scope means, which is exactly the failure mode a hand-written
+/// conversion invites — a scope silently folded into the nearest existing one, at the cost of
+/// either a manufactured finding or a discarded defect. The import buys that check and nothing
+/// else; the policy in this file is still written in terms of [`Attribution`] alone.
+///
+/// Callers holding a build failure convert with [`Attribution::of_scope`], passing that failure's
+/// own [`FailureScope`] so no call site has to reconstruct the mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Attribution {
     /// The observation is a property of the compiler and the program, and is therefore a
@@ -225,21 +273,56 @@ pub enum Attribution {
     /// driver installation cannot run its own stages. Reported as an environment gap, never
     /// as a defect in a compiler that was not given the inputs it needed.
     Environment,
+    /// Who is answerable could not be determined, because the build layer could not capture the
+    /// evidence its attribution would have rested on.
+    ///
+    /// Mirrors the build layer's own third scope. It exists so that this module is never handed a
+    /// two-way choice over a three-way judgement: a boolean conversion would have to fold the
+    /// unattributable case into one of the other two, and both foldings are wrong in ways that
+    /// cost something real — one manufactures a finding against a compiler on the strength of text
+    /// nobody read, the other silently discards a possible defect as a fact about the machine.
+    ///
+    /// Judged as a reported gap: neither a pass, nor an accusation, nor a silent skip. It is
+    /// surfaced through the same [`Verdict::Unavailable`] path an absent oracle uses, because the
+    /// two situations are the same situation — a comparison the run could not soundly make — and
+    /// that path is already the one the summary reports loudly and that strict mode refuses to
+    /// tolerate.
+    Indeterminate,
 }
 
 impl Attribution {
-    /// Convert the build layer's environment predicate into an attribution.
+    /// Mirror the build layer's own scope, exhaustively.
     ///
-    /// Written as a constructor rather than left to each call site so that the mapping exists
-    /// once. A call site that inverted it would turn every missing-C-runtime link failure into
-    /// a finding against the compiler under test, which is the single most expensive mistake
-    /// this module can make: it manufactures false deliverables on a machine that is merely
-    /// modestly provisioned.
-    pub fn for_environment(is_environment: bool) -> Attribution {
-        if is_environment {
-            Attribution::Environment
-        } else {
-            Attribution::Compiler
+    /// The only conversion offered, and deliberately so. An earlier version took the build layer's
+    /// "is the machine answerable" predicate as a boolean, which was sound only while there were
+    /// two scopes; a boolean over more than two cannot be read correctly, because that predicate is
+    /// `false` both for a compiler defect and for a failure whose answerable party is *unknown*.
+    /// Every caller of the boolean form would therefore have silently promoted an unattributable
+    /// refusal to [`Attribution::Compiler`] — a manufactured finding against a compiler on the
+    /// strength of diagnostics nobody read, which is the single most expensive mistake this module
+    /// can make: it manufactures a false deliverable on a machine that is merely modestly
+    /// provisioned.
+    ///
+    /// A `match` instead buys a compiler-checked guarantee: a scope added to the build layer stops
+    /// this file compiling until the policy states what the new scope means.
+    ///
+    /// # The harness's own scope is not an observation about anything
+    ///
+    /// [`FailureScope::Harness`] means a compilation was launched and its result could not be
+    /// established, so nothing was observed about either the compiler or the machine. A caller
+    /// holding a build failure must therefore ask the build layer's own harness predicate
+    /// (`CompileOutcome::is_harness_failure`) **first** and route such a failure to
+    /// [`internal_error`], which fails the run rather than reporting a gap. This conversion still
+    /// has to answer for the case, because an exhaustive `match` is the whole point of it, and it
+    /// answers [`Attribution::Indeterminate`] — the only honest reading left, neither a pass nor an
+    /// accusation — so a caller that forgot the routing loses the harness diagnostic's severity but
+    /// never manufactures a finding against a compiler.
+    pub fn of_scope(scope: FailureScope) -> Attribution {
+        match scope {
+            FailureScope::Compiler => Attribution::Compiler,
+            FailureScope::Environment => Attribution::Environment,
+            FailureScope::Indeterminate => Attribution::Indeterminate,
+            FailureScope::Harness => Attribution::Indeterminate,
         }
     }
 
@@ -248,6 +331,7 @@ impl Attribution {
         match self {
             Attribution::Compiler => "compiler scope",
             Attribution::Environment => "environment scope",
+            Attribution::Indeterminate => "indeterminate scope",
         }
     }
 }
@@ -256,6 +340,41 @@ impl fmt::Display for Attribution {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.label())
     }
+}
+
+/// Whether a divergence was observed by one oracle's comparison, or by a refusal that blocks
+/// every oracle at once.
+///
+/// # Why this distinction decides which marker dimensions are matched
+///
+/// [`covers`] is strict on four dimensions — oracle, target, optimization level and class — and
+/// that strictness exists to stop a marker for one defect absorbing a genuine second defect. It
+/// presupposes something that is true of a comparison and false of a refusal: that exactly one
+/// oracle made the observation, so that naming an oracle in a marker's scope narrows anything at
+/// all.
+///
+/// A refusal is not made by an oracle. The compiler under test is invoked once per cell, before
+/// any oracle is asked, and when it produces no artifact it removes the authority *every* oracle
+/// needs — the same-target reference comparison, the cross-backend comparison and the golden
+/// record alike. There is one observation, of one class, on one cell. Requiring a marker to name
+/// each oracle separately would therefore not be strict, it would be wrong: it would take a single
+/// documented limitation and manufacture an undocumented finding for every oracle the marker's
+/// author did not think to enumerate — which is exactly what requirement 5 forbids, since the
+/// divergence *is* documented and the register *does* explain it.
+///
+/// So a refusal is matched on class, target and optimization level, all three strictly, and the
+/// oracle dimension is not consulted. Nothing is widened by this: the marker's own scope is
+/// unchanged, the register still documents exactly what it says it documents, and the outcome
+/// detail states which oracle the marker names and which oracle is being judged, so a reader is
+/// never left to infer it. And a marker is still detected as stale through the oracle its scope
+/// *does* name: if the refusal disappears, that oracle's comparison agrees, [`scope_marker`] finds
+/// the marker, and the run fails with an unexpected success until the marker is retired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DivergenceShape {
+    /// One oracle compared two observations and they differed.
+    Compared,
+    /// A build produced no artifact, so no oracle could compare anything for this cell.
+    Refused,
 }
 
 /// Everything the harness can observe about one cell under one oracle.
@@ -347,9 +466,11 @@ pub fn judge(
 ) -> Outcome {
     // Steps 1, 2, 3 and 6 conclude here; the divergence steps 4 and 5 are shared by a
     // diverging comparison and a build failure the caller attributed to the compiler, so both
-    // reduce to a class and one line of evidence and fall through to the marker decision
-    // below. Reducing rather than duplicating is what keeps one policy in one place.
-    let (class, evidence) = match observation {
+    // reduce to a class, one line of evidence and the shape the divergence took, then fall
+    // through to the marker decision below. Reducing rather than duplicating is what keeps one
+    // policy in one place; the shape is what lets that one policy match a marker correctly for
+    // both, since a refusal and a comparison are answerable to different dimensions.
+    let (class, evidence, shape) = match observation {
         // Step 1: an oracle's tooling is genuinely absent.
         Observation::ToolingAbsent { diagnosis } => {
             return unavailable_tooling_outcome(key, oracle, diagnosis)
@@ -362,6 +483,16 @@ pub fn judge(
             summary,
         } => return unavailable_environment_outcome(key, oracle, *class, summary),
 
+        // Step 1, indeterminate scope: nobody could be shown answerable, because the evidence the
+        // attribution rests on was not captured whole. Reported on the same unavailable path as an
+        // absent oracle, for the same reason — the run could not soundly make this comparison —
+        // and never as a pass or a finding.
+        Observation::Build {
+            class,
+            attribution: Attribution::Indeterminate,
+            summary,
+        } => return unavailable_indeterminate_outcome(key, oracle, *class, summary),
+
         // Step 6: nothing about this is a divergence or a missing oracle.
         Observation::Unexplained { context, cause } => {
             return fail_outcome(key, oracle, context, cause)
@@ -372,7 +503,7 @@ pub fn judge(
             class,
             attribution: Attribution::Compiler,
             summary,
-        } => (*class, *summary),
+        } => (*class, *summary, DivergenceShape::Refused),
 
         Observation::Compared(comparison) => {
             // A comparison attributed to a different oracle than the one being judged would
@@ -439,7 +570,11 @@ pub fn judge(
             }
 
             match comparison.class {
-                Some(class) => (class, comparison.summary.as_str()),
+                Some(class) => (
+                    class,
+                    comparison.summary.as_str(),
+                    DivergenceShape::Compared,
+                ),
                 // A comparison that is neither equal, nor excluded, nor classified breaks the
                 // comparator's own documented invariant. Reporting it as an agreement would
                 // turn a real divergence into a pass, so it is step 6.
@@ -472,16 +607,25 @@ pub fn judge(
             ),
         );
     };
-    match covering_marker(manifest, key, oracle, class) {
-        // Step 4: a marker covers this oracle, target, optimization level and class.
-        Some(marker) => xfail_divergence_outcome(key, oracle, class, marker, evidence),
+    // The dimensions a marker must match depend on the shape of the divergence, and only on
+    // that: a comparison was made by exactly one oracle, so its marker must name that oracle,
+    // while a refusal was made by none of them, so there is no oracle for a marker to name.
+    // See [`DivergenceShape`] for why that is strictness applied correctly rather than
+    // strictness relaxed.
+    let marker = match shape {
+        DivergenceShape::Compared => covering_marker(manifest, key, oracle, class),
+        DivergenceShape::Refused => refusal_marker(manifest, key, class),
+    };
+    match marker {
+        // Step 4: a marker documents this divergence.
+        Some(marker) => xfail_divergence_outcome(key, oracle, class, marker, evidence, shape),
         // Step 5: no marker covers it, so it is an undocumented divergence — a finding.
         None => finding_outcome(
             key,
             oracle,
             class,
             evidence,
-            marker_non_coverage(manifest, key, oracle, class),
+            marker_non_coverage(manifest, key, oracle, class, shape),
         ),
     }
 }
@@ -572,14 +716,17 @@ pub fn unavailable_oracle(caps: &Capabilities, key: &CellKey, oracle: Oracle) ->
 /// — a rejected program, a program that translated but did not link, or an invocation that
 /// outlived its budget; whether the compiler or this machine is answerable; and one line saying
 /// what happened. Convert that layer's environment predicate with
-/// [`Attribution::for_environment`] rather than deciding attribution here: the decision belongs
-/// where the compiler's diagnostics were read.
+/// [`Attribution::of_scope`] rather than deciding attribution here: the decision belongs
+/// where the compiler's diagnostics were read. A build failure the build layer scoped to itself
+/// belongs to neither attribution and must reach [`internal_error`] instead, as
+/// [`Attribution::of_scope`] records.
 ///
 /// An [`Attribution::Environment`] build failure becomes [`Verdict::Unavailable`] at
 /// environment scope. An [`Attribution::Compiler`] one goes through the same marker logic a
-/// diverging comparison goes through, which is what lets a compile failure on a documented
-/// unimplemented extension be an expected divergence instead of a finding — the worked example
-/// being GCC case ranges, which no documented extension inventory in this repository lists.
+/// diverging comparison goes through, which is what lets a compile failure on a limitation the
+/// repository **explicitly documents** be an expected divergence instead of a finding — and,
+/// where no such documentation exists, keeps it a finding, because a marker may not be minted
+/// on the strength of an omission from an inventory.
 pub fn build_failure(
     manifest: &Manifest,
     key: &CellKey,
@@ -687,19 +834,30 @@ pub fn covering_marker<'a>(
         .filter(|marker| covers(marker, key, oracle, class))
 }
 
-/// Whether this program's marker claims a divergence in this cell and oracle.
+/// The marker that documents a build refusal of this class for this cell, if any.
 ///
-/// Ask this **only when the comparison agreed**, in which case a true answer means the marker
-/// is stale: it documents a divergence that is no longer there. The class is deliberately not
-/// part of the question — there is no observed class when nothing diverged, so requiring one
-/// would make every stale marker undetectable, which is the one way a marker set decays into
-/// documentation nobody can trust.
+/// Class, target and optimization level must all match, exactly as strictly as they must for a
+/// diverging comparison. The oracle dimension is deliberately not consulted, and
+/// [`DivergenceShape`] carries the whole argument for why that is the correct match rather than a
+/// weakened one: a refusal is not a comparison, so no oracle made it, so there is nothing for a
+/// per-oracle scope to narrow.
 ///
-/// A stale marker is retired in two places, the program's own record and the register at
-/// [`EXPECTED_DIVERGENCE_REGISTER`], and an unexpected success fails the run by default so that
-/// retirement actually happens.
-pub fn is_marker_stale(manifest: &Manifest, key: &CellKey, oracle: Oracle) -> bool {
-    scope_marker(manifest, key, oracle).is_some()
+/// A consequence worth stating outright: a marker whose scope names one oracle documents the
+/// refusal for **all** of them, because there is one refusal. That is not the marker growing — its
+/// scope is untouched and the register is unchanged — it is the observation being smaller than the
+/// scope language can express. The outcome detail says so explicitly, so the difference between
+/// "the marker names this oracle" and "the marker documents the refusal this oracle was blocked by"
+/// is visible in the summary rather than hidden in this function.
+fn refusal_marker<'a>(
+    manifest: &'a Manifest,
+    key: &CellKey,
+    class: DivergenceClass,
+) -> Option<&'a ExpectedDivergence> {
+    manifest.marker().filter(|marker| {
+        marker.class() == class
+            && marker.scope().targets().contains(&key.target())
+            && marker.scope().opt_levels().contains(&key.opt())
+    })
 }
 
 /// What one divergence class means, in one sentence, for the outcome detail.
@@ -821,9 +979,19 @@ pub fn run_failures<'a>(outcomes: &'a [Outcome], config: &RunConfig) -> Vec<&'a 
 /// The marker whose scope covers this cell and oracle, whatever class it claims.
 ///
 /// Two situations need the scope answer alone, and in both of them there is no observed class to
-/// compare against: an agreement, where a covering marker means the marker is stale, and an
-/// exclusion, where nothing was measured at all. Requiring class agreement in either would be
-/// asking a question the observation cannot answer.
+/// compare against: an agreement, where a covering marker means the marker is **stale** — it
+/// documents a divergence that is no longer there — and an exclusion, where nothing was measured
+/// at all. Requiring class agreement in either would be asking a question the observation cannot
+/// answer, and would make every stale marker undetectable, which is the one way a marker set
+/// decays into documentation nobody can trust.
+///
+/// This is also the staleness test in full. There is deliberately no separate predicate returning
+/// only whether a marker is stale: both callers need the marker itself — one to name it in the
+/// unexpected-success outcome, the other to cite it in the exclusion outcome — and a bool-returning
+/// wrapper would let a caller establish that a marker is stale without being able to say which one,
+/// which is exactly the report a maintainer cannot act on. Retirement happens in two places, the
+/// program's own record and the register the suite ships beside the corpus, and an unexpected
+/// success fails the run by default so that it actually happens.
 fn scope_marker<'a>(
     manifest: &'a Manifest,
     key: &CellKey,
@@ -845,14 +1013,24 @@ fn scope_marker<'a>(
 /// byte-identical text and a reader is told the whole reason rather than the first part of it. A
 /// maintainer reading this row can see immediately whether the honest fix is a second marker, a
 /// widened scope that the register also documents, or a finding.
+///
+/// The `shape` decides whether the oracle dimension is named at all. For a refusal it is not,
+/// because it was never consulted — see [`DivergenceShape`] — and listing a dimension that played
+/// no part in the decision would send a maintainer to widen a scope that would not have changed
+/// the verdict.
 fn marker_non_coverage(
     manifest: &Manifest,
     key: &CellKey,
     oracle: Oracle,
     class: DivergenceClass,
+    shape: DivergenceShape,
 ) -> Option<String> {
     let marker = manifest.marker()?;
-    if covers(marker, key, oracle, class) {
+    let covered = match shape {
+        DivergenceShape::Compared => covers(marker, key, oracle, class),
+        DivergenceShape::Refused => refusal_marker(manifest, key, class).is_some(),
+    };
+    if covered {
         return None;
     }
     let mut mismatches: Vec<String> = Vec::new();
@@ -862,7 +1040,7 @@ fn marker_non_coverage(
             marker.class()
         ));
     }
-    if !marker.scope().oracles().contains(&oracle) {
+    if shape == DivergenceShape::Compared && !marker.scope().oracles().contains(&oracle) {
         mismatches.push(format!(
             "its scope covers {} while this comparison was made by {oracle}",
             joined(marker.scope().oracles())
@@ -882,12 +1060,20 @@ fn marker_non_coverage(
             key.opt()
         ));
     }
+    let dimensions = match shape {
+        DivergenceShape::Compared => "",
+        DivergenceShape::Refused => {
+            " No artifact was produced for this cell, so no oracle made this observation and the \
+             oracle dimension of the marker's scope was not consulted: only class, target and \
+             optimization level were, and the mismatch above is among those."
+        }
+    };
     Some(format!(
-        "Marker {} is present in this program's record but does not cover this observation: {}. A \
-         marker is never widened to absorb a divergence it does not describe, because that would \
-         launder a genuine second defect into an expected divergence while {} still documented \
-         only the first; if this divergence is also documented, it needs its own marker in both \
-         places.",
+        "Marker {} is present in this program's record but does not cover this observation: {}.\
+         {dimensions} A marker is never widened to absorb a divergence it does not describe, \
+         because that would launder a genuine second defect into an expected divergence while {} \
+         still documented only the first; if this divergence is also documented, it needs its own \
+         marker in both places.",
         marker.id(),
         joined(&mismatches),
         EXPECTED_DIVERGENCE_REGISTER
@@ -921,7 +1107,7 @@ fn comparison_inconsistency(
             key.program()
         ));
     }
-    if comparison.equal && comparison.class.is_some() {
+    if comparison.equal && comparison.is_divergence() {
         return Some(String::from(
             "the comparison reports equality and a divergence class at once, so it cannot be \
              judged: reading it as an agreement would turn a divergence into a pass, and reading \
@@ -935,7 +1121,7 @@ fn comparison_inconsistency(
              would be exactly the silent pass an excluded comparison exists to avoid",
         ));
     }
-    if !comparison.attempted() && comparison.class.is_some() {
+    if !comparison.attempted() && comparison.is_divergence() {
         return Some(String::from(
             "the comparison reports both that it was never attempted and that it observed a \
              divergence, so what actually happened cannot be established",
@@ -1022,6 +1208,52 @@ fn unavailable_environment_outcome(
     )
 }
 
+/// Build the outcome for a build failure nobody could be shown answerable for.
+///
+/// # Why this is reported rather than resolved
+///
+/// The build layer withdraws an attribution when the diagnostics it would have been read from were
+/// truncated or could not be drained. There is genuinely no sound verdict available for such a
+/// cell: calling it a pass would assert an agreement nothing established, calling it a finding
+/// would accuse a compiler on the strength of text nobody read, and skipping it would hide the
+/// whole situation. So it takes the one verdict that means "this comparison could not soundly be
+/// made" — the same verdict an absent oracle takes — and it is listed in the summary and refused
+/// under strict mode for the same reasons.
+///
+/// The detail deliberately names the remedy, because unlike an absent oracle this one is usually
+/// fixable from the artifacts already on disk: the retained workspace holds the compiler's captured
+/// streams and the capture-integrity record beside them, so a maintainer can see how much was lost
+/// and re-run the single cell to read the rest.
+fn unavailable_indeterminate_outcome(
+    key: &CellKey,
+    oracle: Oracle,
+    class: DivergenceClass,
+    summary: &str,
+) -> Outcome {
+    let detail = format!(
+        "not attempted at {scope}: a {class} was observed for {key} under {oracle}, but the build \
+         layer could not establish whether the compiler or this machine is answerable, because the \
+         diagnostics its attribution would have rested on were not captured whole — {summary}. In \
+         general, {significance}. It is therefore reported as unavailable at indeterminate scope \
+         and deliberately NOT as a finding, because a finding is a deliverable a maintainer is \
+         expected to act on and this one would rest on text nobody read; nor as a pass, because \
+         nothing was shown to agree. The cell's retained workspace holds the compiler's captured \
+         streams and the capture-integrity record beside them, so how much was lost is visible and \
+         the single cell can be re-run to read the rest. It is listed in the run summary, and under \
+         {VAR_STRICT} it fails the run.",
+        scope = Attribution::Indeterminate,
+        significance = class_significance(class)
+    );
+    Outcome::new(
+        key.clone(),
+        oracle,
+        Verdict::Unavailable,
+        None,
+        None,
+        detail,
+    )
+}
+
 /// Build the outcome for two observations that agree, with no marker claiming otherwise.
 fn pass_outcome(key: &CellKey, oracle: Oracle, evidence: &str) -> Outcome {
     let detail = format!(
@@ -1051,7 +1283,7 @@ fn xpass_outcome(
          success is listed separately and prominently in the summary either way. The agreement \
          was: {evidence}",
         reference = marker_reference(marker),
-        record = manifest.path().display()
+        record = shown_path(manifest.path())
     );
     Outcome::new(
         key.clone(),
@@ -1064,23 +1296,64 @@ fn xpass_outcome(
 }
 
 /// Build the outcome for a divergence a marker documents.
+///
+/// The `shape` decides which of two accounts the detail gives, because the two situations are
+/// materially different and a reader must not have to guess which one they are looking at:
+///
+/// - [`DivergenceShape::Compared`] — this oracle made a comparison, it differed, and the marker's
+///   own scope names this oracle. The ordinary expected divergence.
+/// - [`DivergenceShape::Refused`] — the compiler under test produced no artifact for this cell, so
+///   this oracle had nothing to compare, and the marker documents that refusal. Where the marker's
+///   scope does not itself name this oracle, the detail says so and says why the marker still
+///   applies, so the classification is auditable from the row rather than only from this file.
 fn xfail_divergence_outcome(
     key: &CellKey,
     oracle: Oracle,
     class: DivergenceClass,
     marker: &ExpectedDivergence,
     evidence: &str,
+    shape: DivergenceShape,
 ) -> Outcome {
-    let detail = format!(
-        "expected divergence: the {class} observed by {oracle} for {key} is documented by \
-         {reference}. In general, {significance}. A marker changes how a divergence is \
-         CLASSIFIED, never whether the feature is EXERCISED: this program was compiled and run in \
-         full, which is what keeps a difficult feature under test instead of quietly dropped. If \
-         the divergence ever disappears, this becomes an unexpected success and fails the run so \
-         that the marker is retired. The divergence was: {evidence}",
-        reference = marker_reference(marker),
-        significance = class_significance(class)
-    );
+    let detail = match shape {
+        DivergenceShape::Compared => format!(
+            "expected divergence: the {class} observed by {oracle} for {key} is documented by \
+             {reference}. In general, {significance}. A marker changes how a divergence is \
+             CLASSIFIED, never whether the feature is EXERCISED: this program was compiled and run \
+             in full, which is what keeps a difficult feature under test instead of quietly \
+             dropped. If the divergence ever disappears, this becomes an unexpected success and \
+             fails the run so that the marker is retired. The divergence was: {evidence}",
+            reference = marker_reference(marker),
+            significance = class_significance(class)
+        ),
+        DivergenceShape::Refused => format!(
+            "expected divergence: no artifact was produced for {key}, so {oracle} had nothing to \
+             compare, and that {class} is documented by {reference}. {scope_note} A refusal is not \
+             a comparison: the compiler under test is invoked once per cell, before any oracle is \
+             asked, and a refusal removes the authority every one of them needs — so the marker is \
+             matched on class, target and optimization level, and the oracle dimension is not \
+             consulted. The marker's own scope is NOT widened by this classification and \
+             {register} still documents exactly what it says it documents; recording one \
+             documented limitation as an undocumented finding on every oracle its author did not \
+             enumerate would be the opposite of what the expected-divergence requirement asks for. \
+             In general, {significance}. A marker changes how a divergence is CLASSIFIED, never \
+             whether the feature is EXERCISED: this program was compiled in full and the \
+             compiler's own diagnostics are recorded. If the refusal ever disappears, the \
+             comparison the marker's scope names becomes an unexpected success and fails the run \
+             so that the marker is retired. The refusal was: {evidence}",
+            reference = marker_reference(marker),
+            scope_note = match marker.scope().oracles().contains(&oracle) {
+                true => format!("The marker's scope names {oracle} directly."),
+                false => format!(
+                    "The marker's scope names {named}, not {oracle}; this arm is recorded as an \
+                     expected divergence traceable to that same single documented root cause \
+                     rather than as a second, undocumented one.",
+                    named = joined(marker.scope().oracles())
+                ),
+            },
+            register = EXPECTED_DIVERGENCE_REGISTER,
+            significance = class_significance(class)
+        ),
+    };
     Outcome::new(
         key.clone(),
         oracle,
@@ -1114,7 +1387,7 @@ fn xfail_exclusion_outcome(
          not a pass; the oracles this program keeps — {kept} — still judge the cell in full, \
          which is how a construct whose value legitimately differs between architectures stays \
          under test instead of being dropped for being difficult. Recorded reason: {recorded}",
-        record = manifest.path().display(),
+        record = shown_path(manifest.path()),
         reference = marker_reference(marker),
         kept = joined(manifest.enabled_oracles()),
         recorded = inline_reason(reason)
@@ -1172,7 +1445,7 @@ fn xfail_recorded_exclusion_outcome(
          were. The oracles this program keeps — {kept} — still judge the cell in full, which is \
          how a property whose value legitimately differs between architectures stays under test \
          instead of being dropped for being difficult. Recorded reason: {recorded}",
-        record = manifest.path().display(),
+        record = shown_path(manifest.path()),
         kept = joined(manifest.enabled_oracles()),
         recorded = inline_reason(reason)
     );
@@ -1198,10 +1471,11 @@ fn finding_outcome(
     }
     detail.push_str(&format!(
         "This is recorded as a finding, which is a DELIVERABLE and not a defect to patch: emit \
-         the artifact directory — the minimized reproducer, its expectation record, a manifest, \
-         the exact reproduction commands, the captured outputs per compiler and per backend, an \
-         environment fingerprint and the computed diff — and index it in {FINDINGS_REGISTER}. No \
-         compiler source change is made in response to a finding. Unlike an unexplained failure \
+         the artifact directory — a verbatim reproducer with its recorded minimization status, \
+         its expectation record, a manifest, the exact reproduction commands, the captured \
+         outputs per compiler and per backend, an environment fingerprint and the computed diff \
+         — and index it in {FINDINGS_REGISTER}. No compiler source change is made in response \
+         to a finding. Unlike an unexplained failure \
          this does not fail the run, because its meaning is known and delivered rather than \
          unknown; it is still reported loudly and counted in the summary. The divergence was: \
          {evidence}"

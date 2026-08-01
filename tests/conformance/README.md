@@ -55,8 +55,8 @@ everything in this directory is therefore:
 
 1. the requirements' own four constraints — **C1** (do not modify the compiler's source code),
    **C2** (do not delete, skip, weaken or relax any existing test or assertion), **C3** (do not
-   exclude a language feature because it is difficult), and **C4** (execute only inside the
-   sandbox, with no network access and no file access outside the working directory) — each
+   exclude a language feature because it is difficult), and **C4** (compile and execute only within
+   the suite's own working directory, with no network access and no file access outside it) — each
    documented with its consequences under
    [Constraints and engineering standards](#constraints-and-engineering-standards); and
 2. the repository's own documented engineering standards, chiefly the Zero External Crate
@@ -71,11 +71,15 @@ No rule is invented here, and no rule text is paraphrased, because there is none
 Three independent oracles judge every cell. Two are mandated by the requirements; the third costs
 nothing and closes a hole the other two structurally cannot see.
 
-| Oracle | Compares | Detects | Cell volume |
+The **Cell volume** column below states the **final planned** figures, for the full 108-program
+corpus. The committed corpus is smaller today; both sets of numbers are published side by side under
+[the enumerable matrix](#the-enumerable-matrix).
+
+| Oracle | Compares | Detects | Cell volume (final planned) |
 | --- | --- | --- | --- |
 | **(a) Reference compiler** | `bcc` against a reference C compiler, same target, same optimization level | A wrong answer `bcc` produces consistently across all four of its backends | **324** native, up to **972** cross |
 | **(b) Cross-backend** | Each non-baseline target against the **x86-64 baseline**, same optimization level | A wrong answer confined to one backend — ABI, register-allocation or instruction-selection defects | **972** comparisons |
-| **(c) Golden record** | Each cell against the `expected_stdout` recorded in the program's own `.expected` record | Both compilers changing behaviour in the same direction at the same time, plus toolchain drift and regression over time | **1,296** assertions |
+| **(c) Golden record** | Each cell against **both** values recorded in the program's own `.expected` record: the `expected_stdout` bytes and the `expect_exit` status | Both compilers changing behaviour in the same direction at the same time, plus toolchain drift and regression over time | **1,296** assertions |
 
 ### Oracle (a) — reference-compiler comparison
 
@@ -99,16 +103,33 @@ implementation-defined difference is a compiler defect.
 and therefore no emulation-related variable. Comparing against a cell that was itself emulated
 would put two unknowns on one side of the comparison.
 
-**Why `bcc`'s own `--target` flag is legitimate here:** oracle (b) is `bcc`-versus-`bcc`, so
-`--target` trivially satisfies the requirement that both compilers honour a flag with the same
-meaning — **both sides are `bcc`**. This point is load-bearing rather than pedantic: without it,
-cross-backend testing would be impossible, because selecting a target is precisely what oracle (b)
-requires. The flag is used **only** within oracle (b) and never enters a shared argument set.
+**Why `bcc`'s own `--target` flag is legitimate:** the shared-flag requirement governs the
+arguments passed **identically to both compilers**, and `--target` never is one. It is
+**`bcc`-only, and it is never passed to the reference compiler** — which has no target-selection
+flag to be given: the `--target=` spelling belongs to a different compiler family and was measured
+to be rejected, so the reference side selects a target by being a **different driver binary** (see
+[Why oracle (a)'s cross arm uses a cross driver](#why-oracle-as-cross-arm-uses-a-cross-driver)).
+
+That split is by compiler side, not by oracle, and the distinction matters because it is easy to
+get backwards. `bcc` is a single binary with no cross drivers, so `--target <triple>` is the only
+way it can reach a non-native backend **at all**; the harness therefore puts it on `bcc`'s side of
+**every** cell it assembles — non-native and native alike, under **oracle (a) exactly as much as
+under oracle (b)** — because one unconditional spelling keeps a single recorded command template
+correct for every cell of a program. Oracle (a)'s cross arm compares `bcc --target <triple> …`
+against `<triple>-gcc …`: each side selects the same target in the only way it can. What is
+excluded is the flag ever entering the **shared** argument set, and `is_forbidden_for_side` in
+`../conformance_harness/mod.rs` is the single place that exclusion is expressed.
+
+Within oracle (b) there is additionally nothing to argue about, since **both sides are `bcc`**:
+selecting a target is precisely what the oracle requires, and it could not exist otherwise.
 
 ### Oracle (c) — golden-record regression
 
-Assert each cell's output against the `expected_stdout` recorded in the program's own co-located
-`.expected` record.
+Assert each cell against the two values the program's own co-located `.expected` record commits to:
+the **recorded stdout bytes** in `expected_stdout` and the **recorded exit status** in `expect_exit`.
+Both are checked, and either one disagreeing is a divergence — the exit status is part of the golden
+record precisely because a program that prints the right bytes and then exits wrongly has still
+behaved wrongly.
 
 **The hole this closes is the justification for its existence.** Pure differential testing
 structurally **cannot** detect **both** compilers changing behaviour in the same direction at the
@@ -149,12 +170,34 @@ one of these six verdicts; dropping a cell is not expressible.
 
 | Verdict | Meaning | Fails the run? |
 | --- | --- | --- |
-| **PASS** | Every enabled oracle agreed | No |
-| **XFAIL** | A divergence occurred that matches an active expected-divergence marker | No |
+| **PASS** | **Per oracle:** this comparison agreed and no marker governs the cell | No |
+| **XFAIL** | Two forms, both reported as XFAIL: a divergence matching an **active marker**, or a comparison the program's own record **deliberately declines to make**, carrying its reasoned exclusion in `impl_defined_notes` | No |
 | **XPASS** | A marker is present but the divergence has **disappeared** | **Yes** (by default) |
 | **FINDING** | An **undocumented** divergence; an artifact directory is written | No (reported as a deliverable) |
 | **FAIL** | Anything unexplained | **Yes** |
 | **UNAVAILABLE** | An oracle's tooling is genuinely absent from the environment | No, but reported loudly |
+
+**Verdicts are per oracle, not per cell.** Each enabled oracle renders its own verdict for a cell,
+so one cell can carry up to three. A **cell** is all-PASS only when **every enabled oracle's outcome
+for it is PASS**; a cell whose oracle (a) agreed while its oracle (b) diverged is not a passing cell,
+and the reports list the two outcomes separately rather than collapsing them. That separation is what
+lets a divergence be attributed to the oracle that saw it.
+
+**The two XFAIL forms, distinguished.** Both are reported as XFAIL and neither fails the run, but
+they arise from opposite directions and must not be confused:
+
+| Form | What happened | Where the explanation lives |
+| --- | --- | --- |
+| **Marker-covered divergence** | The comparison *was* made, it diverged, and an **active marker** covers this oracle, target, optimization level **and** class | The marker in the program's own record, mirrored in [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md), citing a limitation the repository documents |
+| **Recorded exclusion** | The comparison was **not attempted**, because the program's own record narrows its coverage — an oracle switched off, a restricted target list, or a deviating warning gate | The reasoned exclusion in that record's `impl_defined_notes`, which the record format refuses to accept as absent, printed in full in the report |
+
+A recorded exclusion is deliberately **not** UNAVAILABLE and deliberately **not** PASS. UNAVAILABLE
+is a statement about the *machine* — a tool nobody installed. A narrowing is a statement about the
+*corpus* — an authoring decision, taken on the record. And nothing was compared, so no equality may
+be claimed. The cell is still counted and still listed with its reason, which keeps the set of
+comparisons deliberately **not** made as visible as the set that was. The one shape that is never
+excused is a record that *enables* an oracle while the comparison claims exclusion: that removes a
+comparison the corpus asks for, and it is a FAIL.
 
 **There is deliberately no "skip because unsupported" verdict.** An absent oracle is reported as
 UNAVAILABLE — loudly, and in the summary — **never as a silent pass**. That is what keeps a modest
@@ -165,6 +208,17 @@ The four verdicts permitted in a passing run are PASS, XFAIL, FINDING and UNAVAI
 still reported in full. A finding does not fail the run because a finding is a deliverable; an
 unavailable oracle does not fail the run by default because the environment, not the compiler, is
 what is incomplete.
+
+**A FINDING verdict always carries its artifact directory.** Every path that can produce one — an
+ordinary output or status divergence, and equally a *refused build* attributed to a compiler — is
+routed through a single assembly-and-record funnel, so the verdict and the deliverable cannot come
+apart. A build that the compiler under test rejected while the reference compiler accepted it, or
+the reverse, therefore produces a complete artifact directory for **every applicable oracle** rather
+than a verdict row pointing at nothing: the refusing side's compile stdout, stderr and raw wait
+status are persisted into the cell workspace **before either ending is taken**, so the evidence
+exists whichever way the cell resolves. A cross-backend baseline that was itself refused is treated
+the same way, and its finding carries both halves — the baseline's refusal and the target's own
+observation.
 
 ### The six divergence classes
 
@@ -212,23 +266,25 @@ does not excuse a divergence on another; a `compile_failure` marker on oracle (a
 expected divergence. When a marker exists but does not cover the observation, the verdict falls
 through to FINDING and the detail states exactly which dimension failed to match.
 
-**A marked program still compiles and still runs.** A marker changes how a divergence is
-*classified*, never whether the feature is *exercised*. Nothing in the harness can short-circuit
-execution because a marker exists: classification is reached only after the cell has been
-compiled, run and compared.
+**A marker never changes what a program does.** A marker changes how a divergence is *classified*,
+never whether the feature is *exercised*, and nothing in the harness may short-circuit a phase
+because a marker exists.
 
-A recorded exclusion — a program whose own record narrows which oracles judge it — is likewise an
-**XFAIL**, not an UNAVAILABLE. The distinction matters: UNAVAILABLE means the environment could
-not attempt the comparison, whereas a recorded exclusion is a deliberate, reasoned decision
-committed to the repository.
+**The phase lifecycle, stated precisely.** The applicable phases are attempted in order — compile,
+link, run, compare — and classification happens at the **first terminal outcome or the completed
+comparison**, not after every phase has run. A compile failure, a link failure, a crash and a timeout
+are *terminal outcomes* reached before any comparison exists, and each is classified where it
+occurred. That is exactly why a `compile_failure` marker is meaningful at all: the cell it excuses
+never reaches a comparison, so a rule demanding one would make the whole class unreachable.
 
 ---
 
 ## The `.expected` record format
 
 Every program has a sibling `<program>.expected` record. This single file is what makes each test
-reproducible in isolation and what supplies oracle (c). This section is **binding on all 108
-records** and matches the hand-written parser (`manifest.rs`) in
+reproducible in isolation and what supplies oracle (c). This section is **binding on every record**
+— the 73 committed on this branch and every one still to be authored — and matches the hand-written
+parser (`manifest.rs`) in
 [`../conformance_harness/`](../conformance_harness/) exactly. A maintainer authoring a new program
 should copy from here.
 
@@ -311,9 +367,26 @@ record writes them.
 
 ### The canonical reference record
 
-This is the exemplar every new record is derived from.
+Below is `tests/conformance/01_integer_conversions/004_narrowing_conversions.expected`
+**reproduced verbatim** — the complete file, byte for byte, header comments and final newline
+included. It is the exemplar every new record is derived from, and it is copyable: writing these
+bytes to a `.expected` file beside a program named `004_narrowing_conversions.c` yields a record the
+parser accepts and the undefined-behaviour audit gate passes. Anything shortened for readability
+would stop being canonical, so nothing here is shortened.
+
+Note in particular that it declares a warning-gate deviation, and that the deviation's reason names
+**both** dropped flags in a paragraph of its own — the audit gate requires exactly that, and a
+paraphrase that omitted either flag spelling would be refused. When editing this exemplar, edit the
+record first, verify it with `cargo test --test conformance infra_ub_audit_gate`, and then copy the
+file back into this block.
 
 ```text
+# Expectation record for 01_integer_conversions/004_narrowing_conversions.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
 program            = 004_narrowing_conversions
 area               = 01_integer_conversions
 description        = Narrowing integer conversions across signedness, folded and runtime variants
@@ -329,12 +402,55 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_audit_flags     = -Wall -Wextra -pedantic -Wshadow -Werror
 ub_notes           <<END
-All conversions are value-preserving or explicitly defined: unsigned narrowing is modular,
-signed narrowing operands are within the destination range. No signed overflow, no shift
-out of range, no aliasing violation, no uninitialized read.
+This program contains no undefined behaviour, which is the property the differential oracle
+rests on. It deliberately does contain two implementation-defined conversions, and the
+distinction matters: an implementation-defined conversion has a definition the implementation
+must document and abide by, so a divergence between two compilers that both document the same
+definition is still evidence of a defect. Undefined behaviour would permit anything and would
+make a divergence prove nothing, which is why none is present.
+Conversion to an unsigned narrow type is fully defined by the standard as reduction modulo one
+plus the destination's maximum (C11 6.3.1.3p2), so (unsigned char)(-56) and (unsigned
+short)(-200) are not implementation-defined at all. Conversion of an out-of-range value to a
+SIGNED narrow type is implementation-defined -- C11 6.3.1.3p3 permits either an
+implementation-defined value or an implementation-defined signal -- and this program performs
+exactly two such conversions, both converting 200 to signed char: the folded (signed char)200
+and the runtime assignment of the volatile source holding 200. Neither is value-preserving and
+neither is claimed to be; all four supported targets yield a value by two's-complement
+truncation, printing -56, with no signal raised, and the target assumptions that make them
+comparable are recorded in impl_defined_notes below.
+Otherwise: no signed overflow, no shift out of range, no aliasing violation, no uninitialized
+read, no object modified twice between sequence points, no argument with a side effect, and no
+dependence on padding bytes or on the addresses of unrelated objects.
 END
 impl_defined_notes <<END
-Plain char is not used. All widths are fixed-width types or int. No pointer values printed.
+Warning-gate deviation: -Wconversion and -Wsign-conversion are dropped for this program
+because a narrowing conversion is precisely the behaviour under test, so those two
+diagnostics fire on the feature itself rather than on a defect. Every other member of the
+default gate is retained -- -Wall, -Wextra, -pedantic, -Wshadow and -Werror -- so the
+diagnostics those flags enable stay in force even though they are not gate members
+themselves: -Wsign-compare is enabled by the retained -Wextra, and the out-of-range
+constant-conversion overflow diagnostic by the retained -pedantic (both measured with gcc
+13.4.0 on this program's exact shape), while -Werror still makes either one fatal.
+
+Plain char is not used -- every narrow type here is explicitly signed or unsigned -- so the
+measured plain-char signedness difference between the targets cannot reach this program. All
+widths are fixed-width types or int. No pointer values are printed.
+Target assumption for the two implementation-defined conversions of 200 to signed char: each
+of the four reference toolchains documents this conversion as reduction of the value modulo
+two to the power of the destination width, with NO signal raised, which yields -56. That
+assumption was verified rather than assumed: the program was executed on all four targets at
+-O0, -O1 and -O2 -- twelve configurations -- and every one printed narrow_i8=-56 and
+runtime_i8=-56, byte-identically. Because the definition is the same on all four and the
+measured value agrees, cross-backend comparison of this program is sound and oracle (b)
+remains enabled for it.
+What would legitimately break that assumption, and how it must then be handled: a target whose
+implementation defined this conversion differently, or which raised a signal instead of
+producing a value, would be conforming, so the resulting difference would be an
+implementation-defined divergence rather than a compiler defect. It must in that case be
+recorded as an expected divergence with this record's target list narrowed and the reason
+stated here -- never left to surface as a finding against a backend that did nothing wrong,
+and never resolved by dropping the conversion from the corpus, which would remove the feature
+requirement 2 asks this program to cover.
 END
 expected_stdout    <<END
 narrow_u8=200 narrow_i8=-56 narrow_u16=65336
@@ -342,19 +458,64 @@ runtime_u8=200 runtime_i8=-56 runtime_u16=65336
 END
 ```
 
+Three details in it are worth reading rather than skimming, because each is the record format
+carrying its weight:
+
+- **`ub_audit_flags` is present, which means this record deviates from the default warning gate.**
+  It drops `-Wconversion` and `-Wsign-conversion`, and the *reason* is written into the notes,
+  naming both flags. A deviation whose flags are named nowhere in either notes block is a hard
+  error — see
+  [The two facts most often misunderstood](#the-two-facts-most-often-misunderstood).
+- **`ub_notes` distinguishes two kinds of well-definedness.** Narrowing to an **unsigned** type is
+  defined for every value — the result is reduced modulo one plus the destination maximum, which is
+  why `(unsigned char)(-56)` is `200` and `(unsigned short)(-200)` is `65336` everywhere. Narrowing
+  to a **signed** type a value it cannot represent — `(signed char)200` — is
+  **implementation-defined**, *not* undefined. The distinction is what makes the comparison
+  meaningful: an implementation-defined result is a real answer that two compilers can be held to,
+  whereas undefined behaviour would license either of them to do anything and would make a
+  divergence prove nothing.
+- **`impl_defined_notes` is therefore mandatory here, and carries that one case.** It records that
+  the signed narrowing is implementation-defined and that all four supported targets perform
+  two's-complement truncation identically, which is what licenses the cross-backend comparison
+  instead of excluding it.
+
 ### The optional marker block
 
-Append all five keys, or none of them, to the record above.
+Append all five keys, or none of them, to the record above. This is the **syntax**; whether a marker
+may legitimately be written is a separate and much stricter question, answered immediately below.
+
+The block below is an **illustration of the grammar only**. The identifier, the basis and the
+observation are placeholders, deliberately not any real marker: no program in the corpus carries a
+marker today, and [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) is the sole register of the
+ones that ever do.
 
 ```text
-expected_divergence.id       = XD-GCCEXT-CASE-RANGES-001
+expected_divergence.id       = ILLUSTRATION-ONLY-NOT-A-REAL-MARKER
 expected_divergence.class    = compile_failure
 expected_divergence.scope    = oracle_a; all targets; all opt levels
-expected_divergence.basis    = docs/project-guide.md, extension inventory omits case ranges
+expected_divergence.basis    = docs/project-guide.md, the section that explicitly documents this limitation
 expected_divergence.observed <<END
-bcc: error at case label range; reference compiler: compiles and prints range_hits=5
+bcc: <the diagnostic as it was actually seen>; reference compiler: <what it actually printed>
 END
 ```
+
+**A marker may not be minted on an omission, and two conditions must both hold.** A marker
+reclassifies a divergence on the authority of a limitation this repository **explicitly documents**.
+An *omission* from a documented inventory is not that: it records that no document mentions a
+construct, not that the implementation rejects it. So:
+
+1. a repository artifact must **explicitly document the limitation**, and the basis must cite that
+   file and section — the file's existence is machine-verified; and
+2. the divergence must have been **observed and reproduced**, and `expected_divergence.observed`
+   must state what was actually seen rather than what someone expects to see.
+
+Until **both** hold, an observed divergence is a **FINDING** — which is exactly what a finding is
+for, and a first-class reported outcome rather than a compromise. A marker written speculatively
+does active harm: if the construct in fact works the cell agrees, the verdict is **XPASS**, and the
+run fails on a mistake in the test material rather than a defect in the compiler; and until someone
+notices, the marker blinds the suite to a genuine regression in exactly the construct it was meant
+to document. `EXPECTED_DIVERGENCES.md` §8.5 states the same rule as a checklist and §4 works through
+the three candidates the suite has analysed without marking any of them.
 
 ### Every validation the parser enforces
 
@@ -403,7 +564,9 @@ Each item below is a **hard error**.
   remains must be exactly one of the two sanctioned reductions. Because a deviation may only remove
   a member of a fixed set, no compiler option outside the gate can be introduced through it — not a
   suppression such as `-w` or `-Wno-error`, and not an option that changes include search,
-  specification files, plugins, wrappers or output paths.
+  specification files, plugins, wrappers or output paths. Declaring the flags is only half of a
+  valid deviation: it must also carry its recorded reason, on the exact terms set out under
+  [Recorded reasons](#every-validation-the-parser-enforces) below.
 
 **Oracles**
 
@@ -418,14 +581,30 @@ Each item below is a **hard error**.
 
 - **A restricted `targets` list REQUIRES a non-empty `impl_defined_notes`.**
 - **A `disabled` oracle REQUIRES a non-empty `impl_defined_notes`.**
-- **A `ub_audit_flags` deviation REQUIRES its reason recorded in `impl_defined_notes`** — a
-  deviation without a recorded reason is itself a defect in the test. Note the split carefully,
-  because it is easy to get wrong: `impl_defined_notes` is where the parser looks for the reason
-  behind *any* narrowing of coverage — a restricted target list, a disabled oracle, or a gate
-  deviation — while `ub_notes` is separately required of **every** record and holds the written
-  undefined-behaviour-freedom argument. A record that narrows anything and carries no
-  `impl_defined_notes` will not load.
+- **A `ub_audit_flags` deviation REQUIRES its reason recorded in `impl_defined_notes`, and the
+  requirement is enforced per flag by exact spelling** — a deviation without a recorded reason is
+  itself a defect in the test. At load time the parser works out which members of the default gate
+  the record drops and refuses the record unless `impl_defined_notes` names **every one of them by
+  its exact spelling, leading hyphen included**. Naming some of them is not enough: a record that
+  drops both `-Wconversion` and `-Wsign-conversion` but writes only the first will not load, and the
+  diagnostic names the record, the full default gate, both dropped flags and precisely the one left
+  unexplained. Note the split carefully, because it is easy to get wrong: `impl_defined_notes` is
+  the **one** field this reason is read from — for a gate deviation exactly as for a restricted
+  target list or a disabled oracle — and `ub_notes` is **not searched for it at all**. `ub_notes` is
+  separately required of **every** record and holds the written undefined-behaviour-freedom argument
+  and nothing else; a field that answers two questions answers neither reliably, and a reviewer must
+  have one place to look rather than two. A record that narrows anything and carries no
+  `impl_defined_notes` will not load. `infra_ub_audit_gate` then reports each deviation with its
+  reason quoted from `impl_defined_notes`, keeping only the paragraphs that name a dropped flag, so
+  the recorded reason is what a reader sees rather than a reprint of the whole field.
 - `ub_notes` is required and must be non-empty in every record without exception.
+  Put the deviation's explanation in a **paragraph of its own** — paragraphs are separated by a
+  blank line — because the audit quotes the reason back by collecting exactly those paragraphs of
+  `impl_defined_notes` that name a dropped flag. Burying it in a paragraph that also carries the
+  target-restriction argument still loads, but it makes the reported reason the whole argument
+  rather than the reason. `ub_notes` holds the written undefined-behaviour-freedom argument — the
+  human half of the requirement whose machine half is the audit gate — and it is what a reviewer
+  reads first when a divergence appears.
 
 **Marker block**
 
@@ -497,18 +676,27 @@ carry a program is passed over silently:
   corpus directory**. A record dictates what gets compiled and what counts as correct, so one read
   from outside the corpus would decide both while every report still showed a corpus path.
 
-The corpus's genuine companions — `support/`, `tools/`, `findings/` and the three Markdown files —
-are **siblings** of the area directories rather than children, so nothing legitimate is displaced by
-these rules.
+The corpus's genuine companions are **siblings** of the area directories rather than children, so
+nothing legitimate is displaced by these rules. Two of them are committed on this branch —
+`support/`, and `EXPECTED_DIVERGENCES.md` alongside this contract. Three more are **specified by the
+plan but not yet present**: `tools/`, `findings/` and `FINDINGS.md`. They are named here as plain
+text rather than linked, precisely because a link to a path that does not exist is a broken link. The
+sibling rule already accommodates all five, so landing the missing three needs no parser change.
 
 ### Read-only, and the golden-record rule
 
 `manifest.rs` is **read-only with respect to the corpus**: there is deliberately no writer, fixer or
 update-in-place helper anywhere in the harness.
 
-**`expected_stdout` is regenerated only through
-[`tools/regenerate_expected.sh`](tools/regenerate_expected.sh), never automatically during a test
-run**, so a wrong answer can never quietly become the new expectation.
+**`expected_stdout` is never regenerated automatically during a test run**, so a wrong answer can
+never quietly become the new expectation. Because `manifest.rs` has no writer at all, that guarantee
+is structural rather than procedural.
+
+The plan's maintenance script `tests/conformance/tools/regenerate_expected.sh` is intended to be the
+one sanctioned way to refresh a golden record, deliberately outside the test run. It is **not present
+on this branch**, which is why it is named here as plain text and not linked. Until it lands, a
+golden record is refreshed by hand, and the refreshed bytes must be justified in the change that
+touches them — the reviewer, not a script, is the gate.
 
 
 ---
@@ -521,7 +709,9 @@ the time to investigate and then teaches them to distrust the suite.
 
 ### Headers: hand-declare, do not include
 
-**Hand-declare `int printf(const char *, ...);` and include no header.**
+**Hand-declare the libc prototypes a program needs and include no header**, with the single
+sanctioned exception recorded below. That is `int printf(const char *, ...);` in nearly every
+program, and `_Noreturn void exit(int);` as well in `10_declarations_and_types/008_noreturn.c`.
 
 The reason is not obvious, so it is worth stating plainly. `bcc` bundles only nine freestanding
 headers — `stddef.h`, `stdint.h`, `stdarg.h`, `stdbool.h`, `limits.h`, `float.h`, `stdalign.h`,
@@ -540,23 +730,45 @@ every reproducer. Self-containment beats reuse here, deliberately. This is also 
 mechanically: a feature-area directory may contain nothing but `.c` and `.expected` files, so a
 header cannot be placed beside the programs at all.
 
-#### The one sanctioned header exception
+#### The two sanctioned header exceptions
 
-- **Scope:** the programs in area `07_variadics`, and
-  `12_preprocessor/003_bundled_header_inclusion.c`. Those programs — and **only** those — may
-  `#include <stdarg.h>`.
-- **Reason:** a variadic function cannot be written at all without `va_list`, `va_start`, `va_arg`,
-  `va_end` and `va_copy`. Variadic functions are explicitly mandated, and constraint C3 forbids
+Two exception classes are sanctioned, and **only** two. They differ in what they may include, and
+conflating them is a defect in the test material, so they are stated separately.
+
+**Exception 1 — `07_variadics`: `<stdarg.h>`, and nothing else.**
+
+- **Scope:** every program in area `07_variadics`. Each may `#include <stdarg.h>`; no program in that
+  area may include any other header.
+- **Reason:** a variadic function cannot be written at all without `va_list`, `va_start`, `va_arg`
+  and `va_end`. `va_copy` sits on the same documented row but is required only by a program that
+  copies a list or traverses one twice — in this corpus that is
+  `07_variadics/004_va_copy_multiple_passes.c` alone. Variadic functions are explicitly mandated,
+  and constraint C3 forbids
   dropping a feature because it is difficult. `stdarg.h` **is** in `bcc`'s bundled set
-  (`docs/technical-specifications.md` line 205) **and** is a freestanding header provided by the
-  reference compiler, so it compiles identically under both oracles and the program remains a
+  (`docs/technical-specifications.md` line 208) **and** is a freestanding header the reference
+  compiler provides too, so it compiles identically under both oracles and the program remains a
   single-file reproducer.
-- **Obligation:** every program taking this exception must state the exception **and its reason** in
-  its `ub_notes`.
-- **No other header is permitted anywhere in the corpus.** In particular: no `stdio.h` (`bcc` has
-  none), no `wchar.h`, no `uchar.h`, no `string.h`, and **avoid `stdatomic.h` entirely** — it is not
-  mandated by any requirement and atomics can require `-latomic`, which is not in the shared flag
-  set.
+
+**Exception 2 — `12_preprocessor/003_bundled_header_inclusion.c`: the nine required bundled headers.**
+
+- **Scope:** that one program, and no other. It is the **dedicated probe for the bundled header set**,
+  so it may include the nine **required** freestanding headers — `stddef.h`, `stdint.h`, `stdarg.h`,
+  `stdbool.h`, `limits.h`, `float.h`, `stdalign.h`, `stdnoreturn.h` and `iso646.h`.
+- **Reason:** it is the only place the suite exercises `include/` at all. Restricting it to
+  `<stdarg.h>` would leave eight of the nine shipped headers never included by anything, which is a
+  coverage hole rather than a discipline.
+- **Note:** these nine are freestanding headers that the reference compiler also provides, which is
+  what keeps the program compilable under both sides of oracle (a).
+
+**Obligations and limits that apply to both exceptions.**
+
+- **Every program taking either exception must state the exception and its reason in its `ub_notes`.**
+- **The bonus `stdatomic.h` is deliberately excluded from both.** It is not among the nine required
+  headers, it is not mandated by any requirement, and atomics can require `-latomic`, which is not in
+  the shared flag set.
+- **No other header is permitted anywhere in the corpus.** In particular no `stdio.h` (`bcc` ships
+  none), no `wchar.h`, no `uchar.h` and no `string.h`. Every other program — all of them — includes
+  nothing and hand-declares the single libc prototype it needs.
 
 ### The two-variant rule
 
@@ -628,8 +840,11 @@ Every program passes through two gates, and `infra_ub_audit_gate` runs them.
 
 A record that omits `ub_audit_flags` accepts this default, and that is the normal case.
 
-**There are exactly two sanctioned deviations**, each of which must record its reason in
-`impl_defined_notes`:
+**There are exactly two sanctioned deviations.** Each obliges the record to carry a non-empty
+`impl_defined_notes`, and each obliges the reason to **name the dropped flags** — the exact spelling
+of every flag it drops, which the audit accepts in *either* `impl_defined_notes` or `ub_notes`,
+because the gate searches both fields. The full obligation is stated under
+[Recorded reasons](#every-validation-the-parser-enforces):
 
 | Deviation | Where | Why |
 | --- | --- | --- |
@@ -660,12 +875,45 @@ program must be clean under both UndefinedBehaviorSanitizer and AddressSanitizer
   precondition under which a `bcc` divergence is meaningful at all — nothing more, and nothing
   less.
 
-The gate genuinely bites rather than decorating: it rejected the author's own probe program on a
-real diagnostic during design. The volume is 108 programs × 2 gates = **216 audit invocations**.
+The gate genuinely bites rather than decorating: it rejected the author's own probe program on a real
+diagnostic during design.
+
+**The volume, counted two ways, because the two numbers are different.** At the final planned corpus
+of 108 programs the audit produces **216 gate results** — 108 programs × 2 gates — and it performs
+them with **324 process invocations**, because a program costs three processes: one warning-gate
+compile, one sanitizer build, and one sanitizer **run** (the sanitizer gate only means anything if the
+instrumented binary is actually executed). At the 73 programs committed today that is **146 gate
+results** from **219 process invocations**. The audit prints both figures and reconciles them, so a
+missing invocation is visible rather than inferred.
+`AuditReport::gate_result_count` counts the gate applications and the report tabulates them;
+`AuditReport::invocations_expected` states the invocation figure and `invocations_performed`
+states what actually happened, so the two are equal exactly when every gate was applied — which
+is how a degraded run stays visible instead of looking complete.
 
 Alongside the machine half, each program carries a **written** undefined-behaviour-freedom argument
 in its `ub_notes`. The gates are the machine half of that guarantee; `ub_notes` is the human half,
-and it is what a reviewer reads first when a divergence appears.
+and it is what a reviewer reads first when a divergence appears. Its **presence** is enforced, not
+merely encouraged: the record parser refuses a record whose `ub_notes` key is absent, and the warning
+gate records a defect — which fails the gate — for one that is present but empty. What no gate can
+decide is whether the argument is *convincing*, which is why the audit report also states, per
+feature area, how many programs carry one.
+
+### What the audit report states
+
+`infra_ub_audit_gate` prints one report covering every audited program, and two of its sections exist
+to make a *systematic* omission visible where a per-program failure entry cannot:
+
+- **`per-feature-area coverage`** — one row per feature area: how many programs it holds, how many
+  satisfied both gates, how many had a gate that could not be applied, how many deviate from the
+  default warning gate, and how many carry a written argument. A program without one is named
+  individually beneath its area. Areas appear in corpus order, so two runs produce identical text.
+- **`gates that could not be applied`** — every gate that could not run, with its program and the
+  diagnosis of why. An absent reference compiler makes this section 2 × the program count, each entry
+  explaining itself; it is never reported as a pass.
+
+The list of gate members a deviation may **never** drop is derived from the gate table rather than
+written out in prose, so the paragraph describing the policy cannot fall out of step with the policy
+the audit actually applies.
 
 ---
 
@@ -708,9 +956,28 @@ which is linked by default. That limitation is stated rather than glossed over.
 - **Never pass `-fcf-protection`**, even though **both** compilers accept it: their **default scopes
   differ**. This is the case that proves flag verification had to be **semantic, not syntactic** —
   acceptance alone would have been a false positive, and a syntactic check would have admitted it.
-- `-mretpoline`, `--target` and `--sysroot` are `bcc`-only spellings and are excluded from
-  oracle (a) entirely. Target selection is used **only** within oracle (b), where both sides are
-  `bcc`.
+- **Never pass `-mretpoline`.** It is a `bcc`-only hardening spelling with no reference-compiler
+  counterpart, and it is not a target selector, so no invocation the suite makes — on either side,
+  under any oracle — carries it.
+- **`--target` and `--sysroot` are `bcc`-only *target selectors*: forbidden in the shared flag set
+  and on every reference invocation, and admissible on the compiler-under-test side alone.** That
+  split is deliberate rather than a loophole, because the two sides select a target by *different
+  mechanisms* and neither mechanism exists on the other side:
+  - The **reference** side has no target-selection flag, so a reference invocation carries **no**
+    target argument whatsoever and picks its architecture by **driver binary** instead.
+  - The **compiler under test** has no cross drivers, so `--target <triple>` is its only route to a
+    non-native backend. It is therefore passed on `bcc`'s side of **oracle (a)'s cross arm exactly
+    as much as under oracle (b)** — *not* only under oracle (b). It is **required** for every
+    non-native cell, and each record passes it on the native cell too so that one recorded command
+    template stays correct for all twelve cells of a program.
+
+  Enforcement is mechanical on every invocation rather than a convention to remember: at most one
+  target selection may be in force, and when `--target` is present its triple must be the cell's
+  own. A violation is a hard failure naming the flag, the side and the whole command line.
+
+  Oracle (b) is not where the selector is *used*; it is where the selector is *varied*.
+  `is_forbidden_for_side` in `../conformance_harness/mod.rs` is the single place the whole split is
+  expressed.
 
 ### Why every artifact is built with `-static`
 
@@ -737,82 +1004,176 @@ rather than from `-m32`.
 | Target | Triple | Pointer | `long` | ELF class | Endianness | Runner |
 | --- | --- | --- | --- | --- | --- | --- |
 | x86-64 | `x86_64-linux-gnu` | 8 | 8 | ELF64 | little | native (no emulator) |
-| i686 | `i686-linux-gnu` | 4 | 4 | **ELF32** | little | `qemu-i386-static` |
-| AArch64 | `aarch64-linux-gnu` | 8 | 8 | ELF64 | little | `qemu-aarch64-static` |
-| RISC-V 64 | `riscv64-linux-gnu` | 8 | 8 | ELF64 | little | `qemu-riscv64-static` |
+| i686 | `i686-linux-gnu` | 4 | 4 | **ELF32** | little | `qemu-i386` *or* `qemu-i386-static` |
+| AArch64 | `aarch64-linux-gnu` | 8 | 8 | ELF64 | little | `qemu-aarch64` *or* `qemu-aarch64-static` |
+| RISC-V 64 | `riscv64-linux-gnu` | 8 | 8 | ELF64 | little | `qemu-riscv64` *or* `qemu-riscv64-static` |
 
 Sourced from `docs/technical-specifications.md` lines 457–462.
 
-**CRITICAL:** the i686 runner is **`qemu-i386-static`**. The emulator's architecture name is
+**CRITICAL:** the i686 runner is **`qemu-i386`**, not `qemu-i686`. The emulator's architecture name is
 **i386**, so this is the one runner that is *not* named after its target: do not derive the runner
 name from the `i686` in the triple. Source: `docs/project-guide.md` lines 420, 424, 428 and 568.
 Getting this wrong makes the entire i686 arm silently unavailable.
 
-The harness probes **both** the plain and the `-static` spelling of each emulator, because the
-requirements name `qemu-aarch64` and `qemu-riscv64` while this environment ships only the `-static`
-variants. Either packaging works with no configuration.
+**Which spelling exists is a property of the distribution, not of the suite.** The harness probes the
+**plain** spelling first and then the `-static` spelling for each architecture, so either packaging
+works with no configuration:
+
+- the requirements name the plain spelling, which is what Ubuntu 25.10's `qemu-user` package installs —
+  on that release `/usr/bin/qemu-<arch>-static` does not exist at all;
+- Ubuntu 24.04 LTS and earlier, and Debian, install `/usr/bin/qemu-<arch>-static` from the real
+  `qemu-user-static` package, and may not provide the plain spelling.
+
+Both cases are recorded in full, with the measured evidence, under
+[Why `qemu-user` and not `qemu-user-static` on Ubuntu 25.10](#why-qemu-user-and-not-qemu-user-static-on-ubuntu-2510).
+Where a command in this file has to pick one spelling in order to be copy-pasteable, it picks the plain
+one and says so.
 
 **Optimization matrix:** exactly `{-O0, -O1, -O2}`. No other level is in scope.
 
 ### The enumerable matrix
 
-| Quantity | Count |
-| --- | --- |
-| Feature areas | 14 |
-| Programs | 108 |
-| Optimization levels per program | 3 |
-| Targets per program | 4, unless the record restricts them with a recorded reason |
-| **`bcc` compile-and-run cells** | **1,296** (108 × 4 × 3) |
-| Reference cells, native | **324** (108 × 3) |
-| Reference cells, cross | up to **972** (108 × 3 × 3) |
-| Oracle (a) comparisons | **1,296** |
-| Oracle (b) comparisons | **972** |
-| Oracle (c) assertions | **1,296** |
-| **Total differential and golden assertions** | **≈3,564, from 108 programs** |
+Two columns, deliberately. The **final planned target** is what the suite's design calls for; **the
+committed corpus** is what a reader can count in this directory right now, with five of the fourteen
+areas not yet landed. Quoting the planned column as though it described the present state would be
+exactly the unverifiable claim the paragraph below refuses to make.
+
+| Quantity | Final planned target | Committed today |
+| --- | --- | --- |
+| Feature areas | 14 | **9** |
+| Programs | 108 | **73** |
+| Optimization levels per program | 3 | 3 |
+| Targets per program | 4, unless the record restricts them with a recorded reason | 4, same rule |
+| **`bcc` compile-and-run cells** | **1,296** (108 × 4 × 3) | **876** (73 × 4 × 3) |
+| Reference cells, native | **324** (108 × 3) | **219** (73 × 3) |
+| Reference cells, cross | up to **972** (108 × 3 × 3) | up to **657** (73 × 3 × 3) |
+| Oracle (a) comparisons | **1,296** | **876** |
+| Oracle (b) comparisons | **972** | **657** |
+| Oracle (c) assertions | **1,296** | **876** |
+| **Total differential and golden assertions** | **≈3,564, from 108 programs** | **≈2,409, from 73 programs** |
+
+The five areas still to land are `02_constant_expressions`, `03_initializers`, `12_preprocessor`,
+`13_floating_point` and `14_abi_calling_convention`; the per-area table below marks each one.
 
 **Never publish a coverage percentage in this file or in either register.** Coverage instrumentation
-requires a development dependency, which this repository forbids absolutely — so no percentage in
-this repository is measurable, and publishing one would be fabrication. The matrix above **is** the
-coverage evidence: it is countable directly from the committed file set, and the run summary
-re-reports it on every execution. `report.rs` treats a discovered count that disagrees with these
-figures as a corpus defect, so the numbers cannot drift away from the files.
+requires a development dependency, which this repository forbids absolutely — so no percentage in this
+repository is measurable, and publishing one would be fabrication. The matrix above **is** the coverage
+evidence: the committed column is countable directly from the file set, and the run summary re-reports
+what it discovered on every execution. `report.rs` treats a discovered count that disagrees with the
+figures the harness holds as a corpus defect, so the numbers cannot silently drift away from the files.
 
 ### The 14 feature areas
 
-| Area directory | Programs | Mandated |
-| --- | --- | --- |
-| `01_integer_conversions` | 10 | yes |
-| `02_constant_expressions` | 8 | yes |
-| `03_initializers` | 11 | yes |
-| `04_bitfields` | 7 | yes |
-| `05_pointers` | 10 | yes |
-| `06_control_flow` | 10 | yes |
-| `07_variadics` | 6 | yes |
-| `08_gcc_extensions` | 8 | yes |
-| `09_optimization_levels` | 8 | yes |
-| `10_declarations_and_types` | 10 | supplementary |
-| `11_literals_and_strings` | 4 | supplementary |
-| `12_preprocessor` | 6 | supplementary |
-| `13_floating_point` | 4 | supplementary |
-| `14_abi_calling_convention` | 6 | supplementary |
-| **Total** | **108** | |
+`Programs` is the planned count for each area. `State` says whether that area is committed in this
+directory today or still to land.
+
+| Area directory | Programs | Mandated | State |
+| --- | --- | --- | --- |
+| `01_integer_conversions` | 10 | yes | committed |
+| `02_constant_expressions` | 8 | yes | **planned** |
+| `03_initializers` | 11 | yes | **planned** |
+| `04_bitfields` | 7 | yes | committed |
+| `05_pointers` | 10 | yes | committed |
+| `06_control_flow` | 10 | yes | committed |
+| `07_variadics` | 6 | yes | committed |
+| `08_gcc_extensions` | 8 | yes | committed |
+| `09_optimization_levels` | 8 | yes | committed |
+| `10_declarations_and_types` | 10 | supplementary | committed |
+| `11_literals_and_strings` | 4 | supplementary | committed |
+| `12_preprocessor` | 6 | supplementary | **planned** |
+| `13_floating_point` | 4 | supplementary | **planned** |
+| `14_abi_calling_convention` | 6 | supplementary | **planned** |
+| **Planned total** | **108** | | **73 committed across 9 areas** |
 
 The nine mandated areas are the acceptance floor set by the requirements; each carries no fewer than
 six programs. The five supplementary areas were added because they carry the widest cross-backend
-divergence surface.
+divergence surface. Six of the nine mandated areas are committed; the remaining three and two of the
+five supplementary areas are still to land, which is what the `State` column and the committed column
+of the matrix above both record.
 
 ### Measured performance budget
 
 - ≈**72.5 ms** per compile-and-run pair, including emulator startup (36 pairs completed in 2.612 s
   wall time).
-- The full matrix is ≈2,592 compile-and-run pairs, so ≈**188 s serially**, and well under a minute
-  spread across the harness's default thread pool given 14 independent area tests.
+- The **final planned** matrix is ≈2,592 compile-and-run pairs, so ≈**188 s serially**, and well under
+  a minute spread across the harness's default thread pool given 14 independent area tests. The
+  **committed** matrix is ≈1,752 pairs, so ≈**127 s serially**.
 - A per-cell timeout bounds any runaway execution, and a timeout is classified as a divergence
   rather than swallowed as an infrastructure error.
 
 ---
 
 ## Running the suite
+
+### The Cargo integration precondition
+
+**Every command in this section — and every quality gate this suite is measured by — requires the
+repository's Cargo package to be present in the checkout.** That means a `Cargo.toml` at the repository
+root declaring the `bcc` binary target, the `src/**` tree it builds from, and the existing `tests/`
+directory. Auto-discovery is what makes `cargo test --test conformance` work without a manifest *change*,
+but auto-discovery still presupposes a manifest to be discovered *from*.
+
+**This suite does not supply that manifest and must never add one.** C1 makes `Cargo.toml` read-only, and
+the whole no-manifest-change property described under
+[the structural fact that governs this whole directory](#the-structural-fact-that-governs-this-whole-directory)
+depends on the file being left exactly as the compiler's own branch has it. Creating one here would
+satisfy a gate by violating the constraint the gate exists to protect.
+
+So on a checkout that carries this suite **ahead of** the compiler tree — a documentation-only branch, or
+this suite reviewed on its own before it is merged — the Cargo gates do not run. That is a property of
+the checkout, not a defect in the suite, and it resolves the moment the two are on one branch. What can
+and cannot be established in each case:
+
+| Check | Documentation-only checkout | Checkout with the Cargo package |
+| --- | --- | --- |
+| `rustfmt --edition 2021 --check` on each `.rs` file directly | ✅ runs — needs no manifest | ✅ runs |
+| `rustc --edition 2021 --test --emit=metadata tests/conformance.rs` | ✅ runs — type-checks the whole suite, needs no manifest | ✅ runs |
+| `cargo test --test conformance --no-run` | ❌ **blocked** — no manifest to discover the target from | ✅ runs |
+| `cargo clippy -- -D warnings` | ❌ **blocked** — clippy drives Cargo | ✅ runs |
+| `cargo fmt -- --check` | ❌ **blocked** — `cargo fmt` drives Cargo | ✅ runs |
+| `cargo test --test conformance` (execution: 1,296 cells) | ❌ **blocked**, and additionally there is no `bcc` to test | ✅ runs |
+| Whole-repository health gate `cargo test` | ❌ **blocked**, and the existing suites are not present either | ✅ runs |
+
+The two direct invocations in the first two rows are not a substitute for the Cargo gates and are not
+presented as one. They establish the properties that do not depend on packaging — that every file parses,
+type-checks and is correctly formatted — which is exactly the subset a manifest-less checkout can honestly
+claim. The rest is established by placing the suite in a package.
+
+**Establishing the Cargo gates without adding a manifest to this repository.** The suite's own files are
+copied, byte-for-byte unmodified, into a scratch Cargo package created **outside** the repository, which
+supplies only the two things the checkout is missing: a minimal `Cargo.toml` with empty dependency
+sections, and a `bcc` binary target. `cargo test --test conformance --no-run`,
+`cargo clippy -- -D warnings` and `cargo fmt -- --check` then measure exactly these files, because these
+files are what the package contains. The scratch package is never committed and never placed inside the
+repository, so it cannot become the manifest C1 forbids, and it is not a fixture: nothing in the suite
+refers to it, and the suite is unaware it exists.
+
+**What that arrangement can and cannot establish, stated plainly.** It establishes everything *static*:
+that the suite compiles as a Cargo integration target, that it is clippy-clean and rustfmt-clean, and
+that the harness drives an entire matrix end to end — discovery, workspaces, both compilers, all four
+targets, all three oracles, classification, finding artifacts and the run summary. It establishes
+**nothing about the real `bcc`**, because the binary target in a scratch package is a stand-in and not
+the compiler. Any verdict produced there is a verdict about the stand-in. Judging `bcc` requires the
+real binary, which requires the real package — which is the merge described below, and is the only
+place the suite's actual purpose can be served.
+
+Because the compiler under test is resolved at **run time** — `option_env!` on Cargo's binary-path macro
+plus the `BCC_BIN` override, rather than the compile-time `env!` form — a package that has no `bcc` binary
+target still compiles the suite and fails with an explanatory message naming the missing binary, instead
+of an inscrutable compile error. That is what makes the arrangement above possible at all.
+
+**The resolution is merge, not manifest.** Apply this suite onto the branch that already carries the Cargo
+package, the `bcc` binary target, the compiler source tree and the existing sixteen integration suites,
+then run every gate in the third column there. Nothing in the suite needs to change for that to work: it
+is an auto-discovered `tests/<name>.rs` target with a nested non-target helper directory and a data-only
+corpus directory, which is precisely the shape that merges without touching the manifest.
+
+**What a blocked gate looks like.** Every blocked command above exits `101` with `could not find
+Cargo.toml`. That includes the two infrastructure tests which otherwise need no toolchain at all —
+the files they read are committed and present — because the runner itself cannot be started. Nothing
+here is broken by that: the gate is simply not invocable until the package is present, and it is
+stated so that a reader who tries one of these commands on a documentation-only branch knows
+immediately which of the two situations they are in.
 
 | Purpose | Command |
 | --- | --- |
@@ -841,12 +1202,42 @@ area_06_control_flow               area_13_floating_point
 area_07_variadics                  area_14_abi_calling_convention
 ```
 
+All fourteen are declared in the driver. Five of them — `area_02_constant_expressions`,
+`area_03_initializers`, `area_12_preprocessor`, `area_13_floating_point` and
+`area_14_abi_calling_convention` — name area directories that have **not landed on this branch yet**,
+so they cannot pass here: corpus discovery treats a missing area directory as a corpus defect rather
+than as an empty area, which is deliberate, because silently reporting success for zero programs is
+the one failure mode a coverage claim must never have.
+
 Plus four infrastructure tests:
 
 ```text
 infra_flag_capability_probe        infra_expected_divergence_register
 infra_ub_audit_gate                infra_oracle_capability_report
 ```
+
+### What a retained flag-probe or audit workspace holds
+
+The two probes are held to the same evidence contract as a corpus cell, and it is literal: **every**
+compiler and program invocation a probe makes persists its full standard output, its full standard
+error and its raw wait status into the probe's own workspace, and it does so at the moment the process
+is reaped — **before** any check has decided whether it passed. A check does not know it has failed
+until after the invocation it is judging, so recording only on failure would mean the evidence for a
+failure was never captured; and `BCC_CONFORMANCE_KEEP_WORK` asks for a passing run's evidence too.
+
+Probe workspaces live beneath the same work root as the corpus cells, under two reserved names that
+no cell may use: `target/conformance-work/_flagprobe/<flag>/` for one flag check, and
+`target/conformance-work/_ubaudit/<area>/<program>/<gate>/` for one gate applied to one program.
+
+Flag-probe captures are named `{bcc|ref}.{compile|run}.{NN}.{stdout,stderr,exit}`, where `NN` is a
+two-digit ordinal allocated per workspace. The ordinal is what makes several invocations in one
+workspace legible: the `-O` levels check builds and runs three configurations with each compiler, and
+a fixed name would leave only the last of them on disk. A failed check's report row lists its
+`capture:` stems positionally beside its `command:` lines, so a reader can go straight from the
+command that failed to the bytes it produced.
+
+Audit-gate captures follow the same contract: the warning gate persists its compile, and the sanitizer
+gate persists both its build and the instrumented run it then performs.
 
 ### Why each area is one batch test rather than one test per program
 
@@ -870,7 +1261,8 @@ run can never be mistaken for a full one. The same stamping applies when a name 
 
 Run `infra_oracle_capability_report` first in any new environment. It prints the discovered oracle
 inventory and states exactly which arms of which oracles will run, so a misconfigured environment is
-diagnosed **before** 1,296 cells execute.
+diagnosed **before** the matrix executes — 876 `bcc` cells on the committed corpus, 1,296 once all
+fourteen areas have landed.
 
 ---
 
@@ -894,7 +1286,7 @@ variable is true when it is set, non-empty and not the single character `0`.
 | `BCC_CONFORMANCE_STRICT` | unset | Treat an unavailable oracle as a failure — the intended continuous-integration setting |
 | `BCC_CONFORMANCE_ALLOW_XPASS` | unset | Downgrade unexpected success from a failure to a warning during a marker-retirement window |
 | `BCC_CONFORMANCE_ALLOW_MISSING_ORACLES` | unset | Explicitly acknowledge a reduced-oracle environment; the gap is still reported, and under strict mode it is still a failure |
-| `BCC_CONFORMANCE_TIMEOUT_SECS` | `30` | Per-cell execution budget |
+| `BCC_CONFORMANCE_TIMEOUT_SECS` | `30` | Per-cell execution budget, in whole seconds. Accepted range **1–3600**, narrowing to **1–300** when `BCC_CONFORMANCE_STRICT` is set |
 | `BCC_CONFORMANCE_KEEP_WORK` | unset | Retain every cell workspace instead of removing it on success |
 
 Configuration is read **once** into a single validated snapshot before any cell runs, so two
@@ -902,6 +1294,32 @@ concurrently executing area tests cannot observe different policies and the repo
 policy other than the one applied. A malformed value is a hard error naming the variable; an invalid
 value is never treated as absence, because falling back to a probed default there would test a
 different tool than the one that was named.
+
+**The per-cell budget is bounded at both ends.** `BCC_CONFORMANCE_TIMEOUT_SECS` must be a whole
+number of seconds; anything else is a hard error naming the variable. Zero is rejected outright,
+because a budget of zero would time out every cell before it could run. The upper bound depends on
+the mode:
+
+| Mode | Accepted range | Ceiling |
+| --- | --- | --- |
+| Interactive (default) | 1–3600 seconds | 3,600 |
+| `BCC_CONFORMANCE_STRICT` set | 1–300 seconds | 300 |
+
+The stricter continuous-integration ceiling is **a constant of the suite and cannot be raised by any
+variable** — there is no override, and setting a larger value under strict mode is an error rather
+than a value that is silently clamped. The reason a ceiling exists at all is that a budget large
+enough to outlive the run is not a long timeout but the *absence* of one: the runaway-process bound
+would be gone while the configuration still claimed to have one. Probes are bounded separately and
+independently by a fixed 5-second deadline, which this variable does not affect.
+
+**The four `BCC_REF_CC*` defaults are unversioned names, and that is deliberate**: a default cannot know
+which major version a distribution has put behind `gcc`. Set them explicitly whenever the unversioned
+driver is not the **gnu17** one — which is the case on the host recorded under
+[Toolchain of record](#toolchain-of-record), where `gcc` is 15.2.0 and defaults to gnu23. The reason this
+matters rather than being cosmetic is given under
+[Why the reference drivers are pinned to `gcc-13`](#why-the-reference-drivers-are-pinned-to-gcc-13):
+no `-std` flag is ever passed, so the reference compiler's *default* mode is the only thing that selects
+the language it compiles.
 
 **Locating the compiler under test.** By default the suite resolves `bcc` through the Cargo-provided
 `CARGO_BIN_EXE_bcc` path, which points at the **freshly built** binary. That is what guarantees the
@@ -913,46 +1331,219 @@ externally supplied binary.
 
 ## Environment setup
 
+### Rust toolchain
+
 ```bash
 rustup toolchain install 1.93.1
 rustup default 1.93.1
-
-apt-get install -y gcc gcc-i686-linux-gnu gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu \
-  qemu-user-static libc6-dev-i386 libc6-dev-arm64-cross libc6-dev-riscv64-cross
 ```
 
 The documented Rust minimum is **1.70+**, edition 2021; 1.93.1 stable matches the documented build.
 
-Verify before running the full matrix:
+### Reference compilers, emulators and cross C runtimes
+
+**Package names differ between distribution releases, and three of the obvious choices are traps.** Pick
+the line that matches the host, then read the three notes below. Each note records a choice that installs
+successfully and *looks* right — `qemu-user-static`, the unversioned `gcc`, and `libc6-dev-i386` — while
+failing to deliver what the suite actually needs. None of the three announces itself: two produce a
+silently unavailable oracle arm and the third produces a compiler that quietly compiles a different
+language.
+
+**Ubuntu 25.10, and any release where `apt-cache policy qemu-user-static` reports no candidate:**
 
 ```bash
-gcc --version                      # expect 13.x; default mode is gnu17
-i686-linux-gnu-gcc --version       # expect 13.x
-aarch64-linux-gnu-gcc --version    # expect 13.x
-riscv64-linux-gnu-gcc --version    # expect 13.x
-qemu-aarch64-static --version      # expect 8.2.x or newer
+apt-get install -y \
+  gcc-13 gcc-13-i686-linux-gnu gcc-13-aarch64-linux-gnu gcc-13-riscv64-linux-gnu \
+  qemu-user \
+  libc6-dev libc6-dev-i386-cross libc6-dev-arm64-cross libc6-dev-riscv64-cross
+```
+
+**Ubuntu 24.04 LTS and earlier, and Debian, where `qemu-user-static` is a real package:**
+
+```bash
+apt-get install -y \
+  gcc-13 gcc-13-i686-linux-gnu gcc-13-aarch64-linux-gnu gcc-13-riscv64-linux-gnu \
+  qemu-user-static \
+  libc6-dev libc6-dev-i386-cross libc6-dev-arm64-cross libc6-dev-riscv64-cross
+```
+
+Name the pinned drivers to the harness, because the unversioned `gcc` is not necessarily the right one
+(see below):
+
+```bash
+export BCC_REF_CC=gcc-13
+export BCC_REF_CC_I686=i686-linux-gnu-gcc-13
+export BCC_REF_CC_AARCH64=aarch64-linux-gnu-gcc-13
+export BCC_REF_CC_RISCV64=riscv64-linux-gnu-gcc-13
+```
+
+#### Why `qemu-user` and not `qemu-user-static` on Ubuntu 25.10
+
+On 25.10 `qemu-user-static` is a **virtual** package: `apt-cache policy` reports no installed version
+**and no candidate**, and `apt-cache showpkg` reports an empty version list. It is merely *provided by*
+`qemu-user-binfmt`. So `apt-get install -y qemu-user-static` does not fail outright — it silently
+resolves to `qemu-user-binfmt`, which is worse than failing, because
+
+- it registers system-wide `binfmt_misc` handlers that this suite never uses and does not want: every
+  runner is invoked **explicitly** by name, so implicit interpreter registration only changes the host's
+  global behaviour; and
+- it still ships **no** `qemu-<arch>-static` binaries. On 25.10 `qemu-user` installs the **plain**
+  spellings only — `/usr/bin/qemu-i386`, `/usr/bin/qemu-aarch64`, `/usr/bin/qemu-riscv64` — and
+  `/usr/bin/qemu-*-static` does not exist at all.
+
+On Ubuntu 24.04 LTS and earlier, and on Debian, `qemu-user-static` **is** a real package and installs
+`/usr/bin/qemu-<arch>-static`. That is the historical source of the `-static` spelling, and it is why
+the requirements name the plain spelling while some environments only have the suffixed one.
+
+**Either packaging works with no configuration**, because the harness probes the plain spelling first
+and then the `-static` spelling for each architecture; see the `BCC_QEMU_*` defaults in
+[Environment variables](#environment-variables). Only the *documentation* has to know which release it
+is describing — the harness does not.
+
+#### Why the reference drivers are pinned to `gcc-13`
+
+Measured on 25.10: the unversioned `gcc` is **15.2.0**, whose default mode is **gnu23**
+(`__STDC_VERSION__` = `202311L`), while `gcc-13` is **13.4.0**, whose default mode is **gnu17**
+(`__STDC_VERSION__` = `201710L`).
+
+That difference cannot be papered over with a flag, because **no `-std` flag is ever passed** — `bcc`
+has none, so passing one to the reference compiler alone would break the shared-flag discipline that
+[Flag discipline](#flag-discipline) exists to enforce. The reference compiler's *default* mode is
+therefore load-bearing, and the gnu17 driver has to be the one that is named. Pin it explicitly rather
+than relying on whatever `gcc` happens to resolve to, on every release.
+
+#### Why the i686 runtime is `libc6-dev-i386-cross` and not `libc6-dev-i386`
+
+Both packages exist and both install successfully, but they serve different drivers:
+
+- `libc6-dev-i386-cross` installs `/usr/i686-linux-gnu/lib/{libc.a,crt1.o,crti.o,crtn.o}`, which is
+  what the **i686 cross driver** resolves. Verified directly:
+  `i686-linux-gnu-gcc-13 -static -print-file-name=libc.a` resolves inside `/usr/i686-linux-gnu/lib/`.
+- `libc6-dev-i386` installs `/usr/lib32/…`, which is the **multilib** set that only `gcc -m32` uses —
+  and `-m32` is excluded outright under [Prohibitions](#prohibitions) and fails on this host anyway.
+
+Installing only `libc6-dev-i386` therefore leaves the i686 arm with no static C runtime, and every i686
+cell fails at the link step. Install the `-cross` package; `libc6-dev-i386` is not needed at all.
+
+### Verify before running the full matrix
+
+Every line below is copy-pasteable and was run in the environment recorded under
+[Toolchain of record](#toolchain-of-record):
+
+```bash
+gcc-13 --version                    # expect 13.4.0
+i686-linux-gnu-gcc-13 --version     # expect 13.4.0
+aarch64-linux-gnu-gcc-13 --version  # expect 13.4.0
+riscv64-linux-gnu-gcc-13 --version  # expect 13.4.0
+
+# The reference compiler's DEFAULT mode must already be gnu17, because no -std flag is ever passed.
+gcc-13 -dM -E -x c /dev/null | grep __STDC_VERSION__   # expect 201710L
+
+# Emulators: the plain spelling on Ubuntu 25.10, the -static spelling on 24.04 LTS and earlier.
+# The harness accepts either; run whichever the host installed.
+qemu-i386 --version    || qemu-i386-static --version      # expect 10.1.0 on 25.10
+qemu-aarch64 --version || qemu-aarch64-static --version   # expect 10.1.0 on 25.10
+qemu-riscv64 --version || qemu-riscv64-static --version   # expect 10.1.0 on 25.10
+
+# Static C runtimes: each must resolve inside its own target sysroot, not fail.
+gcc-13                   -static -print-file-name=libc.a
+i686-linux-gnu-gcc-13    -static -print-file-name=libc.a  # expect /usr/i686-linux-gnu/lib/...
+aarch64-linux-gnu-gcc-13 -static -print-file-name=libc.a  # expect /usr/aarch64-linux-gnu/lib/...
+riscv64-linux-gnu-gcc-13 -static -print-file-name=libc.a  # expect /usr/riscv64-linux-gnu/lib/...
+
+
+**If you put a pinned driver on `PATH` under an unversioned name, use a script and not a symbolic
+link.** GCC derives its exec prefix from `argv[0]`, so a symlink at `/usr/local/bin/gcc` makes it
+search `/usr/local/libexec/gcc/…` and fail with `cannot execute 'cc1'`. A one-line script that
+`exec`s the real driver by absolute path works, and naming the drivers through the `BCC_REF_CC*`
+overrides avoids the question entirely.
 cargo test --test conformance infra_oracle_capability_report -- --nocapture
 ```
 
+The last line is the authoritative check and the only one that inspects the suite's own view of the
+environment; the rest exist so that a failure is diagnosed against a single tool rather than against
+the whole oracle inventory at once. It requires the Cargo package — see
+[the Cargo integration precondition](#the-cargo-integration-precondition).
+
 ### Toolchain of record
 
-Measured, not assumed — each version was obtained from the package manager's candidate version and
-confirmed by invoking the tool:
+**This table describes one specific host, named and dated. It is not a claim about any other.**
+Measured, not assumed — every version below was obtained from the package manager and then confirmed
+by invoking the tool; nothing is inferred from a package name or from an earlier measurement. When the
+suite runs somewhere else, `infra_oracle_capability_report` reports that host's own inventory, and
+*that* output — not this table — is what the environment fingerprint in a finding artifact records.
 
-| Role | Tool | Version |
-| --- | --- | --- |
-| Reference compiler, native | `gcc` | **13.3.0** (package `4:13.2.0-7ubuntu1`) |
-| Reference compiler, i686 | `i686-linux-gnu-gcc` | same package version |
-| Reference compiler, AArch64 | `aarch64-linux-gnu-gcc` | same package version |
-| Reference compiler, RISC-V 64 | `riscv64-linux-gnu-gcc` | same package version |
-| Cross execution | `qemu-user-static` | **8.2.2** |
-| Native C runtime and static libc | `libc6-dev` | 2.39 |
-| Per-cell timeout | `timeout` (coreutils) | present at `/usr/bin/timeout` |
-| Alternate reference oracle | `clang` | **optional**, not installed here |
-| Reducer for finding minimization | `creduce` | **optional**, not installed here |
+- **Distribution:** Ubuntu 25.10 (`VERSION_ID=25.10`)
+- **Kernel:** 6.12.85+
+- **Measured:** 2026-08-01
 
-`gcc` is the reference compiler of record. `clang` is selectable through `BCC_REF_CC` where it is
-installed, giving a second independent oracle at no code cost.
+| Role | Tool | Version measured | Package |
+| --- | --- | --- | --- |
+| Reference compiler, native | `gcc` → `gcc-13` | **13.4.0**, default mode gnu17 | `gcc-13` `13.4.0-4ubuntu1` |
+| Reference compiler, i686 | `i686-linux-gnu-gcc-13` | **13.4.0** | `gcc-13-i686-linux-gnu` `13.4.0-4ubuntu1cross1` |
+| Reference compiler, AArch64 | `aarch64-linux-gnu-gcc-13` | **13.4.0** | `gcc-13-aarch64-linux-gnu` `13.4.0-4ubuntu1cross1` |
+| Reference compiler, RISC-V 64 | `riscv64-linux-gnu-gcc-13` | **13.4.0** | `gcc-13-riscv64-linux-gnu` `13.4.0-4ubuntu1cross1` |
+| Cross execution | `qemu-<arch>` — the **plain** spellings are what this release's package installs | **10.1.0** | `qemu-user` `1:10.1.0+ds-5ubuntu2.7` |
+| Native C runtime and static libc | `libc6-dev` | **2.42** | `2.42-0ubuntu3.1` |
+| i686 static C runtime | `libc6-dev-i386-cross` | **2.42** | `2.42-0ubuntu3cross1` |
+| AArch64 C runtime | `libc6-dev-arm64-cross` | **2.42** | `2.42-0ubuntu3cross1` |
+| RISC-V 64 C runtime | `libc6-dev-riscv64-cross` | **2.42** | `2.42-0ubuntu3cross1` |
+| Per-cell timeout | `timeout` at `/usr/bin/timeout` | **uutils coreutils 0.2.2** | `coreutils-from-uutils` |
+| Alternate reference oracle | `clang` | **20.1.8**, present | `clang` `1:20.0-63ubuntu1` |
+| Reducer for finding minimization | `creduce` | **2.11.0**, present | `creduce` `2.11.0~20240909-2.1` |
+| ELF inspection | `binutils` | 2.45 present, but **not a dependency** — the flag probe reads the identification bytes with `std` | `binutils` |
+
+`gcc-13` is the reference compiler of record, and the version is not incidental: it is chosen for
+its **gnu17** default, since no `-std` flag may be passed to either compiler. `clang` is selectable
+through `BCC_REF_CC` where a second independent oracle is wanted; `creduce` is used for minimization
+only when present, and is never required.
+
+Three entries deserve a second look, because each was reasoned about from a stale assumption before
+it was measured:
+
+- **The i686 static C runtime comes from `libc6-dev-i386-cross`, not `libc6-dev-i386`.** Both
+  packages exist and both install cleanly, but they serve different drivers: the `-cross` package
+  owns `/usr/i686-linux-gnu/lib/{libc.a,crt1.o,crti.o,crtn.o}`, which is what the i686 cross driver
+  resolves, while `libc6-dev-i386` owns `/usr/lib32/…`, the multilib set only `gcc -m32` uses — and
+  `-m32` is excluded outright. Installing only the latter leaves the i686 arm with no static C
+  runtime and every i686 cell failing at the link step.
+
+- **The `timeout` implementation is `uutils`, not GNU coreutils**, and it is the *reason* the module
+  documentation of `../conformance_harness/execute.rs` carries a measurement table and a
+  standard-library safety net. Two of its three spellings were measured defective, which is why
+  neither `--signal=KILL` nor `--kill-after` is ever passed. Do not assume GNU semantics from the
+  command name.
+- **`clang` and `creduce` are present here**, so neither optional capability is hypothetical on this
+  machine. They remain optional in the sense that the suite is complete without them. Note that
+  `clang`'s default language mode differs from the pinned reference driver's, so selecting it
+  changes what the oracle compares against.
+- **There is no binfmt registration**, so every QEMU runner is invoked explicitly, and if no
+  `timeout` utility is found at all the harness falls back to a standard-library watchdog thread.
+
+**The authoring fingerprint, kept only as history.** While this suite was designed the machine
+reported gcc 13.3.0 (package `4:13.2.0-7ubuntu1`), QEMU 8.2.2 from a separate `qemu-user-static`
+package, glibc 2.39, GNU coreutils `timeout`, and `clang`/`creduce` absent. Those figures appear
+nowhere above and must not be read as current; they are recorded so that a finding captured under
+them can be read in context, which is also why every finding artifact carries its own
+`environment.txt`.
+
+Each measurement this document relies on was re-taken against the toolchain in the table above, and
+each one held:
+
+| Re-confirmed measurement | Result |
+| --- | --- |
+| Shared flags accepted by all four reference drivers | `-c`, `-O0`, `-O1`, `-O2`, `-static`, `-g`, `-fPIC`, `-D`, `-U`, `-I` — all accepted |
+| Reference compiler rejects `--target=<triple>` | `error: unrecognized command-line option '--target=aarch64-linux-gnu'` |
+| `-m32` on this host | Fails — `cannot find -lgcc`, multilib absent |
+| Reference default language mode | gnu17: `__STDC_VERSION__` = 201710, `__STRICT_ANSI__` undefined |
+| `char` signedness | signed on x86-64 and i686, **unsigned** on AArch64 and RISC-V 64 |
+| `sizeof(long)` / `sizeof(void *)` | 4 on i686, 8 on the other three |
+| `sizeof(long double)` | 16 / 12 / 16 / 16 |
+| Right shift of a negative, division and modulo signs, endianness | Arithmetic shift, truncation toward zero, dividend-signed remainder, little-endian — identical on all four |
+| Exit status of `return 300` | **44**, which is why expected exit codes are confined to 0–125 |
+| ELF identification the flag probe reads | type field at offset `0x10`: `1` object, `2` static executable, `3` dynamic; `PT_INTERP` present only when dynamic; `.debug_info` present with `-g` and absent without |
+| `timeout` behaviour, all five documented spellings | `timeout 1 sleep 5` → 124 at 1.007 s; `timeout -s KILL 1 sleep 5` → 124 at **5.008 s**, so no signal is sent; `timeout -s KILL 1 <spin>` → **never returned**; `timeout -k 1 1 <spin>` → **125**; `timeout 1 <spin>` → 124 |
+| 12-cell cross-target sweep, 4 targets × 3 levels | Every capture byte-identical, every exit status 0, and equal to the golden record |
 
 ### binutils is not a dependency
 
@@ -1004,17 +1595,38 @@ expectation record alone** — with no harness, no Cargo and no Rust toolchain.
 ### Procedure
 
 1. Open the program's `.expected` record.
-2. Read `bcc_command`, `ref_command` and `run_command`.
+2. Read `bcc_command`, `ref_command`, `run_command` and `expect_exit`.
 3. Substitute the placeholders:
    - `$BCC` → the `bcc` binary;
-   - `$REF_CC_<TRIPLE>` → the reference driver matching the target;
-   - `<triple>` → the target triple, e.g. `aarch64-linux-gnu`;
+   - `$REF_CC_<TRIPLE>` → the reference driver matching the target, and specifically the **gnu17**
+     one: on the host recorded above that is the `-13` suffixed spelling and never the unversioned
+     `gcc`, because no `-std` flag is passed and the driver's own default mode is what selects the
+     language it compiles;
+   - `<triple>` → the target triple, e.g. `aarch64-linux-gnu`. It is substituted on the **`bcc` side
+     only**: the reference driver selects its target by *being* a different binary and receives no
+     target flag;
    - `<opt>` → the optimization level, e.g. `-O2`;
    - `<src>` → the program's `.c` file;
-   - `<out>` → any output path you like;
-   - `<runner>` → **empty** for x86-64, otherwise the matching `qemu-<arch>-static`.
-4. Run both binaries. Compare stdout bytes and exit status against **each other** (oracle a) and
-   against `expected_stdout` / `expect_exit` (oracle c).
+   - `<out>` → an output path **inside a private working directory you created yourself**;
+   - `<runner>` → **empty** for x86-64, otherwise the matching QEMU runner (`qemu-<arch>`, or
+     `qemu-<arch>-static` where only that spelling is packaged).
+4. Run each binary with **stdout redirected to its own file** and capture that binary's exit status
+   in the same step — `cmd > "$work/x.stdout"; x_exit=$?`. The status is as much of the comparison as
+   the bytes are, and `$?` is overwritten by the very next command, so capturing it later is too late.
+5. Assert the statuses **before** looking at the bytes, because a status mismatch already settles the
+   cell:
+   - **oracle (a)** — the `bcc` status must equal the reference status for the same target and level;
+   - **oracle (b)** — each non-baseline target's status must equal the x86-64 baseline status at the
+     same level;
+   - **oracle (c)** — the `bcc` status must equal the record's `expect_exit`.
+6. Only then compare the captured streams byte-for-byte: `bcc` against the reference (oracle a), each
+   non-baseline target against the x86-64 baseline (oracle b), and `bcc` against the record's
+   `expected_stdout` (oracle c). `cmp` is the right tool, because it reports the offset of the first
+   differing byte — the same thing the harness's own comparator reports.
+
+Termination by a signal is not a normal exit of the same number. If you are reproducing a crash,
+keep the two apart: a shell `$?` in the `128 + signal` range means the runner reported a signal, and
+that is a different outcome from a program that chose to return the same value.
 
 ### Fully worked example
 
@@ -1029,39 +1641,91 @@ run_command        = <runner> <out>
 expect_exit        = 0
 ```
 
-Every placeholder resolved — these three lines are literal and copy-pasteable from the repository
-root:
+Every placeholder resolved. The script below is literal and copy-pasteable from the repository root.
+It creates its own private working directory, keeps every artifact inside it, quotes every expansion,
+uses no `eval`, and removes the directory on exit — including on failure:
 
 ```bash
-# 1. Build with the compiler under test.
-./target/debug/bcc --target aarch64-linux-gnu -O2 -static \
-  tests/conformance/01_integer_conversions/004_narrowing_conversions.c -o /tmp/bcc.out
+#!/usr/bin/env bash
+# Reproduce one cell by hand. Every artifact stays inside "$work", which is removed on exit.
 
-# 2. Build with the matching reference cross driver.
-aarch64-linux-gnu-gcc -O2 -static \
-  tests/conformance/01_integer_conversions/004_narrowing_conversions.c -o /tmp/ref.out
+# 0. Create the private scratch directory first, and never write to a predictable name.
+#    `mktemp -d` creates a directory that did not previously exist, with mode 0700, under an
+#    unpredictable name, so nothing can already be sitting at the paths used below. A fixed path
+#    such as /tmp/bcc.out is shared and guessable: on a multi-user machine another user can
+#    pre-place a symbolic link there, and the redirection in step 3 would then truncate whatever
+#    that link points at, with your privileges. The umask protects the files created inside the
+#    directory, and the trap removes the whole thing however the shell exits, interrupt included.
+umask 077
+work="$(mktemp -d)" || exit 1
+trap 'rm -rf -- "$work"' EXIT INT TERM
+printf 'scratch directory: %s\n' "$work"
 
-# 3. Run both under the target's emulator, which is the runner for aarch64.
-qemu-aarch64-static /tmp/bcc.out > /tmp/bcc.stdout; echo "bcc exit=$?"
-qemu-aarch64-static /tmp/ref.out > /tmp/ref.stdout; echo "ref exit=$?"
+src="tests/conformance/01_integer_conversions/004_narrowing_conversions.c"
+rec="tests/conformance/01_integer_conversions/004_narrowing_conversions.expected"
 
-# 4a. Oracle (a): the two must be byte-identical, and both exit statuses must match.
-cmp /tmp/bcc.stdout /tmp/ref.stdout && echo "oracle a: agree"
+# 1. Build with the compiler under test. --target is a bcc-only selector.
+./target/debug/bcc --target aarch64-linux-gnu -O2 -static "$src" -o "$work/bcc.out" || exit 1
 
-# 4b. Oracle (c): the captured stream must equal the record's expected_stdout verbatim,
-#     and the exit status must equal expect_exit, which this record declares as 0.
-printf 'narrow_u8=200 narrow_i8=-56 narrow_u16=65336\nruntime_u8=200 runtime_i8=-56 runtime_u16=65336\n' \
-  | cmp - /tmp/bcc.stdout && echo "oracle c: golden record matches"
+# 2. Build with the matching reference cross driver, which receives no target flag. The -13 suffix is
+#    the gnu17 driver: no -std flag is passed, so the driver's own default mode selects the language.
+aarch64-linux-gnu-gcc-13 -O2 -static "$src" -o "$work/ref.out" || exit 1
+
+# 3. Run both under the target's runner, capturing stdout and exit status separately.
+qemu-aarch64 "$work/bcc.out" > "$work/bcc.stdout"; bcc_exit=$?
+qemu-aarch64 "$work/ref.out" > "$work/ref.stdout"; ref_exit=$?
+
+# 4. Oracle (a): statuses first, then bytes.
+if [ "$bcc_exit" -ne "$ref_exit" ]; then
+  echo "oracle a: EXIT MISMATCH bcc=$bcc_exit ref=$ref_exit"
+else
+  cmp -- "$work/bcc.stdout" "$work/ref.stdout" && echo "oracle a: exit and stdout agree"
+fi
+
+# 5. Oracle (c): both recorded values, read out of the record itself rather than retyped.
+awk '/^expected_stdout[[:space:]]+<<END$/{f=1;next} f&&/^END$/{exit} f' "$rec" \
+  > "$work/golden.stdout"
+want_exit="$(awk -F'=[[:space:]]*' '/^expect_exit[[:space:]]/{print $2; exit}' "$rec")"
+if [ "$bcc_exit" -ne "$want_exit" ]; then
+  echo "oracle c: EXIT MISMATCH got=$bcc_exit want=$want_exit"
+else
+  cmp -- "$work/golden.stdout" "$work/bcc.stdout" && echo "oracle c: golden record matches"
+fi
 ```
 
-For the x86-64 cell of the same program, `<runner>` is empty, so step 3 becomes `/tmp/bcc.out` and
-`/tmp/ref.out` invoked directly, and `$REF_CC_<TRIPLE>` in step 2 is the native `gcc`.
+Lifting `expected_stdout` and `expect_exit` out of the record with `awk` rather than retyping them is
+deliberate. A retyped golden stream is a second, unverified copy of the expectation, and the whole
+point of oracle (c) is to compare against the **committed** one.
 
-For oracle (b), build the same program for two targets at the same level and compare the two
-captured streams to each other, using the x86-64 cell as the baseline.
+For the x86-64 cell of the same program, `<runner>` is empty: steps 3 onward invoke `"$work/bcc.out"`
+and `"$work/ref.out"` directly, and the reference driver in step 2 is the native gnu17 one — `gcc-13`
+on the host recorded above, **not** the unversioned `gcc`, which is a later major version defaulting
+to a later language mode.
+
+Every path above is quoted, so a directory name containing a space or a shell metacharacter is
+passed through as one argument rather than being split, and `cmp --` cannot mistake a name beginning
+with a hyphen for an option. These are the same precautions the generated `commands.sh` takes,
+described at the end of this section; reproducing a cell by hand should not be less safe than
+reproducing it with the script.
+
+For the x86-64 cell of the same program, `<runner>` is empty, so step 3 invokes `"$work/bcc.out"` and
+`"$work/ref.out"` directly, and `$REF_CC_<TRIPLE>` in step 2 is the native `gcc`. The `--target` flag
+in step 1 stays: it is passed on the `bcc` side of every cell, native included.
+
+For oracle (b), build the same program for two targets at the same level into two paths beneath
+`"$work"`, run each under its own runner, assert the two statuses match, and only then compare the
+two captured streams — with the x86-64 cell as the baseline.
 
 For a **finding**, none of this substitution is necessary: `commands.sh` inside the finding
-directory already contains these lines, fully resolved, for every cell involved.
+directory already contains these lines, fully resolved, for every cell involved — bounded, checking
+both stdout and status, and printing a single `RESULT:` line. Run it with `sh commands.sh`. It creates
+its own private scratch directory with `mktemp -d` under a `077` umask, prints where that is, and
+removes it again however the script exits — set `REPRO_KEEP=1` to keep it, or
+`WORK=<an existing directory>` to write into one of your own, which the script then never creates and
+never removes. Every scratch path it writes is refused rather than reused if something is already at
+that name, so a planted symbolic link cannot turn one of its redirections into a write somewhere else
+on your machine. See
+[what a finding artifact directory holds](#what-a-finding-artifact-directory-holds).
 
 
 ---
@@ -1072,10 +1736,10 @@ directory already contains these lines, fully resolved, for every cell involved.
 tests/conformance/
 ├── README.md                        this file — the suite contract
 ├── EXPECTED_DIVERGENCES.md          register of every expected-divergence marker
-├── FINDINGS.md                      register of every finding
+├── FINDINGS.md                      PLANNED — register of every finding
 ├── 01_integer_conversions/          10 programs: <NNN_name>.c + <NNN_name>.expected
-├── 02_constant_expressions/          8 programs
-├── 03_initializers/                 11 programs
+├── 02_constant_expressions/         PLANNED —  8 programs
+├── 03_initializers/                 PLANNED — 11 programs
 ├── 04_bitfields/                     7 programs
 ├── 05_pointers/                     10 programs
 ├── 06_control_flow/                 10 programs
@@ -1084,24 +1748,59 @@ tests/conformance/
 ├── 09_optimization_levels/           8 programs
 ├── 10_declarations_and_types/       10 programs
 ├── 11_literals_and_strings/          4 programs
-├── 12_preprocessor/                  6 programs
-├── 13_floating_point/                4 programs
-├── 14_abi_calling_convention/        6 programs
+├── 12_preprocessor/                 PLANNED —  6 programs
+├── 13_floating_point/               PLANNED —  4 programs
+├── 14_abi_calling_convention/       PLANNED —  6 programs
 ├── support/
 │   └── include/
 │       └── probe_header.h           the suite's ONLY fixture
-├── tools/
+├── tools/                           PLANNED
 │   └── regenerate_expected.sh       maintenance-only; never invoked by cargo test
-└── findings/
-    └── F-NNNN-<slug>/               one curated, committed finding
+└── findings/                        committed; holds only .gitkeep so far
+    └── F-<digest>-<cell-slug>-<oracle>-<class>/   PLANNED — one curated, committed finding
         ├── reproducer.c
         ├── reproducer.expected
         ├── MANIFEST.txt
         ├── commands.sh
-        ├── outputs/                 captured stdout, exit status and stderr per cell
+        ├── outputs/                 per cell: the program's stdout, stderr and exit status,
+        │                            and the compiler's own stdout, stderr and outcome
         ├── environment.txt
         └── diff.txt
 ```
+
+`PLANNED` marks an entry the plan specifies that has **not landed on this branch yet**. Everything
+unmarked is committed and present. Nothing in this document links to a `PLANNED` path: a link that
+resolves to nothing is worse than no link, because it reads as a promise the repository does not
+keep.
+
+### The finding identifier
+
+A finding directory is named from the divergence itself and from nothing else, so the same divergence
+always names the same directory and two different divergences can never name the same one:
+
+```
+F-<16 hex digits>-<cell slug>-<oracle letter>-<divergence class>
+   e.g. F-9d3c1a5f7b204e68-04_bitfields+005_straddling_and_zero_width+aarch64+O2-b-stdout-mismatch
+```
+
+- the **cell slug** is the harness's own cell identity — area, program, target and optimization level
+  — with every byte outside `[A-Za-z0-9_]` escaped as `%XX` and the four parts joined with `+`. It is
+  **injective**: two different cells cannot produce the same slug, and nothing is abbreviated or
+  truncated on the way in;
+- the **oracle letter** is `a`, `b` or `c`;
+- the **divergence class** is one of `compile-failure`, `link-failure`, `run-crash`,
+  `exit-code-mismatch`, `stdout-mismatch` or `timeout`;
+- the **digest** is a stable hash of exactly those same components, so it adds a short fixed-width
+  handle to quote in conversation without becoming the thing that distinguishes two findings.
+
+Because the slug, the digest and the oracle letter each contain no hyphen, the hyphens above are
+unambiguous separators. **No part of the identifier is abbreviated**, so no two findings can collide
+and overwrite one another's evidence.
+
+Each generated finding directory also carries a `.run-owner` stamp. It is harness bookkeeping rather
+than evidence — it lets a second, concurrent run detect that another run is still writing this
+directory and refuse instead of purging it — and it is not part of the deliverable: no artifact may be
+written to that name, and the completeness check does not look for it.
 
 ### The single fixture
 
@@ -1116,52 +1815,279 @@ is a literal in a program's own source.
 
 ### Maintenance tooling
 
-[`tools/regenerate_expected.sh`](tools/regenerate_expected.sh) regenerates golden records. It is
-**maintenance-only** and is **never invoked by `cargo test`**. That separation is what stops a wrong
-answer from quietly becoming the new expectation.
+`tools/regenerate_expected.sh` is the plan's golden-record regeneration script. It is
+**maintenance-only** and must **never be invoked by `cargo test`**: that separation is what stops a
+wrong answer from quietly becoming the new expectation.
+
+It is **not present on this branch**, so it is named rather than linked. The guarantee it supports
+does not depend on it, though — `manifest.rs` has no writer, so no test run can rewrite a record
+whether the script exists or not. What is missing today is only the *convenience* of regenerating a
+record mechanically; the *protection* is already in place.
 
 ### The transient-versus-curated split
 
 **Preserve this split.** It is what keeps an in-progress run from polluting a committed deliverable.
 
-**Committed and tracked — this folder:**
+**Committed and tracked — this folder.** Present today:
 
-- the 108 programs and their 108 expectation records;
-- `support/`, `tools/` and `findings/`;
-- the three Markdown files: this contract, [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) and
-  [`FINDINGS.md`](FINDINGS.md).
+- 73 programs and their 73 expectation records, across nine area directories;
+- `support/`;
+- two Markdown files: this contract and [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md).
+
+Planned, and not yet present — named as plain text for the reason given under the layout tree:
+
+- the remaining 35 programs and records, across the five unlanded areas, bringing the corpus to 108;
+- `tools/` and `findings/`;
+- `FINDINGS.md`.
 
 **Transient and git-ignored — elsewhere entirely, beneath the build directory:**
 
 | Path | Content |
 | --- | --- |
-| `target/conformance-work/` | Per-cell workspaces. Removed on success, **retained on failure**, so a failing cell leaves behind exactly the artifacts needed to investigate it |
+| `target/conformance-work/` | Per-cell workspaces. **Retained** whenever the cell produced a `FAIL`, an `XPASS` or a `FINDING` outcome, and retained for **every** cell when `BCC_CONFORMANCE_KEEP_WORK` is set; **removed** otherwise, which means a cell whose outcomes were all `PASS`, `XFAIL` or `UNAVAILABLE`. A retained directory leaves behind exactly the artifacts needed to investigate it, and the run prints its path. A timeout is not a separate rule: it reaches the retained set by way of the `FAIL` or `FINDING` verdict it produces. There is deliberately no destructor that deletes, so a panicking cell cannot erase its own evidence |
+| `target/conformance-report/run.txt` | Which run produced the reports in this directory: its run token, its configuration fingerprint and the four retention ceilings |
 | `target/conformance-report/areas/<area>.md` | Per-area human-readable report |
-| `target/conformance-report/areas/<area>.tsv` | Per-area machine-readable report — each area writes only its own file, so there is no contention under parallel execution |
+| `target/conformance-report/areas/<area>.tsv` | Per-area machine-readable report — each area writes only its own file, so there is no contention under parallel execution. Its **first line** is the generation preamble described below; the column header is line two |
 | `target/conformance-report/summary.md` | The deliverable summary |
 | `target/conformance-report/summary.tsv` | The same data, machine-readable |
-| `target/conformance-findings/F-NNNN-<slug>/` | Auto-generated finding artifacts from the current run |
+| `target/conformance-findings/F-<digest>-<cell-slug>-<oracle>-<class>/` | Auto-generated finding artifacts from the current run |
 
 **`findings.rs` never writes into `tests/conformance/`.** The curated finding set and both registers
 are human-maintained committed deliverables. A run writes only beneath the build directory.
 
+Every write beneath the build directory goes through one publisher that refuses to follow a symbolic
+link: the destination is inspected with `symlink_metadata`, the bytes are written to a fresh
+temporary entry created with `create_new`, and the entry is then renamed into place. A name already
+occupied by a link — even a dangling one — is refused rather than followed, so no planted link can
+redirect a write, and no partially written report or finding file is ever observable.
+
+### The report and generated-finding roots are retired at the start of every run
+
+Report and finding paths are deterministic, so a previous run's `areas/09_optimization_levels.tsv`
+sits exactly where this run's will, and so does its `summary.md`. The first thing the run does is
+therefore **empty the report root and the generated-findings root, whole** — entry by entry, so a
+reader holding a directory open keeps a valid handle, and never following a link.
+
+The reason is that finalization would otherwise aggregate files that never described one run: a
+reduced run's rows counted beside a full run's, or a finding that was fixed weeks ago presented as
+current. Worse, a run that never reached finalization at all — a filtered run, or one that failed
+partway — would leave the *previous* run's `summary.md` standing as though it were this one's. The
+whole root is emptied rather than the two known artifacts named, because a list of names has to be
+kept in step with the artifacts written into it and this has no list to fall behind.
+
+The identity of the run is written to `run.txt` beside the reports and **deliberately nowhere else**:
+the `.md` and `.tsv` files are byte-identical across two runs with identical inputs, which is what
+makes them diffable, so the token that necessarily differs between runs stays out of them. What the
+reports *do* carry is the **configuration fingerprint**, which is deterministic — so a reduced run's
+numbers can never be mistaken for a full run's.
+
+One qualification, stated because it is real rather than hidden: the byte counts in
+[`## Retained evidence`](#retention-budgets) reflect the order in which concurrently failing cells
+reached retention. Every verdict, every row and every ordering elsewhere in the reports is a pure
+function of the inputs, and a run in which nothing was pruned reproduces byte for byte; but on a run
+where the retention ceilings are **contended** — hundreds of cells failing at once, so that whichever
+cell concludes first claims the last of the budget — the retained totals and the set of pruning notes
+may differ between two otherwise identical runs. The alternative would be to serialize retention
+across the fourteen area threads, which would trade a real property (evidence bounded continuously,
+as it is produced) for a cosmetic one.
+
+The per-cell workspace root is deliberately **not** wiped: each workspace is purged as it is
+allocated, so a cell always starts empty, while a second filtered run cannot destroy the retained
+evidence of a run a maintainer is still reading.
+
+### The generation stamp — why a summary never reports another run's results
+
+A report on disk outlives the run that wrote it, so every machine-readable area report opens with a
+line naming the run that produced it and the configuration it ran under:
+
+```text
+#generation	run=p12345-t1730000000123456789	config=quick:0;only:-;strict:0;allow_xpass:0;ack_missing:0;timeout:30;targets:x86_64+i686+aarch64+riscv64;levels:O0+O1+O2;oracles:a1111b0111c1111
+```
+
+`run` identifies the process; `config` identifies the settings, one field per fact that changes what
+a report means, ending with a bit per oracle and target so a machine missing one cross driver is
+distinguishable from a fully equipped one. The same generation is printed as a `Generation:` line in
+each per-area Markdown report and as the run identifier and configuration fingerprint in the
+summary's **Provenance** section.
+
+The summary aggregates **only** the area reports carrying the generation of the process reading them.
+An area report from an earlier run is neither counted nor deleted: it is listed by name, with the run
+that wrote it, and it holds the summary back until this run replaces it. A report written before the
+stamp existed has no preamble and is recognised as foreign on its first line. Initialization has
+already retired the previous run's reports by the time any area writes, so a foreign file is the
+exception rather than the rule; the stamp closes the cases initialization cannot — a second suite
+process sharing one build directory, and a file written before the stamp existed. It closes them by
+identity carried inside the file, with no further destructive step and no lock, which is what the
+fourteen concurrently running area tests require: a directory-wide delete taken after they start
+would race with a sibling's write.
+
+Two consequences worth knowing:
+
+- **The reports are byte-identical between runs except for that one line.** Diff two runs' area
+  reports and the only difference is the stamp, unless the run genuinely found something different.
+- **A run that could not aggregate all fourteen current reports says so.** With a test-name filter
+  active it still publishes a summary — stamped partial, with every area that did not contribute
+  listed as absent, stale or unusable — and without one it waits, printing `run summary pending`,
+  which is the ordinary answer for thirteen of the fourteen area tests.
+
+### What a retained cell workspace holds
+
+A workspace is removed when its cell passes and retained when it does not, or always under
+`BCC_CONFORMANCE_KEEP_WORK`. A retained one is self-sufficient — everything needed to investigate
+the cell without re-running it, and without this harness:
+
+| Entry | Content |
+| --- | --- |
+| `program.c` | A copy of the program source, taken when the workspace was allocated |
+| `program.expected` | A copy of the program's expectation record, likewise |
+| `commands.txt` | The exact commands this cell ran |
+| `bcc.compile.stdout` / `bcc.compile.stderr` / `bcc.compile.status` | The compiler under test's build: both streams and the raw wait status |
+| `ref.compile.stdout` / `ref.compile.stderr` / `ref.compile.status` | The reference compiler's build, where oracle (a) ran |
+| `bcc.out` / `ref.out` | The two artifacts, where the builds succeeded |
+| `bcc.stdout` / `bcc.stderr` / `bcc.exit` | The execution of the compiler-under-test artifact |
+| `ref.stdout` / `ref.stderr` / `ref.exit` | The execution of the reference artifact |
+
+The source and record are copied in **at allocation**, not at retention, so a retained workspace
+names the program it tested even for a cell that never got as far as building. The six
+`*.compile.*` entries are written on **every** branch, including a refused build, for the same
+reason: a compile whose evidence had not yet been recorded when the verdict was taken could not be
+investigated afterwards.
+
+Each `*.exit` and `*.compile.status` entry is a line-oriented `key = value` record in the same
+spelling an expectation record uses, so it can be read by eye and by a script. It carries the
+termination and its label, the exit code and whether that code lies inside the corpus's 0–125
+contract, the signal where there was one, the **raw wait status**, the duration and the budget, which
+mechanism enforced the budget, the runner, the working directory, both byte counts, the
+capture-integrity record for each stream, the argument vector as a shell line, and — only when they
+differ — the launch vector that wrapped it.
+
+### Retention budgets
+
+Retention is bounded, because an unbounded one is not a diagnostic aid: a single runaway cell can
+fill a build directory and take the rest of the run's evidence down with it. Four ceilings apply, and
+every one of them **reports** what it did rather than discarding quietly:
+
+| Ceiling | Value | Applies to |
+| --- | --- | --- |
+| Per-entry | 8 MiB | One captured file within a workspace |
+| Per-workspace | 32 MiB | One retained cell's total |
+| Per-run | 2 GiB | Every retained workspace of the run, together |
+| Workspace count | 512 | How many workspaces keep their **contents**; past this a workspace is still created, and still named by the report, but is kept as a bare marker |
+
+Every ceiling is enforced **at the moment of retention**, not by a sweep afterwards, so the bound
+holds continuously rather than eventually. When a **byte** ceiling bites, the **largest** entries are
+pruned first — which is not an arbitrary order: the large entries are the linked executables, while
+the small ones are the captured streams, the recorded statuses and the command lines, which is
+everything an investigation actually reads. So the cheap evidence is what survives.
+
+The **workspace count** ceiling is different in kind, and the difference is worth knowing before you
+open a retained directory: past 512 workspaces a cell that does not pass still gets a workspace and is
+still named by the report, but *every* entry in it is pruned — the command lines included. Nothing in
+the directory survives to be read.
+
+Every pruning is **reported**. A pruned entry is removed and the decision becomes a **pruning note**
+naming the entry, its size, why it went, and how to reproduce it. That last part is the same in both
+cases and does not depend on anything being left behind: the directory the entry stood in names the
+cell exactly, so re-running that one cell reproduces it. A workspace whose entries were all pruned is
+left as an **empty directory**, so the path the report names still exists rather than vanishing.
+
+The run's totals — how many workspaces were retained, how many bytes they hold against the permitted
+ceiling, all four ceilings, and how many prunings were performed — are reported under
+[the deliverable summary](#the-deliverable-summary)'s `## Retained evidence` section, and as
+`retained_workspaces`, `retained_bytes` and one `retention_pruning` record per note in `summary.tsv`.
+
+This is load-bearing rather than tidy: a workspace that was pruned and a workspace that was never
+created are indistinguishable on disk and mean opposite things, so a silent pruning would turn
+*bounded* evidence into *apparently absent* evidence.
+
+### FULL versus PARTIAL — one predicate, three places
+
+A report is stamped `Coverage: FULL` only when every dimension of its planned-against-recorded matrix
+met its plan **and** nothing went wrong while assembling it. The matrix table, the stamp in the first
+heading and the `reduced` and `partial` fields of `summary.tsv` are all derived from the same
+dimension list, so a shortfall can never sit beside a claim of full coverage. Anything below makes a
+report not full, and every one of them is enumerated by name under **Why this report is reduced or
+partial**:
+
+| Condition | Stamp |
+|---|---|
+| `BCC_CONFORMANCE_QUICK` or `BCC_CONFORMANCE_ONLY` narrowed the matrix | reduced |
+| An oracle arm's tooling is absent, or a comparison reported `UNAVAILABLE` | reduced |
+| A matrix dimension fell short — areas, programs, targets, levels, cells or any oracle's comparisons | reduced when the configuration asked for a smaller matrix, partial when it did not |
+| A test-name filter ran a subset of the suite | partial |
+| An area report was absent, stale or unusable | partial |
+| A defect in the corpus, in an expectation record, in an area report or in the summary's own assembly raised a diagnostic | partial |
+
+Reduced always implies partial, because a smaller matrix is by definition not one complete run — so
+`summary.tsv` reports `partial=true` whenever `reduced=true`.
+
 ### The deliverable summary
 
-`target/conformance-report/summary.md` is the artifact the requirements ask for. It reports the
-feature areas covered, the total cells and their outcomes, every expected divergence with its
-documented basis, and every finding with a pointer to its reproducer and its reproduction commands.
-It is also this suite's coverage evidence, for the reason given under
-[the enumerable matrix](#the-enumerable-matrix).
+`target/conformance-report/summary.md` is the artifact the requirements ask for. Its four numbered
+sections are the four things the requirements name: **1 — Feature areas covered**, **2 — Total tests
+and their outcomes**, **3 — Expected divergences and their documented basis**, and **4 — Findings,
+with verbatim reproducer, minimization status and reproduction commands**. That fourth title is
+deliberately more exact than the requirement's own wording: a run performs no automated reduction, so
+the artifact carries the verbatim copy plus the recorded status rather than claiming a reduced
+program. It is also this suite's coverage evidence, for
+the reason given under [the enumerable matrix](#the-enumerable-matrix).
+
+Alongside those, and each present on every run:
+
+| Section | Content |
+| --- | --- |
+| `## Run verdict` | Whether the run passes, and on what |
+| `## ⚠️ Unexpected successes (XPASS) — stale expected-divergence markers` | Listed separately and prominently, always |
+| `## ⚠️ Unavailable oracles` | Every arm that could not be attempted, never silent |
+| `## Recorded, reasoned exclusions — what was deliberately not compared` | So the set of comparisons *not* made is as visible as the set that was |
+| `## Environment fingerprint` | Each compiler, each emulator and the kernel, so a divergence can be attributed to toolchain drift |
+| `## Run configuration` | The effective policy, including a **`Configuration fingerprint`** row — deterministic, so two runs under the same policy agree and a reduced run's numbers cannot be mistaken for a full run's |
+| `## Retained evidence` | `retained_workspaces`, `retained_bytes` against the permitted run ceiling, and every `retention_pruning` note |
+| `## Why this report is reduced or partial` | Present whenever a quick matrix, a name filter or `BCC_CONFORMANCE_ONLY` narrowed the run |
+| `## Diagnostics` | Anything the reporting path itself needs the reader to know |
+
+`summary.tsv` carries the same data, one labelled record per line, including
+`retained_workspaces`, `retained_bytes` and one `retention_pruning` record per note.
+
+### What a finding artifact directory holds
+
+A finding is a deliverable, so its directory is designed to be reproducible **without this harness**:
+
+| Artifact | Content |
+| --- | --- |
+| `reproducer.c` | The program, minimized as far as practical |
+| `reproducer.expected` | Its expectation record, so it remains runnable by the harness too |
+| `MANIFEST.txt` | `finding_id`, an **`identity_digest`**, the area and program, the oracle and its letter, the divergence class, which cells diverged, and a description of what was observed |
+| `commands.sh` | Exact, copy-pasteable compile and run lines for every cell involved. Run it as `sh commands.sh`: it carries a `#!/bin/sh` line but is written without an executable bit, so name the interpreter rather than invoking the path directly |
+| `outputs/<oracle>-<target>-<opt>.{stdout,exit,stderr}` | Captured output per compiler and per backend. Standard error is captured here even though it is never compared, because diagnostic text is often the fastest route to a diagnosis |
+| `environment.txt` | Each compiler version, each emulator version, the kernel — plus this run's **`run_token`** and **`configuration`**, so an artifact can be attributed to the run that produced it |
+| `diff.txt` | The computed difference, with the first divergent line and byte offset |
+
+**The identifier is injective.** It carries the full 64-bit digest of the complete finding identity
+rather than a truncation of it, and before anything is written the identity is verified against any
+`MANIFEST.txt` already at that path. Two distinct findings whose abbreviated names would have
+collided therefore get distinct directories, and a genuine collision is **reported** rather than
+silently overwriting another finding's evidence.
+
+**`commands.sh` reproduces the whole oracle contract, not half of it.** Every build and every
+execution in it is bounded by the discovered `timeout` utility through a runtime test, so one script
+works with or without that utility present — a timeout is one of the divergence classes, so an
+unbounded reproduction could hang instead of reporting the timeout as a result. Each side records its
+own expected termination, keeping an ordinary exit, a signal death and a timeout **distinct** rather
+than folding a signal into `128 + signal` the way a bare `$?` does. And the comparison is on
+**stdout and status together**: comparing stdout alone would call two runs equal that disagreed on
+how they ended. The script prints a single `RESULT:` line saying which of the three things happened —
+the recorded divergence reproduced, nothing differed, or one side never ran at all.
 
 ### Cross-references
 
 | Path | What it holds |
 | --- | --- |
 | [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) | The expected-divergence register, machine-checked against the markers in both directions |
-| [`FINDINGS.md`](FINDINGS.md) | The findings register, indexing every curated reproducer |
+| `FINDINGS.md` | **PLANNED, not present on this branch** — the findings register, indexing every curated reproducer. Named rather than linked |
 | [`../conformance.rs`](../conformance.rs) | The suite driver: 14 area tests and 4 infrastructure tests |
-| [`../conformance_harness/`](../conformance_harness/) | The harness modules — oracle discovery, sandboxing, record parsing, compilation, execution, comparison, classification, findings, reporting, the flag probe and the audit gate |
-| `docs/testing/differential-conformance.md` | The documentation-site page: methodology, oracle definitions, the build matrix, the verdict taxonomy and the summary format |
+| [`../conformance_harness/`](../conformance_harness/) | The harness modules — oracle discovery, workspace isolation, record parsing, compilation, execution, comparison, classification, findings, reporting, the flag probe and the audit gate |
+| `docs/testing/differential-conformance.md` | **PLANNED, not present on this branch** — the documentation-site page: methodology, oracle definitions, the build matrix, the verdict taxonomy and the summary format. Named rather than linked |
 
 ---
 
@@ -1176,14 +2102,35 @@ tests/conformance/<NN_area>/<NNN_name>.c
 tests/conformance/<NN_area>/<NNN_name>.expected
 ```
 
-**No harness change is needed**, because discovery is directory-driven. Then:
+**No harness code registers the program**, because discovery is directory-driven — but one harness
+edit is still required, at step 5 below. Then:
 
 1. Write the program against every rule in [Corpus authoring rules](#corpus-authoring-rules).
-2. Copy the [canonical reference record](#the-canonical-reference-record) and edit `program`, `area`
-   and `description`. Remember that `program` must equal the file stem and `area` must equal the
-   directory name.
-3. Regenerate the golden record through
-   [`tools/regenerate_expected.sh`](tools/regenerate_expected.sh).
+2. Copy the [canonical reference record](#the-canonical-reference-record) and edit **five** things,
+   not three. The exemplar is a real record for a real program, so every field that describes that
+   program must be rewritten to describe yours:
+   1. `program` — must equal the file stem exactly.
+   2. `area` — must equal the directory name exactly.
+   3. `description` — one line naming what this program puts under test.
+   4. **`ub_audit_flags` — delete this line** unless your program genuinely needs one of the two
+      sanctioned deviations. The exemplar is a deliberate narrowing program and therefore declares
+      one; a program that is clean under the full gate omits the key entirely, and a record that
+      declares the full gate verbatim is refused as a deviation in nothing.
+   5. **`ub_notes` and `impl_defined_notes` — rewrite both.** The exemplar's notes argue about the
+      exemplar's conversions and cite the exemplar's measured per-target values; copied unedited
+      they would assert something untrue of your program, which is a defect in the record even
+      though it parses. Write the undefined-behaviour-freedom argument for the constructs your
+      program actually contains, keep it in `ub_notes`, and if you kept a deviation at step 4 give
+      it its own paragraph naming every dropped flag, per
+      [Recorded reasons](#every-validation-the-parser-enforces). If your program narrows nothing —
+      no restricted target list, no disabled oracle, no gate deviation — `impl_defined_notes` may
+      be dropped, but state any implementation-defined property you relied on if you relied on one.
+3. Establish the golden record. Once `tools/regenerate_expected.sh` lands, that script is the only
+   sanctioned way to do it; until then, run the cell by hand using the recipe under
+   [Reproducing a cell by hand](#reproducing-a-cell-by-hand), read the captured stdout back, and
+   paste it into `expected_stdout` — having first confirmed against the reference compiler that the
+   bytes are *right*, not merely what `bcc` currently emits. A golden record copied from an
+   unverified run is a wrong answer promoted to an expectation.
 4. Re-run the area test, then `infra_ub_audit_gate` to confirm the new program is clean under both
    gates.
 5. Update the area's program count in the harness area table and in the
@@ -1246,16 +2193,25 @@ produced either:
 
 - **`08_gcc_extensions/004_case_ranges.c`** — GCC case ranges appear in **no** documented `bcc`
   extension inventory (the documented set enumerates `__attribute__`, statement expressions,
-  `typeof`, computed goto and inline assembly, and omits case ranges). The program is written and
-  executed anyway. If it diverges, the verdict is XFAIL against marker
-  `XD-GCCEXT-CASE-RANGES-001`, and the ambiguity is surfaced so a maintainer can determine whether
-  the omission is an implementation gap or a documentation gap.
-- **`13_floating_point/004_long_double_target_restricted.c`** — `long double` was measured to have
-  three different representations across the four targets (16, 12, 16 and 16 bytes; x87 80-bit
-  against IEEE binary128), so cross-backend *value* equality is genuinely meaningless for it. The
-  program is still written and still executed; it is compared against the same-target reference
-  compiler and against its golden record, and only cross-backend value equality is disabled, with
-  the measured reason recorded in its own `.expected`.
+  `typeof`, computed goto and inline assembly, and omits case ranges). The program is written
+  regardless, with all three oracles enabled on all four targets at all three optimization levels.
+  **No marker is attached, and that is deliberate:** an omission from an inventory is not a
+  documented limitation — it says nothing mentions the construct, not that the frontend rejects it —
+  so a rejection here is a **FINDING**, captured with its reproducer and its exact reproduction
+  commands, until a repository artifact explicitly documents the limitation *and* a real divergence
+  has been observed and reproduced. Nothing is excluded and nothing is excused; the ambiguity
+  between an implementation gap and a documentation gap is surfaced in
+  [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.1 so a maintainer can settle it from a real
+  run rather than from a guess written in advance.
+- **`13_floating_point/004_long_double_target_restricted.c`** (planned with the floating-point area)
+  — `long double` was measured to have three different representations across the four targets (16,
+  12, 16 and 16 bytes; x87 80-bit against IEEE binary128), so cross-backend *value* equality is
+  genuinely meaningless for it. The program is still to be written and still run on all four targets
+  at all three levels; it is compared against the same-target reference compiler and against its
+  golden record, and **only** cross-backend value equality is switched off — a **recorded exclusion**
+  carrying its measured reason in the record's own `impl_defined_notes`, not a marker, because a
+  marker scoped to an oracle the record has switched off would be dormant and the record format
+  refuses it at parse time.
 
 Two other measured differences are handled **by construction** rather than by marker, because a
 marker implies a test that diverges and these do not: plain-`char` signedness is avoided by using
@@ -1263,16 +2219,59 @@ explicit `signed char` and `unsigned char`, and the i686 `long` and pointer widt
 avoided by width normalization. Both are recorded as implementation-defined notes in the affected
 programs.
 
-### C4 — Hermetic execution
+### C4 — Contained execution
 
-Every input is a literal in the program source. **No program opens a socket, calls `fopen`, or reads
-`argv` or `getenv`.** Each cell runs in its own deterministic workspace beneath the build directory,
-uniquely determined by area, program, target and optimization level, and writes nothing outside it.
-A per-cell timeout bounds runaway execution.
+Two separate mechanisms discharge this constraint, and keeping them apart is what makes the claim
+checkable.
 
-This is why the whole folder has **exactly one** fixture file, and why the determinism rules above
-are what they are: a program that read the clock, the environment or an external file would not be
-reproducible, which would make byte-exact comparison meaningless.
+**Corpus-authoring policy** is what keeps the *programs* contained. Every input is a literal in the
+program source: **no corpus program opens a socket, calls `fopen`, or reads `argv` or `getenv`**.
+That is a property of the 108 sources, verified by reading them, not something the harness enforces
+at run time. It is why the whole folder has **exactly one** fixture file, and why the determinism
+rules above are what they are — a program that read the clock, the environment or an external file
+would not be reproducible, which would make byte-exact comparison meaningless.
+
+**Path discipline** is what keeps the *harness* contained. Every path the harness constructs is
+resolved and re-checked against a root beneath the Cargo build directory before it is written: each
+cell gets its own deterministic workspace, uniquely determined by area, program, target and
+optimization level, and reports and generated findings get their own roots. A per-cell timeout
+bounds runaway execution.
+
+**What neither mechanism is.** This is not an operating-system sandbox, and nothing in this suite
+claims to be one:
+
+- No namespace, `chroot`, seccomp filter or network restriction is applied to any child process.
+  Setting a working directory is not confinement.
+- The environment a child inherits is not cleared and `TMPDIR` is not set, so **the external tools
+  keep their own temporaries wherever they normally put them**. `gcc -### -static …` shows the
+  driver writing `/tmp/cc*.s`, `/tmp/cc*.o` and `/tmp/cc*.res` — outside the workspace, every
+  time.
+- The reference compilers, the cross drivers, the QEMU runners and the bounding `timeout` utility
+  are installed tools that live and execute outside the build tree; only their *outputs* are placed
+  inside it.
+- A crash dump is the host's `kernel.core_pattern` decision. A test binary that dies on a signal may
+  write a core file wherever the host has configured, and the harness neither prevents nor observes
+  that.
+
+None of this weakens the constraint as the requirements state it, because the constraint is about
+what the *generated programs* do, and that is settled by the authoring policy above. It is recorded
+so that no reader mistakes path discipline for isolation.
+
+**What this is, stated precisely, because the difference matters.** This is **workspace isolation for
+a trusted, committed corpus — not an operating-system sandbox**: no `chroot`, no mount or PID
+namespace, no seccomp filter and no landlock. Two further consequences follow from that, and neither
+is a gap in the authoring policy above:
+
+- The child **inherits the runner's environment**; the harness adds nothing to it and clears nothing
+  from it. A program that read `getenv` could therefore see the environment — which is precisely why
+  the authoring rules forbid reading it, and why the corpus is reviewed rather than merely fenced.
+- The **artifact path of every cell is checked to be inside that cell's workspace** before it is
+  executed, and the three write roots the harness uses all live beneath the Cargo build directory.
+
+The guarantee is therefore accurate for what this suite runs — a fixed, reviewed corpus of programs
+that read no input — and it must **not** be read as a promise about arbitrary code. **Anything
+untrusted must be run under an external sandbox**: a container, a virtual machine, or a seccomp or
+landlock profile applied outside this harness.
 
 ### The Zero External Crate Dependency Rule
 
@@ -1293,8 +2292,15 @@ timed-wait crate.
 
 ### Zero-warning discipline
 
-All harness code satisfies `cargo clippy -- -D warnings` and `cargo fmt -- --check` with **no new
-suppression, allowance attribute or formatting exception**.
+All harness code is written to satisfy `cargo clippy -- -D warnings` and `cargo fmt -- --check` with
+**no new suppression, allowance attribute or formatting exception**.
+
+Both gates are `cargo` gates, so — exactly as for the commands under
+[Running the suite](#running-the-suite) — they require the package-complete branch. On a
+documentation-only checkout each exits 101 with `could not find Cargo.toml`, and the claim above is
+therefore an obligation on the code as written rather than a result observed on this branch.
+Formatting can still be checked here without the package, because `rustfmt` accepts a file path
+directly: `rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs`.
 
 ### Report, never patch
 
@@ -1313,9 +2319,12 @@ defeat the entire purpose of oracle (b), which is to observe what the generated 
 actually does on each architecture. The only substitution anywhere in the design is the opt-in
 reduced matrix, which is never the default and is always stamped as reduced coverage.
 
-Nothing is virtualized either. The file system is used for real but constrained to per-cell
-workspaces; the network is never touched; and time, randomness, addresses and locale are never
-observed, because any of them would make byte-exact comparison meaningless.
+Nothing is virtualized either. The file system is used for real, with the harness confining the
+paths it writes to per-cell workspaces; no corpus program opens a socket; and time, randomness,
+addresses and locale are never observed, because any of them would make byte-exact comparison
+meaningless. What is *not* virtualized is equally deliberate: there is no isolation layer around any
+child process, for the reasons set out under
+[C4 — Contained execution](#c4--contained-execution).
 
 ### Noted non-goals
 
@@ -1334,4 +2343,3 @@ Recorded here as **decisions rather than oversights**, so their absence is visib
   than adversarial search, and a generator would be an external tool the zero-dependency rule bars.
   The corpus is hand-authored and fully deterministic, which additionally makes every finding
   immediately human-readable.
-

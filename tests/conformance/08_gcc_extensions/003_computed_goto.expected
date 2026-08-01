@@ -13,15 +13,6 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
 ub_notes           <<END
-UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
--pedantic from the default warning gate. Reason: the constructs under test are
-non-standard GCC extensions by definition, and -pedantic exists precisely to reject
-them; retaining it would fail every program in the area for doing exactly what it is
-meant to do. This is the only area-wide deviation in the corpus. No other warning is
-relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0.
-
 UB-FREEDOM ARGUMENT. Every value is a small int; the largest computation is 10 * 3, far
 from INT_MIN and INT_MAX, so there is no signed overflow. No shift operator is used. No
 aliasing violation exists, since every object is accessed only through its own declared
@@ -43,6 +34,15 @@ reaches 5, so it runs exactly five iterations. No label address is ever derefere
 data and none is printed.
 END
 impl_defined_notes <<END
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
+gcc 13.3.0.
+
 Nothing implementation-defined is observed, so no target restriction is needed and all
 four targets are compared. The label-address arrays are declared static void *const
 INSIDE main rather than at file scope, because &&label has no meaning outside the

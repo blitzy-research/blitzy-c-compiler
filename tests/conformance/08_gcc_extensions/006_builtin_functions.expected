@@ -13,15 +13,6 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
 ub_notes           <<END
-UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
--pedantic from the default warning gate. Reason: the constructs under test are
-non-standard GCC extensions by definition, and -pedantic exists precisely to reject
-them; retaining it would fail every program in the area for doing exactly what it is
-meant to do. This is the only area-wide deviation in the corpus. No other warning is
-relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0.
-
 UB-FREEDOM ARGUMENT. There is no signed overflow: the only signed values are -12345 and
 small counts, and __builtin_abs is applied to -12345, which is far from INT_MIN, so the
 absolute value is representable. All bit manipulation is on unsigned types, where
@@ -53,6 +44,15 @@ on aarch64 and riscv64; the char arrays here are only compared byte-wise or test
 zero, so the signedness difference cannot be observed.
 END
 impl_defined_notes <<END
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
+gcc 13.3.0.
+
 Nothing implementation-defined is observed, so no target restriction is needed and all
 four targets are compared. Achieving that required three deliberate exclusions and one
 normalization.
@@ -91,8 +91,9 @@ whose width varies, and __builtin_expect to int because it takes and returns lon
 the value 5 fits on every target including i686.
 
 The __builtin_ forms of memset, memcpy, memcmp, strcmp, strlen and offsetof are used
-rather than the library names precisely because they REQUIRE NO HEADER, and the corpus
-includes none.
+rather than the library names precisely because they REQUIRE NO HEADER, and this program
+includes none: the corpus's only sanctioned inclusion is area 07's <stdarg.h>, string.h
+is not in bcc's bundled set at all, and stddef.h is bundled but not sanctioned here.
 
 The builtin selection deliberately favours the most universally-implemented, deterministic
 builtins over exotic coverage, because the documentation supports __builtin_* only

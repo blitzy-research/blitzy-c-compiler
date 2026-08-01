@@ -49,11 +49,28 @@ facts appear only as dereferenced int values. Plain char is not used, so the mea
 signedness difference (signed on x86_64 and i686, unsigned on aarch64 and riscv64) is
 irrelevant. The only printf conversion specifier used in the program is %d.
 
-The volatile object ticks is incremented three times in sequence, by 1 then 2 then 3, and the
-printed total of 6 asserts that all three read-modify-write side effects survived every
-optimization level. A compiler that folded them into a single store would print a different
-value at -O1 or -O2 than at -O0, which oracle (c) and the optimization sweep would both
-catch.
+The volatile object ticks is read and written three times in sequence, by 1 then 2 then 3, and
+the printed total is 6. What that single printed value can and cannot prove is worth stating
+exactly, because overclaiming it would make the assertion look stronger than it is.
+
+It CAN prove that the three read-modify-write operations were composed correctly: any backend
+that dropped one of them, applied one twice, mis-ordered the reads relative to the writes, or
+loaded a stale value would print something other than 6, and every such difference is caught by
+oracle (a) against the reference compiler, by oracle (b) across the four backends, and by
+oracle (c) against this record, at all three optimization levels. It also proves the value is
+stable ACROSS optimization levels, since the same 6 is expected at -O0, -O1 and -O2.
+
+It CANNOT prove that three distinct volatile accesses were actually emitted. A compiler that
+illegally collapsed the sequence into one store of 6 would print 6 as well, so this output does
+not distinguish the two. Whether the accesses survive individually is an instruction-level
+property, and verifying it needs a white-box check on the generated code -- which is deliberately
+outside this suite's oracles, all three of which compare only observable program behaviour. That
+check belongs to the repository's existing per-backend code-generation tests, which inspect
+emitted instructions directly; the note here is confined to what stdout can settle.
+
+For a side effect whose omission IS observable from stdout, see the short-circuit programs in
+area 06, where the assertion is that a counter did not change -- an omission the printed value
+reports directly.
 END
 expected_stdout    <<END
 const_read=42

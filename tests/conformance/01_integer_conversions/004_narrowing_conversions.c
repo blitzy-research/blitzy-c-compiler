@@ -3,8 +3,11 @@ int printf(const char *, ...);
 int main(void)
 {
     /* The casts are explicit because an *implicit* out-of-range constant
-     * conversion to a signed narrow type trips -Woverflow, which this
-     * program's recorded warning-gate deviation does not drop. */
+     * conversion to a signed narrow type trips the overflow diagnostic the
+     * retained -pedantic enables and -Werror makes fatal.  That diagnostic is
+     * not a member of the default gate, so this program's recorded deviation
+     * -- which drops only -Wconversion and -Wsign-conversion -- cannot and
+     * does not silence it. */
     unsigned char  fold_u8  = (unsigned char)(-56);
     signed char    fold_i8  = (signed char)200;
     unsigned short fold_u16 = (unsigned short)(-200);

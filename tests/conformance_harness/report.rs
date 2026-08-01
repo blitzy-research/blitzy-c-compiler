@@ -4,10 +4,17 @@
 //! Every other module in this harness answers a question about one cell. This one answers the
 //! question the requirements close with: *what did the whole run find?* The summary it writes
 //! is the artifact that reports the feature areas covered, the total tests and their outcomes,
-//! every expected divergence with its documented basis, and every finding with its minimized
-//! reproducer and reproduction commands. Those four elements are the module's specification,
+//! every expected divergence with its documented basis, and every finding with its reproducer
+//! and reproduction commands. Those four elements are the module's specification,
 //! and [`render_summary_markdown`] carries them as four numbered sections so the artifact can
 //! be checked against the requirement literally rather than impressionistically.
+//!
+//! The requirement asks for a *minimized* reproducer, and the wording here is deliberately more
+//! exact than that rather than less: a run never reduces, because a reduction is unbounded in time
+//! and not byte-reproducible, so what it delivers is the reproducer plus a manifest entry stating
+//! that no automated reduction was performed, why, and the exact reducer command a maintainer can
+//! run. Calling that "minimized" in a summary would describe something the artifact does not
+//! contain. See `findings::Minimization` for the full reasoning.
 //!
 //! # Artifacts
 //!
@@ -17,6 +24,7 @@
 //! | `target/conformance-report/summary.tsv` | The same data, machine-readable for aggregation |
 //! | `target/conformance-report/areas/<area>.md` | Per-area human-readable report |
 //! | `target/conformance-report/areas/<area>.tsv` | Per-area machine-readable report |
+//! | `target/conformance-report/.run-owner` | Which run owns this directory, so a second one is refused |
 //!
 //! Those four paths are a contract shared with the suite driver, with the build directory's
 //! ignore rules and with the continuous-integration job that uploads them, so they are named by
@@ -26,27 +34,102 @@
 //! (`tests/conformance/EXPECTED_DIVERGENCES.md`, `tests/conformance/FINDINGS.md`) and curated
 //! finding set are committed deliverables maintained by hand, not run output.
 //!
-//! # Why one file per area, and no lock anywhere
+//! # Concurrency: structural between threads, owned between processes
 //!
-//! The test harness runs the fourteen area tests concurrently by default. Each one calls
-//! [`write_area`] for its own area and therefore writes only `areas/<its own area>.md` and
+//! The test harness runs the fourteen area tests concurrently **in one process** by default. Each
+//! one calls [`write_area`] for its own area and therefore writes only `areas/<its own area>.md` and
 //! `areas/<its own area>.tsv`: two concurrent areas cannot contend, because they cannot name the
-//! same file. Parallel safety is structural rather than enforced, so this module contains no
-//! mutex, no lock file, no global mutable state and no shared append-only log. Every write goes
-//! to a uniquely named temporary sibling and is then renamed into place, which is atomic on the
-//! platforms this suite supports, so a concurrent reader observes either the previous file or the
-//! complete new one and never a half-written one.
+//! same file. Safety of the artifacts themselves is therefore structural rather than enforced, and
+//! there is no shared append-only log anywhere: every write goes to a uniquely named temporary
+//! sibling and is then renamed into place, which is atomic on the platforms this suite supports, so
+//! a concurrent reader observes either the previous file or the complete new one and never a
+//! half-written one.
+//!
+//! Two facts are about the **run** rather than about any one area, and they are the only things
+//! this module coordinates between threads: which areas have published their report pair, and
+//! whether the summary has already been finalized. They live behind one small mutex, `run_registry`,
+//! because they are genuinely shared — the summary must be written exactly once, by whichever
+//! selected area happens to finish last, and "exactly once" is not a property any single area can
+//! establish on its own. The guard is never held across a file write, and the command line is read
+//! before it is taken, so the lock orders a decision rather than serializing the reporting.
+//!
+//! Between **processes**, structure is not enough, because the four artifact paths are derived from
+//! the corpus rather than from the run: a second `cargo test` sharing one build directory addresses
+//! the same files. Two things follow. The report directory carries a run-ownership stamp, so a run
+//! that finds another run still working here refuses to start rather than clearing artifacts that
+//! run is still producing. And the artifacts of a *finished* earlier run are cleared once, before
+//! this run writes its first file, because [`try_finalize`] aggregates whatever it finds and a
+//! stale set of thirteen files plus one fresh one is otherwise a complete-looking run.
+//!
+//! Every persisted row additionally carries the identity of the run that wrote it and a digest of
+//! the configuration it was written under, and [`try_finalize`] refuses a row that carries anything
+//! else. That is the measure that does not depend on the clearing having happened: a stale or
+//! hand-written PASS row cannot be counted into a total without being named in the Diagnostics
+//! section.
 //!
 //! # Once-only finalization, without ordering and without an extra test
 //!
 //! [`try_finalize`] is called by **every** area test at the end of its run. It is a
-//! check-and-write: if all fourteen machine-readable area files exist it aggregates them and
-//! writes the summary, and otherwise it does nothing and reports that it did nothing. Whichever
-//! area finishes last therefore produces the summary, no ordering between tests is required, and
-//! no fifteenth test has to exist to do it — which matters because the suite's test count is
-//! itself a mechanical check that no existing test was skipped or removed. If two areas finish
-//! at once and both see all fourteen files, both may write; the write is idempotent and atomic,
-//! so the outcome is identical either way. Losing that race is never an error.
+//! check-and-write: if all fourteen machine-readable area files exist **and every one of them
+//! belongs to this run** it aggregates them and writes the summary, and otherwise it does nothing
+//! and reports that it did nothing — [`finalization_pending`] then states which of the two it was,
+//! so a summary that did not appear is never left unexplained. Whichever area finishes last
+//! therefore produces the summary, no ordering between tests is required, and no fifteenth test
+//! has to exist to do it — which matters because the suite's test count is itself a mechanical
+//! check that no existing test was skipped or removed. If two areas finish at once and both see a
+//! complete set, both may write; the write is idempotent and atomic, so the outcome is identical
+//! either way. Losing that race is never an error.
+//!
+//! # The report session — why a summary can never blend two runs
+//!
+//! Assembling the summary from the per-area files on disk buys once-only finalization without a
+//! lock, but on its own it would buy something else too: a file left behind by an earlier run is
+//! indistinguishable from one this run wrote, so a single fresh area could be aggregated with
+//! thirteen stale ones and the result would be presented as current. An infrastructure-only or
+//! name-filtered run would be worse still — it writes no area file at all, so a previous full
+//! summary would simply survive and go on looking like this run's verdict.
+//!
+//! [`begin_session`] closes both holes. Exactly once per process, guarded by a [`OnceLock`] so
+//! that concurrent callers block until it has finished rather than racing it, it removes the two
+//! summary artifacts and every per-area artifact that existed when the process started. Every
+//! artifact this run then writes is stamped with a **session signature**: a deterministic,
+//! content-derived rendering of the effective matrix, the program filter, the verdict policies,
+//! the per-cell budget and the test-name filters this process was started with — the configuration
+//! that decides what a row means. [`try_finalize`] reads that stamp back and refuses to aggregate
+//! an artifact carrying any other signature, so two configurations can never be merged into one
+//! summary even if the invalidation was somehow defeated.
+//!
+//! Both [`write_area`] and [`try_finalize`] begin the session themselves before touching the
+//! report root, so the guarantee is structural rather than a convention the callers must remember:
+//! no artifact can be written and none can be read before invalidation has completed.
+//!
+//! # Generation identity — why a summary never aggregates another run's file
+//!
+//! The check-and-write above reads files off disk, and a file on disk outlives the run that wrote
+//! it. Without an identity in the file, the summary could not tell this run's area report from one
+//! a previous run left behind: a filtered run of a single area would find the other thirteen files
+//! still sitting there, aggregate them, and publish a summary that looked like a complete sweep
+//! while twelve fourteenths of it described a different compiler, a different corpus or a different
+//! configuration. That is the one failure mode a report must never have, because its whole value is
+//! that a reader can trust what it says was actually run.
+//!
+//! Every machine-readable area report therefore opens with a generation preamble naming the run
+//! that wrote it and the configuration it ran under — see [`Generation`] — and [`try_finalize`]
+//! aggregates **only** files stamped with the generation of the process reading them. A file from
+//! another run is neither used nor deleted: it is listed as stale, by name and by the generation it
+//! carries, and it holds the summary back until this run replaces it. Clearing the report directory
+//! instead would be the wrong instrument, because the fourteen area tests run concurrently and a
+//! directory-wide delete would race with a sibling's write; an identity in the file achieves the
+//! same guarantee with no destructive step and no lock.
+//!
+//! # Completeness is one predicate, used everywhere
+//!
+//! A report is stamped `FULL` only when every dimension it publishes met its plan and nothing went
+//! wrong while assembling it. The planned-against-recorded matrix, the coverage stamp in the first
+//! heading and the `partial` field of the machine-readable summary are all derived from the same
+//! [`MatrixDimension`] list and the same diagnostic sources, so the table and the stamp cannot
+//! disagree — a table showing a shortfall beside a heading claiming full coverage would be worse
+//! than either alone, because a reader who trusts the heading would never look at the table.
 //!
 //! # Determinism
 //!
@@ -55,7 +138,9 @@
 //! rendered text: rows are sorted by program, then target in [`Target::ALL`] order, then level in
 //! [`OptLevel::ALL`] order, then oracle in [`Oracle::ALL`] order, and every map is ordered. A
 //! report that reordered itself between runs would produce phantom differences and lose exactly
-//! the regression value it exists to provide.
+//! the regression value it exists to provide. The session signature obeys the same rule: it is
+//! derived from configuration alone, never from a clock, a process identifier or a counter, so two
+//! identically configured runs stamp identical bytes and their reports stay diffable.
 //!
 //! # Coverage is a matrix, never a percentage
 //!
@@ -91,7 +176,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use super::classify::{verdict_fails_run, EXPECTED_DIVERGENCE_REGISTER, FINDINGS_REGISTER};
 use super::env::{
@@ -100,12 +186,16 @@ use super::env::{
 };
 use super::findings::{FindingId, COMMANDS_NAME};
 use super::manifest::{self, ExpectedDivergence};
+use super::sandbox::{claim_ownership, live_foreign_owner_identity, RUN_OWNER_ENTRY};
 use super::{
-    posix_quote, report_root, sanitize_text_for_report, AreaSpec, DivergenceClass, HarnessError,
-    HarnessResult, OptLevel, Oracle, Outcome, Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT,
-    MIN_PROGRAMS_PER_MANDATED_AREA, ORACLE_A_COMPARISON_COUNT, ORACLE_B_COMPARISON_COUNT,
-    ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT, REFERENCE_CROSS_CELL_COUNT_MAX,
-    REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
+    corpus_root, create_directory_chain_below, escape_markdown_inline, posix_quote,
+    read_file_bounded, remove_entry, report_root, require_directory_chain_below,
+    require_replaceable, run_generation, sanitize_text_for_report, shown_path, stable_digest,
+    stage_bytes_no_follow, AreaSpec, DivergenceClass, HarnessError, HarnessResult, OptLevel,
+    Oracle, Outcome, Replaceable, Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT,
+    MAX_INSPECTED_FILE_BYTES, MIN_PROGRAMS_PER_MANDATED_AREA, ORACLE_A_COMPARISON_COUNT,
+    ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT,
+    REFERENCE_CROSS_CELL_COUNT_MAX, REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
 };
 
 /// Directory beneath [`report_root`] that holds the per-area reports.
@@ -138,6 +228,8 @@ const COL_COUNT: &str = "count";
 const COL_LABEL: &str = "label";
 const COL_REFERENCE: &str = "reference";
 const COL_DETAIL: &str = "detail";
+const COL_RUN: &str = "run";
+const COL_IDENTITY: &str = "identity";
 
 /// Column order of a per-area machine-readable report, one row per recorded outcome.
 ///
@@ -145,6 +237,11 @@ const COL_DETAIL: &str = "detail";
 /// external tool, and re-read by [`try_finalize`] — which is why every enumeration in it is
 /// written in the spelling its own `parse` function accepts. `detail` is last because it is the
 /// only column of unbounded length.
+///
+/// `run` and `identity` carry the provenance of the row: which run wrote it, and the digest of the
+/// matrix, tool set and corpus it was written under. [`try_finalize`] refuses a row whose provenance
+/// is not this run's, which is what stops an earlier run's outcomes from being aggregated into this
+/// run's totals. They sit before `detail` so that the unbounded column stays last.
 pub const AREA_TSV_COLUMNS: &[&str] = &[
     COL_AREA,
     COL_PROGRAM,
@@ -156,6 +253,8 @@ pub const AREA_TSV_COLUMNS: &[&str] = &[
     COL_MARKER_ID,
     COL_FINDING_ID,
     COL_FINDING_DIR,
+    COL_RUN,
+    COL_IDENTITY,
     COL_DETAIL,
 ];
 
@@ -225,9 +324,247 @@ const TRUNCATION_MARK: &str = "…";
 /// rather than ambiguously blank.
 const ABSENT_CELL: &str = "—";
 
+/// A finding row names an artifact directory that does not exist.
+///
+/// Phrased as the tail of "the finding for X under Y is reported but ...", so the diagnostic reads
+/// as a sentence, and named as a constant so [`finding_artifact_defect`] and
+/// [`finding_artifact_state`] answer the same question from the same source.
+const FINDING_DEFECT_NO_DIRECTORY: &str = "its artifact directory does not exist";
+
+/// A finding's artifact directory exists but holds no reproduction script, which is the artifact
+/// that makes a finding reproducible without the harness at all.
+const FINDING_DEFECT_NO_COMMANDS: &str =
+    "its artifact directory holds no reproduction script, so the finding cannot be reproduced \
+     without the harness";
+
 /// Separator of the machine-readable reports. A field may never contain one, which is what
 /// [`tsv_field`] guarantees.
 const TSV_SEPARATOR: char = '\t';
+
+// ---------------------------------------------------------------------------------------------
+// Generation identity
+//
+// One line, at the top of every machine-readable area report, saying which run wrote it and under
+// what configuration. It exists so that aggregation can be restricted to one run: a report file
+// outlives the process that wrote it, and a summary assembled from whatever happens to be on disk
+// would present another run's results as this one's. The line begins with `#`, so it is visibly not
+// a data row, and it is the first line of the file, so a file that lacks it is recognised as
+// predating the stamp on the very first read rather than after fourteen rows have been counted.
+// ---------------------------------------------------------------------------------------------
+
+/// First token of the generation preamble, which is also how a preamble is recognised.
+const GENERATION_PREAMBLE_PREFIX: &str = "#generation";
+
+/// Label under which the sweep identity appears as a `meta` row of the machine-readable summary.
+///
+/// The same words the human-readable reports use for it, so the two artifacts of one run cannot
+/// name one fact two ways.
+const SESSION_LABEL: &str = "run_identity";
+
+/// Preamble key naming the run that wrote the file.
+const GENERATION_KEY_RUN: &str = "run";
+
+/// Preamble key naming the configuration the run was executed under.
+const GENERATION_KEY_CONFIG: &str = "config";
+
+/// Which run wrote an artifact, and under what configuration it ran.
+///
+/// The two halves answer different questions and both are needed. `run` identifies the **sweep** as
+/// a digest, so a file written under settings this run did not use is recognised as foreign in one
+/// comparison. `config` spells those settings out, so a foreign file's mismatch can be explained to
+/// a reader — "that report swept one target at two levels, this run sweeps four at three" is
+/// actionable, where an opaque identifier alone is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Generation {
+    run: String,
+    config: String,
+}
+
+impl Generation {
+    /// The generation of the process reading this.
+    ///
+    /// Stable for the lifetime of the process — the run identifier is memoized and the
+    /// configuration is itself a process singleton — so every area report this process writes
+    /// carries the same stamp, which is exactly what lets [`try_finalize`] recognise its own.
+    fn current(caps: &Capabilities) -> Generation {
+        Generation {
+            run: String::from(run_identifier(caps)),
+            config: configuration_fingerprint(caps),
+        }
+    }
+
+    /// The line that opens a machine-readable area report.
+    ///
+    /// Assembled here rather than through [`tsv_field`] because it is a comment line rather than a
+    /// row; both values are built from a restricted character set by [`safe_token`], so neither can
+    /// contain the separator, a line break or anything else that would let the preamble be read as
+    /// two lines or as a data row.
+    fn preamble(&self) -> String {
+        format!(
+            "{GENERATION_PREAMBLE_PREFIX}{TSV_SEPARATOR}{GENERATION_KEY_RUN}={}\
+             {TSV_SEPARATOR}{GENERATION_KEY_CONFIG}={}",
+            self.run, self.config
+        )
+    }
+
+    /// Read a generation back from the first line of a machine-readable area report.
+    ///
+    /// Returns `None` for any line that is not a well-formed preamble, including the bare column
+    /// header a report written before the stamp existed begins with. The caller treats every such
+    /// file as foreign, which is the safe direction: an unstamped file cannot be shown to belong to
+    /// this run, and counting it would be the failure the stamp exists to prevent.
+    ///
+    /// A value may itself contain `=`, because the split takes the first one only, and the keys may
+    /// appear in either order — the format is read as a set of fields rather than as a fixed shape,
+    /// so a later key can be added without invalidating files that lack it.
+    fn parse(line: &str) -> Option<Generation> {
+        let mut fields = line.split(TSV_SEPARATOR);
+        if fields.next()? != GENERATION_PREAMBLE_PREFIX {
+            return None;
+        }
+        let mut run = None;
+        let mut config = None;
+        for field in fields {
+            let (key, value) = field.split_once('=')?;
+            match key {
+                GENERATION_KEY_RUN => run = Some(String::from(value)),
+                GENERATION_KEY_CONFIG => config = Some(String::from(value)),
+                _ => {}
+            }
+        }
+        Some(Generation {
+            run: run?,
+            config: config?,
+        })
+    }
+
+    /// How a generation is named in a diagnostic or a report table.
+    fn describe(&self) -> String {
+        format!("run `{}`, configuration `{}`", self.run, self.config)
+    }
+}
+
+/// Identifier of the sweep this run is performing.
+///
+/// Deliberately the *same* token [`RunIdentity`] stamps into the provenance columns, rather than a
+/// second one computed here. Two spellings of one run's identity would put one of them in the
+/// generation preamble and the other in the provenance columns of the very same file, and a reader
+/// comparing the two would have no way to tell whether they described one run or two.
+///
+/// Derived from configuration alone and memoized for the life of the process, so two identically
+/// configured runs stamp identical bytes — the determinism rule this module opens with. A run that
+/// merely *repeats* an earlier one is therefore indistinguishable by stamp, and deliberately so:
+/// recognising an earlier run's leftover file is [`begin_session`]'s job, which removes it before
+/// this run writes anything, while the stamp catches the file that purge could not reach — one
+/// written under different settings, or by a concurrently running sweep.
+fn run_identifier(caps: &Capabilities) -> &'static str {
+    &RunIdentity::of(caps).run
+}
+
+/// A one-line fingerprint of everything about the run configuration that changes what a report
+/// means.
+///
+/// Every field that narrows the matrix, changes a verdict policy or changes which oracle arms can
+/// be attempted is included, so two artifacts carrying the same fingerprint describe comparable
+/// sweeps and two carrying different ones do not. The oracle field is a bit per oracle and target
+/// in [`Oracle::ALL`] and [`Target::ALL`] order, which is what makes a machine with one missing
+/// cross driver distinguishable from a fully equipped one.
+///
+/// Deliberately excluded: the retained-workspace setting, which changes what is left on disk after
+/// a cell but not what the cell decided.
+fn configuration_fingerprint(caps: &Capabilities) -> String {
+    let config = caps.config();
+    let (targets, levels) = config.effective_matrix();
+    let oracles: String = Oracle::ALL
+        .iter()
+        .map(|oracle| {
+            let bits: String = Target::ALL
+                .iter()
+                .map(|target| {
+                    if caps.oracle_available(*oracle, *target) {
+                        '1'
+                    } else {
+                        '0'
+                    }
+                })
+                .collect();
+            format!("{}{bits}", oracle.letter())
+        })
+        .collect();
+    let fields = [
+        format!("quick:{}", digit(config.quick_mode())),
+        format!(
+            "only:{}",
+            match config.only() {
+                Some(filter) => safe_token(&format!("{}/{}", filter.area(), filter.program())),
+                None => String::from("-"),
+            }
+        ),
+        format!("strict:{}", digit(config.strict())),
+        format!("allow_xpass:{}", digit(config.allow_xpass())),
+        format!(
+            "ack_missing:{}",
+            digit(config.missing_oracles_acknowledged())
+        ),
+        format!("timeout:{}", config.timeout_secs()),
+        format!(
+            "targets:{}",
+            targets
+                .iter()
+                .map(|target| target.short_name())
+                .collect::<Vec<_>>()
+                .join("+")
+        ),
+        format!(
+            "levels:{}",
+            levels
+                .iter()
+                .map(|level| level.short())
+                .collect::<Vec<_>>()
+                .join("+")
+        ),
+        format!("oracles:{oracles}"),
+    ];
+    fields.join(";")
+}
+
+/// `1` for true and `0` for false — the fingerprint's spelling of a flag.
+fn digit(value: bool) -> char {
+    if value {
+        '1'
+    } else {
+        '0'
+    }
+}
+
+/// `raw` reduced to a token that is safe inside a preamble field.
+///
+/// Keeps the characters a program filter legitimately contains and replaces every other one,
+/// including any whitespace, with an underscore. An empty result becomes `-`, so a field is never
+/// silently absent. The result is a fingerprint component rather than a faithful reproduction: the
+/// filter is also reported verbatim in the run-configuration table, where it is not constrained.
+fn safe_token(raw: &str) -> String {
+    let token: String = raw
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric()
+                || character == '_'
+                || character == '-'
+                || character == '.'
+                || character == '/'
+            {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if token.is_empty() {
+        String::from("-")
+    } else {
+        token
+    }
+}
 
 /// Absolute path of the directory holding the per-area reports.
 pub fn areas_dir() -> PathBuf {
@@ -261,6 +598,438 @@ pub fn summary_tsv_path() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Run identity
+//
+// The four artifact paths above are deterministic, and that is deliberate: a report row has to lead
+// a maintainer straight to a file. Determinism across *processes*, though, means two runs address
+// the same files, and it means a file an earlier run left behind parses perfectly. Both are real
+// hazards for a report specifically, because a report is aggregated: `try_finalize` reads the
+// fourteen area files back and adds their rows up, so a stale file's PASS rows would be counted into
+// a summary describing a matrix this run never executed, and nothing in the artifact would say so.
+//
+// Two independent measures answer it, because they fail differently. The report directory carries a
+// run-ownership stamp, so a second concurrent run is refused rather than allowed to interleave, and
+// the artifacts of a *finished* earlier run are cleared before this run writes its first file. And
+// every persisted row carries the identity of the run that wrote it, so a row that survives all of
+// that anyway is refused at aggregation and reported as a diagnostic instead of counted.
+// ---------------------------------------------------------------------------------------------
+
+/// The provenance stamped into every persisted row and checked when one is read back.
+///
+/// `run` distinguishes this process from every other; `identity` distinguishes this *configuration*
+/// from another — the matrix that was swept, the tools that were discovered, the corpus that was
+/// read. A row is aggregated only when both match, so neither a file left behind by a differently
+/// configured run nor one written against a different tool set or corpus can contribute to a total
+/// without being named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunIdentity {
+    run: String,
+    identity: String,
+}
+
+impl RunIdentity {
+    /// This run's provenance, computed once for the whole process.
+    ///
+    /// Memoized because it is stamped into every row and checked for every area, and because it must
+    /// not change between the area that wrote a row and the area that reads it back — the two are
+    /// different threads of one process. The capability record is itself resolved once per process,
+    /// so the first caller's `caps` is every caller's `caps`.
+    fn of(caps: &Capabilities) -> &'static RunIdentity {
+        static IDENTITY: OnceLock<RunIdentity> = OnceLock::new();
+        IDENTITY.get_or_init(|| RunIdentity::compute(caps))
+    }
+
+    /// Derive the provenance from the things a report's meaning depends on.
+    ///
+    /// Both halves are derived from configuration alone — never from a clock, a process identifier
+    /// or a counter — so two identically configured runs stamp identical bytes and their reports
+    /// stay diffable, which is the determinism rule this module opens with. Recognising an earlier
+    /// run's file does not need a varying token: [`begin_session`] removes the previous run's
+    /// artifacts before this run writes any, and the stamp then catches whatever that purge could
+    /// not reach.
+    ///
+    /// `run` digests the sweep that was configured: the effective matrix and policy above, plus
+    /// the test-name filters this process was started with, which decide which areas could run at
+    /// all. `identity` digests what the sweep ran against: the row schema, the effective matrix and
+    /// policy, the discovered tool set, and the corpus this run read. Each is recorded in the summary beside the digest, so a
+    /// mismatch can be diagnosed rather than merely detected. [`stable_digest`] is a fixed
+    /// specification rather than the standard library's hasher, whose output is documented as
+    /// unstable between releases and would make one run's rows unrecognisable to the next.
+    fn compute(caps: &Capabilities) -> RunIdentity {
+        let config = caps.config();
+        let (targets, levels) = config.effective_matrix();
+        let schema = tsv_header(AREA_TSV_COLUMNS);
+        let matrix = format!(
+            "targets={};levels={};quick={};only={};strict={};allow_xpass={};allow_missing={};\
+             timeout={};keep_work={}",
+            join_targets(&targets),
+            join_opt_levels(&levels),
+            config.quick_mode(),
+            config
+                .only()
+                .map(|filter| format!("{}/{}", filter.area(), filter.program()))
+                .unwrap_or_default(),
+            config.strict(),
+            config.allow_xpass(),
+            config.missing_oracles_acknowledged(),
+            config.timeout_secs(),
+            config.keep_work(),
+        );
+        let tools = caps.render_fingerprint();
+        let mut corpus = shown_path(&corpus_root());
+        for spec in AREAS.iter() {
+            corpus.push_str(&format!(";{}={}", spec.directory(), spec.program_count()));
+        }
+        let names = libtest_filter_selection().all();
+        let sweep = format!(
+            "{matrix};filters={}",
+            if names.is_empty() {
+                String::from("none")
+            } else {
+                names.join("+")
+            }
+        );
+        RunIdentity {
+            run: stable_digest(&[sweep.as_str()]),
+            identity: stable_digest(&[
+                schema.as_str(),
+                matrix.as_str(),
+                tools.as_str(),
+                corpus.as_str(),
+            ]),
+        }
+    }
+
+    /// Whether a row read back was written by this run under this configuration.
+    fn accepts(&self, run: &str, identity: &str) -> bool {
+        self.run == run && self.identity == identity
+    }
+
+    /// A sentence naming what a refused row claimed, and which half of the claim was wrong.
+    ///
+    /// Phrased as plain sanitized text, like every other diagnostic this module produces: the
+    /// Markdown half escapes a whole diagnostic at its sink, so a fragment escaped here as well
+    /// would be escaped twice.
+    fn describe_mismatch(&self, run: &str, identity: &str) -> String {
+        let which = match (self.run == run, self.identity == identity) {
+            (false, false) => String::from(
+                "it names a different run and a different configuration, so it is an artifact of an \
+                 earlier or concurrent run",
+            ),
+            (false, true) => format!(
+                "it names sweep `{}` rather than this run's `{}`, so it was written under a \
+                 different matrix, a different policy or a different test-name filter — an \
+                 earlier run whose file survived, or a concurrent one",
+                sanitize_text_for_report(run),
+                sanitize_text_for_report(&self.run)
+            ),
+            (true, false) => format!(
+                "it names configuration digest `{}` rather than this run's `{}`, so it was written \
+                 under a different matrix, a different tool set or a different corpus",
+                sanitize_text_for_report(identity),
+                sanitize_text_for_report(&self.identity)
+            ),
+            (true, true) => String::from("it matches this run, so it was not refused"),
+        };
+        format!(
+            "{which}. It is reported here rather than counted, because a total that silently \
+             included it would describe a matrix this run did not execute."
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The report session
+//
+// The summary is assembled from the per-area files on disk, which is what buys once-only
+// finalization without a fifteenth test. The cost of that choice is that a file has no inherent
+// provenance: without one, an artifact left behind by an earlier run reads exactly like one this
+// run wrote. Two independent layers supply the missing provenance. This one removes the previous
+// run's artifacts exactly once per process, so the ordinary case never has a stale file to
+// confuse. [`RunIdentity`] above supplies the other: every artifact carries the configuration
+// that produced it and one stamped differently is refused rather than aggregated, so even a
+// failed invalidation cannot blend two runs into one summary.
+// ---------------------------------------------------------------------------------------------
+
+/// Invalidate the previous run's report artifacts, exactly once in this process.
+///
+/// Removes both summary artifacts and every per-area artifact that exists at the moment of the
+/// call, so that no file this run did not write can be aggregated into this run's summary, and so
+/// that a run which writes no area file at all — an infrastructure-only run, or one restricted by
+/// a test-name filter — cannot leave a previous full summary standing where a reader would take it
+/// for the current verdict.
+///
+/// Idempotent and safe to call from every test on every thread. The work is performed by whichever
+/// caller arrives first; [`OnceLock::get_or_init`] blocks the others until it has finished, so no
+/// thread can write an artifact into a directory another thread is still clearing. Both
+/// [`write_area`] and [`try_finalize`] call it before they touch the report root, which is what
+/// makes that ordering a property of this module rather than a rule its callers must remember.
+///
+/// # Errors
+///
+/// Fails when an existing artifact cannot be removed or the per-area report directory cannot be
+/// scanned. The failure is deliberately fatal and is returned to every subsequent caller: a run
+/// that could not establish a clean slate cannot distinguish its own results from the previous
+/// run's, and reporting that as a clean run is precisely the confusion this exists to prevent.
+pub fn begin_session() -> HarnessResult<()> {
+    static SESSION: OnceLock<HarnessResult<()>> = OnceLock::new();
+    SESSION.get_or_init(invalidate_prior_artifacts).clone()
+}
+
+/// Remove every report artifact of a previous run. The body of [`begin_session`].
+fn invalidate_prior_artifacts() -> HarnessResult<()> {
+    let context = "starting a differential conformance report session";
+    remove_if_present(context, &summary_markdown_path())?;
+    remove_if_present(context, &summary_tsv_path())?;
+    let areas = areas_dir();
+    let entries = match fs::read_dir(&areas) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(HarnessError::new(
+                String::from(context),
+                format!(
+                    "the per-area report directory {} could not be read, so artifacts of a \
+                     previous run could not be removed and this run's summary could have \
+                     aggregated them as if they were its own: {error}",
+                    shown_path(&areas)
+                ),
+            ));
+        }
+    };
+    // Only the two extensions this module publishes are removed, and only directly inside the
+    // per-area directory. A file the suite did not write is left exactly where it is: clearing a
+    // path is warranted for an artifact this module owns and would otherwise misread, and for
+    // nothing else.
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            HarnessError::new(
+                String::from(context),
+                format!(
+                    "an entry of the per-area report directory {} could not be read, so \
+                     artifacts of a previous run could not be removed: {error}",
+                    shown_path(&areas)
+                ),
+            )
+        })?;
+        let path = entry.path();
+        let is_report = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension == MARKDOWN_EXTENSION || extension == TSV_EXTENSION);
+        if is_report && path.is_file() {
+            remove_if_present(context, &path)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// The report namespace
+//
+// Cleared once per run, owned for the duration of the run, and verified level by level on the way
+// to every file. The clearing is what stops a stale area file from being aggregated; the ownership
+// stamp is what stops two concurrent runs from clearing each other; and the verification is what
+// stops a planted symbolic link from deciding where a report is written.
+// ---------------------------------------------------------------------------------------------
+
+/// Refuse a report path that does not lie strictly beneath [`report_root`].
+///
+/// Purely lexical and deliberately so: it runs *before* anything is created, so there is nothing to
+/// resolve yet. Every component below the root must be a plain name, which is what makes the
+/// subsequent walk unable to climb, and the root itself is refused because a report is a file or a
+/// directory beneath the root and never the root.
+fn require_beneath_report_root(context: &str, candidate: &Path) -> HarnessResult<()> {
+    let root = report_root();
+    let mut remaining = candidate.components();
+    for expected in root.components() {
+        if remaining.next() != Some(expected) {
+            return Err(HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} does not lie beneath the run-report root {}; this module writes the two \
+                     summary files and the per-area reports and nothing anywhere else",
+                    shown_path(candidate),
+                    shown_path(&root)
+                ),
+            ));
+        }
+    }
+    let mut depth = 0usize;
+    for component in remaining {
+        match component {
+            Component::Normal(_) => depth += 1,
+            _ => {
+                return Err(HarnessError::new(
+                    String::from(context),
+                    format!(
+                        "{} contains a component that is not a plain name below {}; a \
+                         parent-directory component would let the path climb out of the build \
+                         directory, so it is refused instead of resolved",
+                        shown_path(candidate),
+                        shown_path(&root)
+                    ),
+                ));
+            }
+        }
+    }
+    if depth == 0 {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{} is the run-report root itself rather than a path beneath it",
+                shown_path(&root)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Establish this run's ownership of the report directory before any area begins.
+///
+/// The driver calls this once at start-up so the clearing, the ownership claim and every refusal
+/// they can produce happen *before* the first cell is compiled rather than after a whole area's
+/// matrix has been executed. Two things follow, and both matter: a conflict with a concurrent run is
+/// reported in seconds instead of minutes, and the report directory holds this run's artifacts for
+/// the whole of this run instead of an earlier run's until the first area finishes.
+///
+/// Idempotent and shared with [`write_area`], which asks the same question again on the path that
+/// must not depend on the driver having asked it. Calling it twice costs nothing: the work is
+/// remembered.
+///
+/// # Errors
+///
+/// Returns the same explanatory failure [`write_area`] would have returned later.
+pub fn prepare_namespace() -> HarnessResult<()> {
+    ensure_report_namespace("preparing the run report directory")
+}
+
+/// Establish this run's ownership of the report directory, clearing an earlier run's artifacts.
+///
+/// Runs exactly once per process — [`OnceLock::get_or_init`] blocks every other feature-area thread
+/// until the first one has finished, which is the whole of the coordination needed — and its outcome
+/// is remembered so a failure is reported identically to every caller rather than retried
+/// fourteen times.
+///
+/// # Errors
+///
+/// Returns an explanatory failure when the report root cannot be established or verified, when
+/// another run still owns it, or when an earlier run's artifacts cannot be cleared.
+fn ensure_report_namespace(context: &str) -> HarnessResult<()> {
+    static PREPARED: OnceLock<Result<(), String>> = OnceLock::new();
+    match PREPARED
+        .get_or_init(|| prepare_report_namespace().map_err(|error| String::from(error.cause())))
+    {
+        Ok(()) => Ok(()),
+        Err(cause) => Err(HarnessError::new(
+            String::from(context),
+            format!("the report directory for this run could not be prepared: {cause}"),
+        )),
+    }
+}
+
+/// Clear the previous run's report artifacts and claim the directory for this one.
+///
+/// The order is load-bearing. A **live foreign owner** is detected before anything is removed, so a
+/// run that finds another run working here destroys nothing; the clearing then happens; and only
+/// then is the stamp written, so a crash midway leaves a directory this run will clear again rather
+/// than one another run believes is owned.
+///
+/// Clearing is what makes aggregation honest. `try_finalize` writes the summary once all fourteen
+/// area files exist, and without clearing, thirteen files from an earlier run plus one from this run
+/// would be a complete-looking set. It also means a filtered run reports a *pending* summary rather
+/// than a falsely complete one, which is the honest answer.
+fn prepare_report_namespace() -> HarnessResult<()> {
+    let context = "preparing the report directory for this run";
+    let root = report_root();
+    create_directory_chain_below(context, &root, &root)?;
+
+    if let Some((run, pid)) = live_foreign_owner_identity(&root) {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{} is already owned by run {} (process {}), which is still running. The report \
+                 paths are deterministic so that a row leads straight to a file, which means two \
+                 concurrent runs address the same ones; clearing them here would destroy the \
+                 artifacts that run is still writing, and leaving them would let its rows be \
+                 aggregated into this run's summary. Let that run finish, or set CARGO_TARGET_DIR \
+                 to a different build directory for this one",
+                shown_path(&root),
+                sanitize_text_for_report(&run),
+                pid
+            ),
+        ));
+    }
+
+    for stale in [summary_markdown_path(), summary_tsv_path()] {
+        require_replaceable(context, &stale, Replaceable::RegularFile)?;
+        remove_entry(context, &stale)?;
+    }
+    let areas = areas_dir();
+    require_replaceable(context, &areas, Replaceable::Directory)?;
+    remove_entry(context, &areas)?;
+    purge_stale_temporaries(context, &root)?;
+    create_directory_chain_below(context, &root, &areas)?;
+    claim_ownership(context, &root)
+}
+
+/// Remove any temporary file a crashed earlier run left at the report root.
+///
+/// A temporary name carries the writing run's generation token and a counter unique within that
+/// run, so a leftover can never be reused or collided with; it would simply accumulate. Removing them here keeps the claim that a failed write
+/// leaves no debris true across runs as well as within one. An entry that is not one of ours by name
+/// is left alone, and the ownership stamp is not one of ours by name.
+fn purge_stale_temporaries(context: &str, root: &Path) -> HarnessResult<()> {
+    let entries = fs::read_dir(root).map_err(|error| {
+        HarnessError::new(
+            String::from(context),
+            format!("{} could not be listed: {error}", shown_path(root)),
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            HarnessError::new(
+                String::from(context),
+                format!(
+                    "an entry of {} could not be inspected: {error}",
+                    shown_path(root)
+                ),
+            )
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name == RUN_OWNER_ENTRY || !name.starts_with('.') || !name.ends_with(TEMPORARY_SUFFIX) {
+            continue;
+        }
+        remove_entry(context, &root.join(name))?;
+    }
+    Ok(())
+}
+
+/// Remove one file, treating an absent file as success.
+///
+/// An artifact that is not there is already in the state this wants it in, and two processes
+/// clearing the same stale file is a benign race rather than a failure.
+fn remove_if_present(context: &str, path: &Path) -> HarnessResult<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "the report artifact {} is left over from a previous run and could not be \
+                 removed: {error}. It is not removed for tidiness: this run's summary is \
+                 assembled from the files in this directory, so a file another run wrote would \
+                 be reported as this run's result.",
+                shown_path(path)
+            ),
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Writing
 //
 // Every artifact is produced whole in memory and then published by a single rename. Two
@@ -270,106 +1039,152 @@ pub fn summary_tsv_path() -> PathBuf {
 // process, so a torn report is worse than no new report at all.
 // ---------------------------------------------------------------------------------------------
 
-/// Publish `contents` at `path`, atomically.
+/// Suffix of every temporary file published beneath the report root, and the only name this module
+/// will clean up.
 ///
-/// The bytes are written to a uniquely named sibling and then renamed over the destination.
-/// Renaming within one directory replaces the destination atomically on the platforms this suite
-/// supports, so the destination is only ever the previous complete file or the new complete file.
-/// The temporary name carries the process and thread identity, which is what makes it unique
-/// between concurrent writers without a lock; it never appears in an artifact, so it cannot
-/// affect determinism.
+/// The shared publisher builds its temporary names from the destination's own name, this run's
+/// generation token and a counter unique within the run, and ends every one of them with this
+/// suffix. Nothing in this module creates a file it does not then rename, so a name ending this way
+/// beneath the report root is always debris from a run that died mid-write.
+const TEMPORARY_SUFFIX: &str = ".tmp";
+
+/// Publish a Markdown report and its machine-readable sibling as one operation.
+///
+/// # Why the pair is published together and not one file at a time
+///
+/// Both documents are rendered from a single snapshot, so their contents always agree at the moment
+/// they are produced. Publishing them as two independent operations throws that away: a reader who
+/// listed the directory between the two renames would find a new Markdown report beside the previous
+/// run's tab-separated one — two complete files that disagree, with nothing in either to say they do
+/// not belong together. The machine-readable sibling exists precisely so that totals can be
+/// aggregated without re-reading prose, which makes a silent disagreement between them the one
+/// inconsistency most likely to be believed.
+///
+/// So both are written and flushed **first**, through the harness's no-follow publisher, and only then
+/// are the two renames performed one after the other with no work between them. Every way a write can
+/// fail has already happened by that point, so the failure modes that could leave the pair
+/// *permanently* mismatched are gone, and the remaining exposure is the gap between two adjacent
+/// syscalls. Two renames are not one atomic operation and nothing here pretends they are; a
+/// directory-level swap would be required for that and `std` does not offer one portably.
+///
+/// A staged publication that is never committed removes its own temporary file, so a failure to stage
+/// the second document leaves the first destination untouched rather than half-updated.
+///
+/// # Why publication refuses to follow a link
+///
+/// A report path is fixed and public — `areas/<area>.md` and `summary.tsv` beneath the report root —
+/// and so is the temporary name beside it. Anything able to write in the build directory can therefore
+/// predict where a report is about to be published and plant a symbolic link there first. A plain
+/// write follows such a link, so the run's only durable account of itself would be delivered to
+/// wherever the link pointed, while the harness reported success because the write did succeed.
+///
+/// Four guards stand between a caller and the filesystem, and each closes a distinct way the write
+/// could be *redirected* rather than merely fail:
+///
+/// - the destination is required to lie strictly beneath [`report_root`], with every component below
+///   it a plain name, so nothing can be published outside the build directory and no
+///   parent-directory component can climb out of it;
+/// - every directory from that root down to the parent is created and then required to be a **real
+///   directory** rather than a symbolic link, so a link planted at any level is refused *at* that
+///   level and nothing is written beyond it;
+/// - the destination is required to be absent or a regular file, because this module never puts
+///   anything else there and repairing it silently would discard the only evidence that something
+///   else did;
+/// - the temporary is created with `O_CREAT | O_EXCL`, which fails rather than follows, so a
+///   pre-planted temporary sibling cannot be truncated or written through.
 ///
 /// # Errors
 ///
-/// Returns an explanatory failure naming `context` when the parent directory cannot be created,
-/// when the temporary file cannot be written, or when the rename fails. A failed write removes
-/// its temporary file on a best-effort basis, so a failure does not accumulate debris.
-fn write_atomic(context: &str, path: &Path, contents: &str) -> HarnessResult<()> {
-    let parent = path.parent().ok_or_else(|| {
+/// Returns an explanatory failure naming `context` when the report namespace cannot be established,
+/// when a path is not one this module may write, when the parent chain cannot be created or
+/// verified, when something unexpected occupies a destination, when either document cannot be
+/// staged, or when either rename fails. A failure of the *second* rename is reported in terms of the
+/// inconsistency it leaves, because that is the one case a reader has to know about.
+fn write_report_pair(
+    context: &str,
+    markdown_path: &Path,
+    markdown: &str,
+    tsv_path: &Path,
+    tsv: &str,
+) -> HarnessResult<()> {
+    ensure_report_namespace(context)?;
+    for path in [markdown_path, tsv_path] {
+        require_beneath_report_root(context, path)?;
+        let parent = path.parent().ok_or_else(|| {
+            HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} has no parent directory, so it cannot name a report artifact; every \
+                     artifact is published into a directory beneath the build directory",
+                    shown_path(path)
+                ),
+            )
+        })?;
+        create_directory_chain_below(context, &report_root(), parent)?;
+        require_replaceable(context, path, Replaceable::RegularFile)?;
+    }
+
+    // Stage both, so that every fallible step happens before either destination is claimed.
+    let staged_markdown = stage_bytes_no_follow(context, markdown_path, markdown.as_bytes())?;
+    let staged_tsv = stage_bytes_no_follow(context, tsv_path, tsv.as_bytes())?;
+
+    // Claim both, back to back.
+    staged_markdown.commit()?;
+    staged_tsv.commit().map_err(|error| {
         HarnessError::new(
             String::from(context),
             format!(
-                "{} has no parent directory, so it cannot name a report artifact; every artifact \
-                 is published into a directory beneath the build directory",
-                shown_path(path)
+                "{error}. {} was published but its machine-readable sibling {} was not, so the two \
+                 now describe different runs; re-run the affected area to replace the pair, and do \
+                 not aggregate totals from the stale sibling in the meantime",
+                shown_path(markdown_path),
+                shown_path(tsv_path)
             ),
         )
-    })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        HarnessError::new(
-            String::from(context),
-            format!(
-                "the report directory {} could not be created: {error}",
-                shown_path(parent)
-            ),
-        )
-    })?;
-
-    let temporary = parent.join(temporary_name(path));
-    if let Err(error) = fs::write(&temporary, contents) {
-        let _ = fs::remove_file(&temporary);
-        return Err(HarnessError::new(
-            String::from(context),
-            format!(
-                "the temporary report file {} could not be written: {error}",
-                shown_path(&temporary)
-            ),
-        ));
-    }
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(HarnessError::new(
-            String::from(context),
-            format!(
-                "the temporary report file {} could not be renamed onto {}: {error}; the previous \
-                 report, if any, is left intact rather than replaced by a partial one",
-                shown_path(&temporary),
-                shown_path(path)
-            ),
-        ));
-    }
-    Ok(())
-}
-
-/// A temporary file name for `path` that no concurrent writer can also choose.
-///
-/// Built from the destination's own file name plus the writing process and thread, so two
-/// concurrent writers of the same destination — which only the summary can have — cannot collide,
-/// and a leftover file from an earlier crashed run is simply truncated and reused rather than
-/// accumulating. The leading dot keeps it out of the way of anything listing the reports, and the
-/// name is not one of the fourteen area file names, so a temporary file can never be mistaken for
-/// a finished area report by the finalization gate.
-fn temporary_name(path: &Path) -> String {
-    let stem = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("report");
-    format!(
-        ".{}.{}.{}.tmp",
-        keep_alphanumeric(stem),
-        std::process::id(),
-        keep_alphanumeric(&format!("{:?}", std::thread::current().id()))
-    )
-}
-
-/// `raw` with every character outside the ASCII alphanumerics and the underscore removed.
-///
-/// Used only to build a temporary file name from a debug rendering, where the requirement is a
-/// short token that is safe as a single path component rather than a faithful reproduction.
-fn keep_alphanumeric(raw: &str) -> String {
-    raw.chars()
-        .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
-        .collect()
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
 // Text rendering
 //
-// Three kinds of text reach a report from outside this module: an outcome's detail, which the
+// Four kinds of text reach a report from outside this module: an outcome's detail, which the
 // harness assembled from compiler diagnostics and program output; free text a maintainer wrote
-// into an expectation record, which may legitimately span several lines; and a tool's own
-// identification banner. None of them may be emitted verbatim into a line-oriented artifact, and
-// the three functions below are the only places that decide how each is made safe.
+// into an expectation record, which may legitimately span several lines; a tool's own
+// identification banner; and a discovered filesystem path. None of them may be emitted verbatim
+// into a line-oriented artifact, and the functions below are the only places that decide how each
+// is made safe.
+//
+// Two distinct hazards are answered, and they need different treatments:
+//
+// - **A line-oriented artifact can be forged.** A tab forges a column, a line feed splits one
+//   record into two, an escape introducer repaints a terminal, a directional override makes a line
+//   render as its opposite. [`sanitize_text_for_report`] escapes exactly those characters and is
+//   applied to *everything*, in both artifacts.
+// - **A Markdown document can be restructured.** Sanitization deliberately leaves printable
+//   characters alone, and in Markdown several printable characters are syntax: a permissive
+//   renderer honours raw HTML, and a link, an emphasis run or a code-span introducer can
+//   restructure the document around it. [`escape_markdown_inline`] neutralizes those, and is
+//   applied **only** on the way into the Markdown half.
+//
+// The rule the whole module follows, stated once so it can be checked: *untrusted text is escaped
+// for Markdown exactly once, at the moment it is placed into a Markdown-bearing string, and never
+// again.* In practice that means every interpolation of untrusted text into a rendered line goes
+// through [`md`], [`md_code`], [`md_path`], [`table_cell`], [`optional_cell`] or [`quoted_block`],
+// and the functions that assemble whole lines out of already-escaped fragments do not escape a
+// second time. Escaping twice would render `&amp;lt;` where a reader expects `<`, which is a
+// different kind of dishonest report.
+//
+// The machine-readable sibling is not escaped for Markdown: it is data for an aggregator rather
+// than a document, and escaping would corrupt the values an external tool reads. A diagnostic
+// sentence is the one text that appears in both halves, and it follows the same rule: it is
+// assembled unescaped — sanitized only, so it can never forge a column or a line — and escaped once
+// by [`md`] at the sink that renders it into Markdown. Escaping the sentence whole rather than each
+// fragment of it is what makes the rule checkable, and it has one visible consequence worth naming
+// so it is not later mistaken for a defect: a backtick the harness itself wrote into the sentence is
+// escaped along with everything else, so the raw Markdown reads `\`` where the rendered document
+// reads a plain backtick. That is the correct trade — a report is a document to be rendered, and
+// escaping only the fragments a reader guessed were untrusted is exactly the design that lets one
+// through.
 // ---------------------------------------------------------------------------------------------
 
 /// One field of a machine-readable report.
@@ -409,13 +1224,15 @@ fn collapse_whitespace(raw: &str) -> String {
 
 /// One cell of a Markdown table, from free text of any length.
 ///
-/// Collapsed to a single line, escaped so it cannot act, and then bounded by
-/// [`TABLE_CELL_MAX_CHARS`]. The vertical bar is escaped because it would otherwise end the cell
-/// and shift every value after it into the wrong column — the table equivalent of forging a
-/// tab-separated field. Truncation is marked with [`TRUNCATION_MARK`] and happens on a character
-/// boundary, never inside a character.
+/// Collapsed to a single line, escaped by [`md`] so it can neither repaint a terminal nor act as
+/// Markdown, and then bounded by [`TABLE_CELL_MAX_CHARS`]. The vertical bar is among the characters
+/// [`md`] escapes, which matters here specifically: an unescaped one would end the cell and shift
+/// every value after it into the wrong column — the table equivalent of forging a tab-separated
+/// field. Truncation is marked with [`TRUNCATION_MARK`] and happens on a character boundary, never
+/// inside a character; because escaping happens first, truncation can shorten an escape sequence but
+/// can never leave a half-written character.
 fn table_cell(raw: &str) -> String {
-    let collapsed = sanitize_text_for_report(&collapse_whitespace(raw)).replace('|', "\\|");
+    let collapsed = md(&collapse_whitespace(raw));
     if collapsed.is_empty() {
         return String::from(ABSENT_CELL);
     }
@@ -438,8 +1255,10 @@ fn optional_cell(raw: Option<&str>) -> String {
 ///
 /// Used where the whole of a recorded reason matters — the written basis of an expected
 /// divergence, the reason a comparison was narrowed — so that its structure survives. Each line
-/// is escaped independently, and an empty input line becomes a bare quote marker so the paragraph
-/// break is preserved.
+/// is escaped independently by [`md`], and an empty input line becomes a bare quote marker so the
+/// paragraph break is preserved. A quoted block is prose a maintainer wrote, so it is the sink most
+/// likely to carry a stray angle bracket or underscore; escaping every line means the block renders
+/// as the text that was recorded rather than as whatever that text happens to spell in Markdown.
 fn quoted_block(raw: &str) -> Vec<String> {
     let trimmed = raw.trim_end();
     if trimmed.trim().is_empty() {
@@ -448,7 +1267,7 @@ fn quoted_block(raw: &str) -> Vec<String> {
     trimmed
         .lines()
         .map(|line| {
-            let safe = sanitize_text_for_report(line.trim_end());
+            let safe = md(line.trim_end());
             if safe.is_empty() {
                 String::from(">")
             } else {
@@ -458,9 +1277,35 @@ fn quoted_block(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// A filesystem path rendered safely for a report line.
-fn shown_path(path: &Path) -> String {
-    sanitize_text_for_report(&path.display().to_string())
+/// One fragment of untrusted text, safe in Markdown inline position.
+///
+/// Sanitized first, so no control character or directional override survives, and then escaped for
+/// Markdown, so no character that is syntax there can act. The order matters: sanitization inserts
+/// backslash escapes of its own, and escaping for Markdown afterwards escapes those backslashes
+/// too, which is why `\x1b` renders as the four characters a reader can search for rather than as an
+/// escape Markdown then swallows.
+fn md(raw: &str) -> String {
+    escape_markdown_inline(&sanitize_text_for_report(raw))
+}
+
+/// One fragment of untrusted text inside a Markdown code span, with the delimiters included.
+///
+/// A code span is literal, so nothing inside it needs escaping for Markdown — with exactly one
+/// exception, the backtick that would end the span early and hand the rest of the fragment to the
+/// renderer as document syntax. There is no way to escape a backtick *inside* a span, so it is
+/// replaced by the same visible escape spelling [`sanitize_text_for_report`] uses for a character it
+/// refuses to emit. Everything else passes through as the text it is, which is the point: an
+/// identifier, a path or a command reads correctly only if it is not littered with backslashes.
+fn md_code(raw: &str) -> String {
+    format!("`{}`", sanitize_text_for_report(raw).replace('`', "\\x60"))
+}
+
+/// A filesystem path inside a Markdown code span.
+///
+/// Paths are the sink this module renders most often and trusts least: a path can carry a byte from
+/// an environment variable, from a discovered tool location or from a corpus entry.
+fn md_path(path: &Path) -> String {
+    md_code(&path.to_string_lossy())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -614,7 +1459,11 @@ impl Row {
     /// optimization flag, the oracle's record key, the verdict token and the class token — so the
     /// file the summary reads back is the file the area wrote, with no separate encoding to keep
     /// in step.
-    fn to_tsv(&self) -> String {
+    ///
+    /// `identity` is stamped in rather than derived here, so that every row of one file carries the
+    /// same provenance by construction and the aggregating half has exactly one thing to compare
+    /// against.
+    fn to_tsv(&self, identity: &RunIdentity) -> String {
         tsv_row(&[
             self.area.clone(),
             self.program.clone(),
@@ -629,13 +1478,20 @@ impl Row {
             self.finding_id.clone().unwrap_or_default(),
             self.finding_dir
                 .as_ref()
-                .map(|path| path.display().to_string())
+                .map(|path| shown_path(path))
                 .unwrap_or_default(),
+            identity.run.clone(),
+            identity.identity.clone(),
             self.detail.clone(),
         ])
     }
 
-    /// Rebuild a row from one line of a per-area machine-readable report.
+    /// Rebuild a row from one line of a per-area machine-readable report, with its provenance.
+    ///
+    /// The provenance is returned rather than checked here: this function's job is to say what the
+    /// line *claims*, and the caller decides whether a row claiming a different run may contribute
+    /// to a total. Separating the two keeps a refused row diagnosable — the caller can report what
+    /// the row claimed and what this run expected.
     ///
     /// # Errors
     ///
@@ -644,7 +1500,7 @@ impl Row {
     /// into a loud diagnostic in the summary instead of failing the run. An area file that cannot
     /// be read is a defect in the artifact, and a summary that says so is more useful than a run
     /// that aborts before writing one.
-    fn parse(line: &str, number: usize) -> Result<Row, String> {
+    fn parse(line: &str, number: usize) -> Result<(Row, RunIdentity), String> {
         let fields: Vec<&str> = line.split(TSV_SEPARATOR).collect();
         if fields.len() != AREA_TSV_COLUMNS.len() {
             return Err(format!(
@@ -675,19 +1531,25 @@ impl Row {
                 DivergenceClass::parse(value(6)),
             )?)
         };
-        Ok(Row {
-            area: String::from(value(0)),
-            program: String::from(value(1)),
-            target,
-            opt,
-            oracle,
-            verdict,
-            class,
-            marker_id: optional_field(fields[7]),
-            finding_id: optional_field(fields[8]),
-            finding_dir: optional_field(fields[9]).map(PathBuf::from),
-            detail: String::from(fields[10]),
-        })
+        Ok((
+            Row {
+                area: String::from(value(0)),
+                program: String::from(value(1)),
+                target,
+                opt,
+                oracle,
+                verdict,
+                class,
+                marker_id: optional_field(fields[7]),
+                finding_id: optional_field(fields[8]),
+                finding_dir: optional_field(fields[9]).map(PathBuf::from),
+                detail: String::from(fields[12]),
+            },
+            RunIdentity {
+                run: String::from(value(10)),
+                identity: String::from(value(11)),
+            },
+        ))
     }
 }
 
@@ -824,7 +1686,29 @@ impl AreaReport {
                     outcome.oracle()
                 ));
             }
-            report.absorb(Row::from_outcome(outcome), &mut seen);
+            let row = Row::from_outcome(outcome);
+            // A finding is a deliverable, and the deliverable is the artifact directory. A row that
+            // says `FINDING` while that directory holds nothing is the one shape of report that is
+            // actively misleading: it reads as a recorded observation and is an empty promise. So the
+            // directory is checked here, against disk, while the run that produced the row is still
+            // able to say so — rather than left for whoever later opens the register and finds
+            // nothing there.
+            if row.verdict == Verdict::Finding {
+                if let Some(defect) = row.finding_dir.as_deref().and_then(finding_artifact_defect) {
+                    report.diagnostics.push(format!(
+                        "⚠️ the finding for {} under {} is reported but {}; a finding is a \
+                         deliverable — the reproducer, the exact reproduction commands, the \
+                         captured outputs, the environment fingerprint and the computed difference \
+                         are the whole point of recording one — so a row naming artifacts that are \
+                         not there is a defect in the suite rather than an observation about the \
+                         compiler",
+                        row.cell_label(),
+                        row.oracle,
+                        defect
+                    ));
+                }
+            }
+            report.absorb(row, &mut seen);
         }
         report.rows.sort_by(|left, right| {
             let (left_key, right_key) = (left.order_key(), right.order_key());
@@ -1129,6 +2013,21 @@ fn join_opt_levels(levels: &[OptLevel]) -> String {
     }
 }
 
+/// An area report on disk that this run did not write.
+///
+/// Kept as a first-class list rather than folded into a diagnostic string, because the summary has
+/// to state three separate things about it: which area it claims to be, which run wrote it, and that
+/// its rows were excluded from every total. A stale file is never deleted — this module does not
+/// remove another run's artifacts — so replacing it is the run's own next write.
+#[derive(Debug, Clone)]
+struct StaleArea {
+    spec: &'static AreaSpec,
+    /// The generation the file carries, when it carries a readable one at all.
+    generation: Option<Generation>,
+    /// Why the file is not this run's, in the words the report prints.
+    note: String,
+}
+
 /// The whole run, aggregated from the fourteen per-area machine-readable reports.
 #[derive(Debug, Clone, Default)]
 struct RunReport {
@@ -1136,11 +2035,22 @@ struct RunReport {
     /// Areas whose file existed but could not be used, so their outcomes are absent from the
     /// totals. Listed, never quietly skipped.
     unusable: Vec<&'static AreaSpec>,
+    /// Areas whose file belongs to a different run. Excluded from every total and listed by name,
+    /// which is what stops one run's summary from reporting another run's results.
+    stale: Vec<StaleArea>,
     tally: Tally,
     facts: CorpusFacts,
     /// Test-name filters this process was started with, which is what tells the summary that some
-    /// area files may predate this run.
+    /// areas were never going to run in this process at all.
     filters: Vec<String>,
+    /// Signature of the run every aggregated area file was verified to carry. Recorded in the
+    /// summary so that the identity the areas were checked against is itself auditable, rather than
+    /// being a check whose subject is invisible in its own output.
+    session: String,
+    /// Areas this invocation expected to contribute, whether or not they did. Narrower than the
+    /// full table exactly when a filter is active, and it is the denominator the coverage
+    /// classification compares against.
+    expected: usize,
     diagnostics: Vec<String>,
 }
 
@@ -1182,6 +2092,258 @@ impl RunReport {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The enumerable matrix
+//
+// The suite's coverage evidence is a count of what was planned beside a count of what was actually
+// recorded, in every dimension the requirements name. It is assembled once, here, and read three
+// times: by the Markdown table, by the machine-readable summary, and by the coverage assessment
+// that decides whether the report may call itself full. Assembling it once is the point — a table
+// that showed a shortfall next to a heading claiming full coverage would mislead every reader who
+// trusted the heading, and deriving both from the same list makes that disagreement impossible.
+// ---------------------------------------------------------------------------------------------
+
+/// One dimension of the matrix: what was planned, what was recorded, and what it is called.
+#[derive(Debug, Clone)]
+struct MatrixDimension {
+    /// Machine-readable name, used as the `label` column of a `matrix` row. Stable across runs so
+    /// an external aggregator can address one dimension by name.
+    label: &'static str,
+    /// Human-readable name, used as the first cell of the Markdown table's row.
+    heading: &'static str,
+    planned: usize,
+    actual: usize,
+    note: &'static str,
+}
+
+impl MatrixDimension {
+    /// Assemble one dimension.
+    fn new(
+        label: &'static str,
+        heading: &'static str,
+        planned: usize,
+        actual: usize,
+        note: &'static str,
+    ) -> MatrixDimension {
+        MatrixDimension {
+            label,
+            heading,
+            planned,
+            actual,
+            note,
+        }
+    }
+
+    /// How far short of its plan this dimension fell, or `None` when it met it.
+    ///
+    /// Recording more than was planned is not a shortfall and is not silently corrected either: it
+    /// shows in the table as a recorded count above the planned one, which is a real fact about the
+    /// run — a duplicate comparison does exactly that, and the area report already diagnoses it.
+    fn shortfall(&self) -> Option<usize> {
+        self.planned.checked_sub(self.actual).filter(|gap| *gap > 0)
+    }
+
+    /// The status cell: met, or short by how much.
+    fn status(&self) -> String {
+        match self.shortfall() {
+            None => String::from("✅ complete"),
+            Some(gap) => format!("⚠️ short by {gap}"),
+        }
+    }
+
+    /// This dimension as a row of the Markdown matrix table.
+    fn markdown_row(&self) -> Vec<String> {
+        vec![
+            String::from(self.heading),
+            self.planned.to_string(),
+            self.actual.to_string(),
+            self.status(),
+            String::from(self.note),
+        ]
+    }
+
+    /// This dimension's shortfall stated as a coverage reason, or `None` when it met its plan.
+    fn shortfall_reason(&self) -> Option<String> {
+        self.shortfall().map(|gap| {
+            format!(
+                "{}: {} planned, {} recorded — short by {gap} ({}).",
+                self.heading, self.planned, self.actual, self.note
+            )
+        })
+    }
+}
+
+/// The run's matrix: the nine dimensions the coverage requirement enumerates.
+///
+/// `planned` is the full declared matrix in every dimension, never the reduced one, because the
+/// question this table answers is what the suite claims to cover — a run that narrowed itself
+/// should show the narrowing here rather than redefine the target it is measured against.
+fn run_matrix(run: &RunReport, caps: &Capabilities) -> Vec<MatrixDimension> {
+    let (targets, levels) = caps.config().effective_matrix();
+    vec![
+        MatrixDimension::new(
+            "feature_areas",
+            "Feature areas",
+            AREA_COUNT,
+            run.areas.len(),
+            "nine mandated by the coverage requirement, five supplementary",
+        ),
+        MatrixDimension::new(
+            "programs",
+            "Programs",
+            PROGRAM_COUNT,
+            run.observed_programs(),
+            "one semantic concern per program",
+        ),
+        MatrixDimension::new(
+            "targets",
+            "Targets swept",
+            Target::ALL.len(),
+            targets.len(),
+            "x86-64 is the cross-backend baseline and executes natively",
+        ),
+        MatrixDimension::new(
+            "opt_levels",
+            "Optimization levels swept",
+            OptLevel::ALL.len(),
+            levels.len(),
+            "-O0, -O1, -O2 — the levels both compilers honour identically",
+        ),
+        MatrixDimension::new(
+            "bcc_cells",
+            "Compile-and-run cells",
+            BCC_CELL_COUNT,
+            run.observed_cells(),
+            "one program, one target, one optimization level",
+        ),
+        MatrixDimension::new(
+            "oracle_a_comparisons",
+            "Oracle (a) comparisons",
+            ORACLE_A_COMPARISON_COUNT,
+            run.oracle_count(Oracle::ReferenceCompiler),
+            "reference compiler, same target and same optimization level",
+        ),
+        MatrixDimension::new(
+            "oracle_b_comparisons",
+            "Oracle (b) comparisons",
+            ORACLE_B_COMPARISON_COUNT,
+            run.oracle_count(Oracle::CrossBackend),
+            "every non-baseline target against the baseline at the same level",
+        ),
+        MatrixDimension::new(
+            "oracle_c_assertions",
+            "Oracle (c) assertions",
+            ORACLE_C_ASSERTION_COUNT,
+            run.oracle_count(Oracle::GoldenRecord),
+            "every cell against the stdout its own record declares",
+        ),
+        MatrixDimension::new(
+            "total_assertions",
+            "**Differential and golden assertions**",
+            TOTAL_ASSERTION_COUNT,
+            run.tally.total(),
+            "the sum of the three oracles",
+        ),
+    ]
+}
+
+/// One area's matrix, in the same shape as the run's so the same predicate judges both.
+///
+/// Two of the dimensions take their plan from the corpus rather than from the declared totals,
+/// because an area's plan is what its own records declare: a program that restricts its targets for
+/// a recorded reason has not left a gap, and counting one would turn every reasoned exclusion into
+/// a permanent coverage complaint. The union of the programs' own declared targets, intersected with
+/// the matrix this run sweeps, is therefore the honest plan.
+fn area_matrix(
+    report: &AreaReport,
+    facts: &CorpusFacts,
+    caps: &Capabilities,
+) -> Vec<MatrixDimension> {
+    let spec = report.spec;
+    let (targets, levels) = caps.config().effective_matrix();
+    let discovered = facts.programs.len();
+    let planned_targets = Target::ALL
+        .iter()
+        .filter(|target| targets.contains(target))
+        .filter(|target| {
+            facts
+                .programs
+                .iter()
+                .any(|program| program.targets.contains(target))
+        })
+        .count();
+    let planned_levels = OptLevel::ALL
+        .iter()
+        .filter(|level| levels.contains(level))
+        .filter(|level| {
+            facts
+                .programs
+                .iter()
+                .any(|program| program.opt_levels.contains(level))
+        })
+        .count();
+
+    let mut dimensions = vec![MatrixDimension::new(
+        "programs_discovered",
+        "Programs (expectation records read)",
+        spec.program_count(),
+        discovered,
+        "the corpus table declares the count; the records are what could be read",
+    )];
+    if spec.mandated() {
+        dimensions.push(MatrixDimension::new(
+            "mandated_floor",
+            "Mandated-area program floor",
+            MIN_PROGRAMS_PER_MANDATED_AREA,
+            discovered,
+            "an area named by the coverage requirement holds at least this many programs",
+        ));
+    }
+    dimensions.extend([
+        MatrixDimension::new(
+            "programs_compared",
+            "Programs that produced a comparison",
+            discovered,
+            report.programs.len(),
+            "every readable record is expected to be judged",
+        ),
+        MatrixDimension::new(
+            "targets_swept",
+            "Targets swept",
+            planned_targets,
+            report.observed_targets().len(),
+            "the targets this area's own records declare, within the matrix this run sweeps",
+        ),
+        MatrixDimension::new(
+            "opt_levels_swept",
+            "Optimization levels swept",
+            planned_levels,
+            report.observed_opt_levels().len(),
+            "the levels this area's own records declare, within the matrix this run sweeps",
+        ),
+        MatrixDimension::new(
+            "cells_compared",
+            "Compile-and-run cells",
+            facts.planned_cells(&targets, &levels),
+            report.cells.len(),
+            "each record's own target and level lists, intersected with this run's matrix",
+        ),
+    ]);
+    dimensions
+}
+
+/// The matrix as a Markdown table.
+fn render_matrix_table(dimensions: &[MatrixDimension]) -> Vec<String> {
+    let rows: Vec<Vec<String>> = dimensions
+        .iter()
+        .map(MatrixDimension::markdown_row)
+        .collect();
+    markdown_table(
+        &["Dimension", "Planned", "Recorded", "Status", "Note"],
+        &rows,
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
 // Coverage stamping
 //
 // A report that could be mistaken for a complete one is worse than no report, because it invites a
@@ -1192,8 +2354,16 @@ impl RunReport {
 // Two words are used, and they mean different things. **Reduced** says the matrix that ran was
 // smaller than the full one — quick mode, a program filter, or an oracle whose tooling is absent.
 // **Partial** says this report may not describe one complete, coherent run — everything reduced
-// does, plus a test-name filter, an area whose file could not be used, and a defect in the corpus
-// the report had to read. Partial therefore always holds when reduced does.
+// does, plus a test-name filter, an area whose file could not be used or belongs to another run, a
+// defect in the corpus the report had to read, and any diagnostic raised while assembling it.
+// Partial therefore always holds when reduced does.
+//
+// A dimension of the matrix that fell short of its plan settles it either way, and never leaves the
+// report full: it is recorded as reduced when the run configuration itself asked for a smaller
+// matrix, and as partial when it did not — because a shortfall nothing in the configuration explains
+// is precisely the case where the report cannot claim to describe one complete run. Which of the two
+// words it lands under is presentational; that it lands under one of them is what makes the FULL
+// stamp mean something, and the reason text carries the planned and recorded counts either way.
 // ---------------------------------------------------------------------------------------------
 
 /// Whether a report describes the full matrix, and why not when it does not.
@@ -1263,8 +2433,13 @@ impl Coverage {
     }
 }
 
-/// Assess one area's coverage.
-fn assess_area_coverage(caps: &Capabilities, report: &AreaReport) -> Coverage {
+/// Assess one area's coverage, from the same dimensions its matrix table publishes.
+fn assess_area_coverage(
+    caps: &Capabilities,
+    report: &AreaReport,
+    facts: &CorpusFacts,
+    dimensions: &[MatrixDimension],
+) -> Coverage {
     let mut coverage = Coverage::default();
     note_configuration_reductions(caps, &mut coverage);
     let unavailable = report.tally.get(Verdict::Unavailable);
@@ -1279,6 +2454,7 @@ fn assess_area_coverage(caps: &Capabilities, report: &AreaReport) -> Coverage {
             "No comparison was recorded for this area at all, so nothing in it has been judged.",
         ));
     }
+    note_matrix_shortfalls(caps, dimensions, &mut coverage);
     if !report.diagnostics.is_empty() {
         coverage.note_partial(format!(
             "{} diagnostic(s) were raised while assembling this report; see the Diagnostics \
@@ -1286,11 +2462,22 @@ fn assess_area_coverage(caps: &Capabilities, report: &AreaReport) -> Coverage {
             report.diagnostics.len()
         ));
     }
+    if !facts.diagnostics.is_empty() {
+        coverage.note_partial(format!(
+            "{} defect(s) in this area's expectation records prevented part of the material this \
+             report rests on from being read; see the Diagnostics section.",
+            facts.diagnostics.len()
+        ));
+    }
     coverage
 }
 
-/// Assess the whole run's coverage.
-fn assess_run_coverage(caps: &Capabilities, run: &RunReport) -> Coverage {
+/// Assess the whole run's coverage, from the same dimensions the matrix table publishes.
+fn assess_run_coverage(
+    caps: &Capabilities,
+    run: &RunReport,
+    dimensions: &[MatrixDimension],
+) -> Coverage {
     let mut coverage = Coverage::default();
     note_configuration_reductions(caps, &mut coverage);
     let unavailable = run.tally.get(Verdict::Unavailable);
@@ -1321,8 +2508,10 @@ fn assess_run_coverage(caps: &Capabilities, run: &RunReport) -> Coverage {
     }
     if run.areas.len() < AREA_COUNT {
         coverage.note_partial(format!(
-            "{} of {AREA_COUNT} feature areas contributed outcomes to this summary.",
-            run.areas.len()
+            "{} of {AREA_COUNT} feature areas contributed outcomes to this summary; this \
+             invocation could produce at most {}.",
+            run.areas.len(),
+            run.expected
         ));
     }
     for spec in &run.unusable {
@@ -1332,6 +2521,15 @@ fn assess_run_coverage(caps: &Capabilities, run: &RunReport) -> Coverage {
             spec.directory()
         ));
     }
+    for stale in &run.stale {
+        coverage.note_partial(format!(
+            "The machine-readable report of feature area `{}` was not written by this run, so it \
+             was excluded from every total below: {}",
+            stale.spec.directory(),
+            stale.note
+        ));
+    }
+    note_matrix_shortfalls(caps, dimensions, &mut coverage);
     if !run.facts.diagnostics.is_empty() {
         coverage.note_partial(format!(
             "{} corpus defect(s) prevented part of the expectation-record material from being \
@@ -1339,7 +2537,46 @@ fn assess_run_coverage(caps: &Capabilities, run: &RunReport) -> Coverage {
             run.facts.diagnostics.len()
         ));
     }
+    if !run.diagnostics.is_empty() {
+        coverage.note_partial(format!(
+            "{} diagnostic(s) were raised while assembling this summary; see the Diagnostics \
+             section.",
+            run.diagnostics.len()
+        ));
+    }
+    let area_diagnostics: usize = run.areas.iter().map(|area| area.diagnostics.len()).sum();
+    if area_diagnostics > 0 {
+        coverage.note_partial(format!(
+            "{area_diagnostics} diagnostic(s) were raised in the per-area reports this summary \
+             aggregates; see the Diagnostics section."
+        ));
+    }
     coverage
+}
+
+/// Record every dimension that fell short of its plan, so no shortfall can coexist with a full
+/// stamp.
+///
+/// The bucket is chosen by whether the run configuration itself asked for a smaller matrix: quick
+/// mode and a program filter narrow it deliberately and are therefore *reduced*, while a shortfall
+/// on an unnarrowed run means this report does not describe one complete sweep and is therefore
+/// *partial*. Either way the report is not full and the planned and recorded counts are stated.
+fn note_matrix_shortfalls(
+    caps: &Capabilities,
+    dimensions: &[MatrixDimension],
+    coverage: &mut Coverage,
+) {
+    let narrowed_by_configuration = caps.config().is_reduced_run();
+    for reason in dimensions
+        .iter()
+        .filter_map(MatrixDimension::shortfall_reason)
+    {
+        if narrowed_by_configuration {
+            coverage.note_reduced(reason);
+        } else {
+            coverage.note_partial(reason);
+        }
+    }
 }
 
 /// Record the reductions the run configuration itself imposes.
@@ -1376,41 +2613,89 @@ const LIBTEST_VALUE_OPTIONS: &[&str] = &[
     "-Z",
 ];
 
-/// The test-name filters this process was started with.
+/// Which test-name filters this process was started with, split by what they do.
 ///
-/// A filter means the process ran a subset of the suite, which matters because the summary is
-/// assembled from the per-area files on disk: with a filter active, some of those files may have
-/// been written by an earlier run, and a summary that combined them without saying so would present
-/// stale results as current.
+/// Kept apart because they answer different questions. A positive filter narrows the set of areas
+/// that can possibly run, so it determines when the summary may be finalized. A `--skip` pattern
+/// only removes tests, so it can leave an area's report permanently absent and must never be read
+/// as evidence that the area was expected.
+struct FilterSelection {
+    /// Positional filters: a test runs only if its name contains one of these.
+    positive: Vec<String>,
+    /// Values of `--skip`: a test is excluded when its name contains one of these.
+    skipped: Vec<String>,
+}
+
+impl FilterSelection {
+    /// Whether the area test for `spec` could run in this process.
+    ///
+    /// Mirrors the built-in harness's own rule: a substring match against the test's name, which
+    /// is `area_` followed by the area's directory. `--exact` is not honoured, and not honouring it
+    /// is the safe direction — treating an area as expected when it was not merely leaves the
+    /// summary pending, whereas treating one as unexpected when it did run would drop its outcomes
+    /// from the totals.
+    fn selects(&self, spec: &'static AreaSpec) -> bool {
+        let name = format!("area_{}", spec.directory());
+        if self.skipped.iter().any(|pattern| name.contains(pattern)) {
+            return false;
+        }
+        self.positive.is_empty() || self.positive.iter().any(|filter| name.contains(filter))
+    }
+
+    /// The areas whose reports this process can ever produce.
+    fn expected_areas(&self) -> Vec<&'static AreaSpec> {
+        AREAS.iter().filter(|spec| self.selects(spec)).collect()
+    }
+
+    /// Every filter, in the order the command line gave them, for display.
+    fn all(&self) -> Vec<String> {
+        let mut every = self.positive.clone();
+        every.extend(self.skipped.iter().cloned());
+        every
+    }
+}
+
+/// Read the filter selection from this process's own command line.
 ///
-/// The reading is deliberately conservative. Anything that is not an option and is not the value of
-/// a value-taking option counts as a filter, and a `--skip` value counts too. Reading one argument
-/// too many can only add a partial stamp that was not strictly required, which is the harmless
-/// direction; failing to notice a filter would be the harmful one.
+/// A filter means the process ran a subset of the suite, which matters twice over: it narrows the
+/// set of area reports the summary may wait for, and it means some files in the report root may
+/// have been written by an earlier run, which a summary that combined them without saying so would
+/// present as current.
+///
+/// The reading is deliberately conservative in the direction that cannot lose outcomes. Anything
+/// that is not an option and is not the value of a value-taking option counts as a positive filter.
+/// Reading one argument too many narrows the expected set and can only leave the summary pending,
+/// which is recoverable; failing to notice a filter would let the run claim full coverage it did not
+/// have. `--skip` is read in both its spellings, `--skip pattern` and `--skip=pattern`.
 ///
 /// [`std::env::args_os`] is used rather than [`std::env::args`] because the latter panics on an
 /// argument that is not valid Unicode, and this module contains no panicking path.
-fn libtest_name_filters() -> Vec<String> {
-    let mut filters = Vec::new();
+fn libtest_filter_selection() -> FilterSelection {
+    let mut positive = Vec::new();
+    let mut skipped = Vec::new();
     let mut expect_value_of: Option<String> = None;
     for argument in std::env::args_os().skip(1) {
         let text = argument.to_string_lossy().to_string();
         if let Some(option) = expect_value_of.take() {
             if option == "--skip" {
-                filters.push(text);
+                skipped.push(text);
             }
             continue;
         }
         if text.starts_with('-') {
             let name = text.split('=').next().unwrap_or(text.as_str());
+            if let Some(value) = text.strip_prefix("--skip=") {
+                skipped.push(String::from(value));
+                continue;
+            }
             if !text.contains('=') && LIBTEST_VALUE_OPTIONS.contains(&name) {
                 expect_value_of = Some(String::from(name));
             }
             continue;
         }
-        filters.push(text);
+        positive.push(text);
     }
-    filters
+    FilterSelection { positive, skipped }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1480,21 +2765,48 @@ fn true_false(value: bool) -> &'static str {
     }
 }
 
+/// Why a finding's artifact directory falls short of being a deliverable, or `None` when it does not.
+///
+/// The single authority on that question, so the table cell a reader sees and the diagnostic that
+/// makes the run notice cannot disagree about whether a finding is complete.
+fn finding_artifact_defect(directory: &Path) -> Option<&'static str> {
+    if !directory.is_dir() {
+        Some(FINDING_DEFECT_NO_DIRECTORY)
+    } else if !directory.join(COMMANDS_NAME).is_file() {
+        Some(FINDING_DEFECT_NO_COMMANDS)
+    } else {
+        None
+    }
+}
+
 /// The state of a finding's artifact directory, checked rather than assumed.
 ///
 /// A report that named a directory nobody could open would be worse than one that admitted the
 /// artifacts are missing, because the reproduction commands are the whole point of a finding.
+///
+/// The check does not follow a final symbolic link, and that matters more here than anywhere else in
+/// this module: the row this feeds sits beside [`reproduce_command`], which tells a reader to
+/// **execute** the script named. A test that asked `is_file` would answer about a link's *target*, so
+/// a link planted at `commands.sh` would be reported as present and a reader would be directed to run
+/// whatever it pointed at. The finding writer publishes only regular files, so anything else at one
+/// of these names was not published by this run and is reported as what it is.
 fn finding_artifact_state(directory: &Path) -> &'static str {
-    if !directory.is_dir() {
-        "⚠️ directory absent"
-    } else if !directory.join(COMMANDS_NAME).is_file() {
-        "⚠️ commands.sh absent"
-    } else {
-        "✅ present"
+    match finding_artifact_defect(directory) {
+        None => "✅ present",
+        Some(FINDING_DEFECT_NO_DIRECTORY) => "⚠️ directory absent",
+        Some(_) => "⚠️ commands.sh absent",
     }
 }
 
 /// The command that reproduces a finding with no harness, no Cargo and no Rust toolchain.
+///
+/// The one path rendering in this module that is **not** [`shown_path`], and deliberately so: this
+/// string is a command line a reader is expected to paste into a shell, so it has to name the
+/// directory exactly. [`posix_quote`] wraps it in single quotes, under which every byte — including
+/// one [`shown_path`] would have replaced by a visible escape — is passed through literally and no
+/// character is special to the shell. The result is only ever rendered through [`md_code`], which is
+/// what makes it inert in the document, so the safety of the report does not depend on this
+/// function's output being safe on a line.
 fn reproduce_command(directory: &Path) -> String {
     format!(
         "sh {}",
@@ -1562,7 +2874,7 @@ fn render_marker_block(
     cells: &[&Row],
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(format!("### `{}`", sanitize_text_for_report(marker.id())));
+    lines.push(format!("### {}", md_code(marker.id())));
     lines.push(String::new());
     let basis_path = marker.basis_absolute_path();
     let mut pairs = vec![
@@ -1574,16 +2886,16 @@ fn render_marker_block(
         (
             String::from("Owning program"),
             match owner {
-                Some(facts) => format!("`{}`", facts.label()),
-                None => format!("`{}`", marker.program_label()),
+                Some(facts) => md_code(&facts.label()),
+                None => md_code(&marker.program_label()),
             },
         ),
         (String::from("Documented basis"), table_cell(marker.basis())),
         (
             String::from("Cited document"),
             format!(
-                "`{}` — {}",
-                shown_path(marker.basis_path()),
+                "{} — {}",
+                md_path(marker.basis_path()),
                 if basis_path.is_file() {
                     "✅ present in this checkout"
                 } else {
@@ -1613,8 +2925,8 @@ fn render_marker_block(
         lines.push(String::new());
         for cell in cells {
             lines.push(format!(
-                "- `{}` under `oracle_{}`",
-                cell.cell_label(),
+                "- {} under `oracle_{}`",
+                md_code(&cell.cell_label()),
                 cell.oracle.letter()
             ));
         }
@@ -1630,16 +2942,16 @@ fn render_finding_table(rows: &[&Row]) -> Vec<String> {
             let directory = row.finding_dir.clone();
             vec![
                 match &row.finding_id {
-                    Some(identifier) => format!("`{}`", sanitize_text_for_report(identifier)),
+                    Some(identifier) => md_code(identifier),
                     None => String::from("⚠️ not derivable (no divergence class)"),
                 },
-                format!("`{}`", row.cell_label()),
+                md_code(&row.cell_label()),
                 format!("oracle_{}", row.oracle.letter()),
                 row.class
                     .map(|class| String::from(class.label()))
                     .unwrap_or_else(|| String::from(ABSENT_CELL)),
                 match &directory {
-                    Some(path) => format!("`{}`", shown_path(path)),
+                    Some(path) => md_path(path),
                     None => String::from(ABSENT_CELL),
                 },
                 match &directory {
@@ -1647,9 +2959,7 @@ fn render_finding_table(rows: &[&Row]) -> Vec<String> {
                     None => String::from(ABSENT_CELL),
                 },
                 match &directory {
-                    Some(path) => {
-                        format!("`{}`", sanitize_text_for_report(&reproduce_command(path)))
-                    }
+                    Some(path) => md_code(&reproduce_command(path)),
                     None => String::from(ABSENT_CELL),
                 },
             ]
@@ -1676,7 +2986,7 @@ fn render_unavailable_table(rows: &[&Row]) -> Vec<String> {
         .iter()
         .map(|row| {
             vec![
-                format!("`{}`", row.cell_label()),
+                md_code(&row.cell_label()),
                 format!("oracle_{}", row.oracle.letter()),
                 table_cell(&row.detail),
             ]
@@ -1695,7 +3005,7 @@ fn render_exclusion_table(narrowings: &[(&ProgramFacts, Narrowing)]) -> Vec<Stri
         .iter()
         .map(|(facts, narrowing)| {
             vec![
-                format!("`{}`", facts.label()),
+                md_code(&facts.label()),
                 String::from(narrowing.kind),
                 table_cell(&narrowing.scope),
                 match &narrowing.reason {
@@ -1721,7 +3031,7 @@ fn render_diagnostics(diagnostics: &[String]) -> Vec<String> {
     }
     diagnostics
         .iter()
-        .map(|diagnostic| format!("- {}", sanitize_text_for_report(diagnostic)))
+        .map(|diagnostic| format!("- {}", md(diagnostic)))
         .collect()
 }
 
@@ -1735,7 +3045,7 @@ fn render_coverage_reasons(coverage: &Coverage) -> Vec<String> {
     coverage
         .reasons
         .iter()
-        .map(|reason| format!("- {}", sanitize_text_for_report(reason)))
+        .map(|reason| format!("- {}", md(reason)))
         .collect()
 }
 
@@ -1774,7 +3084,7 @@ fn render_expected_divergence_section(facts: &CorpusFacts, xfail: &[&Row]) -> Ve
         lines.push(String::new());
     }
     for (identifier, cells) in grouped {
-        lines.push(format!("### `{}`", sanitize_text_for_report(&identifier)));
+        lines.push(format!("### {}", md_code(&identifier)));
         lines.push(String::new());
         lines.push(format!(
             "⚠️ {} comparison(s) were reclassified as expected divergences under this identifier, \
@@ -1786,8 +3096,8 @@ fn render_expected_divergence_section(facts: &CorpusFacts, xfail: &[&Row]) -> Ve
         lines.push(String::new());
         for cell in cells {
             lines.push(format!(
-                "- `{}` under `oracle_{}`: {}",
-                cell.cell_label(),
+                "- {} under `oracle_{}`: {}",
+                md_code(&cell.cell_label()),
                 cell.oracle.letter(),
                 table_cell(&cell.detail)
             ));
@@ -1801,17 +3111,22 @@ fn render_expected_divergence_section(facts: &CorpusFacts, xfail: &[&Row]) -> Ve
 }
 
 /// One feature area's human-readable report.
+///
+/// `session` is the signature of the run that produced it, recorded in the effective-matrix table
+/// so that a reader who finds two area reports side by side can see at a glance whether they
+/// describe the same run — the same question [`try_finalize`] answers mechanically from the
+/// machine-readable sibling.
 fn render_area_markdown(
     report: &AreaReport,
     facts: &CorpusFacts,
     caps: &Capabilities,
     coverage: &Coverage,
+    dimensions: &[MatrixDimension],
+    generation: &Generation,
 ) -> String {
     let spec = report.spec;
     let config = caps.config();
     let (targets, levels) = config.effective_matrix();
-    let discovered = facts.programs.len();
-    let planned_cells = facts.planned_cells(&targets, &levels);
 
     let mut lines = Vec::new();
     lines.push(format!(
@@ -1826,6 +3141,12 @@ fn render_area_markdown(
         "Written by the differential conformance harness. Machine-readable sibling: \
          `{AREAS_DIR_NAME}/{}.{TSV_EXTENSION}`. Run summary: `{SUMMARY_STEM}.{MARKDOWN_EXTENSION}`.",
         spec.directory()
+    ));
+    lines.push(String::new());
+    lines.push(format!(
+        "Generation: {}. The run summary aggregates only the area reports carrying its own \
+         generation, so this artifact is never mistaken for one another run wrote.",
+        generation.describe()
     ));
     lines.push(String::new());
 
@@ -1843,38 +3164,6 @@ fn render_area_markdown(
             } else {
                 "supplementary — added for its cross-backend divergence surface"
             }),
-        ),
-        (
-            String::from("Programs planned (corpus table)"),
-            spec.program_count().to_string(),
-        ),
-        (
-            String::from("Programs discovered (expectation records read)"),
-            format!("{discovered} — {}", met(discovered == spec.program_count())),
-        ),
-        (
-            String::from("Programs that produced a comparison"),
-            report.programs.len().to_string(),
-        ),
-        (
-            format!("Mandated floor (at least {MIN_PROGRAMS_PER_MANDATED_AREA} programs)"),
-            if spec.mandated() {
-                String::from(met(discovered >= MIN_PROGRAMS_PER_MANDATED_AREA))
-            } else {
-                String::from("not applicable — this area is supplementary")
-            },
-        ),
-        (
-            String::from("Cells planned for this run"),
-            if facts.programs.is_empty() {
-                String::from("⚠️ not determined — no expectation record could be read")
-            } else {
-                planned_cells.to_string()
-            },
-        ),
-        (
-            String::from("Cells that produced a comparison"),
-            report.cells.len().to_string(),
         ),
         (
             String::from("Comparisons recorded"),
@@ -1902,6 +3191,29 @@ fn render_area_markdown(
         ),
     ]));
     lines.push(String::new());
+
+    lines.push(String::from(
+        "## This area's matrix, planned against recorded",
+    ));
+    lines.push(String::new());
+    lines.push(String::from(
+        "The plan is what this area's own expectation records declare, intersected with the matrix \
+         this run sweeps — so a program that narrows its targets for a recorded reason leaves no gap \
+         here, while a program that should have been judged and was not leaves a visible one. Every \
+         shortfall in this table is also a reason in the coverage section below: the stamp in the \
+         first heading is derived from this table rather than assessed separately, so the two cannot \
+         disagree.",
+    ));
+    lines.push(String::new());
+    lines.extend(render_matrix_table(dimensions));
+    lines.push(String::new());
+    if facts.programs.is_empty() {
+        lines.push(String::from(
+            "⚠️ No expectation record of this area could be read, so the planned counts above are \
+             not the corpus's own — see the Diagnostics section.",
+        ));
+        lines.push(String::new());
+    }
 
     lines.push(String::from("## Effective matrix"));
     lines.push(String::new());
@@ -1931,6 +3243,10 @@ fn render_area_markdown(
             } else {
                 "full"
             }),
+        ),
+        (
+            String::from("Run identity (session)"),
+            format!("`{}`", generation.run),
         ),
     ]));
     lines.push(String::new());
@@ -1999,7 +3315,7 @@ fn render_area_markdown(
 
     let findings = report.rows_with(Verdict::Finding);
     lines.push(String::from(
-        "## Findings — minimized reproducer and reproduction commands",
+        "## Findings — verbatim reproducer, minimization status and reproduction commands",
     ));
     lines.push(String::new());
     if findings.is_empty() {
@@ -2009,8 +3325,9 @@ fn render_area_markdown(
     } else {
         lines.push(format!(
             "A finding is a deliverable, not a defect to patch: no compiler source change is made \
-             in response to one. Each directory holds the reproducer, its expectation record, the \
-             captured outputs, the environment fingerprint, the computed difference and \
+             in response to one. Each directory holds a verbatim reproducer with its recorded \
+             minimization status — a run performs no automated reduction — its expectation record, \
+             the captured outputs, the environment fingerprint, the computed difference and \
              `{COMMANDS_NAME}` — the exact compile and run lines, which reproduce the divergence \
              with no harness at all. The curated set is indexed by `{FINDINGS_REGISTER}`.",
         ));
@@ -2072,12 +3389,20 @@ fn render_area_markdown(
     join_document(&lines)
 }
 
-/// One feature area's machine-readable report: the fixed header, then one row per outcome.
-fn render_area_tsv(report: &AreaReport) -> String {
-    let mut lines = Vec::with_capacity(report.rows.len() + 1);
+/// One feature area's machine-readable report: the generation preamble, the fixed header, then one
+/// row per outcome, each row stamped with this run's provenance.
+///
+/// The preamble comes first so that a reader — and [`read_area`] — can decide whether the file is
+/// theirs before parsing a single row, and so that a file written before the stamp existed is
+/// recognised on its first line. The per-row provenance answers the same question again at row
+/// granularity, which is what lets a row that outlived the clearing contribute nothing rather than
+/// contribute silently.
+fn render_area_tsv(report: &AreaReport, generation: &Generation, identity: &RunIdentity) -> String {
+    let mut lines = Vec::with_capacity(report.rows.len() + 2);
+    lines.push(generation.preamble());
     lines.push(tsv_header(AREA_TSV_COLUMNS));
     for row in &report.rows {
-        lines.push(row.to_tsv());
+        lines.push(row.to_tsv(identity));
     }
     join_document(&lines)
 }
@@ -2101,92 +3426,112 @@ fn join_document(lines: &[String]) -> String {
 // This is the artifact the requirements ask for by name, so its four numbered sections are exactly
 // the four things they ask it to report: the feature areas covered; the total tests and their
 // outcomes; every expected divergence with its documented basis; and every finding with its
-// minimized reproducer and reproduction commands. The numbering is not decoration — it is what lets
-// the artifact be checked against the requirement literally.
+// reproducer, that reproducer's recorded minimization status, and its reproduction commands. The
+// numbering is not decoration — it is what lets the artifact be checked against the requirement
+// literally. The fourth section names the minimization status rather than claiming a minimized
+// reproducer, because a run performs no automated reduction and the manifest says so.
 // ---------------------------------------------------------------------------------------------
 
-/// One row of the matrix table: what was planned, what was recorded, and whether it fell short.
-fn matrix_row(dimension: &str, planned: usize, actual: usize, note: &str) -> Vec<String> {
-    let status = if actual >= planned {
-        String::from("✅ complete")
-    } else {
-        format!("⚠️ short by {}", planned - actual)
-    };
-    vec![
-        String::from(dimension),
-        planned.to_string(),
-        actual.to_string(),
-        status,
-        String::from(note),
-    ]
-}
+/// Which run this summary describes, and what it deliberately left out.
+///
+/// Placed before every count in the document, because a reader has to know what the numbers are
+/// counting before the numbers mean anything. An area whose file belongs to another run is named
+/// here with the generation it carries: excluded, not deleted, and not quietly absorbed.
+fn render_provenance_section(run: &RunReport, generation: &Generation) -> Vec<String> {
+    let absent: Vec<&'static AreaSpec> = AREAS
+        .iter()
+        .filter(|spec| {
+            !run.areas
+                .iter()
+                .any(|area| area.spec.directory() == spec.directory())
+                && !run.unusable.contains(spec)
+                && !run
+                    .stale
+                    .iter()
+                    .any(|stale| stale.spec.directory() == spec.directory())
+        })
+        .collect();
 
-/// The enumerable matrix, planned against recorded. This table is the suite's coverage evidence.
-fn render_matrix_table(run: &RunReport, caps: &Capabilities) -> Vec<String> {
-    let (targets, levels) = caps.config().effective_matrix();
-    let rows = vec![
-        matrix_row(
-            "Feature areas",
-            AREA_COUNT,
-            run.areas.len(),
-            "nine mandated by the coverage requirement, five supplementary",
+    let mut lines = vec![
+        String::from("## Provenance — which run this summary describes"),
+        String::new(),
+        String::from(
+            "This summary aggregates only the per-area reports carrying the generation below. A \
+             report left behind by an earlier run is listed as stale and excluded from every total, \
+             so a filtered or repeated run can never publish another run's results as its own.",
         ),
-        matrix_row(
-            "Programs",
-            PROGRAM_COUNT,
-            run.observed_programs(),
-            "one semantic concern per program",
+        String::new(),
+    ];
+    lines.extend(property_table(&[
+        (
+            String::from("Run identifier"),
+            format!("`{}`", generation.run),
         ),
-        matrix_row(
-            "Targets swept",
-            Target::ALL.len(),
-            targets.len(),
-            "x86-64 is the cross-backend baseline and executes natively",
+        (
+            String::from("Configuration fingerprint"),
+            format!("`{}`", generation.config),
         ),
-        matrix_row(
-            "Optimization levels swept",
-            OptLevel::ALL.len(),
-            levels.len(),
-            "-O0, -O1, -O2 — the levels both compilers honour identically",
-        ),
-        matrix_row(
-            "Compile-and-run cells",
-            BCC_CELL_COUNT,
-            run.observed_cells(),
-            "one program, one target, one optimization level",
-        ),
-        matrix_row(
-            "Oracle (a) comparisons",
-            ORACLE_A_COMPARISON_COUNT,
-            run.oracle_count(Oracle::ReferenceCompiler),
-            &format!(
-                "{REFERENCE_NATIVE_CELL_COUNT} native and up to {REFERENCE_CROSS_CELL_COUNT_MAX} \
-                 cross reference cells"
+        (
+            String::from("Feature areas aggregated"),
+            format!(
+                "{} of {AREA_COUNT} — {}",
+                run.areas.len(),
+                met(run.areas.len() == AREA_COUNT)
             ),
         ),
-        matrix_row(
-            "Oracle (b) comparisons",
-            ORACLE_B_COMPARISON_COUNT,
-            run.oracle_count(Oracle::CrossBackend),
-            "every non-baseline target against the baseline at the same level",
+        (
+            String::from("Feature areas excluded as stale"),
+            run.stale.len().to_string(),
         ),
-        matrix_row(
-            "Oracle (c) assertions",
-            ORACLE_C_ASSERTION_COUNT,
-            run.oracle_count(Oracle::GoldenRecord),
-            "every cell against the stdout its own record declares",
+        (
+            String::from("Feature areas unusable"),
+            run.unusable.len().to_string(),
         ),
-        matrix_row(
-            "**Differential and golden assertions**",
-            TOTAL_ASSERTION_COUNT,
-            run.tally.total(),
-            "the sum of the three oracles",
+        (
+            String::from("Feature areas that filed no report"),
+            absent.len().to_string(),
         ),
-    ];
-    markdown_table(
-        &["Dimension", "Planned", "Recorded", "Status", "Note"],
-        &rows,
-    )
+    ]));
+    lines.push(String::new());
+
+    if !run.stale.is_empty() {
+        lines.push(String::from(
+            "⚠️ Reports on disk that this run did not write, and therefore did not count:",
+        ));
+        lines.push(String::new());
+        let rows: Vec<Vec<String>> = run
+            .stale
+            .iter()
+            .map(|stale| {
+                vec![
+                    format!("`{}`", stale.spec.directory()),
+                    match &stale.generation {
+                        Some(generation) => format!("`{}`", generation.run),
+                        None => String::from("⚠️ unstamped"),
+                    },
+                    table_cell(&stale.note),
+                ]
+            })
+            .collect();
+        lines.extend(markdown_table(
+            &["Feature area", "Written by run", "Why it was excluded"],
+            &rows,
+        ));
+        lines.push(String::new());
+    }
+    if !absent.is_empty() {
+        lines.push(format!(
+            "⚠️ Feature areas that filed no report in this run at all, so nothing in them has been \
+             judged here: {}.",
+            absent
+                .iter()
+                .map(|spec| format!("`{}`", spec.directory()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        lines.push(String::new());
+    }
+    lines
 }
 
 /// The per-area table of the first deliverable section: all fourteen areas, named, counted and
@@ -2203,6 +3548,13 @@ fn render_area_overview_table(run: &RunReport) -> Vec<String> {
         let verdicts = match report {
             Some(area) => area.tally.compact(),
             None if run.unusable.contains(&spec) => String::from("⚠️ its report could not be used"),
+            None if run
+                .stale
+                .iter()
+                .any(|stale| stale.spec.directory() == spec.directory()) =>
+            {
+                String::from("⚠️ its report belongs to another run and was excluded")
+            }
             None => String::from("⚠️ no report contributed"),
         };
         rows.push(vec![
@@ -2247,7 +3599,13 @@ fn render_area_overview_table(run: &RunReport) -> Vec<String> {
 }
 
 /// The human-readable run summary — the suite's deliverable.
-fn render_summary_markdown(run: &RunReport, caps: &Capabilities, coverage: &Coverage) -> String {
+fn render_summary_markdown(
+    run: &RunReport,
+    caps: &Capabilities,
+    coverage: &Coverage,
+    dimensions: &[MatrixDimension],
+    generation: &Generation,
+) -> String {
     let config = caps.config();
     let failing = run.failing(caps);
     let mut lines = Vec::new();
@@ -2261,8 +3619,12 @@ fn render_summary_markdown(run: &RunReport, caps: &Capabilities, coverage: &Cove
     lines.push(String::new());
     lines.push(String::from(
         "This artifact reports the feature areas covered, the total tests and their outcomes, every \
-         expected divergence with its documented basis, and every finding with its minimized \
-         reproducer and reproduction commands. Each of those four is a numbered section below.",
+         expected divergence with its documented basis, and every finding with its reproducer, that \
+         reproducer's recorded minimization status, and its reproduction commands. Each of those \
+         four is a numbered section below. A finding's reproducer is a verbatim copy of the corpus \
+         program. No automated reduction is performed during a run, so a \
+         finding's manifest states its minimization status rather than the summary claiming a \
+         reduced program.",
     ));
     lines.push(String::new());
     lines.push(String::from(
@@ -2272,6 +3634,8 @@ fn render_summary_markdown(run: &RunReport, caps: &Capabilities, coverage: &Cove
          code correctness.",
     ));
     lines.push(String::new());
+
+    lines.extend(render_provenance_section(run, generation));
 
     lines.push(String::from("## Run verdict"));
     lines.push(String::new());
@@ -2385,7 +3749,7 @@ fn render_summary_markdown(run: &RunReport, caps: &Capabilities, coverage: &Cove
             ));
             lines.push(String::new());
             for arm in &arms {
-                lines.push(format!("- {}", sanitize_text_for_report(arm)));
+                lines.push(format!("- {}", md(arm)));
             }
         }
         if !unavailable.is_empty() {
@@ -2416,7 +3780,15 @@ fn render_summary_markdown(run: &RunReport, caps: &Capabilities, coverage: &Cove
         "### The enumerable matrix, planned against recorded",
     ));
     lines.push(String::new());
-    lines.extend(render_matrix_table(run, caps));
+    lines.push(String::from(
+        "The planned column is the full declared matrix, never the reduced one: a run that narrowed \
+         itself shows the narrowing here rather than moving the target it is measured against. Every \
+         shortfall in this table is also a reason in the coverage section below, and the stamp in the \
+         first heading is derived from this table — so a shortfall can never sit beside a claim of \
+         full coverage.",
+    ));
+    lines.push(String::new());
+    lines.extend(render_matrix_table(dimensions));
     lines.push(String::new());
     lines.push(String::from("### Verdict tally"));
     lines.push(String::new());
@@ -2441,10 +3813,12 @@ fn render_summary_markdown(run: &RunReport, caps: &Capabilities, coverage: &Cove
     ));
     lines.push(String::new());
     lines.push(format!(
-        "A marker changes how a divergence is classified, never whether the feature is exercised: a \
-         marked program still compiles and still runs. Every marker cites a limitation this \
-         repository already documents, and the set is cross-referenced by \
-         `{EXPECTED_DIVERGENCE_REGISTER}`."
+        "A marker changes how a divergence is classified, never whether the feature is \
+         exercised: the applicable phases are attempted in order — compile, link, run, compare \
+         — and classification happens at the first terminal outcome or the completed \
+         comparison, so nothing short-circuits a phase because a marker exists. Every marker \
+         cites a limitation this repository already documents, and the set is cross-referenced \
+         by `{EXPECTED_DIVERGENCE_REGISTER}`."
     ));
     lines.push(String::new());
     lines.extend(render_expected_divergence_section(
@@ -2455,7 +3829,7 @@ fn render_summary_markdown(run: &RunReport, caps: &Capabilities, coverage: &Cove
 
     let findings = run.rows_with(Verdict::Finding);
     lines.push(String::from(
-        "## 4 — Findings, with minimized reproducer and reproduction commands",
+        "## 4 — Findings, with verbatim reproducer, minimization status and reproduction commands",
     ));
     lines.push(String::new());
     if findings.is_empty() {
@@ -2466,8 +3840,10 @@ fn render_summary_markdown(run: &RunReport, caps: &Capabilities, coverage: &Cove
         lines.push(format!(
             "{} undocumented divergence(s) were observed. A finding is a deliverable, not a defect \
              to patch: no compiler source change is made in response to one. Each directory holds \
-             the reproducer, its expectation record, a manifest, the captured stdout, exit status \
-             and stderr per compiler and per backend, the environment fingerprint, the computed \
+             a verbatim reproducer — a byte-for-byte copy of the corpus program, whose recorded \
+             minimization status states that a run performs no automated reduction and what to do \
+             next — its expectation record, a manifest, the captured stdout, exit status and \
+             stderr per compiler and per backend, the environment fingerprint, the computed \
              difference, and `{COMMANDS_NAME}` — the exact compile and run lines, which reproduce \
              the divergence with no harness, no Cargo and no Rust toolchain. The curated set is \
              indexed by `{FINDINGS_REGISTER}`.",
@@ -2509,14 +3885,54 @@ fn render_summary_markdown(run: &RunReport, caps: &Capabilities, coverage: &Cove
          difference between two of them is a real difference.",
     ));
     lines.push(String::new());
+    // Rendered as an indented block, which Markdown treats as literal code: nothing inside one is
+    // document syntax, so sanitization for the line is the whole of what this sink needs and the
+    // banners read exactly as their tools printed them. Every fragment of it — tool paths included —
+    // has already been redacted of anything that looked like a credential by the capability record.
     for line in caps.render_fingerprint().lines() {
         lines.push(format!("    {}", sanitize_text_for_report(line)));
     }
     lines.push(String::new());
 
+    lines.push(String::from("## Provenance"));
+    lines.push(String::new());
+    lines.push(String::from(
+        "Every row aggregated into this summary was written by this run under this configuration,          and a row claiming anything else is refused and reported in the Diagnostics section rather          than counted. The run identifier distinguishes this process from any other; the          configuration digest covers the row schema, the effective matrix and policy, the discovered          tool set and the corpus that was read — all four of which are stated in full elsewhere in          this document, so a digest that differs can be diagnosed rather than merely noticed.",
+    ));
+    lines.push(String::new());
+    let identity = RunIdentity::of(caps);
+    lines.extend(property_table(&[
+        (String::from("Run identifier"), md_code(&identity.run)),
+        (
+            String::from("Configuration digest"),
+            md_code(&identity.identity),
+        ),
+        (
+            String::from("Report directory ownership"),
+            format!("claimed by this run — {}", md_code(RUN_OWNER_ENTRY)),
+        ),
+    ]));
+    lines.push(String::new());
+
     lines.push(String::from("## Run configuration"));
     lines.push(String::new());
+    lines.push(format!(
+        "The fingerprint below is a digest of everything that could make two runs' numbers \
+         incomparable — the effective matrix, the resolved identity of every tool, the per-cell \
+         budget and the settings that decide which verdicts fail a run. Two runs configured alike \
+         share it, so a reduced run's totals can never be mistaken for a full run's. It is \
+         deterministic, which is why it can appear here at all: the token that identifies *this \
+         process's* run is deliberately not in this file, because these two artifacts are \
+         byte-identical for identical inputs and a per-run token would break that on every run. The \
+         token is recorded once, in `{}` beside this summary.",
+        super::sandbox::RUN_MANIFEST_NAME
+    ));
+    lines.push(String::new());
     lines.extend(property_table(&[
+        (
+            String::from("Configuration fingerprint"),
+            format!("`{}`", run_generation().configuration()),
+        ),
         (
             format!("`{VAR_QUICK}` (reduced matrix)"),
             String::from(yes_no(config.quick_mode())),
@@ -2524,11 +3940,7 @@ fn render_summary_markdown(run: &RunReport, caps: &Capabilities, coverage: &Cove
         (
             format!("`{VAR_ONLY}` (single program)"),
             match config.only() {
-                Some(filter) => format!(
-                    "`{}/{}`",
-                    filter.area(),
-                    sanitize_text_for_report(filter.program())
-                ),
+                Some(filter) => md_code(&format!("{}/{}", filter.area(), filter.program())),
                 None => String::from("unset"),
             },
         ),
@@ -2559,12 +3971,103 @@ fn render_summary_markdown(run: &RunReport, caps: &Capabilities, coverage: &Cove
             } else {
                 run.filters
                     .iter()
-                    .map(|filter| format!("`{}`", sanitize_text_for_report(filter)))
+                    .map(|filter| md_code(filter))
                     .collect::<Vec<_>>()
                     .join(", ")
             },
         ),
+        (
+            String::from("Feature areas this invocation could produce"),
+            format!("{} of {AREA_COUNT}", run.expected),
+        ),
+        (
+            String::from("Feature areas that contributed outcomes"),
+            format!("{} of {AREA_COUNT}", run.areas.len()),
+        ),
+        // Derived from this run's configuration rather than from its process, so two runs of the
+        // same sweep produce the same value and the artifact stays diffable. It is here because the
+        // per-area files outlive the process that wrote them, and this is the value that says which
+        // run they belong to.
+        (
+            String::from("Run identity (session)"),
+            format!("`{}`", run.session),
+        ),
     ]));
+    lines.push(String::new());
+    lines.push(String::from(
+        "Every one of the area reports aggregated above was verified to carry that run identity. \
+         The previous run's artifacts are removed once, when this process starts, and an area \
+         report stamped with any other identity is refused rather than added in — so this summary \
+         describes one configuration's run and can never be a blend of two.",
+    ));
+    lines.push(String::new());
+
+    lines.push(String::from("## Retained evidence"));
+    lines.push(String::new());
+    lines.push(String::from(
+        "A cell that did not pass keeps its workspace so the divergence can be investigated, and \
+         that retention is bounded: a compiler under test that cannot build anything would otherwise \
+         retain the whole matrix. The accounting is stated here rather than left to be discovered, \
+         because a workspace that was pruned and a workspace that was never created look identical \
+         on disk and mean opposite things.",
+    ));
+    lines.push(String::new());
+    let (retained_bytes, retained_workspaces) = super::sandbox::retention_totals();
+    lines.extend(property_table(&[
+        (
+            String::from("Workspaces retained"),
+            retained_workspaces.to_string(),
+        ),
+        (
+            String::from("Bytes retained"),
+            format!(
+                "{retained_bytes} of {} permitted for the run",
+                super::sandbox::RETAINED_RUN_BYTES_MAX
+            ),
+        ),
+        (
+            String::from("Per-workspace ceiling"),
+            super::sandbox::RETAINED_WORKSPACE_BYTES_MAX.to_string(),
+        ),
+        (
+            String::from("Per-file ceiling"),
+            super::sandbox::RETAINED_ENTRY_BYTES_MAX.to_string(),
+        ),
+        (
+            String::from("Workspace count ceiling"),
+            super::sandbox::RETAINED_WORKSPACE_COUNT_MAX.to_string(),
+        ),
+    ]));
+    lines.push(String::new());
+    let pruning = super::sandbox::retention_pruning_notes();
+    if pruning.is_empty() {
+        lines.push(String::from(
+            "Nothing was pruned: every workspace this run retained fitted inside the budget, so \
+             every retained directory holds the whole of what its cell produced.",
+        ));
+    } else {
+        // The two ceilings prune for different reasons and leave different things behind, so this
+        // paragraph must not describe only the byte case. Saying that what was dropped can be
+        // rebuilt from the command lines retained beside it holds when a byte ceiling bites, but
+        // not when the workspace count ceiling does: that one prunes every entry, the command
+        // lines included. The recovery instruction true in both cases is the workspace path, which
+        // names the cell precisely enough to re-run exactly it.
+        lines.push(format!(
+            "{} pruning(s) were performed to stay inside the budget. Each names what was removed \
+             and why. When a byte ceiling is what bites, the largest entries go first, which keeps \
+             the small text captures — the statuses, the command lines and the recorded streams an \
+             investigation actually reads — and drops the linked executables ahead of them. When \
+             the workspace count ceiling is what bites, every entry of the workspace is pruned and \
+             the notes below are the only surviving record that the cell retained anything. In \
+             either case the directory named in the note identifies the cell, so re-running that \
+             one cell reproduces what was dropped.",
+            pruning.len()
+        ));
+        lines.push(String::new());
+        for note in &pruning {
+            lines.push(format!("- {}", sanitize_text_for_report(note)));
+        }
+    }
     lines.push(String::new());
 
     lines.push(String::from("## Why this report is reduced or partial"));
@@ -2685,13 +4188,41 @@ impl SummaryRow {
 ///
 /// Free text is carried in full here: the Markdown truncates long cells so its tables stay
 /// readable, this file never does, so nothing observed is lost from the artifact pair.
-fn render_summary_tsv(run: &RunReport, caps: &Capabilities, coverage: &Coverage) -> String {
+fn render_summary_tsv(
+    run: &RunReport,
+    caps: &Capabilities,
+    coverage: &Coverage,
+    dimensions: &[MatrixDimension],
+    generation: &Generation,
+) -> String {
     let config = caps.config();
     let failing = run.failing(caps);
     let mut rows: Vec<SummaryRow> = Vec::new();
 
     // Meta — the fields an aggregator reads first, including the two the reporting discipline
-    // requires to be explicit rather than inferred from the prose.
+    // requires to be explicit rather than inferred from the prose, and the provenance that says
+    // which run and which configuration every aggregated row belongs to.
+    let identity = RunIdentity::of(caps);
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "run")
+            .set(COL_DETAIL, identity.run.clone()),
+    );
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "identity")
+            .set(COL_DETAIL, identity.identity.clone()),
+    );
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "run_id")
+            .set(COL_DETAIL, generation.run.clone()),
+    );
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "config_fingerprint")
+            .set(COL_DETAIL, generation.config.clone()),
+    );
     rows.push(
         SummaryRow::new(RECORD_META)
             .set(COL_LABEL, "reduced")
@@ -2702,20 +4233,42 @@ fn render_summary_tsv(run: &RunReport, caps: &Capabilities, coverage: &Coverage)
             .set(COL_LABEL, "partial")
             .set(COL_DETAIL, true_false(coverage.is_partial())),
     );
+    // The suite defines fourteen areas; how many of them *this* invocation could produce is a
+    // different number whenever a filter is active, and an aggregator that compared
+    // `areas_contributed` against the constant would read every filtered run as missing data rather
+    // than as deliberately scoped. Both numbers are published so neither has to be inferred.
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "areas_defined")
+            .set(COL_COUNT, AREA_COUNT.to_string()),
+    );
     rows.push(
         SummaryRow::new(RECORD_META)
             .set(COL_LABEL, "areas_expected")
-            .set(COL_COUNT, AREA_COUNT.to_string()),
+            .set(COL_COUNT, run.expected.to_string()),
     );
     rows.push(
         SummaryRow::new(RECORD_META)
             .set(COL_LABEL, "areas_contributed")
             .set(COL_COUNT, run.areas.len().to_string()),
     );
+    // Published so an aggregator can tell two runs apart and so a per-area file can be matched to
+    // the summary that consumed it. Derived from the configuration this run swept rather than from
+    // the process that swept it, so the field is stable across two runs of the same sweep.
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "run_identity")
+            .set(COL_DETAIL, run.session.clone()),
+    );
     rows.push(
         SummaryRow::new(RECORD_META)
             .set(COL_LABEL, "areas_unusable")
             .set(COL_COUNT, run.unusable.len().to_string()),
+    );
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "areas_stale")
+            .set(COL_COUNT, run.stale.len().to_string()),
     );
     rows.push(
         SummaryRow::new(RECORD_META)
@@ -2769,81 +4322,75 @@ fn render_summary_tsv(run: &RunReport, caps: &Capabilities, coverage: &Coverage)
                 .set(COL_DETAIL, filter.clone()),
         );
     }
+    // The configuration identity every aggregated area file was verified to carry. An aggregator
+    // comparing two summaries reads this first: two rows of the same shape mean different things
+    // under different matrices, filters or verdict policies, and this is what says which applied.
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, SESSION_LABEL)
+            .set(COL_DETAIL, run.session.clone()),
+    );
     // Stated rather than computed, so an aggregator never has to guess why no percentage is here.
     rows.push(
         SummaryRow::new(RECORD_META)
             .set(COL_LABEL, "coverage_metric")
             .set(COL_DETAIL, "enumerable matrix; no percentage is measurable"),
     );
+    // Deterministic, so it belongs in an artifact documented as byte-identical for identical
+    // inputs; the per-process run token deliberately does not, and lives in the run manifest alone.
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "configuration_fingerprint")
+            .set(COL_DETAIL, run_generation().configuration()),
+    );
+
+    // The retention accounting, in the same numbers the Markdown sibling reports.
+    let (retained_bytes, retained_workspaces) = super::sandbox::retention_totals();
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "retained_workspaces")
+            .set(COL_COUNT, retained_workspaces.to_string())
+            .set(
+                COL_REFERENCE,
+                super::sandbox::RETAINED_WORKSPACE_COUNT_MAX.to_string(),
+            ),
+    );
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "retained_bytes")
+            .set(COL_COUNT, retained_bytes.to_string())
+            .set(
+                COL_REFERENCE,
+                super::sandbox::RETAINED_RUN_BYTES_MAX.to_string(),
+            ),
+    );
+    for note in super::sandbox::retention_pruning_notes() {
+        rows.push(
+            SummaryRow::new(RECORD_META)
+                .set(COL_LABEL, "retention_pruning")
+                .set(COL_DETAIL, note),
+        );
+    }
 
     for reason in &coverage.reasons {
         rows.push(SummaryRow::new(RECORD_COVERAGE_REASON).set(COL_DETAIL, reason.clone()));
     }
 
-    let (targets, levels) = config.effective_matrix();
-    let matrix: [(&str, usize, usize, &str); 9] = [
-        (
-            "feature_areas",
-            AREA_COUNT,
-            run.areas.len(),
-            "nine mandated, five supplementary",
-        ),
-        (
-            "programs",
-            PROGRAM_COUNT,
-            run.observed_programs(),
-            "one semantic concern per program",
-        ),
-        (
-            "targets",
-            Target::ALL.len(),
-            targets.len(),
-            "x86-64 is the cross-backend baseline",
-        ),
-        (
-            "opt_levels",
-            OptLevel::ALL.len(),
-            levels.len(),
-            "-O0, -O1, -O2",
-        ),
-        (
-            "bcc_cells",
-            BCC_CELL_COUNT,
-            run.observed_cells(),
-            "program x target x optimization level",
-        ),
-        (
-            "oracle_a_comparisons",
-            ORACLE_A_COMPARISON_COUNT,
-            run.oracle_count(Oracle::ReferenceCompiler),
-            "reference compiler, same target and level",
-        ),
-        (
-            "oracle_b_comparisons",
-            ORACLE_B_COMPARISON_COUNT,
-            run.oracle_count(Oracle::CrossBackend),
-            "non-baseline target against the baseline",
-        ),
-        (
-            "oracle_c_assertions",
-            ORACLE_C_ASSERTION_COUNT,
-            run.oracle_count(Oracle::GoldenRecord),
-            "cell against its own recorded stdout",
-        ),
-        (
-            "total_assertions",
-            TOTAL_ASSERTION_COUNT,
-            run.tally.total(),
-            "sum of the three oracles",
-        ),
-    ];
-    for (label, planned, actual, note) in matrix {
+    // The same dimension list the Markdown table and the coverage stamp were derived from, so the
+    // three cannot disagree about what fell short.
+    for dimension in dimensions {
         rows.push(
             SummaryRow::new(RECORD_MATRIX)
-                .set(COL_LABEL, label)
-                .set(COL_COUNT, actual.to_string())
-                .set(COL_REFERENCE, planned.to_string())
-                .set(COL_DETAIL, note),
+                .set(COL_LABEL, dimension.label)
+                .set(COL_COUNT, dimension.actual.to_string())
+                .set(COL_REFERENCE, dimension.planned.to_string())
+                .set(
+                    COL_DETAIL,
+                    match dimension.shortfall() {
+                        None => format!("complete; {}", dimension.note),
+                        Some(gap) => format!("short by {gap}; {}", dimension.note),
+                    },
+                ),
         );
     }
     rows.push(
@@ -2868,10 +4415,15 @@ fn render_summary_tsv(run: &RunReport, caps: &Capabilities, coverage: &Coverage)
             .areas
             .iter()
             .find(|candidate| candidate.spec.directory() == spec.directory());
-        let state = match report {
-            Some(_) => "contributed",
-            None if run.unusable.contains(&spec) => "unusable",
-            None => "absent",
+        let stale = run
+            .stale
+            .iter()
+            .find(|candidate| candidate.spec.directory() == spec.directory());
+        let state = match (report, stale) {
+            (Some(_), _) => "contributed",
+            (None, Some(_)) => "stale",
+            (None, None) if run.unusable.contains(&spec) => "unusable",
+            (None, None) => "absent",
         };
         rows.push(
             SummaryRow::new(RECORD_AREA)
@@ -2895,8 +4447,19 @@ fn render_summary_tsv(run: &RunReport, caps: &Capabilities, coverage: &Coverage)
                 .set(
                     COL_DETAIL,
                     format!(
-                        "{state}; programs observed {}",
-                        report.map(|area| area.programs.len()).unwrap_or(0)
+                        "{state}; programs observed {}{}",
+                        report.map(|area| area.programs.len()).unwrap_or(0),
+                        match stale {
+                            Some(stale) => format!(
+                                "; written by run {}; excluded because {}",
+                                match &stale.generation {
+                                    Some(generation) => generation.run.clone(),
+                                    None => String::from("(unstamped)"),
+                                },
+                                stale.note
+                            ),
+                            None => String::new(),
+                        }
                     ),
                 ),
         );
@@ -3080,6 +4643,110 @@ fn render_summary_tsv(run: &RunReport, caps: &Capabilities, coverage: &Coverage)
 }
 
 // ---------------------------------------------------------------------------------------------
+// The run's area registry
+//
+// A report directory is a fixed set of names — `areas/<area>.tsv`, one per feature area — and those
+// names carry no run identity of their own. Existence on disk therefore cannot answer the question
+// the summary actually depends on, which is not "does a report for this area exist?" but "did *this*
+// run produce one?". Two different files answer those two questions, and treating the first as the
+// second is how a summary comes to describe a blend of two runs: a previous run's reduced,
+// filtered or differently configured area file is byte-for-byte a perfectly valid report, and
+// aggregating it produces totals that look complete and belong to nothing.
+//
+// Two mechanisms close that gap, and both are needed:
+//
+// - [`super::sandbox::ensure_roots`] retires the previous run's `areas/` directory once per process,
+//   before this run publishes anything. It is a precondition of [`write_area`] rather than an
+//   assumption about call order, so an area report can never be published beside a stale neighbour.
+// - The registry below records which areas *this process* published. It is the set the summary
+//   aggregates from, so a file this run did not write cannot enter a total even if something else
+//   put one there — the completeness check consults memory, not the directory listing.
+//
+// The registry also carries the finalization claim, which fixes the second half of the same problem.
+// Every one of the fourteen area tests calls [`try_finalize`]; without a claim, each of them rescans
+// and re-renders, and two finishing together both write the summary. One critical section performs
+// the completeness check and the claim together, so exactly one caller proceeds and the other
+// thirteen return having touched no file at all. The claim is released again if finalization fails,
+// because a claim that outlives a failed attempt would leave the run with no summary and no way to
+// produce one.
+//
+// The lock guards a set of static names and a boolean, neither of which has an invariant a panic
+// could break, so a poisoned lock is recovered rather than reported: a failing area test panics by
+// design in this suite, and losing the summary because a *different* area failed would suppress
+// exactly the report that explains the failure.
+// ---------------------------------------------------------------------------------------------
+
+/// What this process published, and whether it has already written the summary.
+#[derive(Debug, Default)]
+struct RunRegistry {
+    /// Directory names of the areas whose report pair this process published, canonical spellings.
+    published: BTreeSet<&'static str>,
+    /// Whether the one finalization of this run has been claimed.
+    finalized: bool,
+}
+
+/// This process's registry, created on first use.
+fn run_registry() -> &'static Mutex<RunRegistry> {
+    static REGISTRY: OnceLock<Mutex<RunRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(RunRegistry::default()))
+}
+
+/// Borrow the registry, recovering rather than propagating a lock poisoned by a panicking test.
+fn registry() -> std::sync::MutexGuard<'static, RunRegistry> {
+    run_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Record that this run published `spec`'s report pair.
+///
+/// Called only after a successful publication, so membership implies both files are on disk.
+fn register_published_area(spec: &'static AreaSpec) {
+    registry().published.insert(spec.directory());
+}
+
+/// Claim the single finalization of this run, if every feature area has filed its report.
+///
+/// Returns the areas to aggregate, in canonical [`AREAS`] order rather than the order they
+/// finished, so the summary's bytes do not depend on how the harness scheduled its threads.
+/// Returns `None` when an area that is going to run is still outstanding, when nothing has been
+/// published at all, or when finalization is already claimed; all three are ordinary answers, and
+/// none writes anything.
+///
+/// Completeness is measured against the areas this invocation *can* publish rather than against
+/// all [`AREA_COUNT`](super::AREA_COUNT) of them. Waiting for the whole table would withhold the
+/// deliverable indefinitely from a filtered run, because the areas the filter excluded are never
+/// going to publish; waiting for the selected ones is what stops the summary being written after
+/// the first of several selected areas finishes, which would publish a subset of a subset. The
+/// summary such a run writes is stamped partial and lists every area that did not contribute —
+/// which is the promise [`try_finalize`] documents. What it never does is fill those gaps from
+/// another run's files.
+fn claim_finalization() -> Option<Vec<&'static AreaSpec>> {
+    // Read before the lock is taken: scanning the command line has nothing to do with the registry,
+    // and holding the guard across it would widen the critical section for no reason.
+    let expected = libtest_filter_selection().expected_areas();
+    let mut held = registry();
+    let complete = expected
+        .iter()
+        .all(|spec| held.published.contains(&spec.directory()));
+    if held.finalized || held.published.is_empty() || !complete {
+        return None;
+    }
+    held.finalized = true;
+    Some(
+        AREAS
+            .iter()
+            .filter(|spec| held.published.contains(&spec.directory()))
+            .collect(),
+    )
+}
+
+/// Give the finalization claim back after an attempt that failed to publish a summary.
+fn release_finalization_claim() {
+    registry().finalized = false;
+}
+
+// ---------------------------------------------------------------------------------------------
 // The public surface
 //
 // Two functions. One area test calls both, in this order, at the end of its run — including when it
@@ -3094,9 +4761,22 @@ fn render_summary_tsv(run: &RunReport, caps: &Capabilities, coverage: &Coverage)
 /// does not have would never be aggregated and its outcomes would vanish silently.
 ///
 /// This writes `areas/<area>.md` and `areas/<area>.tsv` beneath the report root, and nothing else
-/// anywhere. Both files are written by rename over a temporary sibling, so a concurrently
-/// finalizing summary never reads a half-written file. Only this area's own two files are touched,
-/// which is why no lock is needed here or anywhere else in this module.
+/// anywhere. Both files are rendered from one snapshot and published together by rename over
+/// temporary siblings created exclusively, so a concurrently finalizing summary never reads a
+/// half-written file, a pre-planted temporary cannot be written through, and a reader never finds a
+/// Markdown report beside a tab-separated sibling from a different run. Only this area's own two
+/// files are touched, which is why no lock between threads is needed; ownership *between runs* is
+/// established once by the first call, which clears an earlier run's artifacts and refuses to
+/// proceed while another run still owns the directory.
+///
+/// The run's roots are initialized first. That is deliberately a precondition of the write rather
+/// than an assumption about who ran earlier: initialization is what retires the previous run's area
+/// reports, and an area report published before it happened would be filed beside stale neighbours
+/// and then retired along with them, so this run's own account of itself would disappear.
+///
+/// Every row written carries this run's provenance, and the file opens with this run's generation,
+/// which is what lets [`try_finalize`] tell a report this run produced from one that was already
+/// lying there.
 ///
 /// Call it once per area test, with every outcome that area accumulated — passes included. The
 /// passes are what make the tally, the matrix and the planned-against-recorded comparison mean
@@ -3104,10 +4784,12 @@ fn render_summary_tsv(run: &RunReport, caps: &Capabilities, coverage: &Coverage)
 ///
 /// # Errors
 ///
-/// Fails when `area` is not a known feature area, or when the report root cannot be created or
-/// written. A failure here is reported rather than swallowed: a verdict that was computed and then
-/// silently not recorded is worse than a loud I/O error, because the run would look clean.
+/// Fails when `area` is not a known feature area, when the run's roots cannot be prepared, or when
+/// the report pair cannot be published. A failure here is reported rather than swallowed: a verdict
+/// that was computed and then silently not recorded is worse than a loud I/O error, because the run
+/// would look clean.
 pub fn write_area(area: &str, outcomes: &[Outcome], caps: &Capabilities) -> HarnessResult<()> {
+    super::sandbox::ensure_roots()?;
     let spec = AreaSpec::lookup(area).ok_or_else(|| {
         HarnessError::new(
             format!("writing the report of feature area `{area}`"),
@@ -3122,23 +4804,33 @@ pub fn write_area(area: &str, outcomes: &[Outcome], caps: &Capabilities) -> Harn
         )
     })?;
 
+    // Before anything is written: clear the previous run's artifacts, exactly once per process.
+    // Doing it here rather than trusting the caller is what makes the guarantee structural — no
+    // area file can reach the report root ahead of the invalidation that would have removed a
+    // stale one, on any thread, however the tests are filtered or ordered.
+    begin_session()?;
+
     let mut report = AreaReport::from_outcomes(spec, outcomes);
     let facts = CorpusFacts::for_area(spec);
     report
         .diagnostics
         .extend(diagnose_unrecorded_programs(&report.rows, &facts));
-    let coverage = assess_area_coverage(caps, &report);
+    let dimensions = area_matrix(&report, &facts, caps);
+    let coverage = assess_area_coverage(caps, &report, &facts, &dimensions);
+    let generation = Generation::current(caps);
 
-    write_atomic(
+    write_report_pair(
         &format!("writing the report of feature area `{area}`"),
         &area_markdown_path(spec),
-        &render_area_markdown(&report, &facts, caps, &coverage),
-    )?;
-    write_atomic(
-        &format!("writing the machine-readable report of feature area `{area}`"),
+        &render_area_markdown(&report, &facts, caps, &coverage, &dimensions, &generation),
         &area_tsv_path(spec),
-        &render_area_tsv(&report),
+        &render_area_tsv(&report, &generation, RunIdentity::of(caps)),
     )?;
+
+    // Registration follows publication, never precedes it, so a registered area is always an area
+    // whose two files are on disk. That ordering is what lets the summary treat a complete registry
+    // as a complete set of readable artifacts.
+    register_published_area(spec);
     Ok(())
 }
 
@@ -3176,72 +4868,211 @@ fn diagnose_unrecorded_programs(rows: &[Row], facts: &CorpusFacts) -> Vec<String
         .collect()
 }
 
-/// Read one area's machine-readable report back.
+/// What one area's machine-readable report turned out to be when this run read it.
 ///
-/// Returns `Ok(None)` when the file is not there — either the area has not run yet, or it vanished
-/// between the existence check and the read, which is a benign race and never a reason to fail a
-/// run. Anything else the file can do to us — unreadable bytes, a header from a different schema, a
-/// row that will not parse — comes back as a diagnostic on an otherwise usable report, so a damaged
-/// file degrades the summary loudly instead of aborting it.
-fn read_area(spec: &'static AreaSpec) -> Option<AreaReport> {
+/// Absence is the ordinary answer for an area that has not filed a report in this process — a
+/// filtered run leaves most of the fourteen absent — and is deliberately not a diagnostic. A
+/// readable report that belongs to another run, or one written before generations were stamped, is
+/// [`Stale`] and contributes nothing to any total while still being listed by name. A file that
+/// exists but cannot be used at all is [`Unusable`], which is counted and reported rather than
+/// quietly skipped, because an area silently missing from a summary is indistinguishable from an
+/// area that passed.
+///
+/// [`Stale`]: AreaState::Stale
+/// [`Unusable`]: AreaState::Unusable
+enum AreaState {
+    /// No file: the area has not filed a report in this process yet.
+    Absent,
+    /// Written by this run, under this configuration.
+    Current(AreaReport),
+    /// A readable report from a different run, or one written before generations were stamped.
+    Stale(StaleArea),
+    /// The file exists but nothing could be made of it.
+    Unusable(AreaReport),
+}
+
+/// Upper bound on the number of lines a per-area machine-readable report may carry.
+///
+/// Derived rather than chosen: the largest legitimate area file holds one row per program, per
+/// target, per optimization level and per oracle, plus its generation preamble and its header. Using
+/// the whole suite's program count makes the bound generous by a factor of about ten for any single
+/// area while still being a bound, so a file that has been replaced by something enormous is refused
+/// instead of parsed line by line into memory.
+const MAX_AREA_TSV_LINES: usize =
+    PROGRAM_COUNT * Target::ALL.len() * OptLevel::ALL.len() * Oracle::ALL.len() + 2;
+
+/// Read one area's machine-readable report back, refusing anything it should not be.
+///
+/// Reading the published artifact back, rather than aggregating the in-memory report a moment
+/// earlier, is what makes the summary provably an aggregate of the files a reader can open. The
+/// machine-readable sibling exists precisely so totals can be derived without re-reading prose, and
+/// deriving them from anything else would let the summary and the per-area files disagree.
+///
+/// Absence returns [`AreaState::Absent`] and is never a diagnostic: the area has not run in this
+/// process, or the file vanished between the existence check and the read, which is a benign race
+/// and never a reason to fail a run. Everything else the file can do to us comes back either as a
+/// stale-file record or as a diagnostic on an otherwise usable report, so a damaged, redirected,
+/// oversized or foreign file degrades the summary **loudly** instead of aborting it or contributing
+/// silently:
+///
+/// - a **symbolic link** at the file, or anywhere in the directory chain above it, is refused rather
+///   than followed, because following one would read rows from anywhere on the machine while the
+///   report still named this path;
+/// - a file **larger than [`MAX_INSPECTED_FILE_BYTES`]**, or with more than [`MAX_AREA_TSV_LINES`]
+///   lines, is refused rather than held in memory;
+/// - bytes that are **not text** are refused rather than lossily reinterpreted;
+/// - a first line that is not this run's generation preamble makes the file stale, which is the one
+///   case that is neither counted nor reported as damage;
+/// - a header from a different schema, or a row that will not parse, is reported;
+/// - a row whose **provenance is not this run's** is refused and counted in a single diagnostic per
+///   distinct claim, so a whole foreign file produces one readable sentence rather than one per row.
+fn read_area(spec: &'static AreaSpec, current: &Generation, identity: &RunIdentity) -> AreaState {
     let path = area_tsv_path(spec);
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+    let context = format!(
+        "reading the machine-readable report of feature area `{}`",
+        spec.directory()
+    );
+    // For the cases whose message already reads as a whole sentence.
+    let unusable = |problem: String| {
+        AreaState::Unusable(AreaReport::from_rows(spec, Vec::new(), vec![problem]))
+    };
+    // For the guarded reads, which report a cause in terms of the path they refused.
+    let damaged = |problem: String| {
+        AreaState::Unusable(AreaReport::from_rows(
+            spec,
+            Vec::new(),
+            vec![format!(
+                "⚠️ the machine-readable report of feature area `{}` could not be used, so its \
+                 outcomes are missing from every total: {problem}",
+                spec.directory()
+            )],
+        ))
+    };
+
+    // Absence is the ordinary answer for an area that has not run, and is the one case that is not a
+    // diagnostic. It is asked without following a final link, so a link is reported as present here
+    // and refused by the guarded read below rather than silently resolved.
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return AreaState::Absent,
         Err(error) => {
-            return Some(AreaReport::from_rows(
-                spec,
-                Vec::new(),
-                vec![format!(
-                    "⚠️ the machine-readable report of feature area `{}` could not be read, so its \
-                     outcomes are missing from every total: {} ({error})",
-                    spec.directory(),
-                    shown_path(&path)
-                )],
+            return damaged(format!(
+                "{} could not be inspected: {error}",
+                shown_path(&path)
+            ));
+        }
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(error) = require_directory_chain_below(&context, &report_root(), parent) {
+            return damaged(String::from(error.cause()));
+        }
+    }
+    let bytes = match read_file_bounded(&context, &path, MAX_INSPECTED_FILE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(error) => return damaged(String::from(error.cause())),
+    };
+    let contents = match String::from_utf8(bytes) {
+        Ok(contents) => contents,
+        Err(error) => {
+            return damaged(format!(
+                "{} is not valid text ({error}); a report this harness wrote is always text, so \
+                 these bytes were written by something else",
+                shown_path(&path)
             ));
         }
     };
+    if contents.lines().count() > MAX_AREA_TSV_LINES {
+        return damaged(format!(
+            "{} carries more than the {MAX_AREA_TSV_LINES} lines the largest legitimate area report \
+             can have, so it is refused rather than parsed",
+            shown_path(&path)
+        ));
+    }
 
     let mut lines = contents.lines();
+    let Some(preamble) = lines.next() else {
+        return unusable(format!(
+            "⚠️ the machine-readable report of feature area `{}` is empty, so its outcomes are \
+             missing from every total.",
+            spec.directory()
+        ));
+    };
+    let Some(generation) = Generation::parse(preamble) else {
+        return AreaState::Stale(StaleArea {
+            spec,
+            generation: None,
+            note: format!(
+                "its first line is not a generation preamble, so it cannot be shown to belong to \
+                 this run. A report written before the harness stamped its reports looks exactly \
+                 like this; re-run the area to replace it. Found `{}`.",
+                sanitize_text_for_report(preamble)
+            ),
+        });
+    };
+    if &generation != current {
+        // The configuration is named only when it differs, because the sweep digest alone already
+        // settles that the file is foreign and repeating an identical fingerprint would crowd out the
+        // one fact a reader needs.
+        let note = if generation.config == current.config {
+            format!(
+                "it names sweep `{}` though its configuration matches this run's, so it was \
+                 written by a concurrent run; this run is `{}`.",
+                generation.run, current.run
+            )
+        } else {
+            format!(
+                "it was written by run `{}` under a different configuration, `{}`.",
+                generation.run, generation.config
+            )
+        };
+        return AreaState::Stale(StaleArea {
+            spec,
+            note,
+            generation: Some(generation),
+        });
+    }
+
     let expected = tsv_header(AREA_TSV_COLUMNS);
     match lines.next() {
         Some(header) if header == expected => {}
         Some(header) => {
-            return Some(AreaReport::from_rows(
-                spec,
-                Vec::new(),
-                vec![format!(
-                    "⚠️ the machine-readable report of feature area `{}` has a header this harness \
+            return unusable(format!(
+                "⚠️ the machine-readable report of feature area `{}` has a header this harness \
                      does not recognise, so its outcomes are missing from every total. Expected \
                      `{expected}`, found `{}`. A report left behind by an older revision of the \
                      harness will do this; re-run the area to replace it.",
-                    spec.directory(),
-                    sanitize_text_for_report(header)
-                )],
+                spec.directory(),
+                sanitize_text_for_report(header)
             ));
         }
         None => {
-            return Some(AreaReport::from_rows(
-                spec,
-                Vec::new(),
-                vec![format!(
-                    "⚠️ the machine-readable report of feature area `{}` is empty, so its outcomes \
+            return unusable(format!(
+                "⚠️ the machine-readable report of feature area `{}` is empty, so its outcomes \
                      are missing from every total.",
-                    spec.directory()
-                )],
+                spec.directory()
             ));
         }
     }
 
     let mut rows = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut foreign: BTreeMap<(String, String), usize> = BTreeMap::new();
     for (offset, line) in lines.enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        // Line one was the header, so a body line's number in the file is its offset plus two.
-        match Row::parse(line, offset + 2) {
-            Ok(row) => rows.push(row),
+        // The preamble and the header took the first two lines, so a body line's number in the file
+        // is its offset plus three.
+        match Row::parse(line, offset + 3) {
+            Ok((row, provenance)) => {
+                if identity.accepts(&provenance.run, &provenance.identity) {
+                    rows.push(row);
+                } else {
+                    *foreign
+                        .entry((provenance.run, provenance.identity))
+                        .or_default() += 1;
+                }
+            }
             Err(problem) => diagnostics.push(format!(
                 "⚠️ a row of the machine-readable report of feature area `{}` could not be read, so \
                  that comparison is missing from every total: {problem}",
@@ -3249,50 +5080,170 @@ fn read_area(spec: &'static AreaSpec) -> Option<AreaReport> {
             )),
         }
     }
-    Some(AreaReport::from_rows(spec, rows, diagnostics))
+    for ((run, claimed), count) in foreign {
+        diagnostics.push(format!(
+            "⚠️ {count} row(s) of the machine-readable report of feature area `{}` were refused \
+             because {}",
+            spec.directory(),
+            identity.describe_mismatch(&run, &claimed)
+        ));
+    }
+    AreaState::Current(AreaReport::from_rows(spec, rows, diagnostics))
 }
 
-/// Write the run summary, if and only if every feature area has filed its report.
+/// Write the run summary, if and only if every feature area of *this run* has filed its report.
 ///
-/// Every area test calls this at the end of its run. All but one call find at least one area still
-/// missing and return `Ok(false)` having written nothing; the last one finds all
-/// [`AREA_COUNT`](super::AREA_COUNT) of them, aggregates the lot and writes the summary. That is
-/// the whole of the coordination: a check followed by a write, requiring no ordering between the
-/// area tests, no lock, and no extra test of its own — which matters, because the suite's test
-/// count is itself one of the mechanical checks that no existing test was skipped or weakened.
+/// Every area test calls this at the end of its run. All but one find at least one area still
+/// outstanding, or find that another thread has already claimed the work, and return `Ok(false)`
+/// having read and written nothing at all; exactly one finds all
+/// [`AREA_COUNT`](super::AREA_COUNT) of them registered, claims finalization, aggregates the lot and
+/// writes the summary. That is the whole of the coordination — a check and a claim in one critical
+/// section — and it requires no ordering between the area tests and no extra test of its own, which
+/// matters because the suite's test count is itself one of the mechanical checks that no
+/// pre-existing test was skipped or weakened.
 ///
-/// Two areas finishing at the same instant may both see a complete set and both write. That is
-/// harmless and deliberate: they aggregate the same fourteen files, so they render identical bytes,
-/// and each writes by rename over its own temporary sibling, so a reader sees one complete summary
-/// or the other and never a blend of the two.
+/// Completeness is decided from the registry of areas this process published, never from a directory
+/// listing. The two are not the same question: a report file left behind by an earlier — possibly
+/// reduced, possibly differently configured — run is a perfectly valid artifact, and counting it
+/// would produce a summary that looks complete and describes no single run. Registration follows
+/// publication, so a complete registry also means a complete set of files on disk to read back.
+///
+/// The files are then read as *this run's* files, and the two independent stamps are what makes that
+/// true rather than assumed: an area file whose generation names another run is excluded from every
+/// total and listed as stale, and any individual row that survived the clearing anyway is refused
+/// because its provenance names a different run. A complete-looking set of stale files therefore
+/// produces a summary full of loud diagnostics and empty totals rather than a quiet pass over a
+/// matrix nobody ran.
+///
+/// Two areas finishing at the same instant cannot both write, because the claim below is taken in
+/// one critical section; if the claim is released after a failed attempt, a later area retries it and
+/// each writes by rename over its own temporary sibling, so a reader sees one complete summary or
+/// the other and never a blend of the two.
 ///
 /// Returns whether the summary was written. A `false` is not a failure — it is the ordinary answer
-/// for thirteen of the fourteen calls, and also the answer when a name filter meant some areas were
-/// never going to run.
+/// for thirteen of the fourteen calls, and also the answer while another area's report is still
+/// missing or still belongs to an earlier run.
+///
+/// # A filtered run still gets a summary, clearly labelled
+///
+/// When a test-name filter means some areas were never going to run in this process, waiting for all
+/// fourteen would withhold the deliverable indefinitely. Such a run therefore publishes a summary
+/// from the areas that did report, stamped partial, with every area that did not contribute listed
+/// as absent or stale. What it never does is fill those gaps from another run's files.
 ///
 /// # Errors
 ///
-/// Fails only when the summary itself cannot be written. A damaged or unreadable area file does not
-/// fail the run: it becomes a diagnostic, the summary is stamped partial, and the outcomes it would
-/// have contributed are reported as missing. Losing the whole summary because one file of fourteen
-/// was unreadable would hide thirteen areas' worth of results to punish one.
+/// Fails only when the summary itself cannot be written, and releases its claim first so that a
+/// later caller can try again rather than leaving the run with no summary and no way to produce one.
+/// A damaged or unreadable area file does not fail the run: it becomes a diagnostic, the summary is
+/// stamped partial, and the outcomes it would have contributed are reported as missing. Losing the
+/// whole summary because one file of fourteen was unreadable would hide thirteen areas' worth of
+/// results to punish one.
 pub fn try_finalize(caps: &Capabilities) -> HarnessResult<bool> {
+    begin_session()?;
+    let Some(specs) = claim_finalization() else {
+        return Ok(false);
+    };
+    match finalize(caps, &specs) {
+        Ok(true) => Ok(true),
+        // Nothing was written, so the claim belongs to whoever tries next rather than to this
+        // caller: an area file that is still outstanding must not cost the run its summary.
+        Ok(false) => {
+            release_finalization_claim();
+            Ok(false)
+        }
+        Err(error) => {
+            release_finalization_claim();
+            Err(error)
+        }
+    }
+}
+
+/// Aggregate the areas this run published and publish the summary pair.
+///
+/// Split from [`try_finalize`] so that the claim is taken, and released on failure, in exactly one
+/// place; every path out of this function has already passed the completeness check.
+fn finalize(caps: &Capabilities, specs: &[&'static AreaSpec]) -> HarnessResult<bool> {
+    let current = Generation::current(caps);
+    let identity = RunIdentity::of(caps);
+    let selection = libtest_filter_selection();
+    // The set to wait for is the set this process can ever produce, not all fourteen areas. A
+    // filtered invocation runs a subset by design, so requiring the whole table would withhold the
+    // summary from exactly the runs whose scope most needs recording — and the summary is a named
+    // deliverable, so withholding it is a loss rather than a neutral omission. The reduction is
+    // never hidden: a narrower set is reported as partial below.
+    let expected = selection.expected_areas();
     let mut run = RunReport {
-        filters: libtest_name_filters(),
+        filters: selection.all(),
+        session: current.run.clone(),
         ..RunReport::default()
     };
-
+    let mut accounted: BTreeSet<&'static str> = BTreeSet::new();
     for spec in AREAS.iter() {
-        // Existence is checked by the read itself, so there is no window between a check and a use.
-        let Some(report) = read_area(spec) else {
-            return Ok(false);
-        };
-        if report.rows.is_empty() && !report.diagnostics.is_empty() {
-            run.unusable.push(spec);
+        // Existence is decided by the read itself, so there is no window between a check and a use.
+        match read_area(spec, &current, identity) {
+            AreaState::Absent => {
+                // Absence is ordinary for an area that did not run in this process, and a defect for
+                // one this run published: the file existed when it was registered, so something
+                // removed or replaced it since, and saying nothing would report the area as
+                // "not run" when it did run.
+                if specs
+                    .iter()
+                    .any(|registered| registered.directory() == spec.directory())
+                {
+                    accounted.insert(spec.directory());
+                    run.unusable.push(spec);
+                    run.diagnostics.push(format!(
+                        "⚠️ this run published the machine-readable report of feature area `{}` and \
+                         it is no longer there, so its outcomes are missing from every total; \
+                         something removed or replaced the file after it was written.",
+                        spec.directory()
+                    ));
+                }
+            }
+            AreaState::Current(report) => {
+                accounted.insert(spec.directory());
+                run.tally.merge(&report.tally);
+                run.areas.push(report);
+            }
+            AreaState::Unusable(report) => {
+                accounted.insert(spec.directory());
+                run.unusable.push(spec);
+                run.diagnostics.extend(report.diagnostics);
+            }
+            AreaState::Stale(stale) => run.stale.push(stale),
         }
-        run.tally.merge(&report.tally);
-        run.areas.push(report);
     }
+
+    // Completeness is measured against the areas this invocation selected, not against the whole
+    // table. An area the filter excluded is never going to file a report, so waiting for it would
+    // withhold the summary for ever; an area that was selected and has not filed yet is exactly
+    // what waiting is for, because the caller that finishes it will find the set complete and
+    // write the summary then. Waiting is also what keeps an earlier run's rows out of this run's
+    // totals: a stale file counts as outstanding, not as a contribution.
+    if expected
+        .iter()
+        .any(|spec| !accounted.contains(&spec.directory()))
+    {
+        return Ok(false);
+    }
+    if run.areas.is_empty() && !expected.is_empty() {
+        // Nothing of this run's own is on disk, so there is nothing to summarise. Writing a summary
+        // of zero areas would replace a previous run's summary with an empty one, which is worse
+        // than leaving the previous one in place and saying nothing. A filter that selects no area
+        // at all is the one exception, and it is handled below: there the emptiness is the fact
+        // being recorded.
+        return Ok(false);
+    }
+    if expected.is_empty() {
+        run.diagnostics.push(String::from(
+            "⚠️ no feature area could be selected by this process's test-name filters, so this \
+             summary describes no outcomes at all. It is written rather than withheld so that the \
+             filter is on record.",
+        ));
+    }
+
+    run.expected = expected.len();
 
     let specs: Vec<&'static AreaSpec> = run.areas.iter().map(|area| area.spec).collect();
     run.facts = CorpusFacts::for_areas(&specs);
@@ -3305,9 +5256,29 @@ pub fn try_finalize(caps: &Capabilities) -> HarnessResult<bool> {
     run.diagnostics
         .extend(diagnose_unrecorded_programs(&rows, &run.facts));
 
+    // One line, not one per pruning: the detail belongs in the retained-evidence section, and a
+    // hundred pruning notes in the diagnostics list would bury the diagnostics that describe
+    // verdicts. What must not be missing from here is the *fact* that some retained workspace holds
+    // less than its cell produced, because a reader who never reaches that section would otherwise
+    // go looking for a file that was accounted for and removed.
+    let prunings = super::sandbox::retention_pruning_notes().len();
+    if prunings > 0 {
+        run.diagnostics.push(format!(
+            "⚠️ {prunings} pruning(s) were performed to keep the run inside its retention budget, so \
+             at least one retained workspace holds less than its cell produced. Each is named in the \
+             retained-evidence section below."
+        ));
+    }
+
     // The corpus states how many programs each area holds; a discovered count that disagrees is a
     // corpus defect, and the summary says so rather than quietly reporting the number it found.
-    for spec in AREAS.iter() {
+    //
+    // Only the areas this run aggregated are checked. An area that filed no report in this process
+    // had its records left unread, so its discovered count would be zero for a reason that has
+    // nothing to do with the corpus; reporting that as a corpus defect would be a fabricated
+    // diagnostic. What was left out is stated by the provenance section instead, in the terms that
+    // are actually true of it — absent, stale or unusable.
+    for spec in specs.iter() {
         let discovered = run
             .facts
             .programs
@@ -3332,17 +5303,87 @@ pub fn try_finalize(caps: &Capabilities) -> HarnessResult<bool> {
         }
     }
 
-    let coverage = assess_run_coverage(caps, &run);
-    let context = "writing the differential conformance run summary";
-    write_atomic(
-        context,
+    let dimensions = run_matrix(&run, caps);
+    let coverage = assess_run_coverage(caps, &run, &dimensions);
+    write_report_pair(
+        "writing the differential conformance run summary",
         &summary_markdown_path(),
-        &render_summary_markdown(&run, caps, &coverage),
-    )?;
-    write_atomic(
-        context,
+        &render_summary_markdown(&run, caps, &coverage, &dimensions, &current),
         &summary_tsv_path(),
-        &render_summary_tsv(&run, caps, &coverage),
+        &render_summary_tsv(&run, caps, &coverage, &dimensions, &current),
     )?;
     Ok(true)
+}
+
+/// Why the run summary has not been written, in a sentence a caller can print.
+///
+/// [`try_finalize`] answers whether the summary was written; this answers why not, which is the
+/// question the answer `false` actually raises. It distinguishes the two reasons, because they call
+/// for opposite responses from a reader: areas still awaited are the ordinary state of thirteen of
+/// the fourteen calls and need no action at all, whereas a refused artifact means a file of another
+/// run's configuration is sitting in the report root and the summary will not appear until the
+/// current configuration has replaced it.
+///
+/// Reads the same files [`try_finalize`] read, so a set completed by another thread in between is
+/// reported as exactly that rather than as a contradiction. Never fails: an unreadable file is
+/// described, not raised, because this is the explanation of a non-failure.
+pub fn finalization_pending(caps: &Capabilities) -> String {
+    let current = Generation::current(caps);
+    let identity = RunIdentity::of(caps);
+    let mut awaited: Vec<&'static str> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+
+    for spec in AREAS.iter() {
+        match read_area(spec, &current, identity) {
+            AreaState::Current(_) => {}
+            AreaState::Absent => awaited.push(spec.directory()),
+            AreaState::Stale(stale) => {
+                refused.push(format!("`{}` — {}", spec.directory(), stale.note));
+            }
+            // A damaged file is refused for a different reason than a foreign one, but it is
+            // refused just the same, and a caller asking why the summary has not appeared needs
+            // both named rather than one silently omitted.
+            AreaState::Unusable(report) => {
+                let why = if report.diagnostics.is_empty() {
+                    String::from("its contents could not be used")
+                } else {
+                    report.diagnostics.join(" ")
+                };
+                refused.push(format!("`{}` — {why}", spec.directory()));
+            }
+        }
+    }
+
+    if awaited.is_empty() && refused.is_empty() {
+        return format!(
+            "every one of the {AREA_COUNT} area reports is now present and belongs to this run, so \
+             the summary was written by whichever area completed the set. Nothing is outstanding."
+        );
+    }
+
+    let mut sentences: Vec<String> = Vec::new();
+    if !awaited.is_empty() {
+        sentences.push(format!(
+            "it is written once all {AREA_COUNT} area reports exist and belong to this run; {} \
+             have not filed yet ({}). A name filter or a single-area invocation leaves this \
+             permanently outstanding, which is expected and is not a failure — each area's own \
+             report was still written.",
+            awaited.len(),
+            awaited.join(", ")
+        ));
+    }
+    if !refused.is_empty() {
+        sentences.push(format!(
+            "⚠️ {} area report(s) were REFUSED because they did not come from this run, and are \
+             therefore not aggregated — a summary that mixed two configurations would present \
+             another run's verdicts as this one's. A row means something different under a \
+             different matrix, filter, verdict policy or per-cell budget, so the two cannot be \
+             added together. This run is {}, and the refused reports are:\n\
+             \x20 - {}",
+            refused.len(),
+            current.describe(),
+            refused.join("\n  - ")
+        ));
+    }
+    sentences.join(" ")
 }

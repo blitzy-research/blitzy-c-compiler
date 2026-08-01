@@ -1,6 +1,5 @@
 # Rust / Cargo build output
 /target
-**/*.rs.bk
 
 # Differential conformance suite — transient run artifacts (never committed).
 # Per-cell workspaces, per-area reports, the run summary, and auto-generated

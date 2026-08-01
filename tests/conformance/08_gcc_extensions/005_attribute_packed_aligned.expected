@@ -13,15 +13,6 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
 ub_notes           <<END
-UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
--pedantic from the default warning gate. Reason: the constructs under test are
-non-standard GCC extensions by definition, and -pedantic exists precisely to reject
-them; retaining it would fail every program in the area for doing exactly what it is
-meant to do. This is the only area-wide deviation in the corpus. No other warning is
-relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0.
-
 UB-FREEDOM ARGUMENT. There is no signed overflow: the largest magnitude used is
 -2000000000, well inside the int range, and it is never negated, doubled or otherwise
 grown. No shift operator is used. There is no aliasing violation, because every member is
@@ -41,8 +32,10 @@ member produces "error: taking address of packed member of 'struct p' may result
 unaligned pointer value [-Werror=address-of-packed-member]", because
 -Waddress-of-packed-member is on by default and -Werror makes it fatal. The program
 therefore never forms a pointer to a packed member and never computes an offset by
-subtracting member addresses. __builtin_offsetof is also required because the corpus
-includes no header, so offsetof from stddef.h is unavailable.
+subtracting member addresses. __builtin_offsetof is also required because this program
+includes no header: the corpus's only sanctioned inclusion is area 07's <stdarg.h>, so
+offsetof from stddef.h is out of reach even though stddef.h is itself in bcc's bundled
+freestanding set.
 
 Every character-sized member is explicitly signed char, never plain char, and the
 round-trip prints it as int. char was measured as signed on x86_64 and i686 but unsigned
@@ -50,6 +43,15 @@ on aarch64 and riscv64, so the negative value -7 would print as 249 on a target 
 plain char is unsigned. The explicit signedness avoids that trap.
 END
 impl_defined_notes <<END
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
+gcc 13.3.0.
+
 Nothing target-restricting is observed, so all four targets are compared. The printed
 layout values are identical on x86_64, i686, aarch64 and riscv64 because on all four int
 is 4 bytes with 4-byte alignment, short is 2 with 2, and signed char is 1 with 1:
@@ -65,15 +67,17 @@ is 4 bytes with 4-byte alignment, short is 2 with 2, and signed char is 1 with 1
             rounded up to 8 => size 8, align 8
   attr_packed_saves = 12 - 7 = 5
 
-No address is ever printed. The alignment claim is expressed as a RESIDUE,
-addr % 16 == 0, printed as the boolean 1, because an address differs per build and per
-target and would destroy byte-exact comparison. The AAP determinism rule permits pointer
-facts only as differences, comparisons and alignment residues.
+No address is ever printed. The alignment claim is expressed as a RESIDUE, addr % 16 ==
+0, printed as the boolean 1, because an address differs per build and per target and
+would destroy byte-exact comparison. A pointer fact is printed only as a difference, a
+comparison or an alignment residue, never as an address, because only those three are
+reproducible across builds, targets and optimization levels.
 
 The pointer cast is unsigned long, NOT unsigned long long. unsigned long is exactly
 pointer-width on all four targets: 4 bytes under ILP32 on i686 and 8 bytes under LP64 on
 x86_64, aarch64 and riscv64. This removes any possibility of a pointer-size cast
-diagnostic on i686, which could not be compiled in the authoring sandbox.
+diagnostic on i686, where casting a pointer to a wider integer is diagnosed as
+-Wpointer-to-int-cast and escalated to an error by this program's gate.
 
 Every sizeof and _Alignof result is cast to unsigned before being passed to %u, because
 size_t width differs across targets and an uncast size_t would be a genuine format

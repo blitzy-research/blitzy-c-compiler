@@ -119,23 +119,47 @@
 //!
 //! Every read is bounds-checked and every failure names the path and the offset, so a
 //! truncated or malformed file yields a diagnosable error rather than a panic that would take
-//! the whole test binary down. Decoding is `std::fs::read` followed by safe slice access and
+//! the whole test binary down. Decoding is one bounded read followed by safe slice access and
 //! `u16`/`u32`/`u64::from_le_bytes`. There is no pointer cast, no reinterpretation of raw bytes
 //! as a C-layout structure, and **no use anywhere in this file of the language's memory-safety
 //! escape hatch** — the reader is ordinary safe Rust, auditable line by line.
 //!
-//! # Hermeticity, determinism and parallel safety
+//! # Workspace discipline, determinism and parallel safety
 //!
 //! Every program the probe writes and every artifact it builds lives in a workspace allocated
-//! by [`probe_workspace`], one directory per flag beneath the build directory. Nothing is
-//! written into the repository, nothing outside the build directory, and no socket is opened:
-//! each probe program's whole input is literals in its own source. Each invocation is bounded
-//! by the run's per-cell budget, so a compiler or program that hangs cannot stall the suite.
+//! by [`probe_workspace`], one directory per flag beneath the build directory. This module
+//! constructs no path into the repository and none outside the build directory, opens no
+//! socket, and gives each probe program its whole input as literals in its own source. Each
+//! invocation is bounded by the run's per-cell budget, so a compiler or program that hangs
+//! cannot stall the suite.
+//!
+//! That is path discipline over what this module writes, not confinement of what it spawns. No
+//! namespace, `chroot`, syscall filter or network restriction is applied, the inherited
+//! environment is not cleared and `TMPDIR` is not set, so a compiler driver keeps putting its
+//! intermediates wherever it normally does — under the system temporary directory for the
+//! reference driver measured here.
 //!
 //! A workspace path is a pure function of the flag under examination, so the probe is
 //! deterministic and two runs produce the same report. A workspace is removed when its check
 //! passed and **retained** when it did not, so a failing flag leaves behind the sources, the
-//! artifacts and the exact command lines needed to reproduce it by hand.
+//! artifacts and the exact command lines needed to reproduce it by hand. What a report *prints* is
+//! an encoded rendering of those command lines rather than their literal bytes, so that no path a
+//! command line contains can forge a row or drive a terminal; the byte-exact form stays in the
+//! retained workspace, which is where a byte-exact artifact belongs.
+//!
+//! # What a retained workspace holds
+//!
+//! Every invocation persists its complete capture — the untruncated standard output, the
+//! untruncated standard error, and a record carrying the termination, the raw wait status, the
+//! byte counts and the capture-integrity accounting — into the flag's own workspace, under a stem
+//! naming the compiler side, the phase and the invocation ordinal, for example `bcc.compile.01`
+//! and `ref.run.01`. Persistence happens inside [`spawn`], the module's single spawn site, so it
+//! is a property of the plumbing rather than something each check has to remember.
+//!
+//! A report row therefore carries three sizes of the same evidence, deliberately: the exact
+//! command line, a bounded excerpt that identifies the failure on one line, and the stem of the
+//! files holding the whole of it. A row that offered only the excerpt would name a directory and
+//! leave the reader to guess which of its entries belonged to which invocation.
 //!
 //! Every argument the probe assembles is passed through [`is_forbidden_for_side`] before the
 //! process is spawned, so the module that enforces the shared-flag discipline cannot itself
@@ -158,13 +182,14 @@ use std::process::Command;
 use std::time::Duration;
 
 use super::env::Capabilities;
-use super::execute::{budget_for, run_command_captured_with, RunOutcome};
+use super::execute::{budget_for, run_command_captured_with, CaptureNames, RunOutcome};
 use super::sandbox::{probe_workspace, Workspace};
 use super::{
     bcc_requires_explicit_target, bcc_target_arguments, corpus_root, is_forbidden_for_side,
-    is_forbidden_in_differential, manifest_dir, require_contained_corpus_file,
-    require_regular_file, sanitize_text_for_report, CompilerSide, HarnessError, HarnessResult,
-    OptLevel, Target, BCC_TARGET_SELECTORS, DIFFERENTIAL_FLAGS_MINIMAL, FORBIDDEN_IN_DIFFERENTIAL,
+    is_forbidden_in_differential, manifest_dir, read_file_bounded, redact_secrets,
+    require_contained_corpus_file, require_regular_file, sanitize_text_for_report, shown_path,
+    CompilerSide, HarnessError, HarnessResult, OptLevel, Target, BCC_TARGET_SELECTORS,
+    DIFFERENTIAL_FLAGS_MINIMAL, FORBIDDEN_IN_DIFFERENTIAL, MAX_INSPECTED_FILE_BYTES,
     SHARED_FLAGS_VERIFIED, UB_AUDIT_GATE_DEFAULT,
 };
 
@@ -308,9 +333,14 @@ const LAYOUT_ELF64: ElfLayout = ElfLayout {
 struct ElfImage {
     /// The path as the caller named it, used verbatim in every diagnostic.
     path: PathBuf,
-    /// The whole file. Small by construction — the probe's artifacts are single-function
-    /// programs — and read in one call so that no decode can observe a file being changed
-    /// underneath it.
+    /// The whole file, up to [`MAX_INSPECTED_FILE_BYTES`].
+    ///
+    /// Read in one bounded call, which buys two distinct properties. Every decode below reads
+    /// these bytes rather than the file, so no decode can observe the file being changed
+    /// underneath it and no sequence of checks can disagree about what the artifact contained.
+    /// And the read is bounded, so a path that does not name one of the probe's own small
+    /// single-function programs — a very large file, a growing one, a device node — costs a
+    /// metadata call and a refusal rather than its own size in memory.
     bytes: Vec<u8>,
     /// The field offsets for this file's class.
     layout: &'static ElfLayout,
@@ -319,24 +349,39 @@ struct ElfImage {
 impl ElfImage {
     /// Read and validate `path`.
     ///
+    /// The read goes through [`read_file_bounded`] rather than [`std::fs::read`], and the
+    /// difference matters for three reasons. The entry is inspected without following a link, so
+    /// a symbolic link planted where an artifact should be is refused rather than pulling in a
+    /// file from anywhere on the machine while every report still names this path. A device node
+    /// or FIFO is refused rather than read, so no inspection can block without end. And the
+    /// length is checked against [`MAX_INSPECTED_FILE_BYTES`] before a byte is read, so a file
+    /// that is not one of this probe's own small programs is refused at a metadata call instead
+    /// of being made resident.
+    ///
+    /// Everything the caller goes on to ask — class, type, program headers, section names — is
+    /// answered from [`ElfImage::bytes`], so one artifact is read exactly once no matter how many
+    /// facts are wanted from it, and every fact describes the same bytes.
+    ///
     /// # Errors
     ///
-    /// Fails, always naming the path, when the file cannot be read, is shorter than an
-    /// identification header, does not begin with [`ELF_MAGIC`], declares a class that is
-    /// neither [`ELF_CLASS_32`] nor [`ELF_CLASS_64`], or declares a byte order other than
-    /// little-endian.
+    /// Fails, always naming the path, when the entry is a link, is not a regular file, exceeds
+    /// [`MAX_INSPECTED_FILE_BYTES`], cannot be read, is shorter than an identification header,
+    /// does not begin with [`ELF_MAGIC`], declares a class that is neither [`ELF_CLASS_32`] nor
+    /// [`ELF_CLASS_64`], or declares a byte order other than little-endian.
     fn read(path: &Path) -> HarnessResult<ElfImage> {
-        let bytes = fs::read(path).map_err(|error| {
-            HarnessError::new(
-                format!("reading the ELF artifact {}", path.display()),
-                format!(
-                    "{} could not be read: {error}; the flag probe verifies a flag by inspecting \
-                     the artifact it produced, so an unreadable artifact is a hard failure rather \
-                     than an unverified flag",
-                    path.display()
-                ),
-            )
-        })?;
+        let context = format!("reading the ELF artifact {}", shown_path(path));
+        let bytes =
+            read_file_bounded(&context, path, MAX_INSPECTED_FILE_BYTES).map_err(|error| {
+                HarnessError::new(
+                    context.clone(),
+                    format!(
+                        "{}; the flag probe verifies a flag by inspecting the artifact it \
+                         produced, so an artifact that cannot be read safely is a hard failure \
+                         rather than an unverified flag",
+                        error.cause()
+                    ),
+                )
+            })?;
 
         let identification = bytes.get(..ELF_MAGIC.len()).ok_or_else(|| {
             malformed(
@@ -410,7 +455,7 @@ impl ElfImage {
 /// Build the error used for every structural defect in an ELF file, so each one names the file.
 fn malformed(path: &Path, cause: String) -> HarnessError {
     HarnessError::new(
-        format!("decoding the ELF artifact {}", path.display()),
+        format!("decoding the ELF artifact {}", shown_path(path)),
         cause,
     )
 }
@@ -731,52 +776,24 @@ impl SectionTable {
     }
 }
 
-/// The `EI_CLASS` of the ELF file at `path`: [`ELF_CLASS_32`] or [`ELF_CLASS_64`].
-///
-/// # Errors
-///
-/// Fails, naming the path, when the file cannot be read, is not an ELF file, or declares a
-/// class or byte order this suite does not produce.
-pub fn elf_class(path: &Path) -> HarnessResult<u8> {
-    Ok(ElfImage::read(path)?.class())
-}
-
-/// The `e_type` of the ELF file at `path`: [`ET_REL`], [`ET_EXEC`], [`ET_DYN`] or another value
-/// the file declares.
-///
-/// The field sits at file offset `0x10` in both classes, which is why this is the cheapest
-/// observable available for `-c` and `-static`.
-///
-/// # Errors
-///
-/// Everything [`elf_class`] can fail on, plus a file too short to contain the field.
-pub fn elf_type(path: &Path) -> HarnessResult<u16> {
-    ElfImage::read(path)?.e_type()
-}
-
-/// Whether the ELF file at `path` carries a [`PT_INTERP`] program header.
-///
-/// `false` is the proof that `-static` was honoured; `true` is what the contrast build must
-/// show for the flag to have been doing anything at all.
-///
-/// # Errors
-///
-/// Everything [`elf_class`] can fail on, plus a program-header table that cannot be walked.
-pub fn has_interp(path: &Path) -> HarnessResult<bool> {
-    ElfImage::read(path)?.has_interp()
-}
-
-/// Whether the ELF file at `path` contains a section named `name`.
-///
-/// Used with [`DEBUG_INFO_SECTION`] to verify `-g` in both directions.
-///
-/// # Errors
-///
-/// Everything [`elf_class`] can fail on, plus a section-header table or string table that
-/// cannot be walked.
-pub fn has_section(path: &Path, name: &str) -> HarnessResult<bool> {
-    ElfImage::read(path)?.has_section(name)
-}
+// Why there is no path-taking shorthand for a single ELF fact.
+//
+// Every question the probe asks of an artifact — its class, its type field, whether it carries a
+// program interpreter header, whether it contains a named section — is a method on `ElfImage`, and
+// the only way to obtain an `ElfImage` is `ElfImage::read`. A convenience function taking a path
+// per fact used to sit here, and it was removed rather than kept, for two reasons.
+//
+// The first is cost. Several checks want two or three facts about one artifact, and a
+// path-per-fact shorthand read the whole file once per fact. A statically linked probe program is
+// a couple of megabytes, so the `-static` check alone read four megabytes to answer two questions
+// that one read answers.
+//
+// The second, and the reason this is a correctness property rather than a performance one, is
+// agreement. Two reads of a path are two different observations, and nothing guarantees they see
+// the same bytes: an artifact replaced between them would let one report line describe the file
+// that was inspected and the next describe a different file, with no indication in the report that
+// the subject had changed. Reading once and asking the resulting image every question makes a
+// whole check's conclusion describe one file, by construction.
 
 /// Name an `e_type` value in words, for a report a reader should not have to decode.
 ///
@@ -978,6 +995,30 @@ const DIAGNOSTIC_EXCERPT_CHARS_MAX: usize = 200;
 /// Characters of captured program output quoted in a report row.
 const OUTPUT_EXCERPT_CHARS_MAX: usize = 120;
 
+/// The phase component of a capture stem for an invocation that compiled something.
+const CAPTURE_PHASE_COMPILE: &str = "compile";
+
+/// The phase component of a capture stem for an invocation that ran a built artifact.
+const CAPTURE_PHASE_RUN: &str = "run";
+
+/// Suffix of the workspace entry holding an invocation's captured standard output.
+const CAPTURE_STDOUT_SUFFIX: &str = "stdout";
+
+/// Suffix of the workspace entry holding an invocation's captured standard error.
+const CAPTURE_STDERR_SUFFIX: &str = "stderr";
+
+/// Suffix of the workspace entry holding an invocation's recorded termination and raw wait status.
+const CAPTURE_EXIT_SUFFIX: &str = "exit";
+
+/// How many invocations of one compiler in one phase a single flag workspace may hold.
+///
+/// A ceiling rather than an unbounded search, because the ordinal is allocated by looking for the
+/// first entry name that is free: an unbounded loop against a directory that could not be written
+/// would spin instead of reporting. Nine checks share the busiest workspace and none makes more
+/// than six invocations of one compiler in one phase, so this is roughly an order of magnitude of
+/// headroom over the largest real use.
+const CAPTURE_ORDINAL_MAX: usize = 99;
+
 // ---------------------------------------------------------------------------------------------
 // SECTION 3 — invocation plumbing.
 //
@@ -1023,7 +1064,7 @@ impl ProbeCompiler {
     /// # Errors
     ///
     /// Fails when the name is one the workspace refuses, which cannot happen for the fixed stems
-    /// this module uses and is checked because the guard is what the hermeticity argument rests
+    /// this module uses and is checked because the guard is what the write-path discipline rests
     /// on.
     fn artifact(&self, workspace: &Workspace, stem: &str) -> HarnessResult<PathBuf> {
         workspace.path(&format!("{}.{stem}", self.prefix))
@@ -1064,7 +1105,16 @@ impl ProbeCompiler {
         Ok(argv)
     }
 
-    /// Compile with this compiler, returning what the invocation did.
+    /// The stem every capture of this compiler in `phase` is published under, before its ordinal.
+    ///
+    /// Carries the side prefix so that the two compilers sharing one flag workspace never write
+    /// over each other, and the phase so that a reader can tell a compilation's diagnostics from
+    /// the output of the program it produced without opening either file.
+    fn capture_base(&self, phase: &str) -> String {
+        format!("{}.{phase}", self.prefix)
+    }
+
+    /// Compile with this compiler, returning what the invocation did and where it was captured.
     ///
     /// A non-zero exit is **not** an error: several checks require a compilation to fail, and the
     /// caller decides what the outcome means. An error here means the process could not be run
@@ -1075,23 +1125,95 @@ impl ProbeCompiler {
         args: &[String],
         budget: Duration,
         timeout_tool: Option<&Path>,
-    ) -> HarnessResult<RunOutcome> {
-        spawn(&self.argv(args)?, workspace, budget, timeout_tool)
+    ) -> HarnessResult<Invocation> {
+        spawn(
+            &self.argv(args)?,
+            workspace,
+            budget,
+            timeout_tool,
+            &self.capture_base(CAPTURE_PHASE_COMPILE),
+        )
+    }
+
+    /// Run an already prepared launch vector for an artifact this compiler built.
+    ///
+    /// Separate from [`ProbeCompiler::compile`] only in the capture phase it records under, and
+    /// deliberately not a bare [`spawn`] call at the two sites that need it: the launch vector for
+    /// a foreign target begins with an emulator rather than with a compiler, so the side the
+    /// capture belongs to cannot be recovered from the vector and has to be stated by the compiler
+    /// whose artifact is being run.
+    fn execute(
+        &self,
+        argv: &[String],
+        workspace: &Workspace,
+        budget: Duration,
+        timeout_tool: Option<&Path>,
+    ) -> HarnessResult<Invocation> {
+        spawn(
+            argv,
+            workspace,
+            budget,
+            timeout_tool,
+            &self.capture_base(CAPTURE_PHASE_RUN),
+        )
     }
 }
 
-/// Spawn one prepared argument vector in `workspace` under the run's per-invocation budget.
+/// One invocation the probe made, together with where its complete capture was published.
+///
+/// # Why the capture location travels with the outcome
+///
+/// A report row quotes one diagnostic line and one bounded excerpt of output, which is the right
+/// size for a row and far too small to diagnose from. The untruncated streams and the raw wait
+/// status are therefore written into the flag's own workspace at the moment of the invocation, and
+/// the stem they were written under is carried here so the row can name them. Returning the
+/// outcome alone would leave a reader holding an excerpt and a directory listing, with no stated
+/// correspondence between the invocation they are reading about and the files that recorded it.
+struct Invocation {
+    /// What the invocation did: its captured streams, its raw wait status and its termination.
+    outcome: RunOutcome,
+    /// The workspace entry stem the three capture files share, without the `.stdout`, `.stderr`
+    /// and `.exit` suffixes.
+    capture: String,
+}
+
+/// Spawn one prepared argument vector in `workspace`, capture it, and persist the capture.
 ///
 /// Delegates to the harness's single bounded-spawn implementation, which supplies the null
-/// standard input, the piped and concurrently drained output streams, the bounded wait and the
-/// forcible kill on expiry. Writing that a second time here is how a suite acquires a second
-/// timeout bug.
+/// standard input, the piped and concurrently drained output streams, the bounded wait, the
+/// forcible kill on expiry, the process-group ownership and whole-group sweep, and the replaced
+/// environment. Writing any of that a second time here is how a suite acquires a second timeout
+/// bug and a second way to leak the invoking environment into a tool.
+///
+/// The workspace is passed as the child's private directory, which is what asks for the isolated
+/// environment: every variable cleared, a documented minimal set restored, and the workspace as
+/// both `HOME` and `TMPDIR`. That matters as much for this probe as for a cell. A flag probe's
+/// whole purpose is to establish what a flag *means* to each compiler, and an inherited search
+/// path, an inherited driver-control variable or an inherited sanitizer setting would make the
+/// answer a property of the machine the probe happened to run on rather than of the compilers.
+///
+/// # Why persistence happens here rather than at the call sites
+///
+/// This is the only place in the module a process is started, so persisting here makes "every
+/// invocation left its full streams and its raw status on disk" a property of the plumbing instead
+/// of a habit each of the six invocation sites has to remember. The alternative — persisting where
+/// a check happens to care — is how the promise in [`settle_workspace`] that a retained workspace
+/// holds every captured stream came to be untrue of the streams themselves.
+///
+/// Persistence is unconditional rather than deferred until a check fails, for two reasons. A check
+/// does not know it has failed until after the invocation it is judging, so deferring would mean
+/// holding every capture of every check in memory against the possibility that a later one fails.
+/// And the run may ask for every workspace to be kept, in which case a passing check's evidence is
+/// wanted too. The cost is three small files per invocation in a directory that is removed moments
+/// later when nothing went wrong, which is the same trade the undefined-behaviour audit already
+/// makes for the same reason.
 fn spawn(
     argv: &[String],
     workspace: &Workspace,
     budget: Duration,
     timeout_tool: Option<&Path>,
-) -> HarnessResult<RunOutcome> {
+    capture_base: &str,
+) -> HarnessResult<Invocation> {
     let (program, arguments) = argv.split_first().ok_or_else(|| {
         HarnessError::new(
             "spawning a flag-probe invocation",
@@ -1103,7 +1225,64 @@ fn spawn(
     // Per child rather than process-wide: the suite's tests run concurrently in one process, so
     // altering a shared working directory would be a data race rather than a confinement.
     command.current_dir(workspace.root());
-    run_command_captured_with(command, budget, timeout_tool)
+    let outcome = run_command_captured_with(command, budget, timeout_tool, Some(workspace.root()))?;
+    let capture = allocate_capture_stem(workspace, capture_base)?;
+    outcome.persist(workspace, &capture_names(&capture))?;
+    Ok(Invocation { outcome, capture })
+}
+
+/// The first capture stem beginning with `base` that this workspace does not already hold.
+///
+/// # Why the ordinal is read from the directory rather than counted in memory
+///
+/// Several checks invoke one compiler in one phase more than once in a single workspace — the
+/// include-path check compiles twice on purpose, the static-linkage check adds a dynamically
+/// linked contrast, and the macro and optimization-level checks each build three configurations.
+/// A fixed stem would leave only the last of them on disk, which is the failure this allocation
+/// exists to prevent.
+///
+/// The directory itself is the state, so no counter has to be threaded through six call sites and
+/// ten check bodies, and no two allocations can disagree. It is deterministic because a flag
+/// workspace is emptied when it is allocated and the invocations within a check are sequential, so
+/// the same run of the same check numbers its captures identically every time.
+///
+/// # Errors
+///
+/// Fails when the workspace refuses the entry name, and when the ceiling is reached — which for
+/// this corpus means the workspace could not be written rather than that a check made a hundred
+/// invocations, and is reported as the defect it is rather than retried without end.
+fn allocate_capture_stem(workspace: &Workspace, base: &str) -> HarnessResult<String> {
+    for ordinal in 1..=CAPTURE_ORDINAL_MAX {
+        let stem = format!("{base}.{ordinal:02}");
+        let candidate = workspace.path(&format!("{stem}.{CAPTURE_STDOUT_SUFFIX}"))?;
+        // The link itself rather than its target: a name occupied by a dangling link is still
+        // occupied, and the publisher will refuse it, so treating it as free would turn a
+        // containment refusal into a lost capture.
+        if fs::symlink_metadata(&candidate).is_err() {
+            return Ok(stem);
+        }
+    }
+    Err(HarnessError::new(
+        format!(
+            "allocating a capture name for a flag-probe invocation in {}",
+            workspace.root().display()
+        ),
+        format!(
+            "the first {CAPTURE_ORDINAL_MAX} capture names beginning with {:?} are all taken, so \
+             this invocation's streams could not be recorded; the workspace is either unwritable \
+             or holds entries no check in this module creates",
+            sanitize_text_for_report(base)
+        ),
+    ))
+}
+
+/// The three workspace entry names one capture stem publishes into.
+fn capture_names(stem: &str) -> CaptureNames {
+    CaptureNames::new(
+        format!("{stem}.{CAPTURE_STDOUT_SUFFIX}"),
+        format!("{stem}.{CAPTURE_STDERR_SUFFIX}"),
+        format!("{stem}.{CAPTURE_EXIT_SUFFIX}"),
+    )
 }
 
 /// Render a path as text, or fail explaining why the probe cannot proceed with it.
@@ -1118,7 +1297,7 @@ fn path_text(path: &Path) -> HarnessResult<String> {
             format!(
                 "{} cannot be expressed as text, so the invocation could not be recorded exactly; \
                  every reported command line must be reproducible by hand",
-                path.display()
+                shown_path(path)
             ),
         )
     })
@@ -1127,10 +1306,17 @@ fn path_text(path: &Path) -> HarnessResult<String> {
 // ---------------------------------------------------------------------------------------------
 // SECTION 4 — the verification record.
 //
-// One row per check. A row carries what was checked, what was observed, the exact command lines
-// that observed it, and the verdict — because a probe that reports only "failed" leaves its
-// reader to reconstruct the invocation by hand, and requirement 3's whole point is that flag
-// handling is established by evidence rather than by assertion.
+// One row per check. A row carries what was checked, what was observed, the command lines that
+// observed it, and the verdict — because a probe that reports only "failed" leaves its reader to
+// reconstruct the invocation by hand, and requirement 3's whole point is that flag handling is
+// established by evidence rather than by assertion.
+//
+// Every text field of a row is sanitized as it is recorded rather than as it is rendered, and a
+// command line is retained only through `CommandEvidence`. The rows in this section are therefore
+// safe to print anywhere, by construction rather than by each printer remembering to be careful:
+// a compiler binary path chosen through an environment variable, a workspace path derived from the
+// build directory, and a diagnostic excerpt taken from a subprocess all reach a row through text
+// that has already been encoded.
 // ---------------------------------------------------------------------------------------------
 
 /// What sort of verification a row records.
@@ -1205,6 +1391,68 @@ impl fmt::Display for CheckOutcome {
     }
 }
 
+/// One command line, retained in the only form a report may carry.
+///
+/// A command line is the most dangerous field on a check row, and the reason is worth stating
+/// plainly. Its text comes from an argument vector, and an argument vector holds a compiler binary
+/// path taken from the environment and workspace paths derived from the build directory. Those are
+/// chosen by whoever runs the suite, and [`posix_quote`] — correctly, for its own purpose —
+/// preserves every byte inside its quotes, because a reproduction line that altered a path would
+/// no longer reproduce anything. Preserving a byte is exactly right for a shell and exactly wrong
+/// for a report: a carriage return erases the line a reader has just seen, a newline forges
+/// another row, an escape introducer starts a terminal sequence.
+///
+/// So the raw argv is retained here only in encoded form. [`CommandEvidence::shown`] is the
+/// POSIX-quoted line with every report-hostile character encoded, and
+/// [`CommandEvidence::is_encoded`] says whether that encoding changed anything — which is the
+/// honest answer to "can I paste this?". For an ordinary command line, and that is every command
+/// line in a normal run, nothing is encoded and the answer is yes. For an exotic one the reader is
+/// told the text stands for bytes rather than being them, and the untruncated exact form remains in
+/// the retained workspace, which is where a byte-exact artifact belongs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandEvidence {
+    /// The POSIX-quoted command line, encoded for a report by [`report_text`].
+    shown: String,
+    /// Whether encoding altered the line, so a reader is never told a rendering is byte-exact
+    /// when it is not.
+    encoded: bool,
+}
+
+impl CommandEvidence {
+    /// Encode one already-quoted command line for a report.
+    fn new(command_line: &str) -> CommandEvidence {
+        let shown = report_text(command_line);
+        CommandEvidence {
+            encoded: shown != command_line,
+            shown,
+        }
+    }
+
+    /// The command line as a report may print it.
+    pub fn shown(&self) -> &str {
+        &self.shown
+    }
+
+    /// True when [`CommandEvidence::shown`] encodes bytes rather than reproducing them, so the
+    /// line identifies the invocation but is not itself copy-pasteable.
+    pub fn is_encoded(&self) -> bool {
+        self.encoded
+    }
+}
+
+impl fmt::Display for CommandEvidence {
+    /// Render the line, saying so when it is an encoding rather than the literal bytes.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.shown())?;
+        if self.is_encoded() {
+            f.write_str(
+                "    [encoded: this line contains \\xNN or \\u{NNNN} escapes standing for                  characters a report cannot carry literally, so it identifies the invocation but                  is not byte-exact; the exact form is in the retained workspace]",
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// One completed check: its subject, its scope, what was observed and the commands that observed
 /// it.
 ///
@@ -1224,8 +1472,16 @@ pub struct FlagCheck {
     outcome: CheckOutcome,
     /// What was actually observed, one line per observation.
     findings: Vec<String>,
-    /// The exact command lines that produced those observations, copy-pasteable as they stand.
-    commands: Vec<String>,
+    /// The command lines that produced those observations, each encoded for a report.
+    commands: Vec<CommandEvidence>,
+    /// The workspace entry stems the full streams and raw statuses of those invocations were
+    /// published under, one per invocation and positionally paired with [`FlagCheck::commands`].
+    ///
+    /// Named in the row rather than left to be discovered, because a reader who has just seen a
+    /// two-hundred-character diagnostic excerpt needs to be told where the rest of it is. The
+    /// stems are relative to the retained workspace the row's retention note names, so a row
+    /// carries the directory once and the entries within it once each.
+    captures: Vec<String>,
     /// Rationale, recorded limitations and unavailability diagnoses.
     notes: Vec<String>,
 }
@@ -1261,8 +1517,8 @@ impl FlagCheck {
         &self.findings
     }
 
-    /// The exact command lines that produced the observations.
-    pub fn commands(&self) -> &[String] {
+    /// The command lines that produced the observations, each in encoded form.
+    pub fn commands(&self) -> &[CommandEvidence] {
         &self.commands
     }
 
@@ -1314,8 +1570,19 @@ impl FlagCheck {
         }
         for command in self.commands() {
             text.push_str("    command:  ");
-            text.push_str(command);
+            text.push_str(&command.to_string());
             text.push('\n');
+        }
+        for capture in &self.captures {
+            text.push_str("    capture:  ");
+            text.push_str(capture);
+            text.push_str(".{");
+            text.push_str(CAPTURE_STDOUT_SUFFIX);
+            text.push(',');
+            text.push_str(CAPTURE_STDERR_SUFFIX);
+            text.push(',');
+            text.push_str(CAPTURE_EXIT_SUFFIX);
+            text.push_str("}\n");
         }
         text
     }
@@ -1333,7 +1600,10 @@ struct Evidence {
     kind: CheckKind,
     observable: String,
     findings: Vec<String>,
-    commands: Vec<String>,
+    commands: Vec<CommandEvidence>,
+    /// The capture stems, in invocation order, that this check's full streams were published
+    /// under. One entry per invocation, paired positionally with [`Evidence::commands`].
+    captures: Vec<String>,
     notes: Vec<String>,
     problems: Vec<String>,
     unavailable: Option<String>,
@@ -1341,6 +1611,11 @@ struct Evidence {
 
 impl Evidence {
     /// Begin accumulating a check.
+    ///
+    /// Every text field is passed through [`report_text`] here rather than where it is printed, so
+    /// a row cannot hold text that would disturb the report that renders it. The scope line is the
+    /// reason this matters even for fields that look like harness prose: it names the reference
+    /// driver, whose path came from an environment variable.
     fn new(
         subject: impl Into<String>,
         scope: impl Into<String>,
@@ -1348,12 +1623,13 @@ impl Evidence {
         observable: impl Into<String>,
     ) -> Evidence {
         Evidence {
-            subject: subject.into(),
-            scope: scope.into(),
+            subject: report_text(&subject.into()),
+            scope: report_text(&scope.into()),
             kind,
-            observable: observable.into(),
+            observable: report_text(&observable.into()),
             findings: Vec::new(),
             commands: Vec::new(),
+            captures: Vec::new(),
             notes: Vec::new(),
             problems: Vec::new(),
             unavailable: None,
@@ -1361,13 +1637,17 @@ impl Evidence {
     }
 
     /// Record something that was observed and holds.
+    ///
+    /// Sanitized on the way in. Most of what arrives here is this module's own prose, but that
+    /// prose routinely interpolates a compiler's diagnostic excerpt or an error cause naming a
+    /// path, and neither of those is under this module's control.
     fn observe(&mut self, text: impl Into<String>) {
-        self.findings.push(text.into());
+        self.findings.push(report_text(&text.into()));
     }
 
     /// Record rationale, a limitation or an explanatory aside.
     fn note(&mut self, text: impl Into<String>) {
-        self.notes.push(text.into());
+        self.notes.push(report_text(&text.into()));
     }
 
     /// Record something that was observed and does **not** hold.
@@ -1375,29 +1655,44 @@ impl Evidence {
     /// The text is also kept among the findings, so the row reads as a complete account of the
     /// check rather than splitting what was seen from what was wrong.
     fn problem(&mut self, text: impl Into<String>) {
-        let text = text.into();
+        let text = report_text(&text.into());
         self.findings.push(format!("MISMATCH: {text}"));
         self.problems.push(text);
     }
 
     /// Record that a tool this check needs is absent, with the diagnosis discovery produced.
     fn mark_unavailable(&mut self, reason: impl Into<String>) {
-        let reason = reason.into();
+        let reason = report_text(&reason.into());
         self.notes.push(format!("UNAVAILABLE: {reason}"));
         if self.unavailable.is_none() {
             self.unavailable = Some(reason);
         }
     }
 
-    /// Record the exact command line of an invocation that took place.
-    fn record(&mut self, outcome: &RunOutcome) {
-        self.commands.push(outcome.command_line());
+    /// Record an invocation that took place: its command line, encoded for a report, and where it
+    /// was captured.
+    ///
+    /// Both halves are recorded together because they are only useful together — a command line
+    /// says what was run, and the capture stem says where the whole of what it produced was kept.
+    /// The argument vector reaches this row only through [`CommandEvidence`], which is what keeps
+    /// a binary path chosen through an environment variable from carrying report-forging
+    /// characters into every row that names the invocation.
+    fn record(&mut self, invocation: &Invocation) {
+        self.commands
+            .push(CommandEvidence::new(&invocation.outcome.command_line()));
+        self.captures.push(invocation.capture.clone());
     }
 
     /// Record a command line that was captured elsewhere, for a row assembled from work shared
     /// with other rows.
     fn record_line(&mut self, command: impl Into<String>) {
-        self.commands.push(command.into());
+        self.commands.push(CommandEvidence::new(&command.into()));
+    }
+
+    /// Record a capture stem that was published elsewhere, for a row assembled from work shared
+    /// with other rows.
+    fn record_capture(&mut self, capture: impl Into<String>) {
+        self.captures.push(capture.into());
     }
 
     /// True while nothing has gone wrong.
@@ -1427,6 +1722,7 @@ impl Evidence {
             outcome,
             findings: self.findings,
             commands: self.commands,
+            captures: self.captures,
             notes: self.notes,
         }
     }
@@ -1467,6 +1763,33 @@ fn quote_stdout(stream: &[u8]) -> String {
     format!("{:?}", truncate_for_report(&text, OUTPUT_EXCERPT_CHARS_MAX))
 }
 
+/// Render one piece of text so that nothing it contains can disturb a report.
+///
+/// The single entry point for untrusted text in this module. Every field of a [`FlagCheck`] and
+/// every line of a [`FlagProbeReport`] passes through here *as it is recorded*, not as it is
+/// rendered, which is a deliberate choice: sanitizing at each render sink means every future sink
+/// must remember to, and the one that forgets is the one that matters. Sanitizing at entry makes
+/// the property structural — a `FlagCheck` cannot hold unsafe text, so no consumer of one can
+/// print unsafe text.
+///
+/// Two transformations, in this order. [`redact_secrets`] first, because a probe command line can
+/// legitimately carry a `-D` definition and an environment summary can carry a tool path, and a
+/// value that looks like a credential must not be copied into a report or a CI log. Then
+/// [`sanitize_text_for_report`], which encodes every character a report cannot carry literally —
+/// the escape introducer that would start a terminal control sequence, the carriage return that
+/// would erase the line already written, the newline that would forge a further row, the tab that
+/// would forge a column. The encoding is `\xNN` and `\u{NNNN}`, so the original byte is still
+/// legible to a reader; it simply no longer acts.
+///
+/// Text arriving here is not necessarily hostile — most of it is this module's own prose. It is
+/// text whose provenance is mixed: a harness sentence interpolating a compiler's diagnostic, an
+/// error cause naming a path taken from an environment variable, an argument vector containing a
+/// binary path the operator chose. Sanitizing all of it costs a copy and removes the need to
+/// reason, case by case, about which interpolation was safe.
+fn report_text(raw: &str) -> String {
+    sanitize_text_for_report(&redact_secrets(raw))
+}
+
 /// Sanitize text for a report row and cap its length in characters.
 ///
 /// Character-counted rather than byte-counted so that a multi-byte character can never be split
@@ -1487,7 +1810,7 @@ fn truncate_for_report(raw: &str, limit: usize) -> String {
 // One context per run, holding the two compilers, the per-invocation budget and the fixture
 // location. The operations below are the only places a compiler is invoked or an artifact is
 // executed, so every check inherits the same confinement, the same bounded wait and the same
-// recording of exact command lines.
+// recording of every command line as report evidence.
 // ---------------------------------------------------------------------------------------------
 
 /// Everything the positive checks share.
@@ -1614,7 +1937,11 @@ impl<'a> Probe<'a> {
             return self.caps.ref_cc_native().summary();
         }
         match self.caps.ref_cc_for(target) {
-            Some(path) => format!("{} reference driver at {}", target.triple(), path.display()),
+            Some(path) => format!(
+                "{} reference driver at {}",
+                target.triple(),
+                shown_path(path)
+            ),
             None => format!("no {} reference driver", target.triple()),
         }
     }
@@ -1662,7 +1989,8 @@ impl<'a> Probe<'a> {
         }
     }
 
-    /// Compile, record the exact command line, and require the compilation to succeed.
+    /// Compile, record the command line as report evidence, and require the compilation to
+    /// succeed.
     ///
     /// Returns `false` when the compilation failed, having already recorded the problem, so a
     /// caller can skip the observable it was about to inspect instead of inspecting an artifact
@@ -1675,20 +2003,21 @@ impl<'a> Probe<'a> {
         args: &[String],
         purpose: &str,
     ) -> HarnessResult<bool> {
-        let outcome = compiler.compile(workspace, args, self.budget, self.timeout_tool)?;
-        evidence.record(&outcome);
-        if outcome.termination().succeeded() {
+        let invocation = compiler.compile(workspace, args, self.budget, self.timeout_tool)?;
+        evidence.record(&invocation);
+        if invocation.outcome.termination().succeeded() {
             return Ok(true);
         }
         evidence.problem(format!(
             "the {} failed to {purpose}: {}",
             compiler.label(),
-            describe_termination(&outcome)
+            describe_termination(&invocation.outcome)
         ));
         Ok(false)
     }
 
-    /// Compile, record the exact command line, and require the compilation to **fail**.
+    /// Compile, record the command line as report evidence, and require the compilation to
+    /// **fail**.
     ///
     /// This is the load-bearing half of the include-path check. Without it, a compilation that
     /// succeeded for some reason other than the flag under test — a header reachable by a route
@@ -1701,9 +2030,9 @@ impl<'a> Probe<'a> {
         args: &[String],
         purpose: &str,
     ) -> HarnessResult<()> {
-        let outcome = compiler.compile(workspace, args, self.budget, self.timeout_tool)?;
-        evidence.record(&outcome);
-        if outcome.termination().succeeded() {
+        let invocation = compiler.compile(workspace, args, self.budget, self.timeout_tool)?;
+        evidence.record(&invocation);
+        if invocation.outcome.termination().succeeded() {
             evidence.problem(format!(
                 "the {} succeeded when it was required to fail: {purpose}",
                 compiler.label()
@@ -1712,7 +2041,7 @@ impl<'a> Probe<'a> {
             evidence.observe(format!(
                 "the {} rejected the compilation as required — {purpose} ({})",
                 compiler.label(),
-                describe_termination(&outcome)
+                describe_termination(&invocation.outcome)
             ));
         }
         Ok(())
@@ -1744,13 +2073,14 @@ impl<'a> Probe<'a> {
             ));
             return Ok(None);
         };
-        let outcome = spawn(&argv, workspace, self.budget, self.timeout_tool)?;
-        evidence.record(&outcome);
+        let invocation = compiler.execute(&argv, workspace, self.budget, self.timeout_tool)?;
+        let outcome = &invocation.outcome;
+        evidence.record(&invocation);
         if !outcome.termination().succeeded() {
             evidence.problem(format!(
                 "the program built by the {} did not exit cleanly: {}",
                 compiler.label(),
-                describe_termination(&outcome)
+                describe_termination(outcome)
             ));
             return Ok(None);
         }
@@ -1771,23 +2101,28 @@ impl<'a> Probe<'a> {
         Ok(Some(outcome.stdout().to_vec()))
     }
 
-    /// Require the ELF class of `artifact` to be the one `target` uses.
+    /// Require the ELF class of an already-read `image` to be the one `target` uses.
     ///
     /// Verified on every artifact the probe inspects rather than only on the 32-bit arm, because
     /// this is what proves the reader chose the right offset table — and choosing the wrong one
     /// would otherwise produce plausible-looking values read from the wrong place in the file.
+    ///
+    /// Takes the [`ElfImage`] rather than a path deliberately: the caller has already read the
+    /// artifact once, and every fact this check and its neighbours report then describes the same
+    /// bytes. A path parameter would invite a second read, which costs the artifact's size again
+    /// and — worse — could disagree with the first.
     fn expect_elf_class(
         &self,
         evidence: &mut Evidence,
         compiler: &ProbeCompiler,
-        artifact: &Path,
+        image: &ElfImage,
     ) -> HarnessResult<()> {
         let width = compiler.target.elf_class();
         let expected = match width {
             32 => ELF_CLASS_32,
             _ => ELF_CLASS_64,
         };
-        let observed = elf_class(artifact)?;
+        let observed = image.class();
         if observed == expected {
             evidence.observe(format!(
                 "the {} produced an ELF{width} artifact, exercising the {width}-bit branch of the \
@@ -1836,6 +2171,9 @@ struct Configuration {
     side: CompilerSide,
     /// Exact command lines, the compilation first and the execution second.
     commands: Vec<String>,
+    /// The capture stems those invocations were published under, in the same order, so a row
+    /// assembled from shared work names its evidence exactly as a single-invocation row does.
+    captures: Vec<String>,
     /// What the program printed, when it ran and exited cleanly.
     printed: Option<Vec<u8>>,
     /// What went wrong, when something did.
@@ -1849,6 +2187,9 @@ impl Configuration {
     fn absorb(&self, evidence: &mut Evidence) {
         for command in &self.commands {
             evidence.record_line(command.clone());
+        }
+        for capture in &self.captures {
+            evidence.record_capture(capture.clone());
         }
         if let Some(problem) = &self.problem {
             evidence.problem(problem.clone());
@@ -1938,18 +2279,20 @@ impl Probe<'_> {
             label: label.clone(),
             side: compiler.side,
             commands: Vec::new(),
+            captures: Vec::new(),
             printed: None,
             problem: None,
             unavailable: None,
         };
 
         let compiled = compiler.compile(workspace, &argv, self.budget, self.timeout_tool)?;
-        configuration.commands.push(compiled.command_line());
-        if !compiled.termination().succeeded() {
+        configuration.commands.push(compiled.outcome.command_line());
+        configuration.captures.push(compiled.capture.clone());
+        if !compiled.outcome.termination().succeeded() {
             configuration.problem = Some(format!(
                 "the {} failed to compile the probe with {label}: {}",
                 compiler.label(),
-                describe_termination(&compiled)
+                describe_termination(&compiled.outcome)
             ));
             return Ok(configuration);
         }
@@ -1962,15 +2305,16 @@ impl Probe<'_> {
             ));
             return Ok(configuration);
         };
-        let executed = spawn(&run, workspace, self.budget, self.timeout_tool)?;
-        configuration.commands.push(executed.command_line());
-        if executed.termination().succeeded() {
-            configuration.printed = Some(executed.stdout().to_vec());
+        let executed = compiler.execute(&run, workspace, self.budget, self.timeout_tool)?;
+        configuration.commands.push(executed.outcome.command_line());
+        configuration.captures.push(executed.capture.clone());
+        if executed.outcome.termination().succeeded() {
+            configuration.printed = Some(executed.outcome.stdout().to_vec());
         } else {
             configuration.problem = Some(format!(
                 "the program the {} built with {label} did not exit cleanly: {}",
                 compiler.label(),
-                describe_termination(&executed)
+                describe_termination(&executed.outcome)
             ));
         }
         Ok(configuration)
@@ -2016,7 +2360,7 @@ impl Probe<'_> {
                 Ok(()) => evidence.observe(format!(
                     "the {} wrote {} exactly as named",
                     compiler.label(),
-                    artifact.display()
+                    shown_path(&artifact)
                 )),
                 Err(error) => evidence.problem(format!(
                     "the {} exited successfully but {}",
@@ -2024,7 +2368,7 @@ impl Probe<'_> {
                     error.cause()
                 )),
             }
-            match elf_type(&artifact) {
+            match ElfImage::read(&artifact).and_then(|image| image.e_type()) {
                 Ok(ET_EXEC) => evidence.observe(format!(
                     "the file the {} named holds a linked executable",
                     compiler.label()
@@ -2082,8 +2426,9 @@ impl Probe<'_> {
             )? {
                 continue;
             }
-            self.expect_elf_class(&mut evidence, compiler, &object)?;
-            let observed = elf_type(&object)?;
+            let image = ElfImage::read(&object)?;
+            self.expect_elf_class(&mut evidence, compiler, &image)?;
+            let observed = image.e_type()?;
             if observed == ET_REL {
                 evidence.observe(format!(
                     "the {} produced ELF type {observed} ({})",
@@ -2098,7 +2443,7 @@ impl Probe<'_> {
                     describe_elf_type(observed)
                 ));
             }
-            if has_interp(&object)? {
+            if image.has_interp()? {
                 evidence.problem(format!(
                     "the object the {} produced carries a program interpreter header, which a \
                      relocatable object never does",
@@ -2159,8 +2504,9 @@ impl Probe<'_> {
                 &argv,
                 "build a statically linked program",
             )? {
-                self.expect_elf_class(&mut evidence, compiler, &artifact)?;
-                self.expect_static_shape(&mut evidence, compiler, &artifact)?;
+                let image = ElfImage::read(&artifact)?;
+                self.expect_elf_class(&mut evidence, compiler, &image)?;
+                self.expect_static_shape(&mut evidence, compiler, &image)?;
                 self.expect_output(
                     &mut evidence,
                     compiler,
@@ -2238,8 +2584,9 @@ impl Probe<'_> {
             )? {
                 continue;
             }
-            self.expect_elf_class(&mut evidence, compiler, &artifact)?;
-            self.expect_static_shape(&mut evidence, compiler, &artifact)?;
+            let image = ElfImage::read(&artifact)?;
+            self.expect_elf_class(&mut evidence, compiler, &image)?;
+            self.expect_static_shape(&mut evidence, compiler, &image)?;
             if self.caps.can_execute(target) {
                 self.expect_output(
                     &mut evidence,
@@ -2263,14 +2610,18 @@ impl Probe<'_> {
         Ok(evidence.finish())
     }
 
-    /// Require an artifact to have the shape a static executable has.
+    /// Require an already-read artifact to have the shape a static executable has.
+    ///
+    /// Both facts — the type field and the absence of a program interpreter header — are taken
+    /// from the same [`ElfImage`], so the two halves of the conclusion cannot describe two
+    /// different readings of the file.
     fn expect_static_shape(
         &self,
         evidence: &mut Evidence,
         compiler: &ProbeCompiler,
-        artifact: &Path,
+        image: &ElfImage,
     ) -> HarnessResult<()> {
-        let observed = elf_type(artifact)?;
+        let observed = image.e_type()?;
         if observed == ET_EXEC {
             evidence.observe(format!(
                 "the {} produced ELF type {observed} ({})",
@@ -2285,7 +2636,7 @@ impl Probe<'_> {
                 describe_elf_type(observed)
             ));
         }
-        if has_interp(artifact)? {
+        if image.has_interp()? {
             evidence.problem(format!(
                 "the artifact the {} produced carries a program interpreter header, so it is not \
                  self-contained and could not be executed under an emulator without a sysroot",
@@ -2317,15 +2668,16 @@ impl Probe<'_> {
         let artifact = compiler.artifact(workspace, "default_linkage.bin")?;
         let artifact_text = path_text(&artifact)?;
         let argv = args(&[FLAG_OUTPUT, &artifact_text, source]);
-        let outcome = compiler.compile(workspace, &argv, self.budget, self.timeout_tool)?;
-        evidence.record(&outcome);
+        let invocation = compiler.compile(workspace, &argv, self.budget, self.timeout_tool)?;
+        let outcome = &invocation.outcome;
+        evidence.record(&invocation);
 
         let authoritative = compiler.side == CompilerSide::Reference;
         if !outcome.termination().succeeded() {
             let detail = format!(
                 "the {} could not build the same program without {FLAG_STATIC}: {}",
                 compiler.label(),
-                describe_termination(&outcome)
+                describe_termination(outcome)
             );
             if authoritative {
                 evidence.problem(format!(
@@ -2342,8 +2694,9 @@ impl Probe<'_> {
             return Ok(());
         }
 
-        let default_type = elf_type(&artifact)?;
-        let default_interp = has_interp(&artifact)?;
+        let image = ElfImage::read(&artifact)?;
+        let default_type = image.e_type()?;
+        let default_interp = image.has_interp()?;
         if default_interp {
             evidence.observe(format!(
                 "without {FLAG_STATIC} the {} produced ELF type {default_type} ({}) with a program \
@@ -2406,7 +2759,7 @@ impl Probe<'_> {
                 &argv,
                 "build the probe program with debug information",
             )? {
-                if has_section(&with_debug, DEBUG_INFO_SECTION)? {
+                if ElfImage::read(&with_debug)?.has_section(DEBUG_INFO_SECTION)? {
                     evidence.observe(format!(
                         "with {FLAG_DEBUG} the {} emitted a {DEBUG_INFO_SECTION} section",
                         compiler.label()
@@ -2430,7 +2783,7 @@ impl Probe<'_> {
                 &argv,
                 "build the probe program without debug information",
             )? {
-                if has_section(&without_debug, DEBUG_INFO_SECTION)? {
+                if ElfImage::read(&without_debug)?.has_section(DEBUG_INFO_SECTION)? {
                     evidence.problem(format!(
                         "without {FLAG_DEBUG} the {} still emitted a {DEBUG_INFO_SECTION} \
                          section, so the presence of that section proves nothing about the flag",
@@ -2474,7 +2827,7 @@ impl Probe<'_> {
         evidence.note(format!(
             "the fixture header is {}, and the program names it with angle brackets so that the \
              include search path is its only route",
-            self.fixture_header.display()
+            shown_path(&self.fixture_header)
         ));
         evidence.note(format!(
             "the printed values come from {FIXTURE_VALUE_MACRO} and {FIXTURE_NAME_MACRO}, which \
@@ -2751,7 +3104,7 @@ impl Probe<'_> {
             )? {
                 continue;
             }
-            self.expect_elf_class(&mut evidence, compiler, &artifact)?;
+            self.expect_elf_class(&mut evidence, compiler, &ElfImage::read(&artifact)?)?;
             self.expect_output(
                 &mut evidence,
                 compiler,
@@ -2945,13 +3298,18 @@ fn describe_output_divergence(groups: &[Vec<Configuration>]) -> Option<String> {
 /// for everything to be retained keeps it either way, and says so, because an intentionally
 /// retained tree and a tree full of failures look identical otherwise.
 ///
+/// "Every captured stream" is literal: each invocation published its untruncated standard output,
+/// its untruncated standard error and its raw wait status into this directory as it happened, under
+/// the stems the rows name. Nothing is written here at settling time, so the retention decision
+/// cannot lose evidence that had not been recorded yet.
+///
 /// The note is returned rather than printed so that it lands in the report next to the check it
 /// belongs to, instead of on a side channel a reader has to correlate by hand.
 fn settle_workspace(workspace: Workspace, failed: bool) -> Option<String> {
     if failed {
         return Some(format!(
             "the workspace was retained for inspection at {}",
-            workspace.retain().display()
+            workspace.retain().describe()
         ));
     }
     let kept_by_request = workspace.keeps_on_success();
@@ -2960,7 +3318,7 @@ fn settle_workspace(workspace: Workspace, failed: bool) -> Option<String> {
         Some(note) => Some(note),
         None if kept_by_request => Some(format!(
             "the workspace {} was kept because the run asked for every workspace to be retained",
-            root.display()
+            shown_path(&root)
         )),
         None => None,
     }
@@ -3537,6 +3895,30 @@ pub struct FlagProbeReport {
 }
 
 impl FlagProbeReport {
+    /// Assemble the report, sanitizing the two free-text lists on the way in.
+    ///
+    /// The checks need no sanitizing here because [`Evidence`] already sanitized every field of
+    /// every row as it was recorded. The environment and note lines do, and for a reason that is
+    /// easy to miss: an environment line names each discovered tool by path and by the version
+    /// banner the tool itself printed, so its text originates in an environment variable and in a
+    /// subprocess's standard output. Discovery already sanitizes a banner at capture time, which
+    /// makes this the second of two independent guarantees rather than the only one — and the point
+    /// of putting it here is that the guarantee then belongs to the type that renders these lines,
+    /// instead of resting on a promise made in another module.
+    fn new(
+        checks: Vec<FlagCheck>,
+        environment: Vec<String>,
+        notes: Vec<String>,
+        unavailable_fails_run: bool,
+    ) -> FlagProbeReport {
+        FlagProbeReport {
+            checks,
+            environment: environment.iter().map(|line| report_text(line)).collect(),
+            notes: notes.iter().map(|line| report_text(line)).collect(),
+            unavailable_fails_run,
+        }
+    }
+
     /// Every check performed, in the order performed.
     pub fn checks(&self) -> &[FlagCheck] {
         &self.checks
@@ -3811,14 +4193,14 @@ fn flag_inventory_authority() -> String {
     if driver_cli.is_file() {
         return format!(
             "flag inventory: read from {}, then verified against both binaries",
-            driver_cli.display()
+            shown_path(&driver_cli)
         );
     }
     format!(
         "flag inventory: {} is not present in this checkout, so the inventory came from the \
          repository's technical specification; every flag was then verified against both binaries \
          regardless, which is the authority requirement 3 asks for",
-        driver_cli.display()
+        shown_path(&driver_cli)
     )
 }
 
@@ -3899,7 +4281,10 @@ pub fn run(caps: &Capabilities) -> HarnessResult<FlagProbeReport> {
             "unavailable checks fail the run: {}",
             config.unavailable_fails_run()
         ),
-        format!("include-path fixture: {}", probe.fixture_header.display()),
+        format!(
+            "include-path fixture: {}",
+            shown_path(&probe.fixture_header)
+        ),
     ];
     if !probe.caps.can_execute(probe.secondary_target) {
         environment.push(format!(
@@ -3932,10 +4317,10 @@ pub fn run(caps: &Capabilities) -> HarnessResult<FlagProbeReport> {
         ));
     }
 
-    Ok(FlagProbeReport {
+    Ok(FlagProbeReport::new(
         checks,
         environment,
         notes,
-        unavailable_fails_run: config.unavailable_fails_run(),
-    })
+        config.unavailable_fails_run(),
+    ))
 }

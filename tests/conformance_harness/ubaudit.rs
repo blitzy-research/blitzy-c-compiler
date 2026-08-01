@@ -124,34 +124,50 @@
 //!
 //! ## Headers, and why a program declares `printf` by hand
 //!
-//! Every program declares `int printf(const char *, ...);` and includes no header, because the
-//! compiler under test bundles only freestanding headers and ships no `stdio.h`: an
+//! Every program declares `int printf(const char *, ...);` by hand, the `_Noreturn` program
+//! additionally declares `_Noreturn void exit(int);`, and no program includes a hosted header,
+//! because the compiler under test bundles only freestanding headers and ships no `stdio.h`: an
 //! `#include <stdio.h>` would fail on that side while succeeding on the reference side, which is a
-//! spurious divergence caused by the test rather than by a compiler. A hand-declared prototype is
-//! also what published output-comparison experience identifies as the fix for the most common
-//! portability problem in this class of suite. Should a bare declaration ever provoke a diagnostic
-//! under the strict gate, the correct resolution is a recorded per-program deviation, never a
-//! silent relaxation of the gate for every program.
+//! spurious divergence caused by the test rather than by a compiler. The one sanctioned inclusion is
+//! area 07's `<stdarg.h>` — freestanding, shipped by both compilers, and unavoidable, since a
+//! variadic function cannot be written without it — and every program taking it records the exception
+//! and its reason in its own `ub_notes`. A hand-declared prototype is also what published
+//! output-comparison experience identifies as the fix for the most common portability problem in this
+//! class of suite. Should a bare declaration ever provoke a diagnostic under the strict gate, the
+//! correct resolution is a recorded per-program deviation, never a silent relaxation of the gate for
+//! every program.
 //!
 //! # Coverage, and the absence of a silent skip
 //!
 //! Every program the corpus contains is audited under both gates; the corpus is enumerated by
-//! [`manifest::discover_all`] rather than from any list written here, so adding a program adds two
-//! audit invocations and needs no change to this file. A program that cannot be audited because the
-//! reference compiler is absent is reported [`GateStatus::Unavailable`] — loudly, in the summary,
-//! and escalated to a failure under the strict setting intended for continuous integration, where
-//! the toolchain is installed deliberately. There is no path through this module by which a program
-//! is quietly not audited.
+//! [`manifest::discover_all`] rather than from any list written here, so adding a program needs no
+//! change to this file. What it adds is two **gate applications** and three **process
+//! invocations** — the counts differ because the sanitizer gate builds and then runs, and the run
+//! is what makes it a gate about undefined behaviour rather than about compilability. Both are
+//! reported, by [`AuditReport::gate_result_count`] and [`AuditReport::invocations_expected`]
+//! respectively; conflating them understates what the audit does.
 //!
-//! # Hermeticity, bounded execution, and parallel safety
+//! A program that cannot be audited because the reference compiler is absent is reported
+//! [`GateStatus::Unavailable`] — loudly, in the summary, and escalated to a failure under the
+//! strict setting intended for continuous integration, where the toolchain is installed
+//! deliberately. There is no path through this module by which a program is quietly not audited.
+//!
+//! # Workspace discipline, bounded execution, and parallel safety
 //!
 //! Each gate applied to each program gets its own workspace from
 //! [`sandbox::audit_workspace`], beneath the audit root of the Cargo build directory. Paths are a
 //! pure function of area, program and gate — no process identifier, no clock reading — so two
 //! concurrently executing tests cannot collide and a reader of a report row can predict exactly
-//! which directory to open. Nothing is written outside that directory, no socket is opened, and the
-//! corpus is strictly read-only to this module: a program is read and copied *into* a workspace,
+//! which directory to open. This module constructs no path outside that directory, opens no socket,
+//! and treats the corpus as strictly read-only: a program is read and copied *into* a workspace,
 //! never modified.
+//!
+//! The children it spawns are not confined by any of that. No namespace, `chroot`, syscall filter
+//! or network restriction is applied and `TMPDIR` is left alone, so the reference driver keeps its
+//! own intermediates under the system temporary directory, and the sanitizer runtime a gate links
+//! in reports wherever its own configuration says. The claim is about the paths this module builds,
+//! and — for the program being audited — about the corpus-authoring policy that gives every program
+//! its whole input as literals in its own source.
 //!
 //! Every invocation is bounded by the shared timed-wait facility in
 //! [`run_command_captured_with`], using the discovered `timeout` utility when there is one
@@ -179,9 +195,10 @@ use super::manifest::{self, Manifest};
 use super::sandbox::{self, Workspace, COMMANDS_NAME, PROGRAM_SOURCE_NAME};
 use super::{
     comma_separated, ensure_within, is_bcc_target_selector, is_ub_audit_gate_member,
-    is_ub_audit_gate_removable, posix_command_line, require_regular_file, sanitize_text_for_report,
-    HarnessError, HarnessResult, EXTENSION_AREA, PROGRAM_COUNT, UB_AUDIT_GATE_DEFAULT,
-    UB_AUDIT_GATE_MANDATORY, UB_AUDIT_GATE_REMOVABLE,
+    is_ub_audit_gate_removable, posix_command_line, redact_secrets, require_regular_file,
+    sanitize_text_for_report, shown_path, ub_audit_gate_required, HarnessError, HarnessResult,
+    EXTENSION_AREA, PROGRAM_COUNT, UB_AUDIT_GATE_DEFAULT, UB_AUDIT_GATE_MANDATORY,
+    UB_AUDIT_GATE_REMOVABLE,
 };
 
 /// The sanitizer gate, in the order the flags are passed.
@@ -371,7 +388,6 @@ impl GateStatus {
     pub fn failed(self) -> bool {
         matches!(self, GateStatus::Failed)
     }
-
     /// True for a gate that could not be applied at all.
     pub fn unavailable(self) -> bool {
         matches!(self, GateStatus::Unavailable)
@@ -550,23 +566,19 @@ pub struct ProgramAudit {
     dropped: Vec<String>,
     /// The reason recorded in the program's own record for the deviation, when there is one.
     reason: Option<String>,
-    /// Whether the written undefined-behaviour-freedom argument is present and non-empty.
+    /// Whether this program's record carries the written undefined-behaviour-freedom argument.
+    ///
+    /// Requirement 1 has a machine half and a human half. An absent argument already fails the
+    /// warning gate, so this flag never decides a verdict — it is recorded so the report can state
+    /// the human half's coverage as a count and name each program that owes one, which is a
+    /// different question from whether any gate failed and is not answerable from the gate results.
     ub_notes_recorded: bool,
+    /// The two gate results.
     warning: GateResult,
     sanitizer: GateResult,
 }
 
 impl ProgramAudit {
-    /// The feature-area directory this program lives in.
-    pub fn area(&self) -> &str {
-        &self.area
-    }
-
-    /// The program stem, without extension.
-    pub fn program(&self) -> &str {
-        &self.program
-    }
-
     /// The `<area>/<program>` identity used in every report row and every diagnostic.
     pub fn label(&self) -> String {
         format!("{}/{}", self.area, self.program)
@@ -602,11 +614,6 @@ impl ProgramAudit {
         self.reason.as_deref()
     }
 
-    /// Whether the written undefined-behaviour-freedom argument is recorded.
-    pub fn ub_notes_recorded(&self) -> bool {
-        self.ub_notes_recorded
-    }
-
     /// The warning-gate result.
     pub fn warning(&self) -> &GateResult {
         &self.warning
@@ -630,24 +637,11 @@ impl ProgramAudit {
         }
     }
 
-    /// True when both gates were applied and both were satisfied.
-    pub fn passed(&self) -> bool {
-        self.results().iter().all(|result| result.status().passed())
-    }
-
     /// The gates this program did not satisfy, in gate order.
     pub fn failures(&self) -> Vec<&GateResult> {
         self.results()
             .into_iter()
             .filter(|result| result.status().failed())
-            .collect()
-    }
-
-    /// The gates that could not be applied to this program, in gate order.
-    pub fn unavailable(&self) -> Vec<&GateResult> {
-        self.results()
-            .into_iter()
-            .filter(|result| result.status().unavailable())
             .collect()
     }
 
@@ -661,6 +655,33 @@ impl ProgramAudit {
             .iter()
             .map(|result| result.commands().len())
             .sum()
+    }
+    /// The feature-area directory this program lives in.
+    pub fn area(&self) -> &str {
+        &self.area
+    }
+
+    /// The program stem, without extension.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// True when both gates were applied and both were satisfied.
+    pub fn passed(&self) -> bool {
+        self.results().iter().all(|result| result.status().passed())
+    }
+
+    /// The gates that could not be applied to this program, in gate order.
+    pub fn unavailable(&self) -> Vec<&GateResult> {
+        self.results()
+            .into_iter()
+            .filter(|result| result.status().unavailable())
+            .collect()
+    }
+
+    /// Whether the written undefined-behaviour-freedom argument is recorded.
+    pub fn ub_notes_recorded(&self) -> bool {
+        self.ub_notes_recorded
     }
 }
 
@@ -715,6 +736,10 @@ pub struct AuditReport {
 
 impl AuditReport {
     /// Every audited program, in corpus order.
+    ///
+    /// Every method below reads the corpus through this accessor rather than through the field, so
+    /// there is exactly one read path for the audited set. That is what keeps a tally, a section
+    /// heading and the per-program table from ever disagreeing about which programs were audited.
     pub fn programs(&self) -> &[ProgramAudit] {
         &self.programs
     }
@@ -725,7 +750,7 @@ impl AuditReport {
     /// enumerates the corpus and states what it found, and the driver owns any assertion about how
     /// large the corpus ought to be.
     pub fn program_count(&self) -> usize {
-        self.programs.len()
+        self.programs().len()
     }
 
     /// How many programs the corpus contains, including any the filter excluded.
@@ -735,12 +760,12 @@ impl AuditReport {
 
     /// How many gate results this report holds: one per gate per audited program.
     pub fn gate_result_count(&self) -> usize {
-        self.programs.len() * Gate::ALL.len()
+        self.programs().len() * Gate::ALL.len()
     }
 
     /// How many process invocations were actually performed.
     pub fn invocations_performed(&self) -> usize {
-        self.programs
+        self.programs()
             .iter()
             .map(ProgramAudit::invocations_performed)
             .sum()
@@ -752,7 +777,7 @@ impl AuditReport {
     /// runs. Stating both this and [`AuditReport::invocations_performed`] is what keeps a degraded
     /// run visible: the two are equal exactly when every gate was applied.
     pub fn invocations_expected(&self) -> usize {
-        self.programs.len()
+        self.programs().len()
             * Gate::ALL
                 .iter()
                 .map(|gate| gate.invocations_per_program())
@@ -761,7 +786,7 @@ impl AuditReport {
 
     /// How many gate results carry `status`, across both gates.
     pub fn tally(&self, status: GateStatus) -> usize {
-        self.programs
+        self.programs()
             .iter()
             .flat_map(|audit| audit.results())
             .filter(|result| result.status() == status)
@@ -770,7 +795,7 @@ impl AuditReport {
 
     /// How many results of one gate carry `status`.
     pub fn gate_tally(&self, gate: Gate, status: GateStatus) -> usize {
-        self.programs
+        self.programs()
             .iter()
             .filter(|audit| audit.result(gate).status() == status)
             .count()
@@ -781,7 +806,7 @@ impl AuditReport {
     /// This is the list an author works through: each entry carries the program path, the exact
     /// command lines and the verbatim output.
     pub fn failures(&self) -> Vec<(&ProgramAudit, &GateResult)> {
-        self.programs
+        self.programs()
             .iter()
             .flat_map(|audit| {
                 audit
@@ -792,9 +817,69 @@ impl AuditReport {
             .collect()
     }
 
+    /// Every gate that could not be applied, paired with the program, in corpus order.
+    ///
+    /// The counterpart of [`AuditReport::failures`], and it exists for the same reason: the suite's
+    /// standing rule is that an absent oracle is reported loudly and never passed over in silence,
+    /// and a tally alone does not say *which* programs went unaudited. Without this list a reader
+    /// knows that some gate did not run but not which precondition is therefore unestablished — and
+    /// the whole purpose of these gates is to establish a precondition, program by program.
+    pub fn unapplied(&self) -> Vec<(&ProgramAudit, &GateResult)> {
+        self.programs()
+            .iter()
+            .flat_map(|audit| {
+                audit
+                    .unavailable()
+                    .into_iter()
+                    .map(move |result| (audit, result))
+            })
+            .collect()
+    }
+
+    /// How many audited programs satisfied **both** gates.
+    ///
+    /// Reported alongside the gate-result tallies rather than in place of them, because the two
+    /// answer different questions. A gate tally says how many of the 2N gate applications held; this
+    /// says how many programs are fit to serve as differential evidence, which is the number that
+    /// actually bears on requirement 1 — a program that passed one gate and not the other is not
+    /// half-eligible.
+    pub fn fully_audited_count(&self) -> usize {
+        self.programs()
+            .iter()
+            .filter(|audit| audit.passed())
+            .count()
+    }
+
+    /// How many audited programs record the written undefined-behaviour-freedom argument.
+    ///
+    /// Requirement 1 has a machine half and a human half. The gates are the machine half; the
+    /// argument recorded in each program's expectation record is the human half, and it is the first
+    /// thing a reader consults when a divergence appears. Counting it here means the report states
+    /// the human half's coverage rather than leaving it to be assumed.
+    pub fn ub_notes_recorded_count(&self) -> usize {
+        self.programs()
+            .iter()
+            .filter(|audit| audit.ub_notes_recorded())
+            .count()
+    }
+
+    /// The distinct feature areas audited, in corpus order.
+    ///
+    /// The final deliverable summary must report the feature areas covered, so the audit states the
+    /// areas it actually reached rather than restating the corpus tables.
+    pub fn areas_audited(&self) -> Vec<&str> {
+        let mut areas: Vec<&str> = Vec::new();
+        for audit in self.programs() {
+            if !areas.contains(&audit.area()) {
+                areas.push(audit.area());
+            }
+        }
+        areas
+    }
+
     /// Every program whose warning gate deviates from the default, in corpus order.
     pub fn deviations(&self) -> Vec<&ProgramAudit> {
-        self.programs
+        self.programs()
             .iter()
             .filter(|audit| audit.deviated())
             .collect()
@@ -893,7 +978,7 @@ impl AuditReport {
         out.push_str(&format!(
             "  audit driver          : {}\n",
             match &self.reference_path {
-                Some(path) => sanitize_line(&path.display().to_string()),
+                Some(path) => shown_path(path),
                 None => String::from("(none: both gates are unavailable)"),
             }
         ));
@@ -957,9 +1042,39 @@ impl AuditReport {
             ));
         }
         out.push_str(&format!(
+            "  feature areas audited : {} ({})\n",
+            self.areas_audited().len(),
+            if self.areas_audited().is_empty() {
+                String::from("none")
+            } else {
+                sanitize_line(&self.areas_audited().join(", "))
+            }
+        ));
+        out.push_str(&format!(
             "  gate results          : {} ({} gates per program)\n",
             self.gate_result_count(),
             Gate::ALL.len()
+        ));
+        // Requirement 1 has two halves and this report is named for one of them, so the other has
+        // to be visible here too. The gates below already fail a program that records no written
+        // argument, which means a clean audit implies a complete set — but "implies" is exactly
+        // what evidence should not require a reader to work out. Stating the count says the human
+        // half was checked, rather than leaving it to be inferred from the absence of a failure.
+        out.push_str(&format!(
+            "  ub-freedom arguments  : {} of {} audited program(s) record a written argument \
+             (requirement 1's human half; a program without one fails the warning gate){}\n",
+            self.ub_notes_recorded_count(),
+            self.program_count(),
+            if self.ub_notes_recorded_count() == self.program_count() {
+                ""
+            } else {
+                " — INCOMPLETE"
+            }
+        ));
+        out.push_str(&format!(
+            "  satisfied both gates  : {} of {} program(s)\n",
+            self.fully_audited_count(),
+            self.program_count()
         ));
         out.push_str(&format!(
             "  invocations performed : {} of {} expected (per program: one warning-gate compile, \
@@ -983,9 +1098,135 @@ impl AuditReport {
             self.verdict_line()
         ));
 
+        out.push_str(&self.render_area_coverage());
         out.push_str(&self.render_deviations());
         out.push_str(&self.render_failures());
+        out.push_str(&self.render_unavailable());
+        out.push_str(&self.render_unapplied());
         out.push_str(&self.render_program_table());
+        out
+    }
+
+    /// One row per feature area: the programs it contributes, how many satisfied both gates, how
+    /// many gate results could not be applied at all, how many deviate, and how many carry the
+    /// written undefined-behaviour-freedom argument.
+    ///
+    /// # Why the written argument is counted, and counted here
+    ///
+    /// Requirement 1 has two halves. The gates above are the machine half. The written argument in
+    /// each program's own expectation record is the **human** half: it is what a reviewer reads
+    /// first when a divergence appears, and it is the one part of requirement 1 that no gate can
+    /// establish, because a compiler cannot be asked whether a program's author understood why the
+    /// program is free of undefined behaviour. An audit that measured the machine half and stayed
+    /// silent about the human one would present requirement 1 as satisfied on half its evidence.
+    ///
+    /// The *presence* of the argument is already enforced elsewhere and is not re-decided here: a
+    /// record with no `ub_notes` key at all fails to parse, and one whose value is empty is
+    /// recorded as a defect by [`decide_warning_gate`], which fails the gate. So a row here whose
+    /// written-argument count falls short of its program count always belongs to a run that is
+    /// already failing. What this table adds is *where*: the failure listing states the defect once
+    /// per program, and a systematic omission across one feature area is a pattern only a per-area
+    /// count makes visible.
+    ///
+    /// What no gate can decide is whether a recorded argument is *convincing*. That is a review
+    /// matter, and it is why the argument is named beside the program rather than reduced to a
+    /// corpus-wide total a reader could not act on.
+    ///
+    /// Grouped in first-appearance order, which is corpus order, so the table renders identically
+    /// on every run of the same corpus.
+    fn render_area_coverage(&self) -> String {
+        let mut out = String::from("per-feature-area coverage\n");
+        out.push_str("-------------------------\n");
+        let programs = self.programs();
+        if programs.is_empty() {
+            out.push_str("  (no program was audited)\n\n");
+            return out;
+        }
+        let mut areas: Vec<&str> = Vec::new();
+        for audit in programs {
+            if !areas.contains(&audit.area()) {
+                areas.push(audit.area());
+            }
+        }
+        for area in areas {
+            let members: Vec<&ProgramAudit> = programs
+                .iter()
+                .filter(|audit| audit.area() == area)
+                .collect();
+            let satisfied = members.iter().filter(|audit| audit.passed()).count();
+            let not_applied: usize = members.iter().map(|audit| audit.unavailable().len()).sum();
+            let deviating = members.iter().filter(|audit| audit.deviated()).count();
+            let argued = members
+                .iter()
+                .filter(|audit| audit.ub_notes_recorded())
+                .count();
+            out.push_str(&format!(
+                "  {:<28} {:>3} program(s), {:>3} satisfied both gates, {:>3} gate result(s) not \
+                 applied, {:>3} deviating, {:>3} with a written argument\n",
+                sanitize_line(area),
+                members.len(),
+                satisfied,
+                not_applied,
+                deviating,
+                argued
+            ));
+            for audit in members.iter().filter(|audit| !audit.ub_notes_recorded()) {
+                out.push_str(&format!(
+                    "      NO WRITTEN ARGUMENT: {} — requirement 1's human half is absent from \
+                     this program's expectation record; the gates judged the program, but no \
+                     recorded reasoning explains why it is free of undefined behaviour\n",
+                    sanitize_line(audit.program())
+                ));
+            }
+        }
+        out.push('\n');
+        out
+    }
+
+    /// Every gate that could not be applied, with the program it belongs to and the diagnosis.
+    ///
+    /// Kept separate from the failure listing because the two mean opposite things: a failure is a
+    /// statement about a test program, and an unavailability is a statement about this machine. The
+    /// tallies above count them, but a count is not actionable — an entry here names the program
+    /// that was not audited and the reason, which is what turns "reported rather than skipped
+    /// silently" into something a reader can act on.
+    fn render_unavailable(&self) -> String {
+        let mut entries: Vec<(&ProgramAudit, &GateResult)> = Vec::new();
+        for audit in self.programs() {
+            for result in audit.unavailable() {
+                entries.push((audit, result));
+            }
+        }
+        let mut out = format!("gates that could not be applied ({})\n", entries.len());
+        out.push_str("-----------------------------------\n");
+        if entries.is_empty() {
+            out.push_str("  (none: every gate was applied to every audited program)\n\n");
+            return out;
+        }
+        out.push_str(&indented_block(
+            &format!(
+                "Each entry is a program that was NOT audited under the gate named. This is never a \
+                 pass. It fails the run when {VAR_STRICT} is set, where the toolchain is installed \
+                 deliberately and an absent driver means a broken workflow rather than a modest \
+                 machine.",
+            ),
+            "  ",
+        ));
+        out.push('\n');
+        for (audit, result) in entries {
+            out.push_str(&format!(
+                "  {} — {} gate\n",
+                sanitize_line(&audit.label()),
+                result.gate()
+            ));
+            out.push_str(&format!(
+                "    program : {}\n",
+                sanitize_line(&audit.source().display().to_string())
+            ));
+            out.push_str("    detail  :\n");
+            out.push_str(&indented_block(result.detail(), "      "));
+            out.push('\n');
+        }
         out
     }
 
@@ -1026,12 +1267,19 @@ impl AuditReport {
             out.push_str("  (none: every audited program passed the full default gate)\n\n");
             return out;
         }
-        out.push_str(
-            "  A deviation is a removal and never an addition, always retains -Werror, and is \
-             recorded\n  with its reason in the program's own expectation record. Exactly two \
-             categories are\n  sanctioned: the supported-extension area drops -pedantic, and the \
-             deliberate\n  narrowing-conversion programs drop the two conversion diagnostics.\n\n",
-        );
+        // The two lists are read from the gate tables rather than restated, for the same reason
+        // `gate_flag_line` reads them: a report that names its own flags can advertise a guarantee
+        // other than the one the audit enforces. Restating one flag also understated the guarantee
+        // — four members are non-negotiable, not just the one that turns diagnostics into errors.
+        out.push_str(&format!(
+            "  A deviation is a removal and never an addition, always retains {}, and is \
+             recorded\n  with its reason in the program's own expectation record. Only {} may be \
+             dropped at all, and\n  exactly two categories are sanctioned: the supported-extension \
+             area drops {EXTENSION_ONLY_REMOVABLE},\n  and the deliberate narrowing-conversion \
+             programs drop the two conversion diagnostics.\n\n",
+            comma_separated(&ub_audit_gate_required()),
+            comma_separated(UB_AUDIT_GATE_REMOVABLE),
+        ));
         for audit in deviations {
             out.push_str(&format!("  {}\n", sanitize_line(&audit.label())));
             out.push_str(&format!(
@@ -1077,15 +1325,9 @@ impl AuditReport {
                 sanitize_line(&audit.label()),
                 result.gate()
             ));
-            out.push_str(&format!(
-                "    program : {}\n",
-                sanitize_line(&audit.source().display().to_string())
-            ));
+            out.push_str(&format!("    program : {}\n", shown_path(audit.source())));
             if let Some(record) = audit.record() {
-                out.push_str(&format!(
-                    "    record  : {}\n",
-                    sanitize_line(&record.display().to_string())
-                ));
+                out.push_str(&format!("    record  : {}\n", shown_path(record)));
             }
             out.push_str("    detail  :\n");
             out.push_str(&indented_block(result.detail(), "      "));
@@ -1106,10 +1348,7 @@ impl AuditReport {
                 }
             }
             if let Some(workspace) = result.workspace() {
-                out.push_str(&format!(
-                    "    retained: {}\n",
-                    sanitize_line(&workspace.display().to_string())
-                ));
+                out.push_str(&format!("    retained: {}\n", shown_path(workspace)));
             }
             if result.diagnostics().is_empty() {
                 out.push_str("    output  : (empty)\n");
@@ -1122,15 +1361,49 @@ impl AuditReport {
         out
     }
 
+    /// Every gate that could not be applied, named program by program.
+    ///
+    /// Separate from the failure section on purpose, because the two call for different actions. A
+    /// failure is a defect in a test program and is fixed by editing the corpus. An unapplied gate
+    /// is a gap in this machine, fixed by installing a tool — and until it is, the programs listed
+    /// here take part in the differential matrix without their precondition having been
+    /// established. Saying which ones, rather than only how many, is what makes that gap actionable
+    /// instead of merely acknowledged.
+    fn render_unapplied(&self) -> String {
+        let unapplied = self.unapplied();
+        let mut out = format!("gates that could not be applied ({})\n", unapplied.len());
+        out.push_str("-------------------------------------\n");
+        if unapplied.is_empty() {
+            out.push_str("  (none: every gate was applied to every audited program)\n\n");
+            return out;
+        }
+        out.push_str(&format!(
+            "  Each entry is a gap in THIS MACHINE rather than a defect in the program. The              precondition\n  requirement 1 asks for is unestablished for the program named, and              under {VAR_STRICT} each of\n  these fails the run.\n\n"
+        ));
+        for (audit, result) in unapplied {
+            out.push_str(&format!(
+                "  {} / {} — {} gate\n",
+                sanitize_line(audit.area()),
+                sanitize_line(audit.program()),
+                result.gate()
+            ));
+            out.push_str(&format!("    program : {}\n", shown_path(audit.source())));
+            out.push_str("    detail  :\n");
+            out.push_str(&indented_block(result.detail(), "      "));
+            out.push('\n');
+        }
+        out
+    }
+
     /// One row per program, so the complete outcome is in the report even when nothing failed.
     fn render_program_table(&self) -> String {
         let mut out = String::from("per-program results (warning gate, sanitizer gate)\n");
         out.push_str("--------------------------------------------------\n");
-        if self.programs.is_empty() {
+        if self.programs().is_empty() {
             out.push_str("  (no program was audited)\n");
             return out;
         }
-        for audit in &self.programs {
+        for audit in self.programs() {
             out.push_str(&format!(
                 "  {:<11} {:<11} {}{}\n",
                 audit.warning().status(),
@@ -1156,11 +1429,21 @@ fn gate_flag_line(gate: Gate) -> String {
 
 /// One line of text, made safe to render.
 ///
-/// Every control character and every formatting character that could forge a column, erase the line
-/// it ends or reverse how the line reads is replaced by a visible escape, so nothing a compiler or
-/// a corpus path puts into this report can act rather than merely say.
+/// Two transformations, in this order, and the order matters: redaction reads names and values, so
+/// it must see the text before escaping rewrites it.
+///
+/// [`redact_secrets`] first. A gate command line carries every flag the audit passes, an audit
+/// invocation records the sanitizer options it forced, and a diagnostic excerpt can quote whatever
+/// the compiler was told — so a value that looks like a credential can reach this report from a
+/// definition on a command line. Redacting it here keeps it out of the rendered audit and out of
+/// any log that captures one.
+///
+/// Then [`sanitize_text_for_report`]. Every control character and every formatting character that
+/// could forge a column, erase the line it ends or reverse how the line reads is replaced by a
+/// visible escape, so nothing a compiler or a corpus path puts into this report can act rather than
+/// merely say.
 fn sanitize_line(raw: &str) -> String {
-    sanitize_text_for_report(raw)
+    sanitize_text_for_report(&redact_secrets(raw))
 }
 
 /// Multi-line text, each line sanitized and indented, with a trailing newline.
@@ -1366,7 +1649,7 @@ fn host_line(caps: &Capabilities) -> String {
 /// discovered corpus path always has both; a path that does not is a defect worth reporting rather
 /// than a program to audit under an invented name.
 fn identity_of(source: &Path) -> HarnessResult<(String, String)> {
-    let context = format!("identifying the corpus program {}", source.display());
+    let context = format!("identifying the corpus program {}", shown_path(source));
     let area = source
         .parent()
         .and_then(Path::file_name)
@@ -1404,7 +1687,13 @@ struct GateDecision {
     deviated: bool,
     /// The reason recorded in the program's own record, when it records one.
     reason: Option<String>,
-    /// Whether the written undefined-behaviour-freedom argument is present and non-empty.
+    /// Whether the record carries a non-empty `ub_notes`, the written
+    /// undefined-behaviour-freedom argument requirement 1 obliges every program to record.
+    ///
+    /// Decided here because this is where the record is read, and carried on to the audit rather
+    /// than only turned into a defect: an absent argument fails the warning gate *and* is counted
+    /// in the report, so a reader is told which programs lack one instead of inferring it from the
+    /// absence of a failure.
     ub_notes_recorded: bool,
     /// Everything wrong with the record, each phrased as a sentence an author can act on. A
     /// non-empty list fails the warning gate.
@@ -1414,10 +1703,10 @@ struct GateDecision {
 /// Decide the warning gate for one program, and validate the record's claim to deviate.
 ///
 /// The record parser already refuses a gate that is not a sanctioned reduction, so in a healthy
-/// checkout every check below passes. They are performed again here, independently, for two reasons
-/// the plan is explicit about: this module is the thing that actually *runs* the gate, so it must
-/// not depend on another module's diligence for the guarantee it publishes; and the checks are what
-/// make the requirement enforced in code rather than by convention.
+/// checkout every check below passes. They are performed again here, independently, for two
+/// reasons: this module is the thing that actually *runs* the gate, so it must not depend on
+/// another module's diligence for the guarantee it publishes; and the checks are what make the
+/// requirement enforced in code rather than by convention.
 ///
 /// Five conditions are required, and each closes a distinct way a relaxation could spread:
 ///
@@ -1518,12 +1807,14 @@ fn decide_warning_gate(manifest: &Manifest) -> GateDecision {
     let (reason, unexplained) = explain_deviation(manifest, &dropped);
     if !unexplained.is_empty() {
         defects.push(format!(
-            "the warning gate drops {} but neither the record's `impl_defined_notes` nor its \
-             `ub_notes` names {} anywhere, so the removal has no recorded reason. A DEVIATION \
-             WITHOUT A RECORDED REASON IS ITSELF A DEFECT IN THE TEST: the gate's whole value is its \
-             strictness, and an unexplained relaxation quietly re-admits the undefined behaviour \
-             this suite depends on excluding. Name the flag in the notes and state why the program \
-             cannot be compiled with it",
+            "the warning gate drops {} but the record's `impl_defined_notes` does not name {} \
+             anywhere, so the removal has no recorded reason. A DEVIATION WITHOUT A RECORDED REASON \
+             IS ITSELF A DEFECT IN THE TEST: the gate's whole value is its strictness, and an \
+             unexplained relaxation quietly re-admits the undefined behaviour this suite depends on \
+             excluding. `impl_defined_notes` is the one field this reason is read from — `ub_notes` \
+             carries the undefined-behaviour-freedom argument and is not searched for it — so name \
+             each dropped flag there by its exact spelling and state why the program cannot be \
+             compiled with it",
             comma_separated(&dropped.iter().map(String::as_str).collect::<Vec<&str>>()),
             comma_separated(&unexplained.iter().map(String::as_str).collect::<Vec<&str>>())
         ));
@@ -1556,11 +1847,22 @@ fn decide_warning_gate(manifest: &Manifest) -> GateDecision {
 /// record that narrows the audit without saying which flag it removed, or why, has recorded nothing
 /// that could be reviewed.
 ///
-/// Both notes fields are searched, in a fixed order — the narrowing field first, since recording a
-/// narrowing is its purpose, then the undefined-behaviour argument. Only paragraphs that name a
-/// dropped flag are kept, which is what makes the returned text an explanation of the removal
-/// rather than a reprint of the record: a program's notes legitimately discuss target widths, char
-/// signedness and oracle scope as well, and none of that justifies relaxing a diagnostic.
+/// Exactly one field is searched: `impl_defined_notes`, the **single canonical field** for the
+/// reason behind a gate deviation. `ub_notes` is deliberately **not** consulted, and the difference
+/// matters in both directions. `impl_defined_notes` is the field a record must already carry
+/// whenever it narrows anything, and a gate deviation is a narrowing, so a reason recorded there is
+/// recorded where the parser has already insisted something be written. `ub_notes` answers a
+/// different question — the written undefined-behaviour-freedom argument, which every program owes
+/// whether or not its gate deviates — and a field that answers two questions answers neither
+/// reliably. Searching both would also leave a reviewer with two places to look and no guarantee
+/// about which holds the reason. The parser enforces the same contract at load time, so by the time
+/// a record reaches this function the explanation is already required to be here; the check below
+/// remains because a gate this suite runs must never depend on a validation performed elsewhere.
+///
+/// Only paragraphs that name a dropped flag are kept, which is what makes the returned text an
+/// explanation of the removal rather than a reprint of the record: this field legitimately discusses
+/// target widths, char signedness and oracle scope as well, and none of that justifies relaxing a
+/// diagnostic.
 ///
 /// Matching is on the flag's exact spelling including its leading hyphen, so prose that happens to
 /// use the word in another sense does not count as an explanation. The spellings cannot shadow one
@@ -1572,28 +1874,23 @@ fn explain_deviation(manifest: &Manifest, dropped: &[String]) -> (Option<String>
     if dropped.is_empty() {
         return (None, Vec::new());
     }
-    let sources = [
-        manifest.impl_defined_notes().unwrap_or_default(),
-        manifest.ub_notes(),
-    ];
+    let source = manifest.impl_defined_notes().unwrap_or_default();
 
     let mut paragraphs: Vec<String> = Vec::new();
-    for source in sources {
-        for paragraph in source.split("\n\n") {
-            let text = paragraph.trim();
-            if text.is_empty() {
-                continue;
-            }
-            let names_a_dropped_flag = dropped.iter().any(|flag| text.contains(flag.as_str()));
-            if names_a_dropped_flag && !paragraphs.iter().any(|kept| kept == text) {
-                paragraphs.push(String::from(text));
-            }
+    for paragraph in source.split("\n\n") {
+        let text = paragraph.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let names_a_dropped_flag = dropped.iter().any(|flag| text.contains(flag.as_str()));
+        if names_a_dropped_flag && !paragraphs.iter().any(|kept| kept == text) {
+            paragraphs.push(String::from(text));
         }
     }
 
     let unexplained: Vec<String> = dropped
         .iter()
-        .filter(|flag| !sources.iter().any(|source| source.contains(flag.as_str())))
+        .filter(|flag| !source.contains(flag.as_str()))
         .cloned()
         .collect();
 
@@ -1617,6 +1914,8 @@ fn undecidable_gate(error: &HarnessError) -> GateDecision {
         dropped: Vec::new(),
         deviated: false,
         reason: None,
+        // A record that could not be read states no argument either, and reporting the argument as
+        // present because the field could not be inspected is the one answer no reader could act on.
         ub_notes_recorded: false,
         defects: vec![format!(
             "the expectation record could not be read, so the gate this program asks for is unknown: \
@@ -1789,7 +2088,7 @@ fn judge_warning_gate(outcome: &RunOutcome, object: &Path) -> (GateStatus, Strin
                     format!(
                         "the reference compiler exited cleanly but produced no object at {}; the \
                          gate cannot be said to have examined the program",
-                        sanitize_line(&object.display().to_string())
+                        shown_path(object)
                     ),
                 );
             }
@@ -1912,12 +2211,12 @@ fn run_sanitizer_gate(
         ));
     }
 
-    // The artifact is about to be executed, so the two properties that make that safe are
+    // The artifact is about to be executed, so the two properties that make that defensible are
     // established rather than assumed: it is a regular file and not a symbolic link, and it
     // resolves to a path strictly inside this gate's own workspace. Both hold by construction — the
     // path came from the workspace and the build has just written it — and both are checked anyway,
-    // because this is the line the hermeticity argument rests on and a check that is unconditional
-    // cannot be forgotten.
+    // because this is the line the execute-path discipline rests on and a check that is
+    // unconditional cannot be forgotten.
     require_regular_file(&context, &artifact)?;
     ensure_within(&context, workspace.root(), &artifact)?;
 
@@ -1970,7 +2269,7 @@ fn describe_failed_build(build: &RunOutcome, artifact: &Path) -> String {
         Termination::Exited(0) => format!(
             "the instrumented build exited cleanly but produced no artifact at {}, so nothing could \
              be executed and the gate reached no conclusion",
-            sanitize_line(&artifact.display().to_string())
+            shown_path(artifact)
         ),
         Termination::Exited(code) => format!(
             "the instrumented build failed (exit code {code}). The program must be buildable under \
@@ -2182,12 +2481,19 @@ fn guard_invocation(
 ///
 /// The working directory is the gate's own workspace, per child rather than process-wide: the
 /// feature area tests run concurrently in one process, so changing the shared working directory
-/// would be a data race rather than a confinement. Any incidental file a driver writes therefore
-/// lands inside the workspace.
+/// would be a data race rather than a confinement. An incidental file a driver writes *beside its
+/// output* therefore lands inside the workspace; one it writes under the system temporary
+/// directory does not, because a working directory is not a confinement and `TMPDIR` is left as
+/// inherited.
 ///
 /// The bound comes from the shared timed-wait facility, using the discovered `timeout` utility when
 /// there is one and a watchdog thread otherwise. Standard input is the null device and both streams
 /// are captured, so nothing can block on input and nothing pollutes the runner's own output.
+///
+/// The environment is **replaced, not inherited**, with the gate's workspace as the child's private
+/// `HOME` and `TMPDIR`. A reference driver reads a great many variables that decide where it looks
+/// for headers and libraries and how it behaves, and this gate exists to establish a property of a
+/// *program*. A result that depended on the invoking environment would not be that property.
 ///
 /// # Errors
 ///
@@ -2208,19 +2514,41 @@ fn spawn_guarded(
     let mut command = Command::new(reference);
     command.args(arguments);
     command.current_dir(workspace.root());
-    run_command_captured_with(command, budget_for(caps), caps.timeout_tool().path())
+    run_command_captured_with(
+        command,
+        budget_for(caps),
+        caps.timeout_tool().path(),
+        Some(workspace.root()),
+    )
 }
 
 /// Run the instrumented artifact directly on the host, and capture everything it did.
 ///
-/// Launched with no arguments, no environment additions and the workspace as its working directory.
-/// No emulator and no target dispatch appear here, because this gate is native by design: the
-/// sanitizer runtimes are not available for the cross targets under emulation, and undefined
-/// behaviour is a property of the program rather than of the target it is later built for.
+/// Launched with no arguments and the workspace as both its working directory and its private
+/// `HOME` and `TMPDIR`. No emulator and no target dispatch appear here, because this gate is native
+/// by design: the sanitizer runtimes are not available for the cross targets under emulation, and
+/// undefined behaviour is a property of the program rather than of the target it is later built for.
 ///
-/// No sanitizer runtime option is set either. Configuring one would weaken the gate — suppressing
-/// leak detection, or letting a diagnostic be reported without terminating — and the whole value of
-/// the gate is that it runs the runtimes as they come.
+/// # The sanitizer runtimes are configured, and configuring them is what makes the gate sound
+///
+/// This is the one child in the suite whose behaviour is *decided* by environment variables. Each
+/// sanitizer runtime reads its own options variable — `ASAN_OPTIONS`, `UBSAN_OPTIONS`,
+/// `LSAN_OPTIONS` — and those options can switch a diagnostic off, let one be reported without
+/// terminating, or send the report somewhere nobody reads it. Inheriting them was therefore not a
+/// neutral omission: an environment carrying `ASAN_OPTIONS=detect_leaks=0` or
+/// `UBSAN_OPTIONS=halt_on_error=0` would have turned real undefined behaviour into a clean run,
+/// and a clean run here is what licenses the whole suite to treat a divergence as a compiler
+/// defect. The gate would have gone on reporting that it had proved something it had not.
+///
+/// So the environment is replaced and the options are **forced** to the strictest setting each
+/// runtime offers: a diagnostic terminates the process rather than being recovered from, and it is
+/// printed rather than suppressed. The forced set lives in one catalogue beside the rest of the
+/// child environment, applied to every child in the suite rather than only to this one — a variable
+/// that cannot reach *any* child cannot reach the one that matters, and a rule with no exceptions
+/// is easier to verify than a rule with one.
+///
+/// Forcing is not a weakening of the earlier "run the runtimes as they come" posture; it is that
+/// posture made true. As they come is precisely what an inherited variable prevented.
 ///
 /// # Errors
 ///
@@ -2232,7 +2560,12 @@ fn spawn_guarded_artifact(
 ) -> HarnessResult<RunOutcome> {
     let mut command = Command::new(artifact);
     command.current_dir(workspace.root());
-    run_command_captured_with(command, budget_for(caps), caps.timeout_tool().path())
+    run_command_captured_with(
+        command,
+        budget_for(caps),
+        caps.timeout_tool().path(),
+        Some(workspace.root()),
+    )
 }
 
 /// One path as text, for an argument vector and a report line.
@@ -2249,7 +2582,7 @@ fn path_text(context: &str, role: &str, path: &Path) -> HarnessResult<String> {
             format!(
                 "{role} at {} is not valid text, so it could not be written into an argument vector \
                  or into a command line a maintainer can re-run",
-                path.display()
+                shown_path(path)
             ),
         )
     })
@@ -2325,7 +2658,16 @@ fn conclude(workspace: Workspace, status: GateStatus, detail: &mut String) -> Op
     let root = workspace.root().to_path_buf();
     let keeps_on_success = workspace.keeps_on_success();
     if !status.passed() {
-        return Some(workspace.retain());
+        // The retention is bounded and its accounting is reported: a gate whose evidence had to be
+        // pruned to stay inside the run's budget says so in its own detail, because an author sent
+        // to a directory that no longer holds what the detail promised has been misled rather than
+        // helped.
+        let retention = workspace.retain();
+        for note in retention.notes() {
+            detail.push_str(". Retention note: ");
+            detail.push_str(&sanitize_line(note));
+        }
+        return Some(retention.root().to_path_buf());
     }
     match workspace.discard_advisory() {
         Some(note) => {

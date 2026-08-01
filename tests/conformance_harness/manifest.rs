@@ -100,14 +100,14 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use super::{
-    canonical_corpus_root, comma_separated, corpus_root, ensure_within, is_forbidden_for_side,
-    is_ub_audit_gate_member, is_ub_audit_gate_removable, joined_target_names, manifest_dir,
+    canonical_corpus_root, comma_separated, corpus_root, ensure_within, findings_root,
+    is_forbidden_for_side, is_ub_audit_gate_member, joined_target_names, manifest_dir,
     must_escape_for_report, posix_command_line, require_contained_corpus_file,
-    require_regular_file, sanitize_text_for_report, AreaSpec, CellKey, CompilerSide,
-    DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Target, AREAS, BCC_TARGET_FLAG,
-    BCC_TARGET_SELECTORS, DIFFERENTIAL_FLAGS_MINIMAL, EXTENSION_AREA, SHARED_FLAGS_VERIFIED,
-    UB_AUDIT_GATE_DEFAULT, UB_AUDIT_GATE_MANDATORY, UB_AUDIT_GATE_REMOVABLE, UB_GATE_DEFAULT,
-    UB_GATE_WITHOUT_CONVERSION, UB_GATE_WITHOUT_PEDANTIC,
+    require_regular_file, sanitize_text_for_report, shown_path, ub_audit_gate_required, AreaSpec,
+    CellKey, CompilerSide, DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Target,
+    AREAS, BCC_TARGET_FLAG, BCC_TARGET_SELECTORS, DIFFERENTIAL_FLAGS_MINIMAL, EXTENSION_AREA,
+    SHARED_FLAGS_VERIFIED, UB_AUDIT_GATE_DEFAULT, UB_AUDIT_GATE_MANDATORY, UB_AUDIT_GATE_REMOVABLE,
+    UB_GATE_DEFAULT, UB_GATE_WITHOUT_CONVERSION, UB_GATE_WITHOUT_PEDANTIC,
 };
 
 const HEREDOC_OPENER: &str = "<<";
@@ -123,6 +123,14 @@ const SOURCE_EXTENSION: &str = "c";
 
 const RECORD_EXTENSION: &str = "expected";
 
+/// The corpus directory holding committed, curated finding artifacts.
+///
+/// A sibling of the feature-area directories rather than a child of one, which is why
+/// [`AREA_COMPANION_EXTENSIONS`] can stay as narrow as it is. [`load_replay`] reads beneath it so a
+/// reviewed, committed reproducer can be replayed by the harness exactly like a freshly generated
+/// one; nothing in the suite writes there.
+const CURATED_FINDINGS_DIR_NAME: &str = "findings";
+
 /// Extensions a regular file may carry inside a feature-area directory without being a program.
 ///
 /// Exactly one: the expectation record. A feature-area directory holds programs and the records
@@ -132,13 +140,16 @@ const RECORD_EXTENSION: &str = "expected";
 /// permit a per-program dependency to sit inside an area, and that would quietly dismantle two
 /// guarantees the suite is built on. A program must be reproducible from its own source file and
 /// its record alone — that is what makes "source file, build commands, and expected output
-/// recorded together" literally true — and every program therefore hand-declares the one libc
-/// prototype it needs rather than including anything. A header beside the programs is an
-/// invitation to break that, and a shared header would additionally fail against a compiler under
-/// test that bundles no `stdio.h`, producing a divergence caused by the test rather than by the
-/// compiler. A script beside the programs is worse still: the area directory is scanned, and
-/// something that looks like a per-area build step is the beginning of a corpus that no longer
-/// builds the way its records say it does.
+/// recorded together" literally true — and every program therefore hand-declares the libc
+/// prototypes it needs rather than including a hosted header: `printf` in nearly every program,
+/// and `_Noreturn void exit(int);` as well in the `_Noreturn` program. The single sanctioned
+/// inclusion is area 07's `<stdarg.h>`, which is freestanding, is shipped by both compilers, and
+/// cannot be worked around at all, because a variadic function cannot be written without it. A
+/// header beside the programs is an invitation to break that, and a shared header would
+/// additionally fail against a compiler under test that bundles no `stdio.h`, producing a
+/// divergence caused by the test rather than by the compiler. A script beside the programs is
+/// worse still: the area directory is scanned, and something that looks like a per-area build step
+/// is the beginning of a corpus that no longer builds the way its records say it does.
 ///
 /// The corpus's genuine companions — the fixture support tree, the tooling tree, the findings tree
 /// and the two registers — are siblings of the area directories rather than children, so nothing
@@ -249,9 +260,14 @@ const FLAGS_WITHOUT_EXECUTABLE: &[&str] = &["-c", "-S", "-E"];
 
 /// Largest expectation record the parser will read, in bytes.
 ///
-/// A record holds a handful of scalar fields and a golden stdout measured in hundreds of bytes;
-/// the largest plausible record is far below this bound, so the limit costs the corpus nothing
-/// and denies an adversarial or corrupt file the ability to exhaust memory. The size is checked
+/// A record holds a small set of scalar fields, its written notes, and a golden stdout. Measured
+/// across the committed corpus: the largest golden stdout is 2,220 bytes over 126 lines, the
+/// largest single notes field a few kilobytes, and the largest whole record roughly ten kilobytes
+/// — an order of magnitude below this bound, so the limit costs the corpus nothing while denying
+/// an adversarial or corrupt file the ability to exhaust memory. The exact figures for the notes
+/// and the whole record are deliberately given as an order rather than a byte count, because
+/// prose is edited and a stated byte count would go stale; the golden-stdout figures are exact,
+/// because a golden record is immutable except through the regeneration tool. The size is checked
 /// against the file's metadata *before* it is opened and enforced again on the reader, because a
 /// file can grow between the two.
 const RECORD_BYTES_MAX: u64 = 256 * 1024;
@@ -464,7 +480,7 @@ fn key_error(origin: &Path, line: usize, key: &str, cause: impl Into<String>) ->
     HarnessError::new(
         format!(
             "parsing the expectation record {} at line {line}, key `{key}`",
-            origin.display()
+            shown_path(origin)
         ),
         cause,
     )
@@ -476,7 +492,7 @@ fn line_error(origin: &Path, line: usize, cause: impl Into<String>) -> HarnessEr
     HarnessError::new(
         format!(
             "parsing the expectation record {} at line {line}",
-            origin.display()
+            shown_path(origin)
         ),
         cause,
     )
@@ -486,7 +502,7 @@ fn line_error(origin: &Path, line: usize, cause: impl Into<String>) -> HarnessEr
 /// is therefore no line to point at.
 fn record_error(origin: &Path, cause: impl Into<String>) -> HarnessError {
     HarnessError::new(
-        format!("parsing the expectation record {}", origin.display()),
+        format!("parsing the expectation record {}", shown_path(origin)),
         cause,
     )
 }
@@ -633,9 +649,9 @@ fn require_field_within_size(origin: &Path, field: &RawField, key: &str) -> Harn
         key,
         format!(
             "the value is {} bytes, above the {FIELD_BYTES_MAX}-byte limit for a single field; \
-             every field of the format is a short scalar or a golden stdout measured in hundreds \
-             of bytes, so a value this large is a corrupt or adversarial record rather than one \
-             the corpus could contain",
+             the largest golden stdout in the corpus is 2,220 bytes and the largest notes field \
+             a few kilobytes, so a value this large is a corrupt or adversarial record rather \
+             than one the corpus could contain",
             field.value.len()
         ),
     ))
@@ -801,9 +817,9 @@ fn parse_fields(text: &str, origin: &Path) -> HarnessResult<Vec<(&'static KeySpe
                     open.spec.name,
                     format!(
                         "the heredoc body has reached {HEREDOC_LINES_MAX} lines without a closing \
-                         `{HEREDOC_TERMINATOR}`; the longest golden stdout in the corpus is a \
-                         handful of lines, so a body this long is an unterminated heredoc \
-                         swallowing the rest of the file rather than a value"
+                         `{HEREDOC_TERMINATOR}`; the longest heredoc body in the corpus is 126 \
+                         lines, so a body more than an order of magnitude longer is an \
+                         unterminated heredoc swallowing the rest of the file rather than a value"
                     ),
                 ));
             }
@@ -991,9 +1007,10 @@ pub struct CommandSubstitutions {
     /// where the placeholder contributes no argument so the rendered line begins with the artifact
     /// itself.
     ///
-    /// Unlike the optional runner this replaced, `None` here is unambiguous: it can only arise
-    /// from [`Execution::Native`], which the constructor accepts solely for a target the host runs
-    /// natively. A missing emulator cannot reach this field at all.
+    /// `None` is unambiguous here, and that is the point of holding the runner as an
+    /// [`Execution`]-derived value rather than as a bare option a caller could leave empty for any
+    /// reason: it can only arise from [`Execution::Native`], which the constructor accepts solely
+    /// for a target the host runs natively. A missing emulator cannot reach this field at all.
     runner: Option<String>,
 }
 
@@ -1096,16 +1113,6 @@ impl CommandSubstitutions {
     pub fn output(&self) -> &Path {
         Path::new(&self.output)
     }
-
-    /// The emulator that runs this cell's artifact, or `None` when it runs natively.
-    pub fn runner(&self) -> Option<&Path> {
-        self.runner.as_deref().map(Path::new)
-    }
-
-    /// True when this cell's artifact runs directly on the host.
-    pub fn executes_natively(&self) -> bool {
-        self.runner.is_none()
-    }
 }
 
 /// Render one vetted path as the exact text that will become a command-line argument, refusing a
@@ -1143,7 +1150,7 @@ fn require_representable_path(context: &str, role: &str, path: &Path) -> Harness
                  reproduce the cell, and the failure would arrive as a file-not-found from a \
                  command line that reads correctly. Move the checkout, or the tool, to a path that \
                  is valid Unicode",
-                path.display()
+                shown_path(path)
             ),
         )),
     }
@@ -1526,8 +1533,11 @@ impl fmt::Display for MarkerScope {
 /// A divergence that a limitation the repository already documents explains.
 ///
 /// A marker changes how a divergence is **classified**, never whether the feature is
-/// **exercised**: a marked program still compiles and still runs, which is what keeps a
-/// difficult feature under test instead of quietly dropped. The basis is carried as both the
+/// **exercised**: the applicable phases are attempted in order — compile, link, run, compare
+/// — and classification happens at the first terminal outcome or the completed comparison, so
+/// a marker never short-circuits a phase. That is what keeps a difficult feature under test
+/// instead of quietly dropped, including when the divergence being excused is the compile
+/// failing. The basis is carried as both the
 /// original text and the repository-relative path it cites, so the infrastructure test that
 /// audits the register can assert the cited document actually exists.
 /// The fields are private for the same reason the scope's are: this type is the mechanism by which
@@ -1549,8 +1559,10 @@ pub struct ExpectedDivergence {
 }
 
 impl ExpectedDivergence {
-    /// Marker identifier, by convention `XD-<AREA>-<TOPIC>-<NNN>`, for example
-    /// `XD-GCCEXT-CASE-RANGES-001`. Unique across the corpus.
+    /// Marker identifier, by convention `XD-<AREA>-<TOPIC>-<NNN>`. Unique across the corpus. No
+    /// concrete identifier is named here on purpose: the register is the only place a marker
+    /// exists, and quoting a real one in a doc comment would outlive its retirement. There is
+    /// presently no active marker in the corpus.
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -1580,11 +1592,6 @@ impl ExpectedDivergence {
     /// The divergence as observed, so a reader can recognise it without reproducing the run.
     pub fn observed(&self) -> &str {
         &self.observed
-    }
-
-    /// The program that provokes the divergence: the `.c` file, not its record.
-    pub fn program_path(&self) -> &Path {
-        &self.program_path
     }
 
     /// True when this marker's scope covers the given cell and oracle.
@@ -1618,8 +1625,12 @@ impl ExpectedDivergence {
             .and_then(|name| name.to_str());
         match (area, program) {
             (Some(area), Some(program)) => format!("{area}/{program}"),
-            _ => self.program_path.display().to_string(),
+            _ => shown_path(&self.program_path),
         }
+    }
+    /// The program that provokes the divergence: the `.c` file, not its record.
+    pub fn program_path(&self) -> &Path {
+        &self.program_path
     }
 }
 
@@ -1644,6 +1655,17 @@ impl fmt::Display for ExpectedDivergence {
 /// exit status is one the platform can deliver, no flag forbidden in a differential invocation
 /// reached the shared set, and every narrowing of coverage carries a recorded reason. Public
 /// fields would make an unvalidated manifest constructible.
+///
+/// # The validated `shared_flags` list is checked and not retained
+///
+/// The record's declared list is required, parsed, checked against the permitted set, and
+/// cross-checked against both build templates — every flag either template passes must be declared,
+/// and every declared flag must appear in both — all before this value is constructed. The two
+/// templates are then kept verbatim, so the flags a cell actually passes are recoverable from
+/// `bcc_command` and `ref_command`, and a finding's reproduction commands show them literally.
+/// Keeping a second copy of the list beside them would be a field claiming to publish a fact that no
+/// path ever reads, and a reader who found the two disagreeing would have no way to tell which one
+/// the invocation used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     path: PathBuf,
@@ -1652,7 +1674,11 @@ pub struct Manifest {
     description: String,
     targets: Vec<Target>,
     opt_levels: Vec<OptLevel>,
-    shared_flags: Vec<String>,
+    /// The two build templates. The flag set both pass is not stored beside them: the record's
+    /// `shared_flags` declaration is enforced against these templates at parse time by
+    /// [`validate_build_template`], so the templates below are the authority on what each
+    /// compiler is given, and a second copy of the declaration could only ever disagree with
+    /// them.
     bcc_command: String,
     ref_command: String,
     run_command: String,
@@ -1703,21 +1729,12 @@ impl Manifest {
         &self.opt_levels
     }
 
-    /// The flags passed identically to both compilers in a differential invocation.
-    pub fn shared_flags(&self) -> &[String] {
-        &self.shared_flags
-    }
-
     pub fn bcc_command(&self) -> &str {
         &self.bcc_command
     }
 
     pub fn ref_command(&self) -> &str {
         &self.ref_command
-    }
-
-    pub fn run_command(&self) -> &str {
-        &self.run_command
     }
 
     pub fn expect_exit(&self) -> i32 {
@@ -1789,19 +1806,17 @@ impl Manifest {
         self.impl_defined_notes.as_deref()
     }
 
-    /// The golden record: the stdout every cell of this program is expected to produce.
-    pub fn expected_stdout(&self) -> &str {
-        &self.expected_stdout
-    }
-
-    /// The golden record as bytes, which is the form the comparison actually uses, since the
-    /// comparison is byte-exact rather than textual.
+    /// The golden record — the stdout every cell of this program is expected to produce — as the
+    /// bytes oracle (c) compares against.
+    ///
+    /// Deliberately the only accessor for it. There is no textual counterpart, because the
+    /// comparison this record exists for is byte-exact: handing out a `&str` would invite a
+    /// consumer to compare the golden record as text, and a textual comparison silently agrees
+    /// about differences that matter — a trailing carriage return, an invalid sequence normalized
+    /// on the way in, a byte that renders as the same glyph as another. The suite's contract is
+    /// bytes, so this is the form the suite offers.
     pub fn expected_stdout_bytes(&self) -> &[u8] {
         self.expected_stdout.as_bytes()
-    }
-
-    pub fn has_marker(&self) -> bool {
-        self.marker.is_some()
     }
 
     pub fn marker(&self) -> Option<&ExpectedDivergence> {
@@ -1859,14 +1874,55 @@ impl Manifest {
         Ok(cells)
     }
 
+    /// Render this program's compiler-under-test invocation as one quoted shell line.
+    ///
+    /// The reproduction form of [`Manifest::render_bcc_argv`]: the line a report shows and a
+    /// findings script carries, produced by [`render_command_checked`] from the same argument
+    /// vector the harness executed, so a maintainer reads the command that actually ran rather
+    /// than a re-derivation of it.
+    ///
+    /// # Errors
+    ///
+    /// Every rejection is [`render_command_argv`]'s. A template token that is placeholder-shaped
+    /// but is not a placeholder this harness recognises, a concrete reference-driver spelling
+    /// naming an architecture other than this cell's, and a template that expands to no argument
+    /// at all are all refused: a half-expanded line cannot reproduce a cell, so it is rejected
+    /// rather than recorded.
     pub fn render_bcc_command(&self, subs: &CommandSubstitutions) -> HarnessResult<String> {
         render_command_checked(&self.bcc_command, subs)
     }
 
+    /// Render this program's reference-compiler invocation as one quoted shell line.
+    ///
+    /// The reproduction form of [`Manifest::render_ref_argv`], with the same provenance.
+    ///
+    /// # Errors
+    ///
+    /// [`render_command_argv`]'s rejections, plus the one specific to this arm: a
+    /// reference-driver placeholder has nothing to expand to when `subs` carries no reference
+    /// driver. That is a caller defect rather than a corpus defect — where oracle (a) is
+    /// unavailable the cell is reported unavailable for that oracle, and no reference command is
+    /// rendered for it at all.
     pub fn render_ref_command(&self, subs: &CommandSubstitutions) -> HarnessResult<String> {
         render_command_checked(&self.ref_command, subs)
     }
 
+    /// The recorded run line, rendered for a reader.
+    ///
+    /// Unlike the two compile lines, this is not derived from a vector the harness executes — see
+    /// [`Manifest::render_bcc_argv`] for why the executed runner comes from the attested capability
+    /// record rather than from this template. The two agree in every ordinary configuration, and
+    /// the recorded environment fingerprint beside a finding is what lets a reader confirm it.
+    ///
+    /// The `<runner>` placeholder contributes the emulator on an emulated target and nothing at all
+    /// on a natively executing one, so the line begins with the artifact itself rather than with an
+    /// empty word.
+    ///
+    /// # Errors
+    ///
+    /// [`render_command_argv`]'s rejections: an unrecognised placeholder-shaped token, a concrete
+    /// reference-driver spelling belonging to another architecture, or an expansion that yields no
+    /// argument.
     pub fn render_run_command(&self, subs: &CommandSubstitutions) -> HarnessResult<String> {
         render_command_checked(&self.run_command, subs)
     }
@@ -1877,18 +1933,83 @@ impl Manifest {
     /// shell, so no character in a path can be interpreted as grammar. The string renderers above
     /// exist for reports and reproduction scripts and are derived from this same vector, which is
     /// what keeps the line a maintainer reads identical to the command that actually ran.
+    ///
+    /// The *run* line is deliberately the exception. [`Manifest::render_run_command`] renders the
+    /// recorded template for a reader and [`Manifest::render_run_argv`] renders it as a vector the
+    /// driver compares against the one it launched, but neither is what *chooses* the runner: the
+    /// argument vector that actually executes an artifact is assembled by `execute.rs` from the
+    /// runner in the capability record — the one this process discovered and attested itself. A
+    /// vector built from the template would take the runner from a corpus file instead, which is
+    /// the one input a record must not be able to choose: the attestation exists precisely so that
+    /// what runs a cell is not named by the material under test.
+    ///
+    /// # Errors
+    ///
+    /// See [`render_command_argv`]. A placeholder-shaped token the harness does not recognise, a
+    /// concrete reference-driver spelling for another architecture, and an expansion yielding no
+    /// argument are each refused rather than passed to a compiler as literal text.
     pub fn render_bcc_argv(&self, subs: &CommandSubstitutions) -> HarnessResult<Vec<String>> {
         render_command_argv(&self.bcc_command, subs)
     }
 
     /// Build this program's reference-compiler invocation as an argument vector.
+    ///
+    /// # Errors
+    ///
+    /// See [`render_command_argv`], and additionally: a reference-driver placeholder cannot be
+    /// expanded when `subs` carries no reference driver, so this is rendered only for a cell whose
+    /// reference driver resolved.
     pub fn render_ref_argv(&self, subs: &CommandSubstitutions) -> HarnessResult<Vec<String>> {
         render_command_argv(&self.ref_command, subs)
     }
 
     /// Build this program's execution invocation as an argument vector.
+    ///
+    /// # Errors
+    ///
+    /// See [`render_command_argv`]. The `<runner>` placeholder contributes no element on a
+    /// natively executing target, which is why an empty expansion — the one case that would leave
+    /// no program to run — is refused there rather than silently accepted.
     pub fn render_run_argv(&self, subs: &CommandSubstitutions) -> HarnessResult<Vec<String>> {
         render_command_argv(&self.run_command, subs)
+    }
+
+    pub fn run_command(&self) -> &str {
+        &self.run_command
+    }
+
+    /// The shared flags this record passes, recovered from its own build template.
+    ///
+    /// Derived rather than stored, which is what the type's own contract requires: the validated
+    /// list is checked against the permitted set and against both templates before a `Manifest`
+    /// exists and is then deliberately not retained, because a second copy beside the templates
+    /// would be a field claiming to publish a fact no invocation reads. Recovering it here keeps
+    /// one source of truth — the template the cell actually renders — so a report can state the
+    /// flags without a reader having to wonder which of two lists the build used.
+    ///
+    /// Returned in template order, and only switches this layer is entitled to choose
+    /// ([`RECORD_SHARED_FLAGS_PERMITTED`]) are recognised, so a placeholder, a path or the output
+    /// selection the harness owns can never be reported as a record's choice.
+    pub fn shared_flags(&self) -> Vec<String> {
+        self.bcc_command
+            .split_whitespace()
+            .filter(|token| RECORD_SHARED_FLAGS_PERMITTED.contains(token))
+            .map(String::from)
+            .collect()
+    }
+
+    pub fn has_marker(&self) -> bool {
+        self.marker.is_some()
+    }
+
+    /// The golden record as text, for quoting into a finding's manifest.
+    ///
+    /// Never for comparing: the comparison reads [`Manifest::expected_stdout_bytes`], and the
+    /// reasoning there is why this one exists only to be *printed*. The record is required to be
+    /// valid UTF-8 by the parser, so the text and the bytes are two views of the same value rather
+    /// than a conversion that could lose anything.
+    pub fn expected_stdout(&self) -> &str {
+        &self.expected_stdout
     }
 }
 
@@ -2381,16 +2502,16 @@ fn is_literal_opt_level(token: &str) -> bool {
 ///
 /// # A deviation is a removal from a fixed gate, never a compiler invocation
 ///
-/// The rule this replaces accepted any token beginning with a hyphen, which is not a constraint
-/// at all: these flags are passed to a real compiler, so such a rule let a record hand the
-/// reference compiler an option that loads a shared object into the compiler process
-/// (`-fplugin=`), substitutes the assembler or the compiler proper (`-B`), replaces the driver's
-/// built-in specification (`-specs=`), changes what is compiled or where the output lands (`-I`,
-/// `-include`, `-D`, `-o`, a bare filename), or simply turned the audit off while leaving it
-/// apparently configured (`-w`, `-fsyntax-only`, or any `-Wno-` spelling). An audit that can be
-/// disabled by the record it is auditing is not an audit, and since the audit is what establishes
-/// that a program is free of undefined behaviour, disabling it silently removes the precondition
-/// under which any divergence this suite reports means anything at all.
+/// Accepting any token that begins with a hyphen would not be a constraint at all: these flags are
+/// passed to a real compiler, so such a rule would let a record hand the reference compiler an
+/// option that loads a shared object into the compiler process (`-fplugin=`), substitutes the
+/// assembler or the compiler proper (`-B`), replaces the driver's built-in specification
+/// (`-specs=`), changes what is compiled or where the output lands (`-I`, `-include`, `-D`, `-o`, a
+/// bare filename), or simply turn the audit off while leaving it apparently configured (`-w`,
+/// `-fsyntax-only`, or any `-Wno-` spelling). An audit that can be disabled by the record it is
+/// auditing is not an audit, and since the audit is what establishes that a program is free of
+/// undefined behaviour, disabling it silently removes the precondition under which any divergence
+/// this suite reports means anything at all.
 ///
 /// Modelling a deviation as a set of removals closes all of that at once — not by listing the
 /// dangerous spellings, which would be a race against the compiler's option table, but by making
@@ -2501,11 +2622,9 @@ fn parse_ub_audit_flags(origin: &Path, raw: &RawField, area: &str) -> HarnessRes
     // Every member the deviation omits must be one of the authorized removals. Expressed as
     // "which omissions are not permitted" rather than "which flags are banned", so the rule
     // stays closed: the set it draws from is fixed by the gate itself.
-    let unauthorized: Vec<&'static str> = UB_AUDIT_GATE_DEFAULT
-        .iter()
-        .copied()
+    let unauthorized: Vec<&'static str> = ub_audit_gate_required()
+        .into_iter()
         .filter(|member| !declared.iter().any(|flag| flag == member))
-        .filter(|member| !is_ub_audit_gate_removable(member))
         .collect();
     if !unauthorized.is_empty() {
         return Err(key_error(
@@ -2571,6 +2690,75 @@ fn parse_ub_audit_flags(origin: &Path, raw: &RawField, area: &str) -> HarnessRes
             UB_GATE_WITHOUT_PEDANTIC.join(" "),
             UB_GATE_WITHOUT_CONVERSION.join(" "),
             UB_GATE_DEFAULT.join(" ")
+        ),
+    ))
+}
+
+/// Require that every flag a declared gate drops is named, by its exact spelling, in
+/// `impl_defined_notes`.
+///
+/// `impl_defined_notes` is the **single canonical field** for the reason behind a warning-gate
+/// deviation, and this is what makes that a contract rather than a convention. Three things settle
+/// the choice of field. It is the field a record already has to carry whenever it narrows anything
+/// at all, so a gate deviation — which is a narrowing — has no second place to go. `ub_notes` is
+/// reserved for a different obligation, the written undefined-behaviour-freedom argument, and a
+/// field that answers two questions answers neither reliably. And accepting either field would mean
+/// a reviewer looking for the reason has two places to look and no guarantee about which holds it.
+///
+/// The general narrowing check proves only that *some* reason is recorded. This proves the reason
+/// accounts for the flag actually removed, which is the part a reviewer needs: a record that
+/// explains a restricted target list while silently dropping a diagnostic has recorded nothing
+/// about the removal that matters.
+///
+/// Matching is on the flag's exact spelling including its leading hyphen, so prose that happens to
+/// use the word in another sense — "conversion", "pedantic" — cannot pass for an explanation. The
+/// spellings cannot shadow one another either: no member of the default gate is a substring of
+/// another member.
+///
+/// # Errors
+///
+/// Fails naming the record, every dropped flag, and the flags the notes do not account for. A
+/// deviation without a recorded reason is a defect in the **test program**, not in the compiler: the
+/// gate's whole value is its strictness, and an unexplained relaxation quietly re-admits the
+/// undefined behaviour this suite depends on excluding in order to attribute a divergence at all.
+fn require_gate_deviation_is_explained(
+    origin: &Path,
+    gate: &[String],
+    impl_defined_notes: Option<&str>,
+) -> HarnessResult<()> {
+    let dropped: Vec<&str> = UB_GATE_DEFAULT
+        .iter()
+        .copied()
+        .filter(|member| !gate.iter().any(|flag| flag == member))
+        .collect();
+    if dropped.is_empty() {
+        return Ok(());
+    }
+
+    let notes = impl_defined_notes.unwrap_or_default();
+    let unexplained: Vec<&str> = dropped
+        .iter()
+        .copied()
+        .filter(|flag| !notes.contains(*flag))
+        .collect();
+    if unexplained.is_empty() {
+        return Ok(());
+    }
+
+    Err(record_error(
+        origin,
+        format!(
+            "the warning gate declared here drops {} from the default gate ({}), but \
+             `impl_defined_notes` does not name {} anywhere, so the removal has no recorded reason. \
+             A DEVIATION WITHOUT A RECORDED REASON IS ITSELF A DEFECT IN THE TEST. \
+             `impl_defined_notes` is the one field this suite reads that reason from — `ub_notes` \
+             carries the undefined-behaviour-freedom argument and is not searched for it — so name \
+             each dropped flag there by its exact spelling and state why this program cannot be \
+             compiled with it. Add or extend {}",
+            comma_separated(&dropped),
+            UB_GATE_DEFAULT.join(" "),
+            comma_separated(&unexplained),
+            required_form_of("impl_defined_notes")
         ),
     ))
 }
@@ -3244,6 +3432,35 @@ fn known_area_names() -> String {
     comma_separated(&names)
 }
 
+/// Where the expected `program` and `area` of a record come from.
+///
+/// A record always declares both, and both are always checked. This decides what they are checked
+/// *against*, which differs between the two places a record is legitimately read from:
+///
+/// - Inside the corpus, the record's own path is the authority: a record is `<program>.expected`
+///   inside `<area>/`, so the declared values must equal the file stem and the containing directory
+///   name. Nothing outside the record is needed or trusted.
+/// - Inside a finding directory, the path carries no identity — the copy is always
+///   `reproducer.expected` inside a directory named after the finding — so the reader states the
+///   identity it expects and the record is validated against that.
+///
+/// Modelling this as a two-variant choice rather than an "skip the check" flag is deliberate: there
+/// is no configuration in which the identity goes unchecked, so no caller can obtain one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordIdentity<'a> {
+    /// Derive the expected identity from the record's own path: stem is the program, parent
+    /// directory is the area. The rule for every record in the corpus.
+    FromPath,
+    /// Check the declared identity against values the caller supplies, for a record read from
+    /// outside the corpus whose path cannot carry one.
+    Declared {
+        /// The feature area the reader expects the record to declare.
+        area: &'a str,
+        /// The program the reader expects the record to declare.
+        program: &'a str,
+    },
+}
+
 fn record_stem(origin: &Path) -> HarnessResult<&str> {
     origin
         .file_stem()
@@ -3806,7 +4023,11 @@ fn validate_templates(
 /// produce, so none of them is tolerated: a divergence is evidence about the compiler only when
 /// the program that provoked it is well formed and compared under oracles whose exclusions each
 /// carry a recorded reason.
-fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> HarnessResult<Manifest> {
+fn assemble(
+    fields: Vec<(&'static KeySpec, RawField)>,
+    origin: &Path,
+    identity: RecordIdentity<'_>,
+) -> HarnessResult<Manifest> {
     for spec in KEYS
         .iter()
         .filter(|spec| matches!(spec.presence, Presence::Required))
@@ -3825,34 +4046,69 @@ fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> Harness
     }
 
     let program_field = required_field(&fields, origin, "program")?;
-    let stem = record_stem(origin)?;
-    if program_field.value != stem {
-        return Err(key_error(
-            origin,
-            program_field.line,
-            "program",
-            format!(
-                "the record claims to govern {:?} but its own file stem is {stem:?}; the two must \
-                 agree, because this is the cheapest guard there is against a record copied from \
-                 another program and only partly edited",
-                program_field.value
-            ),
-        ));
-    }
-
     let area_field = required_field(&fields, origin, "area")?;
-    let directory = record_directory(origin)?;
-    if area_field.value != directory {
-        return Err(key_error(
-            origin,
-            area_field.line,
-            "area",
-            format!(
-                "the record claims the area {:?} but lives in {directory:?}; the two must agree, \
-                 because the area names the report file the program's verdicts are written to",
-                area_field.value
-            ),
-        ));
+    match identity {
+        RecordIdentity::FromPath => {
+            let stem = record_stem(origin)?;
+            if program_field.value != stem {
+                return Err(key_error(
+                    origin,
+                    program_field.line,
+                    "program",
+                    format!(
+                        "the record claims to govern {:?} but its own file stem is {stem:?}; the \
+                         two must agree, because this is the cheapest guard there is against a \
+                         record copied from another program and only partly edited",
+                        program_field.value
+                    ),
+                ));
+            }
+            let directory = record_directory(origin)?;
+            if area_field.value != directory {
+                return Err(key_error(
+                    origin,
+                    area_field.line,
+                    "area",
+                    format!(
+                        "the record claims the area {:?} but lives in {directory:?}; the two must \
+                         agree, because the area names the report file the program's verdicts are \
+                         written to",
+                        area_field.value
+                    ),
+                ));
+            }
+        }
+        RecordIdentity::Declared { area, program } => {
+            if program_field.value != program {
+                return Err(key_error(
+                    origin,
+                    program_field.line,
+                    "program",
+                    format!(
+                        "the record claims to govern {:?} but the caller reading it expects {:?}. \
+                         This record was read outside the corpus, where the file stem carries no \
+                         identity, so the expected identity was supplied by the caller instead. A \
+                         disagreement means the record does not describe the program it was \
+                         emitted beside",
+                        program_field.value, program
+                    ),
+                ));
+            }
+            if area_field.value != area {
+                return Err(key_error(
+                    origin,
+                    area_field.line,
+                    "area",
+                    format!(
+                        "the record claims the area {:?} but the caller reading it expects {area:?}. \
+                         This record was read outside the corpus, where the containing directory \
+                         carries no identity, so the expected area was supplied by the caller \
+                         instead",
+                        area_field.value
+                    ),
+                ));
+            }
+        }
     }
     if AreaSpec::lookup(&area_field.value).is_none() {
         return Err(key_error(
@@ -3995,6 +4251,9 @@ fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> Harness
             ),
         ));
     }
+    if let Some(gate) = &ub_audit_flags {
+        require_gate_deviation_is_explained(origin, gate, impl_defined_notes.as_deref())?;
+    }
 
     let source = origin.with_extension(SOURCE_EXTENSION);
     let marker = parse_marker(&fields, origin, &source)?;
@@ -4015,7 +4274,6 @@ fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> Harness
         description: description_field.value.clone(),
         targets,
         opt_levels,
-        shared_flags,
         bcc_command: bcc_field.value.clone(),
         ref_command: ref_field.value.clone(),
         run_command: run_field.value.clone(),
@@ -4036,9 +4294,57 @@ fn assemble(fields: Vec<(&'static KeySpec, RawField)>, origin: &Path) -> Harness
 /// it must be the record's real path even when the text was obtained some other way. Keeping the
 /// pure parser separate from the reader is what lets the format's behaviour be inspected — and
 /// every rejection exercised — without laying a single file down.
+///
+/// # Errors
+///
+/// Two layers reject, and every rejection is a corpus defect rather than a condition an
+/// environment can legitimately produce. The grammar layer refuses a malformed key line, an
+/// unknown or duplicated key, a missing required key, an unterminated or empty heredoc, an
+/// oversized field, and a control or formatting character in a value. The assembly layer then
+/// refuses a record whose declared program does not equal `origin`'s file stem or whose declared
+/// area does not equal its containing directory, an unknown feature area, a command template that
+/// is not the exact shape its key requires, a target or optimization-level restriction with no
+/// recorded reason, an expected exit status outside the permitted range, and a malformed
+/// expected-divergence marker.
 pub fn parse_str(text: &str, origin: &Path) -> HarnessResult<Manifest> {
     let fields = parse_fields(text, origin)?;
-    assemble(fields, origin)
+    assemble(fields, origin, RecordIdentity::FromPath)
+}
+
+/// Parse and validate a record that does **not** live in the corpus, against an identity the caller
+/// already knows.
+///
+/// # Why this exists
+///
+/// A record's declared `program` and `area` are normally checked against its own file stem and
+/// containing directory. That is the cheapest possible guard against a record copied from another
+/// program and only partly edited, and it is exactly right for the corpus.
+///
+/// It is also unusable for a **finding artifact**. A finding directory holds a copy of the program
+/// and a copy of its record under fixed names — `reproducer.c` beside `reproducer.expected` — inside
+/// a directory named after the finding. The copy's stem is therefore `reproducer` and its parent is
+/// a finding identifier, so the path carries no corpus identity at all, and the path-derived check
+/// would reject a record that is in every other respect the correct and complete one.
+///
+/// Dropping the identity check for such a record would be the wrong repair: the requirement that a
+/// finding be reproducible depends on the emitted pair being genuinely parseable and genuinely about
+/// the program beside it. So the check is not weakened, it is **re-based**: the caller — which
+/// derived the finding from a cell and therefore knows the area and program with certainty — states
+/// the identity it expects, and the record is validated against that instead of against its path.
+/// Every other rule in the format applies unchanged.
+///
+/// # Errors
+///
+/// Returns an explanatory failure when the record does not parse, when any other validation rule is
+/// violated, or when its declared identity disagrees with the one supplied here.
+pub fn parse_standalone_str(
+    text: &str,
+    origin: &Path,
+    area: &str,
+    program: &str,
+) -> HarnessResult<Manifest> {
+    let fields = parse_fields(text, origin)?;
+    assemble(fields, origin, RecordIdentity::Declared { area, program })
 }
 
 /// Read, parse and validate a record from disk.
@@ -4056,8 +4362,20 @@ pub fn parse_str(text: &str, origin: &Path) -> HarnessResult<Manifest> {
 /// correct — while every report still named the corpus path. The resolved path is what the
 /// manifest carries onward, so the identity checks and every later diagnostic name the file that
 /// was actually read.
+///
+/// # Errors
+///
+/// Three stages reject. Containment refuses a path that is not an existing regular file, is a
+/// symbolic link, does not carry the record extension, or does not resolve strictly beneath the
+/// corpus root. Reading refuses a file whose size exceeds [`RECORD_BYTES_MAX`] — checked before
+/// the open and again on the reader, so a file that grows in between is caught — one that cannot
+/// be opened or read, and one whose bytes are not valid UTF-8, with the first invalid offset
+/// named. Parsing then applies every rejection [`parse_str`] documents.
 pub fn load(expected_path: &Path) -> HarnessResult<Manifest> {
-    let context = format!("reading the expectation record {}", expected_path.display());
+    let context = format!(
+        "reading the expectation record {}",
+        shown_path(expected_path)
+    );
     let resolved = require_contained_corpus_file(
         &context,
         "expectation record",
@@ -4066,6 +4384,104 @@ pub fn load(expected_path: &Path) -> HarnessResult<Manifest> {
     )?;
     let text = read_record_text(&resolved)?;
     parse_str(&text, &resolved)
+}
+
+/// Read, parse and validate a **reproducer** record from a finding's artifact directory.
+///
+/// This is the function that makes a finding's central promise true. Every finding ships
+/// `reproducer.c` beside `reproducer.expected` precisely "so the pair remains runnable by the
+/// harness" — and a promise that has no code path behind it is worth nothing. [`load`] cannot serve
+/// here for two independent reasons, and both are properties of where a finding lives rather than
+/// of what it contains: a reproducer resolves inside a findings directory rather than inside the
+/// corpus, and its path names the finding rather than the program (see
+/// [`RecordIdentity::Declared`], and [`parse_standalone_str`] for why the identity is supplied by
+/// the caller instead of being read off the path).
+///
+/// Containment is enforced against the two directories a reproducer may legitimately occupy, and
+/// nowhere else:
+///
+/// - the generated set beneath [`findings_root`], written by the current run;
+/// - the curated set beneath the corpus's `findings` directory, promoted by a human after review
+///   and committed as a deliverable.
+///
+/// Both are checked with the same [`ensure_within`] the corpus loader uses, after the same
+/// [`require_regular_file`], so "inside a findings directory" is decided by exactly the machinery
+/// that decides "inside the corpus" — a reproducer is read only when it is an absolute path to a
+/// regular, non-symbolic-link file that genuinely resolves beneath one of those two roots. That
+/// matters for the same reason it matters for a corpus record: a record dictates the commands a
+/// cell executes and the output it is judged against, so one read from an arbitrary location would
+/// decide what gets compiled and what counts as correct.
+///
+/// A path beneath neither root is refused with both roots named, because the most likely cause is a
+/// caller reaching for the wrong loader, and the fix is to say which one.
+pub fn load_replay(record_path: &Path, area: &str, program: &str) -> HarnessResult<Manifest> {
+    let context = format!(
+        "reading the reproducer expectation record {}",
+        record_path.display()
+    );
+
+    if !record_path.is_absolute() {
+        return Err(HarnessError::new(
+            context,
+            format!(
+                "the reproducer record path {} is not absolute; a finding's artifacts are addressed \
+                 from the package manifest directory so that replaying one never depends on the \
+                 working directory",
+                record_path.display()
+            ),
+        ));
+    }
+
+    let scoped = format!("{context}: the reproducer record path");
+    require_regular_file(&scoped, record_path)?;
+
+    let generated = findings_root();
+    let curated = curated_findings_root();
+    let resolved = match ensure_within(&scoped, &generated, record_path) {
+        Ok(resolved) => resolved,
+        Err(_) => ensure_within(&scoped, &curated, record_path).map_err(|_| {
+            HarnessError::new(
+                context.clone(),
+                format!(
+                    "{} does not resolve beneath either directory a reproducer may occupy: the \
+                     generated set at {} or the curated set at {}; a corpus record is loaded with \
+                     the corpus loader instead, which additionally requires the record's own path \
+                     to restate the program's identity",
+                    record_path.display(),
+                    generated.display(),
+                    curated.display()
+                ),
+            )
+        })?,
+    };
+
+    let found = resolved
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(String::from);
+    if found.as_deref() != Some(RECORD_EXTENSION) {
+        return Err(HarnessError::new(
+            context,
+            format!(
+                "the reproducer record path {} does not have the required extension \
+                 {RECORD_EXTENSION:?}; a finding ships a .{SOURCE_EXTENSION} reproducer paired with \
+                 a sibling .{RECORD_EXTENSION} record",
+                resolved.display()
+            ),
+        ));
+    }
+
+    let text = read_record_text(&resolved)?;
+    parse_standalone_str(&text, &resolved, area, program)
+}
+
+/// The committed, curated findings directory inside the corpus.
+///
+/// Named in exactly one place so the replay loader and the prose that documents it cannot drift.
+/// This module only ever **reads** beneath it; writing into the curated set is reserved for a human
+/// promoting a reviewed finding, and no run may touch it.
+fn curated_findings_root() -> PathBuf {
+    corpus_root().join(CURATED_FINDINGS_DIR_NAME)
 }
 
 /// Read a record's text with every read bounded.
@@ -4087,7 +4503,7 @@ pub fn load(expected_path: &Path) -> HarnessResult<Manifest> {
 fn read_record_text(path: &Path) -> HarnessResult<String> {
     use std::io::Read;
 
-    let context = format!("reading the expectation record {}", path.display());
+    let context = format!("reading the expectation record {}", shown_path(path));
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         HarnessError::new(
             context.clone(),
@@ -4096,7 +4512,7 @@ fn read_record_text(path: &Path) -> HarnessResult<String> {
                  sibling `.{RECORD_EXTENSION}` record holding its command templates and its golden \
                  output, and a record that cannot be read is a corpus defect rather than a reason \
                  to skip the program",
-                path.display()
+                shown_path(path)
             ),
         )
     })?;
@@ -4104,11 +4520,10 @@ fn read_record_text(path: &Path) -> HarnessResult<String> {
         return Err(HarnessError::new(
             context,
             format!(
-                "the record is {} bytes, above the {RECORD_BYTES_MAX}-byte limit; a record holds a \
-                 handful of short scalar fields and a golden stdout measured in hundreds of bytes, \
-                 so a file this large is corrupt or adversarial rather than one the corpus could \
-                 contain, and reading it would let a data file decide how much memory the suite \
-                 uses",
+                "the record is {} bytes, above the {RECORD_BYTES_MAX}-byte limit; the largest \
+                 record in the committed corpus is roughly ten kilobytes, so a file this large is \
+                 corrupt or adversarial rather than one the corpus could contain, and reading it \
+                 would let a data file decide how much memory the suite uses",
                 metadata.len()
             ),
         ));
@@ -4117,7 +4532,7 @@ fn read_record_text(path: &Path) -> HarnessResult<String> {
     let file = fs::File::open(path).map_err(|error| {
         HarnessError::new(
             context.clone(),
-            format!("{} could not be opened: {error}", path.display()),
+            format!("{} could not be opened: {error}", shown_path(path)),
         )
     })?;
     let mut bytes: Vec<u8> = Vec::new();
@@ -4128,7 +4543,7 @@ fn read_record_text(path: &Path) -> HarnessResult<String> {
     bounded.read_to_end(&mut bytes).map_err(|error| {
         HarnessError::new(
             context.clone(),
-            format!("{} could not be read: {error}", path.display()),
+            format!("{} could not be read: {error}", shown_path(path)),
         )
     })?;
     if bytes.len() as u64 > RECORD_BYTES_MAX {
@@ -4162,8 +4577,19 @@ fn read_record_text(path: &Path) -> HarnessResult<String> {
 /// requirement "source file, build commands, and expected output recorded together" true, and a
 /// program without its half of that pairing cannot be reproduced by hand or judged by the
 /// golden-record oracle.
+///
+/// # Errors
+///
+/// Fails when `c_path` does not carry the program extension, when the program itself does not
+/// pass containment, when the derived sibling record is absent or is not a regular file, and for
+/// every reason [`load`] documents once the record path has been derived. The program is resolved
+/// before the record path is derived from it, so a link or an escape is refused before it can be
+/// used to legitimise a record path outside the corpus.
 pub fn load_for_source(c_path: &Path) -> HarnessResult<Manifest> {
-    let context = format!("resolving the expectation record for {}", c_path.display());
+    let context = format!(
+        "resolving the expectation record for {}",
+        shown_path(c_path)
+    );
     let extension = c_path.extension().and_then(|value| value.to_str());
     if extension != Some(SOURCE_EXTENSION) {
         return Err(HarnessError::new(
@@ -4199,29 +4625,6 @@ pub fn load_for_source(c_path: &Path) -> HarnessResult<Manifest> {
     load(&record)
 }
 
-/// Every program in one feature area, resolved and sorted so that run order is deterministic.
-///
-/// The returned paths are resolved, matching [`load`] and the harness root's cell resolution, so
-/// that discovery, record loading and cell identity all agree on the path a program is known by.
-///
-/// The scan is strict about what an area directory may contain, and nothing that could carry a
-/// program is passed over silently. Programs are the `.c` files; the extensions in
-/// [`AREA_COMPANION_EXTENSIONS`] — which is the expectation record and nothing else — are
-/// recognised companions, and each one must pair with a same-stem program by
-/// [`require_paired_companions`]; the whitelisted names in [`AREA_PLACEHOLDER_NAMES`] are ignored
-/// by name rather than by pattern. Everything else — an unrecognised extension, a dot-prefixed
-/// entry, a nested directory, a symbolic link — is a hard error.
-///
-/// That strictness is load-bearing rather than fussy. It mechanically enforces the rule that the
-/// corpus tree contains no `.rs` file anywhere, which is what keeps the corpus invisible to the
-/// build system and the suite free of any package-manifest change. And each rejection closes a way
-/// for a program to disappear from the matrix without a word: an unrecognised extension catches a
-/// program misnamed; a dot-prefixed entry is rejected rather than skipped, because a blanket skip
-/// means renaming `007_x.c` to `.007_x.c` removes twelve cells from the matrix while the run still
-/// reports success; a nested directory is rejected because an area contains files and nothing else,
-/// the corpus's genuine subdirectories being siblings of the areas rather than inside one; and a
-/// symbolic link is rejected rather than followed, for the reason given in
-/// [`require_contained_corpus_file`].
 /// Reject a companion file in a feature area that no program claims.
 ///
 /// Every recognised companion is an expectation record, and a record governs exactly one program:
@@ -4271,6 +4674,39 @@ fn require_paired_companions(
     ))
 }
 
+/// Every program in one feature area, resolved and sorted so that run order is deterministic.
+///
+/// The returned paths are resolved, matching [`load`] and the harness root's cell resolution, so
+/// that discovery, record loading and cell identity all agree on the path a program is known by.
+///
+/// The scan is strict about what an area directory may contain, and nothing that could carry a
+/// program is passed over silently. Programs are the `.c` files; the extensions in
+/// [`AREA_COMPANION_EXTENSIONS`] — which is the expectation record and nothing else — are
+/// recognised companions, and each one must pair with a same-stem program by
+/// [`require_paired_companions`]; the whitelisted names in [`AREA_PLACEHOLDER_NAMES`] are ignored
+/// by name rather than by pattern. Everything else — an unrecognised extension, a dot-prefixed
+/// entry, a nested directory, a symbolic link — is a hard error.
+///
+/// That strictness is load-bearing rather than fussy. It mechanically enforces the rule that the
+/// corpus tree contains no `.rs` file anywhere, which is what keeps the corpus invisible to the
+/// build system and the suite free of any package-manifest change. And each rejection closes a way
+/// for a program to disappear from the matrix without a word: an unrecognised extension catches a
+/// program misnamed; a dot-prefixed entry is rejected rather than skipped, because a blanket skip
+/// means renaming `007_x.c` to `.007_x.c` removes twelve cells from the matrix while the run still
+/// reports success; a nested directory is rejected because an area contains files and nothing else,
+/// the corpus's genuine subdirectories being siblings of the areas rather than inside one; and a
+/// symbolic link is rejected rather than followed, for the reason given in
+/// [`require_contained_corpus_file`].///
+/// # Errors
+///
+/// Fails when `area` is not one of the corpus's feature areas, when the corpus root cannot be
+/// resolved, and when the area's own directory is absent or unreadable — an area of the corpus is
+/// never optional, so a missing one is a corpus defect rather than a smaller matrix. Within the
+/// directory it fails on an entry that cannot be read, a name that is not valid UTF-8, a
+/// dot-prefixed entry, a symbolic link, a nested directory, anything that is not a regular file,
+/// an extension that is neither a program nor a recognised companion, a program that does not
+/// resolve strictly beneath the corpus root, a companion record whose stem matches no program in
+/// the area, and an area holding no program at all.
 pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
     let name = area.trim();
     if AreaSpec::lookup(name).is_none() {
@@ -4291,7 +4727,7 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
             format!(
                 "{} could not be read: {error}; the corpus is discovered by scanning this \
                  directory, so an area that is absent or unreadable is a corpus defect",
-                directory.display()
+                shown_path(&directory)
             ),
         )
     })?;
@@ -4308,7 +4744,7 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
                 format!("discovering the programs of feature area {name:?}"),
                 format!(
                     "an entry of {} could not be read: {error}",
-                    directory.display()
+                    shown_path(&directory)
                 ),
             )
         })?;
@@ -4322,7 +4758,7 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
                     format!(
                         "{} has a name that is not valid UTF-8; every corpus path is written into \
                          reports and reproduction commands, so it must be readable text",
-                        path.display()
+                        shown_path(&path)
                     ),
                 )
             })?;
@@ -4352,7 +4788,7 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
             HarnessError::new(
                 format!("discovering the programs of feature area {name:?}"),
-                format!("{} could not be inspected: {error}", path.display()),
+                format!("{} could not be inspected: {error}", shown_path(&path)),
             )
         })?;
         let file_type = metadata.file_type();
@@ -4440,7 +4876,7 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
             format!(
                 "{} contains no `.{SOURCE_EXTENSION}` program; an empty feature area is a corpus \
                  defect, because no area of the corpus is optional and none may be skipped",
-                directory.display()
+                shown_path(&directory)
             ),
         ));
     }
@@ -4454,6 +4890,11 @@ pub fn discover_area(area: &str) -> HarnessResult<Vec<PathBuf>> {
 /// Consumed by the undefined-behaviour audit, which drives every program through both gates, and
 /// by the register cross-check. A feature area that is absent or empty fails here rather than
 /// shrinking the run quietly.
+///
+/// # Errors
+///
+/// Every rejection [`discover_area`] documents, for whichever area fails first. The areas are
+/// visited in table order, so the same corpus defect is reported the same way on every run.
 pub fn discover_all() -> HarnessResult<Vec<PathBuf>> {
     let mut programs: Vec<PathBuf> = Vec::new();
     for area in AREAS {
@@ -4474,6 +4915,12 @@ pub fn discover_all() -> HarnessResult<Vec<PathBuf>> {
 /// A duplicate identifier is a hard error. Two markers sharing a name would make the register
 /// cross-check ambiguous in one direction and satisfiable by the wrong program in the other, so
 /// the duplicate is reported with both owning programs named.
+///
+/// # Errors
+///
+/// Fails on a duplicate marker identifier, and on every rejection [`discover_all`] and
+/// [`load_for_source`] document — because enumerating the markers means loading every record in
+/// the corpus, a defect in any one of them surfaces here rather than being stepped over.
 pub fn all_markers() -> HarnessResult<Vec<ExpectedDivergence>> {
     let mut markers: Vec<ExpectedDivergence> = Vec::new();
     for program in discover_all()? {

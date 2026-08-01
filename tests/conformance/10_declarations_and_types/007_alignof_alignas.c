@@ -29,7 +29,9 @@
  * mandatory audit gate escalates to an error; the two-step form never crosses
  * one.  This matches the carrier discipline used by
  * 05_pointers/007_casts_roundtrip.c.  uintptr_t is not used because it would
- * require stdint.h and no header may be included. */
+ * require stdint.h, and this program includes no header: the corpus's only
+ * sanctioned inclusion is area 07's <stdarg.h>, and stdint.h, though bundled,
+ * is not sanctioned here. */
 
 int printf(const char *, ...);
 

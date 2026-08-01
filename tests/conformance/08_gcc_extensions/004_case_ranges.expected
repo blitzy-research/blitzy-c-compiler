@@ -31,6 +31,18 @@ extension, which is by definition not standard C, and -pedantic exists precisely
 such constructs: with it in force the program could not be compiled at all and the feature
 would go untested, which constraint C3 forbids.  Every other member of the gate is
 retained, including -Werror, so no other class of defect in this program is downgraded.
+
+No expected-divergence marker is attached, and that is deliberate.  Case ranges are absent
+from every documented extension inventory in this repository, but an omission from an
+inventory is not a documented limitation: it does not say the frontend rejects the
+construct, only that no inventory mentions it.  A marker minted on that basis would claim a
+divergence nobody has observed, and if bcc accepts case ranges the cell would agree, the
+verdict would be XPASS and the run would fail on a mistake in the test material rather than
+a defect in the compiler.  Until a repository artifact explicitly documents the limitation
+and a real divergence has been observed and reproduced, a divergence here is a FINDING,
+which is exactly what requirement 6 defines a finding to be.  The analysis, the inventory
+evidence and the conditions for minting a marker later are recorded in
+tests/conformance/EXPECTED_DIVERGENCES.md section 4.1.
 END
 expected_stdout    <<END
 cr_bucket_neg=10
@@ -51,18 +63,4 @@ cr_fall_high=100
 cr_fall_none=0
 cr_runtime_bucket=2
 cr_runtime_hex=12
-END
-
-expected_divergence.id       = XD-GCCEXT-CASE-RANGES-001
-expected_divergence.class    = compile_failure
-expected_divergence.scope    = oracle_a; all targets; all opt levels
-expected_divergence.basis    = docs/project-guide.md, the GCC extension inventory enumerates __attribute__, statement expressions, typeof, computed goto and inline assembly, and omits case ranges
-expected_divergence.observed <<END
-The documented extension inventory does not list case ranges among the GCC
-extensions the frontend accepts, so a compile failure on a case-range label is
-traceable to that documented gap rather than to an unexplained defect.  The
-reference compiler accepts the construct and prints the stdout recorded below.
-The program is written and executed regardless, because constraint C3 forbids
-excluding a feature merely because it may be unimplemented; if the divergence does
-not occur, this marker is stale and must be retired.
 END

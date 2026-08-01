@@ -41,11 +41,35 @@ enumerator in this program is therefore kept strictly inside int range. The extr
 exactly the int minimum (B_LOW) and the int maximum (B_HIGH), and no other enumerator comes
 near either.
 
-NO RAW ENUM SIZE IS PRINTED. The compatible type of an enumeration is implementation-defined
-even for values within int range, so the program prints only the relation sizeof(enum color)
-== sizeof(int) as a 0 or 1 value, never a raw size. Every enumerator is also explicitly cast
-to int before printing, which normalizes the printed value and keeps the %d conversion correct
-on every target regardless of the compatible type chosen.
+THE ONE IMPLEMENTATION-DEFINED RELATION THAT IS PRINTED, AND WHY PRINTING IT IS SOUND. No raw
+enum size ever reaches stdout: the program prints sizeof(enum color) == sizeof(int) as a 0 or 1
+value only. Even so, the compatible type of an enumeration is implementation-defined for values
+within int range as well as beyond it, so that relation is an implementation-defined observation
+rather than a language guarantee, and printing it needs a justification instead of an assumption.
+
+Three things together supply one. First, it is a RELATION and not a width, so no byte count
+enters the golden record and the measured i686 width difference cannot surface through it.
+Second, it was MEASURED rather than assumed: compiling and running this comparison with each
+target's own reference cross driver yields 1 on all four targets at all three optimization
+levels -- twelve configurations, all agreeing, with sizeof(enum color) four bytes in every one.
+Third, on these four targets the choice is not free in practice. Each is a hosted ELF target
+whose objects must interoperate with a system C library built by that same reference compiler,
+so the compatible type is fixed by the platform's established ABI rather than chosen afresh by
+each compiler. Agreeing with the reference compiler on the same target is therefore an ABI
+requirement and not a convention, and a disagreement would be an ABI incompatibility -- exactly
+the class of defect this suite exists to surface.
+
+This line is consequently treated as a MEASURED NON-DIFFERENCE, on the same footing as bitfield
+layout, negative right shift, and division and remainder signs; see
+tests/conformance/EXPECTED_DIVERGENCES.md section 5.4. A divergence on it is a genuine finding
+rather than an expected implementation-defined difference, and no marker covers it.
+
+Should a future backend or a newly supported target ever legitimately choose a different
+compatible type, the correct response is to delete this printed relation or to restrict this
+program's target list with a recorded reason -- never to mint a marker and never to weaken an
+oracle. Independently of all of the above, every enumerator is explicitly cast to int before
+printing, which normalizes the printed values and keeps the %d conversion correct on every
+target whatever compatible type is chosen.
 
 REMAINING WIDTH NORMALIZATION. No sizeof of long, pointer, double, long long or any aggregate
 containing them is printed, so the measured i686 difference (4-byte long and pointer versus 8

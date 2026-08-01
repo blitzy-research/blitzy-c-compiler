@@ -70,8 +70,8 @@
 //! codes, raw wait statuses and stdout bytes all agree.
 //!
 //! A signal death or a budget expiry on either side is reported as a divergence **even when
-//! both sides agree on it**. [`Termination::divergence_class`] records the reason: a crash and
-//! a timeout are divergent however they are compared. Two identical crashes are two crashes,
+//! both sides agree on it**. The reason is that a crash and a timeout are divergent however
+//! they are compared, so each maps to its own class here. Two identical crashes are two crashes,
 //! and reporting them as an agreement would let a program that never produced its output pass.
 //!
 //! # Class precedence
@@ -97,6 +97,17 @@
 //! program's own record gives for it, so the set of comparisons deliberately not made is as
 //! visible in the summary as the set that was. Narrowing to one oracle is permitted; dropping
 //! a feature from testing is not.
+//!
+//! # A refusal is rendered here even though it is not compared here
+//!
+//! A cell one side of which produced no artifact has no two observations to compare, and the
+//! verdict for it is decided by `classify.rs` from the build layer's own report rather than from
+//! anything in this file. [`build_refusal`] nevertheless renders it as a [`Comparison`], for one
+//! reason: a divergence no marker excuses becomes a finding, and a finding's artifact directory is
+//! written *from* a [`Comparison`]. Giving a refusal the same carrier as a wrong answer is what
+//! lets every compiler-attributed divergence travel one artifact-producing path, so a finding can
+//! never be announced with nothing behind it. It claims no equality, carries no exclusion, and
+//! keeps the class the build layer determined.
 //!
 //! # Invariants callers may rely on
 //!
@@ -124,7 +135,7 @@ use std::fmt;
 
 use super::execute::{RunOutcome, Termination, MAX_CONTRACT_EXIT_CODE};
 use super::manifest::Manifest;
-use super::{sanitize_text_for_report, CellKey, DivergenceClass, Oracle, Target};
+use super::{sanitize_text_for_report, shown_path, CellKey, DivergenceClass, Oracle, Target};
 
 /// Lines of context shown on each side of the divergent line.
 ///
@@ -756,11 +767,14 @@ impl fmt::Display for StatusDivergence {
 /// where both sides have one — reported the same raw wait status.
 ///
 /// A [`Termination::Signalled`] or [`Termination::TimedOut`] on either side is a divergence
-/// **even when both sides agree on it**. That is deliberate and follows
-/// [`Termination::divergence_class`]: a crash and a timeout are divergent however they are
-/// compared. Two identical crashes are two crashes, and calling them an agreement would let a
-/// program that never produced its output pass — which is exactly the softening this suite may
-/// not do.
+/// **even when both sides agree on it**. That is deliberate: a crash and a timeout are divergent
+/// however they are compared. Two identical crashes are two crashes, and calling them an
+/// agreement would let a program that never produced its output pass — which is exactly the
+/// softening this suite may not do.
+///
+/// The per-side facts are read directly rather than through a single collapsed class, because the
+/// precedence rule below needs to know *which* side crashed and *which* side hung; a class alone
+/// would name the shape and lose the side.
 ///
 /// `expected_raw` and `actual_raw` are `None` for a side that is a recorded expectation rather
 /// than an execution, which is the case for the golden-record oracle's authoritative side.
@@ -779,29 +793,36 @@ pub fn locate_status_divergence(
 
     // Precedence is applied by testing the classes in order and keeping the first that fires;
     // every fact is collected regardless, so nothing the reader needs is discarded by the choice.
+    //
+    // The class of a termination that is divergent on its own is never re-derived here.
+    // [`Termination::divergence_class`] owns that mapping — a signal is a run crash, an expired
+    // budget is a timeout, an ordinary exit is neither — and spelling it out a second time is
+    // exactly how the two would come to disagree after a maintenance edit to one of them. What
+    // this function contributes is the precedence between the two shapes and the wording of each
+    // fact, neither of which a single termination can decide by itself.
     if let Some(signal) = expected.signal() {
-        class = Some(DivergenceClass::RunCrash);
+        class = expected.divergence_class();
         facts.push(format!(
             "{} was terminated by signal {signal}, so it never returned an exit code",
             sanitize_text_for_report(expected_label)
         ));
     }
     if let Some(signal) = actual.signal() {
-        class = Some(DivergenceClass::RunCrash);
+        class = actual.divergence_class();
         facts.push(format!(
             "{} was terminated by signal {signal}, so it never returned an exit code",
             sanitize_text_for_report(actual_label)
         ));
     }
     if expected.timed_out() {
-        class = class.or(Some(DivergenceClass::Timeout));
+        class = class.or(expected.divergence_class());
         facts.push(format!(
             "{} exceeded its execution budget and was terminated",
             sanitize_text_for_report(expected_label)
         ));
     }
     if actual.timed_out() {
-        class = class.or(Some(DivergenceClass::Timeout));
+        class = class.or(actual.divergence_class());
         facts.push(format!(
             "{} exceeded its execution budget and was terminated",
             sanitize_text_for_report(actual_label)
@@ -907,11 +928,6 @@ impl Comparison {
         self.excluded.is_none()
     }
 
-    /// Whether a divergence was observed, which is exactly `class.is_some()`.
-    pub fn is_divergence(&self) -> bool {
-        self.class.is_some()
-    }
-
     /// Append an advisory to both renderings.
     ///
     /// Advisories are facts a reader must be told that are not themselves divergences — a
@@ -923,6 +939,10 @@ impl Comparison {
         self.summary.push_str(&format!("; note: {safe}"));
         self.detail.push('\n');
         self.detail.push_str(&row("note", &safe));
+    }
+    /// Whether a divergence was observed, which is exactly `class.is_some()`.
+    pub fn is_divergence(&self) -> bool {
+        self.class.is_some()
     }
 }
 
@@ -1232,7 +1252,7 @@ pub fn oracle_c(actual: &RunOutcome, manifest: &Manifest, key: &CellKey) -> Comp
         "golden record",
         &format!(
             "{} ({} expected stdout bytes, expected exit code {})",
-            manifest.path().display(),
+            shown_path(manifest.path()),
             manifest.expected_stdout_bytes().len(),
             manifest.expect_exit()
         ),
@@ -1327,7 +1347,7 @@ pub fn excluded_by_manifest(oracle: Oracle, manifest: &Manifest, key: &CellKey) 
     ));
     detail.push_str(&format!(
         "\n{}",
-        row("expectation record", &manifest.path().display().to_string())
+        row("expectation record", &shown_path(manifest.path()))
     ));
     detail.push_str(&format!(
         "\n{}",
@@ -1372,6 +1392,132 @@ pub fn excluded_by_manifest(oracle: Oracle, manifest: &Manifest, key: &CellKey) 
         );
     }
     comparison
+}
+
+/// Which side of an oracle's comparison produced no artifact.
+///
+/// A refusal is not something one oracle observed. It happens once per cell, before any oracle is
+/// asked, and it removes an artifact the comparison needed — so the only thing a caller has to say
+/// about it is *whose* artifact is missing. Naming that with an enumeration rather than a free
+/// string keeps both situations' prose in this module beside every other rendering, and makes a
+/// third situation a compile error rather than a sentence somebody forgot to write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RefusedSide {
+    /// The compiler under test produced no artifact for **this** cell, so nothing ran here.
+    UnderTest,
+    /// The compiler under test produced no artifact for the cross-backend baseline cell this one
+    /// would have been compared against, so this target has no authority to be compared with.
+    Baseline,
+}
+
+/// Build the divergence result for a cell one side of which produced no artifact.
+///
+/// # Why a refusal needs a [`Comparison`] at all
+///
+/// A build that produces nothing is judged by `classify.rs` from the build layer's own report,
+/// not from a comparison — there are no two observations to compare. But a divergence the
+/// classifier cannot excuse becomes a finding, and a finding is a **deliverable**: a directory
+/// holding the reproducer, its record, the exact reproduction commands, the captured outputs, an
+/// environment fingerprint and the computed difference. The writer builds all of that from a
+/// [`Comparison`], because that is the type carrying the oracle, the class and both renderings of
+/// what was observed.
+///
+/// Without this constructor a refusal could reach the finding verdict with nothing to write, and a
+/// finding announced with nothing behind it is strictly worse than a failure: it looks like a
+/// result. This function is therefore what lets *every* compiler-attributed divergence — a wrong
+/// answer and a refusal alike — travel the same artifact-producing path.
+///
+/// # What the result claims, and what it does not
+///
+/// [`Comparison::equal`] is false, because nothing was compared and claiming equality would be a
+/// silent pass. [`Comparison::class`] is the class the build layer determined, so the finding is
+/// filed under the shape the refusal actually took — a rejected program, a program that
+/// translated but did not link, or an invocation that outlived its budget — rather than under a
+/// stand-in. [`Comparison::excluded`] is `None`, because this is an observation about a compiler
+/// and not a narrowing a program's record declared: the two must never be confused, since one is a
+/// divergence and the other is a deliberate authoring decision.
+///
+/// `summary` is the build layer's own one-line account, and it is bounded and escaped on the way
+/// into the single-line form exactly as a recorded reason is, so a compiler diagnostic containing
+/// a line feed cannot forge a report row.
+///
+/// `reference_arm`, when supplied, is one phrase naming how the reference-compiler arm of this cell
+/// ended. It is rendered as a row and never compared. A refusal is attributed to the compiler under
+/// test on the strength of requirement 1's audit gate rather than on this arm, so the phrase changes
+/// no verdict — but "the reference driver for this target is absent" and "the reference compiler
+/// rejected this program too" point a reader at opposite conclusions, and an artifact that recorded
+/// neither would leave that distinction to guesswork. It is escaped like every other reported value.
+pub fn build_refusal(
+    oracle: Oracle,
+    key: &CellKey,
+    class: DivergenceClass,
+    side: RefusedSide,
+    summary: &str,
+    reference_arm: Option<&str>,
+) -> Comparison {
+    let (whose, consequence) = match side {
+        RefusedSide::UnderTest => (
+            String::from("the compiler under test produced no artifact for this cell"),
+            "so there was nothing to execute and nothing for this oracle to compare; the absence \
+             of the artifact IS the observation",
+        ),
+        RefusedSide::Baseline => (
+            format!(
+                "the compiler under test produced no artifact for the {} baseline of this program \
+                 at {}",
+                Target::BASELINE.triple(),
+                key.opt().flag()
+            ),
+            "so this target has no authority to be compared against; the absence of the baseline \
+             artifact IS the observation",
+        ),
+    };
+
+    let mut detail = detail_header(oracle, key);
+    detail.push_str(&format!(
+        "\n{}",
+        row(
+            "comparison",
+            "not performed: one side produced no artifact, so there were never two observations to \
+             compare"
+        )
+    ));
+    detail.push_str(&format!(
+        "\n{}",
+        row("divergence class", &class.to_string())
+    ));
+    detail.push_str(&format!("\n{}", row("refused side", &whose)));
+    detail.push_str(&format!("\n{}", row("consequence", consequence)));
+    detail.push_str(&format!(
+        "\n{}",
+        row("build outcome", &sanitize_text_for_report(summary))
+    ));
+    detail.push_str(&format!(
+        "\n{}",
+        row(
+            "compiler diagnostics",
+            "captured into this finding's outputs directory and never compared, because diagnostic \
+             wording legitimately differs between compilers"
+        )
+    ));
+    if let Some(arm) = reference_arm {
+        detail.push_str(&format!(
+            "\n{}",
+            row("reference arm", &sanitize_text_for_report(arm))
+        ));
+    }
+
+    Comparison {
+        equal: false,
+        class: Some(class),
+        summary: format!(
+            "{oracle} {key}: {class} — {whose}: {}",
+            render_reason_inline(summary)
+        ),
+        detail,
+        oracle,
+        excluded: None,
+    }
 }
 
 /// A bounded, dependency-free line diff of two stdout streams, for a finding's `diff.txt`.

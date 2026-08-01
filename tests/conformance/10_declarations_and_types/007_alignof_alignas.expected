@@ -33,21 +33,22 @@ No padding byte is read -- p.c and p.aligned_member are named members, and the p
 _Alignas(8) member introduces between them is never accessed.
 END
 impl_defined_notes <<END
-RESIDUE TECHNIQUE. An address is never reproducible: it varies with the loader, the target,
-the optimization level and whether execution is native or under emulation, so printing one
-would make byte-exact comparison meaningless and would generate divergences in every cell that
-say nothing about compiler correctness. This program therefore prints only alignment residues.
-Each object's address is carried through a two-step conversion: the pointer is cast first to
+RESIDUE TECHNIQUE. An address is never reproducible: it varies with the loader, the target, the
+optimization level and whether execution is native or under emulation, so printing one would
+make byte-exact comparison meaningless and would generate divergences in every cell that say
+nothing about compiler correctness. This program therefore prints only alignment residues. Each
+object's address is carried through a two-step conversion: the pointer is cast first to
 unsigned long, which is exactly pointer width on all four targets, and that result is then
 widened to unsigned long long, which is eight bytes everywhere and so always holds the residue
-arithmetic. uintptr_t is unavailable because no header may be included, which is why unsigned
-long is the carrier. The two-step form is deliberate rather than incidental: casting a pointer
-directly to unsigned long long crosses a width boundary on i686, where it is diagnosed as
--Wpointer-to-int-cast and escalated to an error by the mandatory audit gate, so the single-step
-spelling would fail that gate on one of the four targets this record declares. Only the value
-modulo that object's own requested alignment is printed. Every residue must be 0 on every
-target at every optimization level, which is exactly what _Alignas promises. The address itself
-never reaches stdout.
+arithmetic. uintptr_t is unavailable because this program includes no header -- the corpus's
+only sanctioned inclusion is area 07's <stdarg.h>, and stdint.h, though bundled, is not
+sanctioned here -- which is why unsigned long is the carrier. The two-step form is deliberate
+rather than incidental: casting a pointer directly to unsigned long long crosses a width
+boundary on i686, where it is diagnosed as -Wpointer-to-int-cast and escalated to an error by
+the mandatory audit gate, so the single-step spelling would fail that gate on one of the four
+targets this record declares. Only the value modulo that object's own requested alignment is
+printed. Every residue must be 0 on every target at every optimization level, which is exactly
+what _Alignas promises. The address itself never reaches stdout.
 
 MEASURED I686 ALIGNMENT DIFFERENCE, HANDLED BY AN EXACT PER-TARGET EXPECTATION RATHER THAN BY
 RESTRICTION. On the i386 System V ABI, _Alignof(double), _Alignof(long long), _Alignof(long) and

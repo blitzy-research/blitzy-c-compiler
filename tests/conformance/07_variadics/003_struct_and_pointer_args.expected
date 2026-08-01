@@ -1,6 +1,6 @@
 program            = 003_struct_and_pointer_args
 area               = 07_variadics
-description        = Aggregates and pointers through the variadic path, spanning each target's by-register and by-memory threshold, folded and volatile-runtime variants
+description        = Aggregates and pointers through the variadic path, sized around the aggregate by-register versus by-memory boundary on the three register-passing targets and contrasted against i686's all-stack convention, folded and volatile-runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -12,8 +12,12 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Header exception: this program includes stdarg.h, and that is the one sanctioned header
-exception for area 07, because a variadic function cannot be written at all without
+Header exception: this program includes stdarg.h. The corpus sanctions two header exception
+classes and only two, and this is the first of them: the programs in area 07 may include
+<stdarg.h> and nothing else. The second class is the dedicated bundled-header probe
+12_preprocessor/003_bundled_header_inclusion.c, which may include the nine required bundled
+freestanding headers; it does not apply here, and no program may take both. The exception is
+needed because a variadic function cannot be written at all without
 va_list, va_start, va_arg and va_end. stdarg.h belongs to bcc's own bundled freestanding
 set (docs/technical-specifications.md line 208, the row that also lists va_copy) and is a
 freestanding header the reference compiler supplies, so it resolves the same way under
@@ -68,17 +72,28 @@ a bitfield: the documented target table (docs/technical-specifications.md lines 
 462) records a pointer and long width of 4 bytes on i686 against 8 on the other three, so
 a pointer or long member would make one declaration a different size on i686 and the
 retrieved values could no longer be compared across backends.
-Why these three sizes: they sit below, exactly at, and above the by-register versus
-by-memory boundary the four ABIs use for aggregates. On x86-64 System V
-(docs/technical-specifications.md line 546) an argument is classified INTEGER, SSE or
-MEMORY, and an aggregate small enough to occupy at most two eightbytes is passed in
-integer registers while a larger one is MEMORY class and passed on the stack, so small and
-mid travel by register and large travels by memory. On i686 cdecl (line 553) every
-argument is pushed on the stack whatever its size, which is the sharpest contrast in the
-matrix. AArch64 AAPCS64 (line 559) offers x0 to x7 and RISC-V 64 LP64D (line 565) offers
-a0 to a7, and each passes a large composite indirectly. Which value travels where is the
-ABI's decision and not this program's: only the retrieved values are compared, so a
-correct backend agrees with the other three however it routes the arguments.
+Why these three sizes, and why the claim is made per target rather than universally. They
+are chosen to sit below, at, and above the aggregate by-register versus by-memory boundary
+on the three targets that have such a boundary, and the reasoning leans only on the ABI
+inventories the repository actually documents. x86-64 System V AMD64
+(docs/technical-specifications.md line 546) classifies each argument INTEGER, SSE or MEMORY
+and lists six integer argument registers together with eight SSE registers, so an aggregate
+classified INTEGER travels in registers and one classified MEMORY travels on the stack.
+AArch64 AAPCS64 (line 559) documents eight integer argument registers x0 to x7, and
+RISC-V 64 LP64D (line 565) documents eight, a0 to a7; each therefore has a register path an
+aggregate can occupy and a memory path it falls back to.
+i686 has no such boundary at all, and that is part of the coverage rather than a gap in it.
+cdecl (line 553) passes every argument on the stack, right to left, with caller cleanup, so
+all three aggregates travel the same way on i686 whatever their size. That makes i686 the
+control arm of this program: three sizes routed three different ways on the register-passing
+targets are routed identically here, and the retrieved values must still agree with all
+three. A divergence between i686 and the baseline consequently cannot be an aggregate
+classification-threshold difference, which narrows the diagnosis considerably.
+Where each of the three sizes actually lands on each register-passing target is that ABI's
+decision, and this record deliberately does not predict it: the repository documents register
+inventories rather than aggregate classification rules, and the suite is a black-box oracle
+that compares only the retrieved values. A correct backend agrees with the other three
+however it routes the arguments.
 No addresses printed: the pointer group prints only the dereferenced value. No address, no
 pointer value, no sizeof result and no signedness-dependent plain char value reaches
 stdout, so nothing width-dependent or signedness-dependent can enter the golden record. The

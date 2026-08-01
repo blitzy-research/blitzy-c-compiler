@@ -12,9 +12,14 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Header exception: this program includes <stdarg.h>. That is the one sanctioned header
-exception for area 07, because variadic functions cannot be written at all without
-va_list, va_start, va_arg, va_end and va_copy. stdarg.h is in bcc's own bundled
+Header exception: this program includes <stdarg.h>. The corpus sanctions two header
+exception classes and only two, and this is the first of them: the programs in area 07 may
+include <stdarg.h> and nothing else. The second class is the dedicated bundled-header probe
+12_preprocessor/003_bundled_header_inclusion.c, which may include the nine required bundled
+freestanding headers; it does not apply here, and no program may take both. The exception is
+needed because variadic functions cannot be written at all without
+va_list, va_start, va_arg and va_end, and because this program additionally copies a list
+with va_copy, which is its whole subject. stdarg.h is in bcc's own bundled
 freestanding set, and docs/technical-specifications.md line 208 documents va_copy
 explicitly among the macros implemented via compiler builtins, which is precisely what
 this program exercises. stdarg.h is also a freestanding header supplied by the reference

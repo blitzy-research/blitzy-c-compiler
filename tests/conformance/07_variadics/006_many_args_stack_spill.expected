@@ -12,9 +12,15 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Header exception: this program includes <stdarg.h>. That is the one sanctioned header
-exception for area 07, because variadic functions cannot be written at all without
-va_list, va_start, va_arg, va_end and va_copy. stdarg.h is in bcc's own bundled
+Header exception: this program includes <stdarg.h>. The corpus sanctions two header
+exception classes and only two, and this is the first of them: the programs in area 07 may
+include <stdarg.h> and nothing else. The second class is the dedicated bundled-header probe
+12_preprocessor/003_bundled_header_inclusion.c, which may include the nine required bundled
+freestanding headers; it does not apply here, and no program may take both. The exception is
+needed because variadic functions cannot be written at all without
+va_list, va_start, va_arg and va_end. This program uses exactly those four; va_copy sits
+on the same documented row but is not needed here, because no list is copied and none is
+traversed twice. stdarg.h is in bcc's own bundled
 freestanding set (docs/technical-specifications.md line 208) and is also a freestanding
 header supplied by the reference compiler, so it compiles identically under both oracles
 and the program remains a single-file reproducer. No other header is included; in
@@ -61,22 +67,39 @@ The key exists only to record a deviation, so restating the full gate would clai
 narrowing that was never made and would demand a recorded reason for it.
 END
 impl_defined_notes <<END
-Why these argument counts. The measured argument-register capacity of each supported ABI is
-recorded in docs/technical-specifications.md: x86-64 System V AMD64 at line 546 provides six
-integer registers rdi, rsi, rdx, rcx, r8 and r9 and eight SSE registers xmm0 to xmm7, and
-for a variadic call the al register must carry the number of vector registers used; i686
-cdecl at line 553 passes every argument on the stack with right-to-left push and caller
-cleanup; AArch64 AAPCS64 at line 559 provides x0 to x7 and v0 to v7; RISC-V 64 LP64D at
-line 565 provides a0 to a7 and fa0 to fa7. The worst-case capacity across the four is
-therefore eight integer plus eight floating-point registers, and every group in this program
-exceeds it: twenty int arguments, twelve long long arguments, sixteen double arguments, and
-ten interleaved int and double pairs.
-The interleaved group is the decisive case. Two named parameters consume the first two
-integer argument registers on x86-64, leaving only rdx, rcx, r8 and r9, so four of the ten
-integers travel in registers and six spill to the stack, while eight of the ten doubles
-travel in xmm0 to xmm7 and two spill. Both register classes overflow in the same call,
-which is the condition under which a variadic argument-area defect is most likely to
-appear, and on x86-64 it additionally exercises the al vector-count register.
+Why these argument counts, stated per target rather than as a single universal model. The
+repository documents each backend's argument-register inventory and nothing beyond it, so the
+reasoning below is confined to those inventories plus the counts this program actually passes.
+x86-64 System V AMD64 (docs/technical-specifications.md line 546) classifies each argument
+INTEGER, SSE or MEMORY and lists six integer argument registers rdi, rsi, rdx, rcx, r8 and r9
+together with eight SSE argument registers xmm0 to xmm7. i686 cdecl (line 553) documents no
+argument registers at all: every argument is pushed on the stack, right to left, with caller
+cleanup, so on i686 the stack is the only path and there is no register file to exhaust.
+AArch64 AAPCS64 (line 559) documents eight integer argument registers x0 to x7 and eight SIMD
+and floating-point argument registers v0 to v7. RISC-V 64 LP64D (line 565) documents eight
+integer argument registers a0 to a7 and eight floating-point argument registers fa0 to fa7.
+Across the three register-passing targets the largest documented integer inventory is
+therefore eight and the largest documented floating inventory is eight. Each helper declares
+two named parameters ahead of its ellipsis, and each group passes more variadic arguments of
+a single class than any target documents registers for: twenty int arguments, twelve long
+long arguments, sixteen double arguments, and ten interleaved int and double pairs, which is
+ten of each class in one call. On every register-passing target at least one argument of the
+class under test must therefore reach the callee through memory, and on i686 all of them do -
+the sharpest contrast in the matrix, and the reason i686 is kept in the target list rather
+than dismissed as uninteresting.
+The interleaved group is the decisive case, because it overflows both classes in the same
+call: ten integers against a documented maximum of eight, and ten floating values against a
+documented maximum of eight, on all three register-passing targets simultaneously. That is
+the condition under which a variadic argument-area defect is most likely to surface.
+How each argument is actually routed - which register, which stack slot, in what order, and
+what additional bookkeeping a particular target's variadic sequence may require - is the
+ABI's decision and each backend's implementation detail. This record makes no claim about it,
+for two reasons: the repository documents register inventories rather than variadic routing
+rules, so any such claim would exceed its cited basis; and the suite is a black-box oracle in
+which only the retrieved values reach stdout. A correct backend agrees with the other three
+however it routes the arguments, and one line per retrieved argument means a divergent line
+names the exact argument slot that was mishandled without this record having to predict where
+that slot lives.
 Width normalization: the types long and unsigned long are never used, because sizeof(long)
 and sizeof(void *) are 4 on i686 and 8 on x86-64, AArch64 and RISC-V 64
 (docs/technical-specifications.md lines 457 to 462). long long is 64 bits on all four targets
@@ -97,8 +120,12 @@ Cross-backend comparability: integer and double variadic argument passing was me
 produce byte-identical results on all four targets at all three optimization levels, so no
 target is restricted and all three oracles are enabled. Any cross-backend difference in
 this program is a genuine ABI-level finding rather than a documented implementation-defined
-difference, and it must be reported as a finding with its minimized reproducer and exact
-reproduction commands rather than patched.
+difference, and it must be reported as a finding rather than patched: a verbatim reproducer,
+a byte-for-byte copy of this program, together with the captured per-compiler and per-backend
+outputs, an environment fingerprint, its recorded minimization status and the exact
+reproduction commands. Reduction is never
+performed during a run; it is a supervised activity carried out on the copy before a finding
+is promoted to the curated set.
 END
 expected_stdout    <<END
 fint[0]=1000

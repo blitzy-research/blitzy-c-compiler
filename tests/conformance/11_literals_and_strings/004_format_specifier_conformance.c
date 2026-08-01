@@ -20,6 +20,13 @@ int main(void)
     double       d  = 1.5;
     float        f  = 0.25f;
 
+    /* Snapshots of the four volatile objects. Declared here with the other objects
+     * and assigned below, so each volatile access is a statement of its own. */
+    int                sn_i;
+    unsigned int       sn_u;
+    long long          sn_ll;
+    double             sn_d;
+
     printf("d=%d i=%i\n", i, i);
     printf("u=%u o=%o x=%x X=%X\n", u, u, u, u);
     printf("lld=%lld llu=%llu llx=%llx\n", ll, ull, ull);
@@ -40,9 +47,23 @@ int main(void)
     printf("sizeof_int=%d sizeof_ll=%d\n", (int)sizeof(int),
            (int)sizeof(long long));
 
-    printf("rt_i=%d rt_u=%u\n", (int)rt_i, (unsigned int)rt_u);
-    printf("rt_lld=%lld\n", (long long)rt_ll);
-    printf("rt_f=%.6f\n", (double)rt_d);
-    printf("rt_hex=%x rt_oct=%o\n", (unsigned int)rt_u, (unsigned int)rt_u);
+    /* Each volatile object is read exactly once, in its own statement.  An access to
+     * a volatile object is an observable side effect, and the relative order of side
+     * effects within one argument list is unspecified, so the earlier form of these
+     * calls depended on unspecified evaluation order in two distinct ways: the first
+     * call read two different volatile objects in one argument list, and the last read
+     * the SAME volatile object twice.  Snapshotting first separates every access from
+     * the next by a sequence point, and costs the test nothing -- the snapshots are
+     * loads from volatile storage, so each conversion is still fed a runtime value the
+     * optimizer may not fold. */
+    sn_i  = rt_i;
+    sn_u  = rt_u;
+    sn_ll = rt_ll;
+    sn_d  = rt_d;
+
+    printf("rt_i=%d rt_u=%u\n", sn_i, sn_u);
+    printf("rt_lld=%lld\n", sn_ll);
+    printf("rt_f=%.6f\n", sn_d);
+    printf("rt_hex=%x rt_oct=%o\n", sn_u, sn_u);
     return 0;
 }

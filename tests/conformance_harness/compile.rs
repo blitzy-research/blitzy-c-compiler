@@ -1,5 +1,6 @@
 //! Builds one cell: a single compiler invocation, assembled under the shared-flag
-//! discipline, executed hermetically, and reported as data rather than raised as an error.
+//! discipline, run inside the cell's own workspace, and reported as data rather than raised as
+//! an error.
 //!
 //! # What building one cell means
 //!
@@ -81,16 +82,23 @@
 //! whose hand-run reproduction disagreed with the report. A mismatch is therefore a hard
 //! failure naming the differing element and both full lines, never a warning.
 //!
-//! # Hermeticity and parallel safety
+//! # Workspace discipline and parallel safety
 //!
 //! Each child runs with its current directory set to the cell's own workspace, so a compiler
-//! that writes a temporary file beside its output writes it inside the one directory the cell
+//! that writes a temporary file *beside its output* writes it inside the one directory the cell
 //! owns. The process-wide working directory is **never** changed: the feature-area tests run
 //! concurrently in one process, so that would be a data race rather than a confinement. The
 //! artifact is required to be a direct child of that workspace, and it is required to be the
 //! canonical name for its compiler — which is what stops two compilers in one cell from
 //! writing over each other's binary and leaving a comparison to be made against a single file
 //! twice.
+//!
+//! Setting a working directory is not confinement, and the difference is worth stating: a
+//! driver that puts its intermediates under the system temporary directory instead — `gcc -###`
+//! shows `/tmp/cc*` for the assembler input, the object and the linker response file — keeps
+//! doing so, because nothing here sets `TMPDIR`, enters a namespace or filters a syscall. The
+//! guarantee is that *this module* constructs no path outside the cell's workspace and requires
+//! the artifact it goes on to execute to be inside it.
 //!
 //! Standard input is the null device, both output streams are captured as raw bytes through
 //! pipes, and every invocation is bounded in time twice over: by the system timeout utility
@@ -107,11 +115,14 @@
 //! drops a cell for being difficult.
 //!
 //! [`BuildFailure`] separates two questions that a bare exit status conflates. Its
-//! [`DivergenceClass`] says what shape the failure took, and its [`FailureScope`] says whether
-//! the machine or the compiler is answerable for it: a target whose C runtime is not installed
-//! produces a link failure at [`FailureScope::Environment`], which must be reported as a gap in
-//! the environment rather than as a finding against a compiler that never had the inputs it
-//! needed.
+//! [`DivergenceClass`] says what shape the failure took, and its [`FailureScope`] says who is
+//! answerable for it — the compiler, the machine, or this process. A target whose C runtime is not
+//! installed produces a link failure at [`FailureScope::Environment`], which must be reported as a
+//! gap in the environment rather than as a finding against a compiler that never had the inputs it
+//! needed. A build whose result could not be established at all is [`FailureScope::Harness`], which
+//! must be reported as a failure of this suite rather than as either of the other two: it is the one
+//! answer that says nothing was observed, and filing it as an environment gap would let a cell that
+//! was launched and lost read as one the run had no reason to fail for.
 //!
 //! # What this module deliberately does not do
 //!
@@ -126,21 +137,28 @@
 //! self-test here would move the suite's own test counts.
 
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::env::Capabilities;
+use super::env::{kill_tool, Capabilities};
+use super::execute::TIMEOUT_UTILITY_OUTER_MARGIN;
 use super::manifest::{CommandSubstitutions, Manifest};
-use super::sandbox::{Workspace, BCC_ARTIFACT_NAME, REFERENCE_ARTIFACT_NAME};
+use super::sandbox::{
+    Workspace, BCC_ARTIFACT_NAME, BCC_COMPILE_STATUS_NAME, BCC_COMPILE_STDERR_NAME,
+    BCC_COMPILE_STDOUT_NAME, REFERENCE_ARTIFACT_NAME, REFERENCE_COMPILE_STATUS_NAME,
+    REFERENCE_COMPILE_STDERR_NAME, REFERENCE_COMPILE_STDOUT_NAME,
+};
 use super::{
     bcc_requires_explicit_target, bcc_target_arguments, corpus_root, ensure_within,
-    is_bcc_target_selector, is_forbidden_for_side, posix_command_line, require_regular_file,
-    sanitize_text_for_report, CompilerSide, DivergenceClass, HarnessError, HarnessResult, OptLevel,
-    Target, BCC_TARGET_FLAG, DIFFERENTIAL_FLAGS_MINIMAL,
+    is_bcc_target_selector, is_forbidden_for_side, isolate_child_environment, own_process_group,
+    posix_command_line, redact_secrets, require_regular_file, sanitize_text_for_report, shown_path,
+    terminate_process_group, CaptureIntegrity, CompilerSide, DivergenceClass, GroupTermination,
+    HarnessError, HarnessResult, OptLevel, Target, BCC_TARGET_FLAG, CAPTURE_CHUNK_BYTES,
+    CAPTURE_RETAINED_BYTES_MAX, DIFFERENTIAL_FLAGS_MINIMAL,
 };
 
 /// The flag that names the artifact, spelled once so the argument builder, the allow-list and
@@ -159,11 +177,16 @@ pub const FLAG_STATIC: &str = "-static";
 
 /// Bytes retained from each of the compiler's output streams.
 ///
-/// Generous for a diagnostic and finite by design. The bound is what makes a compiler stuck in
-/// a diagnostic loop harmless: the reader stops at the cap, drops the pipe, and the operating
-/// system terminates the writer, so neither this process's memory nor the run's duration
-/// depends on how much a misbehaving tool decides to print.
-const CAPTURE_BYTES_MAX: u64 = 4 * 1024 * 1024;
+/// Generous for a diagnostic and finite by design. Spelled as an alias of the harness-wide
+/// [`CAPTURE_RETAINED_BYTES_MAX`] rather than as its own number, so a compiler's diagnostics and
+/// a program's output are bounded by one quota that cannot drift apart between the two modules
+/// that enforce it — and so a reader of either module finds the same figure.
+///
+/// The bound alone would not make a diagnostic loop harmless, because a reader that stops at the
+/// cap and abandons the pipe leaves the writer blocked rather than terminated. The pipe is
+/// therefore drained past the cap and the surplus discarded, and how much was discarded is
+/// carried on the outcome as a [`CaptureIntegrity`] instead of being silently absorbed.
+const CAPTURE_BYTES_MAX: u64 = CAPTURE_RETAINED_BYTES_MAX;
 
 /// Interval between checks on a child that has not yet finished.
 ///
@@ -172,45 +195,13 @@ const CAPTURE_BYTES_MAX: u64 = 4 * 1024 * 1024;
 /// waiting costs no measurable processor time.
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
-/// Extra time the watchdog allows beyond the budget when the system timeout utility is also in
-/// use.
-///
-/// The utility is given the first opportunity to act, because it signals the whole process
-/// group and therefore also stops the sub-processes a compiler driver started, which this
-/// module cannot see. The watchdog is the backstop for the case where the utility itself fails
-/// to act, so it must fire later than the utility rather than at the same moment.
-const WATCHDOG_GRACE: Duration = Duration::from_secs(5);
-
 /// Time allowed for the capture threads to deliver after the child has been waited on.
 ///
 /// Without it, a compilation that finished just inside its budget could have its diagnostics
 /// truncated by the same deadline that governed the wait — losing exactly the text a
 /// divergence has to be read from. With it, the whole invocation is still bounded, at the
-/// budget plus this grace plus [`WATCHDOG_GRACE`].
+/// budget plus this grace.
 const CAPTURE_GRACE: Duration = Duration::from_secs(2);
-
-/// Exit status the system timeout utility reports when it terminated the command it was
-/// wrapping.
-///
-/// The conventional value, verified against the utility installed in this environment. No
-/// compiler in this suite exits with it of its own accord, and [`expired_under_timeout_tool`]
-/// additionally requires the observed duration to have reached the budget, so a command that
-/// somehow chose this status for itself is not mistaken for a timeout.
-const TIMEOUT_TOOL_EXPIRED_STATUS: i32 = 124;
-
-/// Exit statuses the system timeout utility reports for failures of its own: it could not run
-/// at all, it found the command but could not invoke it, or it could not find the command.
-///
-/// These describe the machine rather than the compilation, so they are reported at
-/// [`FailureScope::Environment`].
-const TIMEOUT_TOOL_OWN_FAILURE_STATUSES: &[i32] = &[125, 126, 127];
-
-/// Tolerance applied when deciding whether an invocation really reached its budget.
-///
-/// The elapsed time is measured around the spawn, so a genuine expiry always exceeds the
-/// budget; this slack only absorbs clock granularity and cannot turn a prompt failure into a
-/// reported timeout.
-const TIMEOUT_ELAPSED_SLACK: Duration = Duration::from_millis(250);
 
 /// Characters of a captured diagnostic quoted in a failure summary.
 ///
@@ -299,6 +290,10 @@ pub enum Compiler {
 impl Compiler {
     /// Both compilers, in oracle (a) comparison order — the compiler under test first, because
     /// it is the subject of every comparison.
+    ///
+    /// Read on every invocation by `CompileRequest::validate_artifact`, which uses it to prove the
+    /// compiler-to-artifact-name mapping is injective. That proof is what stops two builds of one
+    /// cell from writing the same path and leaving oracle (a) comparing a binary against itself.
     pub const ALL: [Compiler; 2] = [Compiler::Bcc, Compiler::Reference];
 
     /// Which side of the shared-flag discipline this compiler is on.
@@ -334,6 +329,28 @@ impl Compiler {
         }
     }
 
+    /// The three workspace names this compiler's *build* evidence is written under.
+    ///
+    /// Returned as a triple from the workspace vocabulary rather than assembled from a prefix, for
+    /// the same reason [`Compiler::artifact_name`] is: the file this module writes must be the file
+    /// every other consumer of the workspace looks for, and a name built by formatting is a name no
+    /// other consumer can reference. Taking all three together also makes it impossible to write a
+    /// build's standard output under one compiler's name and its status under the other's.
+    pub fn compile_evidence_names(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Compiler::Bcc => (
+                BCC_COMPILE_STDOUT_NAME,
+                BCC_COMPILE_STDERR_NAME,
+                BCC_COMPILE_STATUS_NAME,
+            ),
+            Compiler::Reference => (
+                REFERENCE_COMPILE_STDOUT_NAME,
+                REFERENCE_COMPILE_STDERR_NAME,
+                REFERENCE_COMPILE_STATUS_NAME,
+            ),
+        }
+    }
+
     /// The phrase used in diagnostics and report rows.
     pub fn label(self) -> &'static str {
         self.side().label()
@@ -362,6 +379,40 @@ pub enum FailureScope {
     /// driver installation that cannot run its own stages. Reported as an environment gap, and
     /// never as a defect in a compiler that was never given the inputs it needed.
     Environment,
+    /// Who is answerable could not be determined, because the evidence the determination rests on
+    /// was not fully captured.
+    ///
+    /// # Why an honest third answer, rather than a default to one of the other two
+    ///
+    /// Most scopes are read out of the compiler's own diagnostics: a line naming a missing C
+    /// runtime means the machine, a line naming a source location means the program. That reading
+    /// is only as good as the text it was performed on, and a diagnostic stream truncated by the
+    /// retention quota or abandoned by a reader that could not finish may be missing precisely the
+    /// line that would have decided it.
+    ///
+    /// Defaulting such a case either way is wrong in a way that costs something real. Defaulting
+    /// to [`FailureScope::Compiler`] manufactures a finding against a compiler on the strength of
+    /// text nobody read — the worst outcome available, because requirement 6 makes a finding a
+    /// deliverable a maintainer is expected to act on. Defaulting to
+    /// [`FailureScope::Environment`] silently discards a real defect, and does so in the one
+    /// category the suite exists to detect. This variant says what actually happened, and the
+    /// classifier renders it as a reported gap that is neither a pass nor an accusation.
+    ///
+    /// Deliberately **not** used for a failure established by a fact rather than by text. A
+    /// timeout, a signal death, an unobservable status and a missing artifact are all observed
+    /// directly, so a truncated diagnostic stream does not weaken them and they keep the scope
+    /// they were given.
+    Indeterminate,
+    /// The failure is a property of *this process*: a compilation was launched and its result
+    /// could not be established, so nothing was observed about either the compiler or the machine.
+    ///
+    /// Held apart from [`FailureScope::Environment`] because the two lead to opposite verdicts and
+    /// conflating them is how a defect escapes. An environment gap is a reported absence — the arm
+    /// could not be attempted, and the run does not fail for it. A bookkeeping fault is the
+    /// harness's own defect: it means a cell was launched and its outcome lost, which is a failure
+    /// and must be reported as one. Filing it as an absence would let a suite that cannot observe
+    /// its own children report a clean run over cells it never actually judged.
+    Harness,
 }
 
 impl FailureScope {
@@ -370,6 +421,8 @@ impl FailureScope {
         match self {
             FailureScope::Compiler => "compiler scope",
             FailureScope::Environment => "environment scope",
+            FailureScope::Indeterminate => "indeterminate scope",
+            FailureScope::Harness => "harness scope",
         }
     }
 }
@@ -387,13 +440,13 @@ impl std::fmt::Display for FailureScope {
 /// front of it. The shape is one of the suite's closed set of divergence classes — a rejected
 /// program is [`DivergenceClass::CompileFailure`], a program that translated but did not link
 /// is [`DivergenceClass::LinkFailure`], and an invocation that outlived its budget is
-/// [`DivergenceClass::Timeout`] — and the scope says whether the compiler or the machine is
-/// answerable.
+/// [`DivergenceClass::Timeout`] — and the scope says who is answerable: the compiler, the machine,
+/// or this process itself.
 ///
 /// The fields are private because the three travel together as one judgement. A caller able to
-/// rewrite the scope could turn an environment gap into a finding against a compiler, or hide a
-/// real defect behind a claim about the machine, while every report still displayed the
-/// original summary.
+/// rewrite the scope could turn an environment gap into a finding against a compiler, hide a real
+/// defect behind a claim about the machine, or relabel a result this suite lost as an arm it merely
+/// could not attempt, while every report still displayed the original summary.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BuildFailure {
     class: DivergenceClass,
@@ -421,7 +474,7 @@ impl BuildFailure {
         self.class
     }
 
-    /// Whether the compiler or the machine is answerable.
+    /// Who is answerable: the compiler, the machine, or this process.
     pub fn scope(&self) -> FailureScope {
         self.scope
     }
@@ -434,16 +487,59 @@ impl BuildFailure {
         &self.summary
     }
 
-    /// Whether this failure is a property of the machine rather than of the compiler.
+    // # Why there is no `is_environment` predicate here
+    //
+    // There was one, and it was removed rather than extended when [`FailureScope::Indeterminate`]
+    // was introduced. A boolean over three scopes cannot be read correctly: "is the machine
+    // answerable" is `false` both for a compiler defect and for a failure whose answerable party is
+    // unknown, so every caller of such a predicate silently treats the second as the first — which
+    // is a manufactured finding against a compiler on the strength of diagnostics nobody read.
+    //
+    // [`BuildFailure::scope`] is the only accessor, and every consumer matches it exhaustively, so
+    // a fourth scope added later cannot reach a report until each consumer says what it means. That
+    // is a compiler-checked guarantee where the predicate offered only a convention.
+
+    /// The same failure with its scope declared unattributable, and the reason appended.
     ///
-    /// The predicate a caller wants far more often than the scope value itself: it is the test
-    /// that decides whether an outcome becomes an environment report or a candidate finding.
-    pub fn is_environment(&self) -> bool {
-        matches!(self.scope, FailureScope::Environment)
+    /// Consumes and returns rather than mutating, so an indeterminate scope can only be produced
+    /// where the original judgement is in hand and is being replaced wholesale. The summary keeps
+    /// what was originally concluded and states that it could not be relied upon, because a
+    /// maintainer reading the record needs both the reading and the reason it was withdrawn.
+    fn into_indeterminate(self, reason: &str) -> BuildFailure {
+        BuildFailure {
+            class: self.class,
+            scope: FailureScope::Indeterminate,
+            summary: format!(
+                "{} — who is answerable could not be determined because {reason}, so this is \
+                 reported as an unattributable gap rather than as a defect in the compiler or in \
+                 the machine",
+                self.summary
+            ),
+        }
+    }
+
+    /// Whether this failure is a fault in this process's own bookkeeping.
+    ///
+    /// Asked *before* [`BuildFailure::is_environment`] by every caller that decides a verdict,
+    /// because the two questions are not independent: a bookkeeping fault is neither the
+    /// compiler's nor the machine's, and answering only the environment question would file it
+    /// as an absence the run does not fail for.
+    pub fn is_harness(&self) -> bool {
+        matches!(self.scope, FailureScope::Harness)
     }
 }
 
 impl std::fmt::Display for BuildFailure {
+    /// The one canonical rendering of a failure: class, scope, and the single-line summary.
+    ///
+    /// There is deliberately no separate accessor for the summary alone. Every consumer wants the
+    /// scope beside it — a link failure at [`FailureScope::Environment`] and one at
+    /// [`FailureScope::Compiler`] are the same sentence with opposite meanings — and an accessor
+    /// that handed out the summary by itself would make it possible to render the words without
+    /// the attribution.
+    ///
+    /// Any text quoted from a compiler's diagnostics has already been escaped and truncated, so no
+    /// captured byte can forge a column, erase a line or repaint a verdict.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} ({}): {}", self.class, self.scope, self.summary)
     }
@@ -606,13 +702,36 @@ impl<'a> CompileRequest<'a> {
                      writes into the one directory its cell owns and nowhere else, and the \
                      artifact path must be derived from that workspace — for example with \
                      `Workspace::path({:?})`",
-                    output.display(),
-                    root.display(),
+                    shown_path(output),
+                    shown_path(root),
                     self.compiler.artifact_name()
                 ),
             ));
         }
         let expected = self.compiler.artifact_name();
+        // The name must identify *this* compiler, so the mapping from compiler to artifact name has
+        // to be injective. Checking only that the artifact carries this compiler's own name would
+        // pass unchanged if both compilers named the same file, and that is the one failure the
+        // check below exists to prevent: two builds into one path leave oracle (a) comparing a
+        // binary against itself and reporting agreement, which looks exactly like a pass. The
+        // assertion is over the whole compiler set rather than over the two spellings, so a third
+        // compiler added later is covered without anyone remembering to come back here.
+        for other in Compiler::ALL {
+            if other != self.compiler && other.artifact_name() == expected {
+                return Err(HarnessError::new(
+                    String::from(context),
+                    format!(
+                        "the {} and the {} both name their artifact {expected:?}, so the two \
+                         builds of a cell would write the same path and oracle (a) would compare \
+                         one binary against itself and report agreement — a false pass that \
+                         leaves no trace in any output. The artifact-name mapping must be \
+                         injective; correct it in `Compiler::artifact_name`",
+                        self.compiler.label(),
+                        other.label()
+                    ),
+                ));
+            }
+        }
         let actual = output.file_name().and_then(|name| name.to_str());
         if actual != Some(expected) {
             return Err(HarnessError::new(
@@ -622,7 +741,7 @@ impl<'a> CompileRequest<'a> {
                      the {}; both compilers build into one workspace per cell, so a shared or \
                      swapped artifact name would leave oracle (a) comparing one binary against \
                      itself and reporting agreement — the one failure that leaves no trace",
-                    output.display(),
+                    shown_path(output),
                     self.compiler.label()
                 ),
             ));
@@ -651,9 +770,9 @@ impl<'a> CompileRequest<'a> {
                 "the program source {} resolves neither inside the corpus {} nor inside the cell \
                  workspace {}; those are the only two places a file the suite compiles and then \
                  executes may come from, so a source outside both is refused rather than built",
-                source.display(),
-                corpus_root().display(),
-                workspace_root.display()
+                shown_path(source),
+                shown_path(&corpus_root()),
+                shown_path(workspace_root)
             ),
         ))
     }
@@ -701,7 +820,7 @@ impl<'a> CompileRequest<'a> {
                     "the record {} does not declare the target {}; it declares {}. A narrowed \
                      target list is a recorded exclusion with a stated reason, so a cell outside \
                      it must not be built",
-                    self.manifest.path().display(),
+                    shown_path(self.manifest.path()),
                     target.triple(),
                     joined_targets(self.manifest.targets())
                 ),
@@ -713,7 +832,7 @@ impl<'a> CompileRequest<'a> {
                 String::from(context),
                 format!(
                     "the record {} does not declare the optimization level {}; it declares {}",
-                    self.manifest.path().display(),
+                    shown_path(self.manifest.path()),
                     opt.flag(),
                     joined_opt_levels(self.manifest.opt_levels())
                 ),
@@ -768,9 +887,12 @@ pub struct CompileOutcome {
     timed_out: bool,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    stdout_integrity: CaptureIntegrity,
+    stderr_integrity: CaptureIntegrity,
     artifact: PathBuf,
     artifact_size: Option<u64>,
     duration: Duration,
+    notes: Vec<String>,
     failure: Option<BuildFailure>,
 }
 
@@ -794,7 +916,7 @@ impl CompileOutcome {
     ///
     /// This is the vector the recorded command template expands to and the one a maintainer
     /// reproduces. Where a timeout utility was used it wraps this vector rather than appearing
-    /// in it — see [`CompileOutcome::spawned_argv`].
+    /// in it — see [`CompileOutcome::spawned_command_line`].
     pub fn argv(&self) -> &[String] {
         &self.argv
     }
@@ -809,17 +931,18 @@ impl CompileOutcome {
         &self.command_line
     }
 
-    /// The vector actually spawned, which is [`CompileOutcome::argv`] prefixed with the system
-    /// timeout utility when the environment provided one.
+    /// The vector actually spawned, as one shell line: [`CompileOutcome::argv`] prefixed with the
+    /// system timeout utility when the environment provided one.
     ///
-    /// Reported separately, and never used as the reproduction line, because the wrapper is an
-    /// implementation detail of how this run bounded the compilation rather than part of the
-    /// command that reproduces the artifact.
-    pub fn spawned_argv(&self) -> &[String] {
-        &self.spawned_argv
-    }
-
-    /// The spawned vector as one shell line, for a report that needs to state exactly what ran.
+    /// Reported separately from [`CompileOutcome::command_line`], and never used as the
+    /// reproduction line, because the wrapper is an implementation detail of how this run bounded
+    /// the compilation rather than part of the command that reproduces the artifact. A finding
+    /// artifact records both: the reproduction line so a maintainer can rebuild the artifact, and
+    /// this line so the record states exactly what ran.
+    ///
+    /// Only the rendered line is exposed. The vector itself has no consumer that the line does not
+    /// serve, and handing it out would invite a second, differently quoted rendering of the same
+    /// facts.
     pub fn spawned_command_line(&self) -> String {
         posix_command_line(&self.spawned_argv)
     }
@@ -867,9 +990,11 @@ impl CompileOutcome {
 
     /// The compiler's standard output, as raw bytes.
     ///
-    /// Captured for completeness and for finding artifacts. A compiler ordinarily prints nothing
-    /// here, and nothing in the suite compares it: the streams that decide a verdict are those
-    /// of the *program*, not of the compiler that built it.
+    /// Written verbatim into a finding artifact's `.compile.stdout` entry, and **never compared**:
+    /// the streams that decide a verdict are those of the *program*, not of the compiler that built
+    /// it. A compiler ordinarily prints nothing here, and the entry is written even when it is
+    /// empty, because a reproduction script redirects this stream to a file of the same name and a
+    /// maintainer comparing the two needs both sides to exist.
     pub fn stdout(&self) -> &[u8] {
         &self.stdout
     }
@@ -891,24 +1016,58 @@ impl CompileOutcome {
         String::from_utf8_lossy(&self.stderr).into_owned()
     }
 
+    /// How faithfully [`CompileOutcome::stdout`] represents what the compiler wrote there.
+    pub fn stdout_integrity(&self) -> CaptureIntegrity {
+        self.stdout_integrity
+    }
+
+    /// How faithfully [`CompileOutcome::stderr`] represents what the compiler wrote there.
+    ///
+    /// The stream every diagnostic arrives on, so this is the value that decides whether an
+    /// attribution read out of that text is a fact or a guess. [`CompileOutcome::failure`] is
+    /// reported at [`FailureScope::Indeterminate`] when a scope would otherwise have been derived
+    /// from diagnostics this says were not fully read.
+    pub fn stderr_integrity(&self) -> CaptureIntegrity {
+        self.stderr_integrity
+    }
+
+    /// Whether the diagnostics were captured whole.
+    ///
+    /// The precondition for reading a compiler's intent out of its own words. False means the
+    /// stream was truncated by the retention quota or its reader did not finish, either of which
+    /// can hide the one line that would have named the real cause.
+    pub fn diagnostics_complete(&self) -> bool {
+        self.stderr_integrity.complete()
+    }
+
+    /// Everything that fell short of the ideal while this build was watched and collected.
+    ///
+    /// Each entry is a fact about the machine — a cleanup that could not be completed, a stream
+    /// that could not be read to its end, a status that stopped being observable, a process group
+    /// that could not be swept or still held processes after the sweep. Reported rather than
+    /// absorbed, because each one changes how the evidence beside it should be read: a surviving
+    /// sub-process holds a pipe and can outlive the run, and a suite that quietly accumulated them
+    /// would slow down and eventually fail for reasons no report explained.
+    ///
+    /// Kept out of [`CompileOutcome::stderr`] deliberately, so the bytes a finding artifact records
+    /// as the compiler's own diagnostics contain nothing this harness wrote.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+
     /// Where the artifact was asked to be written.
     pub fn artifact(&self) -> &Path {
         &self.artifact
     }
 
-    /// Whether a regular file appeared at the artifact path.
-    ///
-    /// Derived from the recorded size rather than probed again, so this answer and
-    /// [`CompileOutcome::artifact_size`] can never disagree, and neither changes if something
-    /// later removes the file.
-    pub fn artifact_exists(&self) -> bool {
-        self.artifact_size.is_some()
-    }
-
     /// The artifact's size in bytes, or `None` when no regular file was there.
     ///
     /// Recorded so that "it exited successfully and produced nothing" is visible as the distinct
-    /// failure it is, rather than surfacing later as an execution that could not start.
+    /// failure it is, rather than surfacing later as an execution that could not start. Every
+    /// consumer needs that three-way answer — absent, present but empty, or present with content —
+    /// so existence is read from this one value rather than probed again, and no separate
+    /// existence predicate is offered that could disagree with it or change if something later
+    /// removed the file.
     pub fn artifact_size(&self) -> Option<u64> {
         self.artifact_size
     }
@@ -944,19 +1103,33 @@ impl CompileOutcome {
         self.failure.as_ref().map(BuildFailure::class)
     }
 
-    /// Whether the failure, if any, is a property of the machine rather than of the compiler.
+    // # Why there is no `is_environment_failure` predicate here
+    //
+    // For the reason given on [`BuildFailure`]: a boolean cannot carry a three-way judgement, and
+    // the reading it forces on its callers is the damaging one. A caller deciding whether to raise
+    // a finding reads [`CompileOutcome::failure`] and matches that failure's own
+    // [`BuildFailure::scope`], which the compiler checks for exhaustiveness.
+
+    /// Whether the failure, if any, is a fault in this process's own bookkeeping.
     ///
-    /// False for a successful build. A caller deciding whether to raise a finding must consult
-    /// this: a target whose C runtime is absent produces a link failure that says nothing about
-    /// the compiler, and reporting it as a defect would manufacture findings on any modestly
-    /// provisioned machine.
-    pub fn is_environment_failure(&self) -> bool {
-        self.failure
-            .as_ref()
-            .is_some_and(BuildFailure::is_environment)
+    /// False for a successful build. A caller deciding a verdict must consult this *first*: a
+    /// compilation whose result could not be established says nothing about the compiler and
+    /// nothing about the machine, so it is neither a candidate finding nor an environment gap. It
+    /// is this suite failing to observe a cell it launched, and the only honest report of that is
+    /// a failure.
+    pub fn is_harness_failure(&self) -> bool {
+        self.failure.as_ref().is_some_and(BuildFailure::is_harness)
     }
 
     /// One line describing this outcome for a report or a failure message.
+    ///
+    /// **Deliberately free of any measured time.** This line reaches a report file and a finding
+    /// manifest, both of which must be byte-identical across two runs of the same inputs so that a
+    /// difference between them means a difference in behaviour. An elapsed-millisecond figure
+    /// varies with machine load on every run, so including it would make every artifact differ
+    /// from every other artifact and destroy exactly the comparability the records exist for.
+    /// Timing is genuinely useful — for progress output, where a slow cell is worth noticing — and
+    /// [`CompileOutcome::describe_with_timing`] is where it is available.
     pub fn describe(&self) -> String {
         let termination = match (&self.failure, self.status) {
             (Some(failure), _) => failure.to_string(),
@@ -967,14 +1140,127 @@ impl CompileOutcome {
             Some(bytes) => format!("{bytes} byte artifact"),
             None => String::from("no artifact"),
         };
-        format!(
-            "{} {} {}: {termination}; {size}; {} ms; {}",
+        let mut line = format!(
+            "{} {} {}: {termination}; {size}",
             self.compiler.label(),
             self.target.triple(),
             self.opt.flag(),
-            self.duration.as_millis(),
-            self.command_line
-        )
+        );
+        // Appended only when a capture fell short, so a complete capture — the ordinary case —
+        // contributes nothing and the line stays stable.
+        line.push_str(
+            &self
+                .stdout_integrity
+                .describe("the compiler's standard output"),
+        );
+        line.push_str(&self.stderr_integrity.describe("the compiler's diagnostics"));
+        for note in self.notes() {
+            line.push_str("; ");
+            line.push_str(note);
+        }
+        line.push_str("; ");
+        line.push_str(&self.command_line);
+        line
+    }
+
+    /// The same line with the measured duration appended, for progress output only.
+    ///
+    /// Separated from [`CompileOutcome::describe`] rather than offered as an option, because the
+    /// distinction being enforced is *where the text may go*: this variant is safe on a terminal
+    /// and never safe in a file whose bytes are compared. Keeping them as two named methods makes
+    /// the wrong choice visible at the call site instead of hiding it in an argument.
+    pub fn describe_with_timing(&self) -> String {
+        format!("{} ({} ms)", self.describe(), self.duration.as_millis())
+    }
+
+    /// Write this build's evidence into the cell workspace, for a retained failure to be read from.
+    ///
+    /// A workspace kept after a failure is the maintainer's primary evidence, and until now it
+    /// held the artifact and the command lines but not the build that produced them. The four
+    /// files written here close that gap: the compiler's own two streams verbatim, the raw
+    /// termination facts, and the fidelity of each capture, so a truncated diagnostic listing
+    /// cannot be mistaken for a short one.
+    ///
+    /// Every write goes through the workspace's publisher, which refuses to follow a symbolic link
+    /// planted at a destination name, so a compiler that emitted a link into its own working
+    /// directory cannot redirect this evidence outside the cell.
+    ///
+    /// # Errors
+    ///
+    /// A name that escapes the workspace, a destination that is not a regular file, or an
+    /// underlying write failure — each of which is a condition of the machine and is reported
+    /// rather than absorbed, because evidence that was silently not written is worse than evidence
+    /// that was never promised.
+    pub fn persist(&self, workspace: &Workspace) -> HarnessResult<()> {
+        let (stdout_name, stderr_name, status_name) = self.compiler.compile_evidence_names();
+        workspace.write(stdout_name, self.stdout())?;
+        workspace.write(stderr_name, self.stderr())?;
+        workspace.write_text(status_name, &self.status_record())?;
+        Ok(())
+    }
+
+    /// The build's termination and capture facts, as a line-oriented record.
+    ///
+    /// Line-oriented and free of measured time for the same reason [`CompileOutcome::describe`] is:
+    /// a maintainer comparing two retained workspaces must see only the differences that mean
+    /// something. Every value here is either a decision the compiler made or a fact about how
+    /// faithfully it was observed.
+    fn status_record(&self) -> String {
+        let mut record = String::new();
+        record.push_str(&format!("compiler = {}\n", self.compiler.label()));
+        record.push_str(&format!("target = {}\n", self.target.triple()));
+        record.push_str(&format!("opt = {}\n", self.opt.flag()));
+        record.push_str(&format!("command = {}\n", self.command_line));
+        record.push_str(&format!("spawned = {}\n", self.spawned_command_line()));
+        record.push_str(&format!(
+            "timeout_tool_used = {}\n",
+            self.timeout_tool_used()
+        ));
+        record.push_str(&format!("budget_secs = {}\n", self.budget.as_secs()));
+        record.push_str(&format!(
+            "exit_code = {}\n",
+            match self.exit_code() {
+                Some(code) => code.to_string(),
+                None => String::from("none"),
+            }
+        ));
+        record.push_str(&format!(
+            "terminated_by_signal = {}\n",
+            self.terminated_by_signal()
+        ));
+        record.push_str(&format!("timed_out = {}\n", self.timed_out));
+        record.push_str(&format!("artifact = {}\n", self.artifact.display()));
+        record.push_str(&format!("artifact_exists = {}\n", self.artifact_exists()));
+        record.push_str(&format!(
+            "artifact_size = {}\n",
+            match self.artifact_size {
+                Some(bytes) => bytes.to_string(),
+                None => String::from("none"),
+            }
+        ));
+        record.push_str(&self.stdout_integrity().record_lines("stdout"));
+        record.push_str(&self.stderr_integrity().record_lines("stderr"));
+        record.push_str(&format!("succeeded = {}\n", self.succeeded()));
+        match self.failure.as_ref() {
+            Some(failure) => {
+                record.push_str(&format!("failure_scope = {}\n", failure.scope()));
+                record.push_str(&format!("failure_class = {:?}\n", failure.class()));
+                record.push_str(&format!("failure = {}\n", failure.summary()));
+            }
+            None => record.push_str("failure = none\n"),
+        }
+        for note in self.notes() {
+            record.push_str(&format!("note = {note}\n"));
+        }
+        record
+    }
+    /// Whether a regular file appeared at the artifact path.
+    ///
+    /// Derived from the recorded size rather than probed again, so this answer and
+    /// [`CompileOutcome::artifact_size`] can never disagree, and neither changes if something
+    /// later removes the file.
+    pub fn artifact_exists(&self) -> bool {
+        self.artifact_size.is_some()
     }
 }
 
@@ -1002,6 +1288,7 @@ pub fn build(request: &CompileRequest<'_>, caps: &Capabilities) -> HarnessResult
         request.cell_label()
     );
     require_minimal_flag_table_agreement(&context)?;
+    require_distinct_evidence_names(&context)?;
 
     let program = resolve_compiler(request, caps, &context)?;
     let argv = assemble_argv(request, &program, &context)?;
@@ -1015,27 +1302,28 @@ pub fn build(request: &CompileRequest<'_>, caps: &Capabilities) -> HarnessResult
     cross_check_against_template(request, &argv, &context)?;
 
     let budget = Duration::from_secs(caps.config().timeout_secs());
-    let (spawned_argv, timeout_tool_used) = wrap_with_timeout_tool(&argv, caps, budget);
-    // The utility, when present, is given the first opportunity to act, because it signals the
-    // whole process group and therefore also reaches the sub-processes a compiler driver started
-    // and this module cannot see. The watchdog then fires later, as a backstop for the case where
-    // the utility does not act at all.
-    let watchdog = if timeout_tool_used {
-        budget + WATCHDOG_GRACE
-    } else {
-        budget
-    };
-    let capture = spawn_bounded(
-        &spawned_argv,
-        request.workspace().root(),
-        watchdog,
-        &context,
-    )?;
+    // This module's own watchdog is the authoritative bound, and it is set at exactly the
+    // configured budget. The system utility, when present, is given the budget plus
+    // [`TIMEOUT_UTILITY_OUTER_MARGIN`], so it can only ever act after the watchdog has already
+    // acted and failed to stop the child.
+    //
+    // The earlier arrangement was the reverse — the utility first, the watchdog as a backstop —
+    // and it had to be inverted. Reading a timeout off the utility means reading it off an exit
+    // status, and an exit status is a number the compiler under test is equally entitled to
+    // choose. The installed utility passes its child's status through verbatim, so a compiler
+    // exiting 124, 125, 126 or 127 was indistinguishable from the utility reporting an expiry or
+    // a failure of its own; the second of those became an `Environment` attribution, which passes
+    // by default. With the watchdog authoritative, a timeout is a fact this process observed — it
+    // reached its own deadline and terminated the child — and no exit status is interpreted
+    // anywhere in this module.
+    let (spawned_argv, timeout_tool_used) =
+        wrap_with_timeout_tool(&argv, caps, budget + TIMEOUT_UTILITY_OUTER_MARGIN);
+    let capture = spawn_bounded(&spawned_argv, request.workspace().root(), budget, &context)?;
 
     let artifact = request.output().to_path_buf();
     let artifact_size = regular_file_size(&artifact);
-    let timed_out =
-        capture.timed_out || expired_under_timeout_tool(&capture, timeout_tool_used, budget);
+    // Solely the watchdog's own observation. Nothing about the child's exit status contributes.
+    let timed_out = capture.timed_out;
     let mut outcome = CompileOutcome {
         compiler: request.compiler(),
         target: request.target(),
@@ -1049,9 +1337,12 @@ pub fn build(request: &CompileRequest<'_>, caps: &Capabilities) -> HarnessResult
         timed_out,
         stdout: capture.stdout,
         stderr: capture.stderr,
+        stdout_integrity: capture.stdout_integrity,
+        stderr_integrity: capture.stderr_integrity,
         artifact,
         artifact_size,
         duration: capture.duration,
+        notes: capture.notes,
         failure: None,
     };
     // Classified once, with the status, the diagnostics, the artifact and the target's probed C
@@ -1091,6 +1382,49 @@ fn require_minimal_flag_table_agreement(context: &str) -> HarnessResult<()> {
                      that set, so one written only here would bypass the verification"
                 ),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Assert that no two compilers write their build evidence under the same workspace name.
+///
+/// # Why this is checked rather than assumed
+///
+/// A cell workspace holds both compilers' evidence side by side, and the two name triples come from
+/// two separate groups of constants in the workspace vocabulary. A single transposed prefix there —
+/// one `bcc.` where a `ref.` belonged — would make the reference build's diagnostics overwrite the
+/// subject's in every one of the 1,296 cells, and the failure would be invisible: each file would
+/// exist, be non-empty and contain real compiler output, just the wrong compiler's. A maintainer
+/// investigating a retained cell would read the reference compiler's reasoning and attribute it to
+/// the compiler under test.
+///
+/// Every pairing is compared, over [`Compiler::ALL`], so a compiler added later is included without
+/// this function being revisited. Nine string comparisons per invocation is nothing against a
+/// mistake that would silently corrupt the evidence trail of an entire run.
+fn require_distinct_evidence_names(context: &str) -> HarnessResult<()> {
+    for (index, compiler) in Compiler::ALL.iter().enumerate() {
+        let (stdout, stderr, status) = compiler.compile_evidence_names();
+        for other in &Compiler::ALL[index + 1..] {
+            let (other_stdout, other_stderr, other_status) = other.compile_evidence_names();
+            for mine in [stdout, stderr, status] {
+                for theirs in [other_stdout, other_stderr, other_status] {
+                    if mine == theirs {
+                        return Err(HarnessError::new(
+                            String::from(context),
+                            format!(
+                                "the {} and the {} would both write build evidence to {mine:?} in \
+                                 the same cell workspace, so one would overwrite the other and a \
+                                 retained cell would attribute one compiler's diagnostics to the \
+                                 other; the workspace vocabulary must give every compiler its own \
+                                 three names",
+                                compiler.label(),
+                                other.label()
+                            ),
+                        ));
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -1180,8 +1514,8 @@ fn require_same_path(
              substitutions from the discovery layer's own answer — `Capabilities::bcc().path()` \
              for the compiler under test, `Capabilities::ref_cc_for(target)` for the reference \
              compiler",
-            resolved.display(),
-            declared.display()
+            shown_path(resolved),
+            shown_path(declared)
         ),
     ))
 }
@@ -1235,7 +1569,7 @@ fn argument_text(context: &str, role: &str, path: &Path) -> HarnessResult<String
                  not decode. It is refused rather than converted: a reproduction command that \
                  names a different file from the one that ran would be worse than no command at \
                  all",
-                path.display()
+                shown_path(path)
             ),
         )),
     }
@@ -1534,7 +1868,7 @@ fn cross_check_against_template(
                  difference is refused rather than preferred one way or the other. Template in \
                  {}: {template:?}. Assembled: {}. Recorded: {}",
                 request.compiler().label(),
-                manifest.path().display(),
+                shown_path(manifest.path()),
                 posix_command_line(argv),
                 posix_command_line(&recorded)
             ),
@@ -1555,7 +1889,7 @@ fn cross_check_against_template(
             request.compiler().label(),
             argv.len(),
             recorded.len(),
-            manifest.path().display(),
+            shown_path(manifest.path()),
             posix_command_line(argv),
             posix_command_line(&recorded)
         ),
@@ -1566,23 +1900,30 @@ fn cross_check_against_template(
 ///
 /// Returns the vector to spawn and whether the utility is in it.
 ///
-/// The utility is preferred over the harness's own watchdog for one reason that matters: it
-/// signals the whole process group, and a compiler driver is ordinarily a process group. The
+/// The utility is preferred over the harness's own watchdog for one reason that matters: an
+/// implementation that signals the process group can reach further than this module can. The
 /// driver this module spawns starts sub-processes of its own — a preprocessor, a compiler proper,
-/// an assembler, a linker — and it is one of *those* that hangs. Killing only the driver would
-/// leave the sub-process running, holding the pipe this module is reading, so the harness would
-/// go on waiting for a process it never started and cannot see.
+/// an assembler, a linker — and it is one of *those* that hangs. Terminating only the driver
+/// leaves the sub-process running, holding the pipe this module is reading, so a harness that
+/// read that pipe to end of file would go on waiting for a process it never started and cannot
+/// see.
 ///
-/// The watchdog in [`spawn_bounded`] remains in force regardless, set to fire later, so the two
-/// compose rather than compete: the utility acts first and reaches further, and the watchdog
-/// covers the case where the utility does not act at all.
+/// That reach is the utility's to provide, and it is neither established nor relied on here.
+/// Nothing in this module creates a process group or sends a group-wide signal, and the
+/// implementation measured in this environment was defective in two of its three spellings, so a
+/// descendant may well survive. What does not depend on the utility is stated exactly: the
+/// watchdog in [`spawn_bounded`] remains in force regardless, set to fire later, and it
+/// terminates and reaps the one child this module spawned, so the invocation returns within the
+/// budget whether the utility acted or not. Reading the captures with a deadline rather than to
+/// end of file is what makes a surviving descendant survivable.
 ///
 /// Where the utility is absent, or where its path cannot be rendered as text without loss, the
 /// vector is returned untouched and the watchdog is the whole bound. That is a complete
 /// substitute rather than a degradation of correctness — it bounds the invocation just as surely,
-/// it simply cannot reach a grandchild — so it is taken silently rather than refused. Reporting
-/// the untouched vector is also what keeps [`CompileOutcome::spawned_argv`] a faithful record of
-/// what ran.
+/// it forfeits only a reach the utility might have had, and the child's own process group is swept
+/// on every exit path regardless — so it is taken silently rather than refused. Reporting
+/// the untouched vector is also what keeps [`CompileOutcome::spawned_command_line`] a faithful
+/// record of what ran.
 fn wrap_with_timeout_tool(
     argv: &[String],
     caps: &Capabilities,
@@ -1617,19 +1958,100 @@ struct Capture {
     stdout: Vec<u8>,
     /// Bytes the child wrote to standard error, capped at [`CAPTURE_BYTES_MAX`].
     stderr: Vec<u8>,
+    /// How faithfully `stdout` represents what the child actually wrote there.
+    stdout_integrity: CaptureIntegrity,
+    /// How faithfully `stderr` represents what the child actually wrote there.
+    ///
+    /// The stream a compiler's diagnostics arrive on, and therefore the stream every attribution
+    /// derived from diagnostic text depends upon. Recorded rather than assumed so that
+    /// [`classify_failure`] can decline to attribute a failure it could not fully read.
+    stderr_integrity: CaptureIntegrity,
     /// Whether the harness's watchdog killed the child for outliving its bound.
     timed_out: bool,
     /// How the child terminated, or `None` when it was killed or became unobservable.
     status: Option<ExitStatus>,
     /// Wall-clock time from spawn to termination, excluding the time spent collecting output.
     duration: Duration,
+    /// Everything that fell short of the ideal while this child was watched and collected.
+    ///
+    /// A cleanup that could not be completed, a stream that could not be read to its end, a
+    /// status that stopped being observable: each is a fact about the machine that would
+    /// otherwise be discarded, and each can change how a maintainer reads the outcome beside it.
+    notes: Vec<String>,
 }
 
-/// Run one invocation inside a cell workspace, bounded, with its output captured.
+/// One output stream after it has been drained, with the fidelity of that drain recorded.
 ///
-/// Five properties hold together, and each closes a distinct way a compiler invocation can fail
-/// to return or can reach outside the directory it was given:
+/// The bytes and the account of how they were obtained travel together on purpose. A truncated
+/// stream and a complete one are indistinguishable once separated from their byte counts, and a
+/// compiler attribution read out of a truncated diagnostic stream is a guess presented as a fact
+/// — which is precisely what [`FailureScope::Indeterminate`] exists to prevent.
+#[derive(Debug)]
+struct StreamHarvest {
+    /// The retained bytes, never more than [`CAPTURE_BYTES_MAX`].
+    bytes: Vec<u8>,
+    /// Total bytes the child wrote to this stream, including any the quota discarded.
+    produced: u64,
+    /// Whether the quota discarded anything.
+    truncated: bool,
+    /// Whether the stream was read all the way to its end.
+    drained: bool,
+    /// Why the drain fell short, when it did.
+    note: Option<String>,
+}
+
+impl StreamHarvest {
+    /// A stream that was never opened, which is not the same as one that was empty.
+    ///
+    /// Reported as undrained, because nothing was read: describing an absent pipe as a completely
+    /// read empty one would let a missing stream masquerade as a silent compiler.
+    fn absent(reason: &str) -> Self {
+        Self {
+            bytes: Vec::new(),
+            produced: 0,
+            truncated: false,
+            drained: false,
+            note: Some(String::from(reason)),
+        }
+    }
+
+    /// The fidelity of this harvest, in the harness-wide form every capture is reported in.
+    fn integrity(&self) -> CaptureIntegrity {
+        CaptureIntegrity::new(
+            self.produced,
+            self.bytes.len() as u64,
+            self.truncated,
+            self.drained,
+        )
+    }
+}
+
+/// Run one invocation inside a cell workspace, bounded, isolated, supervised as a group, with
+/// its output captured.
 ///
+/// Seven properties hold together, and each closes a distinct way a compiler invocation can fail
+/// to return, can reach outside the directory it was given, or can carry something out of this
+/// process that should never have left it:
+///
+/// - **The environment is replaced, not inherited.** Every variable is cleared and a documented
+///   minimal set restored, with the cell workspace as the child's private `HOME` and `TMPDIR`.
+///   A compiler driver reads a great many variables — search paths, loader configuration, its own
+///   options — and a continuous-integration environment carries credentials beside them. Neither
+///   belongs in a hermetic comparison: an inherited search path makes the result depend on the
+///   machine rather than on the compiler, and an inherited credential can be printed by a tool
+///   and persisted into a finding artifact. Isolation is applied to the command that is actually
+///   spawned. That ordering matters here only in the negative sense: this module wraps by
+///   rebuilding the **argument vector** and constructs its `Command` once from the final vector,
+///   so there is no second `Command` for a clear to be lost from — unlike a design that wraps by
+///   rebuilding the command, where `Command::env_clear` is invisible to `Command::get_envs` and a
+///   rebuild silently re-inherits everything.
+/// - **The child owns its own process group, and the whole group is swept.** A compiler driver is
+///   ordinarily a process group: it execs a preprocessor, a compiler proper, an assembler and a
+///   linker, and it is one of *those* that hangs. Killing the driver alone leaves the sub-process
+///   running, still holding the pipe this module is reading. Every exit path therefore sweeps the
+///   whole group after the direct child has been reaped, and records the result: a group that
+///   still holds survivors, or one that could not be swept at all, is stated in the outcome
+///   rather than passed over.
 /// - **The working directory is the cell's own workspace.** Set on the child rather than by
 ///   changing this process's directory, which would be a data race: the suite's area tests run
 ///   concurrently by default, and a process-wide change of directory made by one of them would
@@ -1638,12 +2060,21 @@ struct Capture {
 ///   inside the one directory the cell owns.
 /// - **Standard input is the null device**, so a driver that reads it sees end of file at once
 ///   rather than waiting for input that will never arrive.
-/// - **Each output stream is drained by its own thread, bounded** at [`CAPTURE_BYTES_MAX`]. Two
-///   hazards are closed by this: a driver that prints without end cannot exhaust memory, and the
-///   classic deadlock in which a parent waits for a child that is itself blocked writing into a
-///   pipe nobody is reading cannot occur.
+/// - **Each output stream is drained by its own thread, bounded** at [`CAPTURE_BYTES_MAX`], and
+///   drained *past* the bound so nothing is retained beyond it while the pipe keeps being
+///   emptied. Two hazards are closed by this together: a driver that prints without end cannot
+///   exhaust memory, and the classic deadlock in which a parent waits for a child that is itself
+///   blocked writing into a pipe nobody is reading cannot occur. Stopping the reader at the cap
+///   would close the first hazard and reopen the second, so the surplus is read and discarded
+///   rather than left in the pipe, and the discarded quantity is reported on the outcome.
+/// - **The child is spawned into its own process group**, and the group — not merely the direct
+///   child — is what gets signalled when the watchdog fires. A compiler driver's sub-processes
+///   are the ordinary case here, and killing only the driver leaves the assembler or the linker
+///   it started running and holding the pipe open.
 /// - **The wait is bounded** by polling, because the standard library offers no timed wait on a
-///   child, and the child is **always reaped**, so no zombie is left behind on any path.
+///   child, and the child is **always reaped**, so no zombie is left behind on any path. The
+///   bound is this module's own and is authoritative: the system utility, when present, is given
+///   a strictly later deadline and no status it might report is ever interpreted.
 /// - **Collecting the output is bounded too**, and separately from the wait. Terminating a child
 ///   does not close the pipe it was writing to: any process that inherited the write end still
 ///   holds it open, and a compiler driver's sub-processes are the ordinary case. Draining to end
@@ -1684,6 +2115,16 @@ fn spawn_bounded(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // A group of the child's own, so terminating it reaches every sub-process a compiler driver
+    // started. Zero requests a new group whose identifier is the child's own process identifier,
+    // which is what makes the group addressable from here without a second lookup. Deliberately
+    // not the harness's own group: signalling that would kill the test process itself along with
+    // every other cell running concurrently beside it.
+    //
+    // Both are applied to the one command this function spawns, which is built from the
+    // already-wrapped vector, so nothing downstream can rebuild it and lose the clear.
+    isolate_child_environment(&mut command, working_directory);
+    own_process_group(&mut command);
     let started = Instant::now();
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -1701,22 +2142,47 @@ fn spawn_bounded(
             ));
         }
     };
+    // The child leads its own group because `own_process_group` was applied before the spawn, so
+    // its identifier is also the group's. Read before anything can fail, so that every path below
+    // has a group to sweep.
+    let group = child.id();
     let deadline = started + bound;
     let stdout_reader = child.stdout.take().map(spawn_capped_reader);
     let stderr_reader = child.stderr.take().map(spawn_capped_reader);
-    let (timed_out, status) = await_child_within_deadline(&mut child, deadline);
+    let watched = await_child_within_deadline(&mut child, deadline);
     // Measured before the harvest, so the reported duration is how long the compilation took and
     // not how long its diagnostics took to arrive.
     let duration = started.elapsed();
+    // Swept after the direct child has been waited on, never before: a reaped-but-unwaited child
+    // is a zombie, a zombie still answers an existence probe, and sweeping first would therefore
+    // report a survivor that is nothing of the kind. The sweep is unconditional — a driver that
+    // exited normally can still have left a sub-process behind holding the pipe.
+    let mut notes: Vec<String> = Vec::new();
+    match terminate_process_group(group, kill_tool()) {
+        GroupTermination::Cleared => {}
+        GroupTermination::Survivors(detail) | GroupTermination::Unsupervised(detail) => {
+            notes.push(sanitize_text_for_report(&redact_secrets(&detail)));
+        }
+    }
     let harvest_deadline = deadline.max(Instant::now() + CAPTURE_GRACE);
-    let stdout = harvest_within_deadline(stdout_reader, harvest_deadline);
-    let stderr = harvest_within_deadline(stderr_reader, harvest_deadline);
+    let stdout = harvest_within_deadline(stdout_reader, harvest_deadline, "standard output");
+    let stderr = harvest_within_deadline(stderr_reader, harvest_deadline, "standard error");
+    notes.extend(watched.notes);
+    if let Some(note) = stdout.note.as_ref() {
+        notes.push(format!("the compiler's standard output {note}"));
+    }
+    if let Some(note) = stderr.note.as_ref() {
+        notes.push(format!("the compiler's standard error {note}"));
+    }
     Ok(Capture {
-        stdout,
-        stderr,
-        timed_out,
-        status,
+        stdout_integrity: stdout.integrity(),
+        stderr_integrity: stderr.integrity(),
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+        timed_out: watched.timed_out,
+        status: watched.status,
         duration,
+        notes,
     })
 }
 
@@ -1727,93 +2193,248 @@ fn spawn_bounded(
 /// reached end of file — which, as [`spawn_bounded`] explains, is an event a terminated compiler
 /// driver does not guarantee.
 ///
-/// A read error and a send failure are both discarded, and for the same reason: the bytes already
-/// collected are worth exactly what they contain, a stream that failed mid-read is
-/// indistinguishable from a driver that stopped printing, and a send that fails means the caller
-/// has already reached its deadline and moved on. Neither can change a verdict, because a verdict
-/// is decided by the *program's* output and never by the compiler's diagnostics.
-fn spawn_capped_reader<R>(stream: R) -> Receiver<Vec<u8>>
+/// **The quota bounds what is retained, not what is read.** A reader that stopped at the cap
+/// would leave the writer blocked on a full pipe forever, converting a chatty compiler into a
+/// hang — the exact deadlock the separate reader threads exist to prevent. So the stream is read
+/// to its end in fixed-size chunks and the surplus is dropped, which keeps memory bounded by the
+/// quota while keeping the pipe empty.
+///
+/// A read error no longer vanishes. It ends the drain, and the fact that the drain ended early is
+/// carried back to the caller so an attribution built on this text can decline to be certain. The
+/// send failure is still discarded, and only that: it means the caller reached its deadline and
+/// moved on, which the caller already knows because it is the party that timed out.
+fn spawn_capped_reader<R>(stream: R) -> Receiver<StreamHarvest>
 where
     R: Read + Send + 'static,
 {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let mut buffer: Vec<u8> = Vec::new();
-        let mut bounded = stream.take(CAPTURE_BYTES_MAX);
-        let _ = bounded.read_to_end(&mut buffer);
-        let _ = sender.send(buffer);
+        let _ = sender.send(drain_capped(stream));
     });
     receiver
 }
 
-/// Take a reader's bytes if they arrive by the deadline, and nothing if they do not.
+/// Read one stream to its end, retaining a bounded prefix and counting everything.
+///
+/// Split out from the thread body so the retention rule is stated once and can be read without
+/// the concurrency around it: every byte is read, a prefix up to [`CAPTURE_BYTES_MAX`] is kept,
+/// and the count of what the child actually produced is exact regardless of how much was kept.
+fn drain_capped<R>(mut stream: R) -> StreamHarvest
+where
+    R: Read,
+{
+    let mut retained: Vec<u8> = Vec::new();
+    let mut produced: u64 = 0;
+    let mut truncated = false;
+    let mut chunk = vec![0_u8; CAPTURE_CHUNK_BYTES];
+    let mut drained = false;
+    let mut note = None;
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                drained = true;
+                break;
+            }
+            Ok(count) => {
+                produced = produced.saturating_add(count as u64);
+                let room = CAPTURE_BYTES_MAX.saturating_sub(retained.len() as u64);
+                let keep = room.min(count as u64) as usize;
+                if keep > 0 {
+                    retained.extend_from_slice(&chunk[..keep]);
+                }
+                if keep < count {
+                    truncated = true;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                note = Some(format!(
+                    "could not be read to its end: {}; the {} byte(s) collected before the error \
+                     are reported, and any diagnostic the compiler wrote after it is absent",
+                    sanitize_text_for_report(&error.to_string()),
+                    retained.len()
+                ));
+                break;
+            }
+        }
+    }
+    if truncated && note.is_none() {
+        note = Some(format!(
+            "produced {produced} byte(s), of which the {CAPTURE_BYTES_MAX}-byte quota retained \
+             the first {}; the remainder was read from the pipe and discarded so the compiler \
+             could not block on it",
+            retained.len()
+        ));
+    }
+    StreamHarvest {
+        bytes: retained,
+        produced,
+        truncated,
+        drained,
+        note,
+    }
+}
+
+/// Take a reader's harvest if it arrives by the deadline, and an accounted absence if it does not.
 ///
 /// A deadline already in the past yields a zero wait, which makes this a non-blocking poll —
 /// exactly right after a timeout, where bytes already delivered are kept and nothing is waited
 /// for.
-fn harvest_within_deadline(reader: Option<Receiver<Vec<u8>>>, deadline: Instant) -> Vec<u8> {
+///
+/// The two ways this can come back empty are no longer conflated with an empty stream. A reader
+/// that never existed and a reader that did not deliver in time are both reported as undrained,
+/// with the reason attached, because a compiler whose diagnostics were lost to a deadline must
+/// never be mistaken for a compiler that printed nothing.
+fn harvest_within_deadline(
+    reader: Option<Receiver<StreamHarvest>>,
+    deadline: Instant,
+    role: &str,
+) -> StreamHarvest {
     let Some(receiver) = reader else {
-        return Vec::new();
+        return StreamHarvest::absent(&format!(
+            "was never opened, so no {role} could be collected; this is a condition of the \
+             machine rather than a silent compiler"
+        ));
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
-    receiver.recv_timeout(remaining).unwrap_or_default()
+    match receiver.recv_timeout(remaining) {
+        Ok(harvest) => harvest,
+        Err(error) => StreamHarvest::absent(&format!(
+            "did not arrive within the collection grace: {}; the {role} it may have carried is \
+             absent from this record rather than empty",
+            sanitize_text_for_report(&error.to_string())
+        )),
+    }
+}
+
+/// Everything learned while watching one child until it finished or was stopped.
+///
+/// Returned as a record rather than a tuple because the third element — what could not be
+/// completed during cleanup — is the part a tuple invites a caller to drop.
+#[derive(Debug)]
+struct WatchedChild {
+    /// Whether the child outlived its budget and was terminated for it.
+    timed_out: bool,
+    /// How the child terminated, or `None` when it was killed or became unobservable.
+    status: Option<ExitStatus>,
+    /// Cleanup and observation shortfalls, each already sanitized for a report.
+    notes: Vec<String>,
 }
 
 /// Wait for a child until the deadline, killing and reaping it if it outlives one.
 ///
-/// Returns `(timed_out, status)`. A status is present on exactly one path — the child was
-/// observed to finish on its own — and absent on the two paths where none exists to report: the
-/// deadline was reached, or the status can no longer be observed at all.
+/// A status is present on exactly one path — the child was observed to finish on its own — and
+/// absent on the two paths where none exists to report: the deadline was reached, or the status
+/// can no longer be observed at all.
 ///
 /// Those two absences are deliberately not conflated. A child that outlived its budget is a
 /// timeout, which is one of the suite's divergence classes and a real finding about a compiler. A
 /// child whose status became unobservable is a condition of the machine, and reporting it as a
 /// timeout would attribute a fault in this process's bookkeeping to the compiler it was watching.
-fn await_child_within_deadline(child: &mut Child, deadline: Instant) -> (bool, Option<ExitStatus>) {
+/// Both absences now carry a note saying which of the two occurred, so the distinction survives
+/// into the record a maintainer reads.
+fn await_child_within_deadline(child: &mut Child, deadline: Instant) -> WatchedChild {
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return (false, Some(status)),
+            Ok(Some(status)) => {
+                return WatchedChild {
+                    timed_out: false,
+                    status: Some(status),
+                    notes: Vec::new(),
+                }
+            }
             Ok(None) => {}
-            Err(_) => {
-                terminate_and_reap(child);
-                return (false, None);
+            Err(error) => {
+                let mut notes = vec![format!(
+                    "the compiler's exit status stopped being observable while it was being \
+                     watched: {}; it was terminated and reaped so nothing of ours is left \
+                     running, and the absent status is reported as unobservable rather than as a \
+                     timeout",
+                    sanitize_text_for_report(&error.to_string())
+                )];
+                notes.extend(terminate_and_reap(child));
+                return WatchedChild {
+                    timed_out: false,
+                    status: None,
+                    notes,
+                };
             }
         }
         if Instant::now() >= deadline {
-            terminate_and_reap(child);
-            return (true, None);
+            return WatchedChild {
+                timed_out: true,
+                status: None,
+                notes: terminate_and_reap(child),
+            };
         }
         thread::sleep(WAIT_POLL_INTERVAL);
     }
 }
 
-/// Kill a child and wait for it, ignoring both results.
+/// Kill a child's whole process group, then the child itself, and reap it.
 ///
-/// Both results are ignored on purpose. A kill fails when the child has already exited, and a
-/// wait fails when it has already been reaped; either way the postcondition this function exists
-/// to establish — that no process of ours is still running and none is left unreaped — already
-/// holds.
-fn terminate_and_reap(child: &mut Child) {
+/// The order matters and is the point of this function. Signalling the group first reaches the
+/// sub-processes a compiler driver started — the assembler, the linker, a wrapped `timeout`'s own
+/// child — which a kill directed at the driver alone leaves running and holding the output pipe
+/// open. Killing the direct child afterwards is not redundant: the group signal is delivered by
+/// an external utility whose absence must not leave the child alive, so the built-in kill is the
+/// guarantee that at least the process this module started is stopped.
+///
+/// A failure of either the kill or the wait is *ordinarily* not a failure at all — a kill fails
+/// when the child has already exited and a wait fails when it has already been reaped — so those
+/// two are still absorbed. What is no longer absorbed is a group signal that could not be
+/// attempted, because that one means sub-processes may still be running, which is a fact about
+/// the machine a maintainer needs rather than one this function may quietly decide for them.
+fn terminate_and_reap(child: &mut Child) -> Vec<String> {
+    let group = child.id();
     let _ = child.kill();
     let _ = child.wait();
+    // Swept after the wait, never before: a killed-but-unwaited child is a zombie, and a zombie
+    // still answers an existence probe, so sweeping first would report a survivor that is nothing
+    // of the kind.
+    let mut notes = Vec::new();
+    match terminate_process_group(group, kill_tool()) {
+        GroupTermination::Cleared => {}
+        GroupTermination::Survivors(detail) | GroupTermination::Unsupervised(detail) => {
+            notes.push(sanitize_text_for_report(&redact_secrets(&detail)));
+        }
+    }
+    notes
 }
 
-/// True when the system timeout utility, and not the compiler, produced this status.
+/// Withdraw an attribution that was read out of diagnostics this run did not capture whole.
 ///
-/// Two conditions are required together, because the utility reports expiry by exiting with a
-/// status a compiler is equally entitled to exit with. The status alone would misread a compiler
-/// that legitimately exited 124 as a hang, so the elapsed time must corroborate it: a genuine
-/// expiry cannot have taken materially less than the budget. [`TIMEOUT_ELAPSED_SLACK`] absorbs
-/// the difference between the utility's own clock and this module's.
-fn expired_under_timeout_tool(capture: &Capture, tool_used: bool, budget: Duration) -> bool {
-    if !tool_used {
-        return false;
+/// The gate that makes [`FailureScope::Indeterminate`] mean something. Applied at exactly the
+/// return sites of [`classify_failure`] whose scope was decided by matching — or by failing to
+/// match — a signature against the compiler's own text, and applied at none of the sites whose
+/// scope came from a directly observed fact.
+///
+/// The distinction is load-bearing in both directions:
+///
+/// - A **text-derived** scope is only as sound as the text. A truncated diagnostic stream may be
+///   missing the line naming an absent C runtime, in which case the environment test above would
+///   not have fired and the failure would fall through to the compiler-answerable default — a
+///   manufactured finding against a compiler that was never given the inputs it needed. The
+///   *absence* of a signature is the weakest evidence of all in a stream that was cut short, which
+///   is why the final fallback is gated too.
+/// - A **fact-derived** scope is untouched by how much text survived. A timeout, a bounding
+///   utility's own status, an unobservable wait, a signal death and a missing artifact are each
+///   observed directly, and withdrawing those attributions because a diagnostic listing overflowed
+///   a quota would discard sound conclusions and bury real defects under an unattributable label.
+///
+/// Returns the judgement unchanged in the ordinary case, so a complete capture — which every
+/// well-behaved invocation produces — pays nothing and reads exactly as it did before.
+fn scoped_by_diagnostics(failure: BuildFailure, outcome: &CompileOutcome) -> BuildFailure {
+    if outcome.diagnostics_complete() {
+        return failure;
     }
-    let expired_status = capture
-        .status
-        .and_then(|status| status.code())
-        .is_some_and(|code| code == TIMEOUT_TOOL_EXPIRED_STATUS);
-    expired_status && capture.duration + TIMEOUT_ELAPSED_SLACK >= budget
+    failure.into_indeterminate(&format!(
+        "this attribution was read from the compiler's diagnostics and that stream was not \
+         captured whole{}",
+        outcome
+            .stderr_integrity()
+            .describe("the compiler's diagnostics")
+    ))
 }
 
 /// The size of a regular file at `path`, or `None` when there is no regular file there.
@@ -1844,36 +2465,68 @@ fn regular_file_size(path: &Path) -> Option<u64> {
 /// # The order of the tests, and why it is this order
 ///
 /// Every test below can match evidence another would also match, so the sequence is the
-/// judgement:
+/// judgement. Two principles set the order, and both were arrived at by way of a defect:
 ///
-/// 1. **Timeout first.** An invocation that outlived its budget was killed, so whatever it had
-///    printed by then is incidental. A hang is its own divergence class.
-/// 2. **The bounding utility's own failure next**, because it exits with statuses that mean "I
-///    could not run the command" rather than "the command failed". Reading one of those as a
-///    compiler's verdict would attribute the machine's problem to the compiler.
-/// 3. **A status that could not be observed next.** No verdict was seen, so none may be
-///    inferred; this is a fault in this process's own bookkeeping and is answerable by the
-///    machine.
-/// 4. **A missing C runtime next**, ahead of every other link diagnostic. This is the test that
-///    prevents the suite manufacturing findings: a static link that fails because a target's
-///    start files were never installed has *exactly* the shape of one that fails because of a
-///    defect in code generation, and only the probed runtime and the diagnostic together
-///    distinguish them. Getting this wrong would turn a modestly provisioned machine into a
-///    stream of false findings against a compiler that did nothing wrong.
-/// 5. **A driver that cannot run its own stages next**, which is an installation fault reported
-///    in the driver's own words.
-/// 6. **Termination by a signal next.** The two tests above come first because attributing a
-///    gap in the machine to a compiler is the more damaging mistake of the two; everything after
-///    this point is a heuristic over diagnostic text, whereas a signal is an unambiguous fact
-///    about the process, so it is established before any text is interpreted.
-/// 7. **Other linker-stage diagnostics next**, which are genuine link failures — a distinct
-///    class from a rejected translation, because the two implicate different parts of a compiler.
+/// - **Facts before text.** A signal, an exit status and this process's own watchdog observation
+///   are facts about a process. A diagnostic signature is a guess about a string the subject
+///   chose to print. Every fact is therefore established before any text is interpreted.
+/// - **Attributing a failure to the machine requires corroboration the subject cannot fabricate.**
+///   An `Environment` attribution is not a neutral classification: it becomes `UNAVAILABLE`, and
+///   `UNAVAILABLE` does not fail a run by default. A compiler able to reach that verdict by
+///   printing a chosen line could excuse its own defects. So no diagnostic signature attributes a
+///   failure to the machine on its own; each one must be corroborated by an independent
+///   observation this process made itself.
+///
+/// The sequence:
+///
+/// 1. **Timeout first.** An invocation that outlived its budget was killed by this module's own
+///    watchdog, so whatever it had printed by then is incidental. A hang is its own divergence
+///    class, and the observation is this process's — not an exit status, and not the bounding
+///    utility's.
+/// 2. **A status that could not be observed next.** No verdict was seen, so none may be inferred;
+///    this is a fault in this process's own bookkeeping and is answerable by *this process*, at
+///    [`FailureScope::Harness`]. It is deliberately not attributed to the machine: an environment
+///    gap is a reported absence the run does not fail for, and a launched build whose result was
+///    lost must fail rather than read as an arm that could not be attempted.
+/// 3. **Termination by a signal next**, ahead of every text test. A signal is an unambiguous fact
+///    about the process, and a compiler that dies on a valid program is a defect that no
+///    diagnostic it managed to print beforehand may excuse. This test was previously *below* the
+///    two environment-signature tests, which meant a subject that crashed while printing
+///    `cannot find crt1.o` was attributed to the machine.
+/// 4. **Success next**, which is delegated to [`classify_successful_build`]. Answering it here,
+///    rather than as an afterthought at the end, is what makes every test below a *failure-only*
+///    test: none of them can ever see a build that succeeded, so none has to guard against one.
+/// 5. **A missing C runtime next**, ahead of every other link diagnostic — but attributed to the
+///    machine **only when the target's probed C runtime is positively incomplete**. This is the
+///    test that prevents the suite manufacturing findings: a static link that fails because a
+///    target's start files were never installed has *exactly* the shape of one that fails because
+///    of a defect in code generation. The diagnostic alone cannot separate them, because the
+///    subject writes the diagnostic. The probe can, because this process performed it, against a
+///    driver of its own choosing, before the subject ran. Where the probe says the runtime is
+///    complete — or says nothing, because no driver could be asked — the same diagnostic is
+///    attributed to the **compiler**, and the summary says so and quotes both.
+/// 6. **A driver that cannot run its own stages next**, which is an installation fault — and
+///    available only to the reference compiler, which is a driver that execs separate stages and
+///    can therefore genuinely fail to find one. The compiler under test is a single self-contained
+///    binary with an integrated assembler and linker: it has no stage to exec, so the same
+///    diagnostic from it is not an installation fault but a string it chose to print, and it is
+///    attributed to the compiler.
+/// 7. **Other linker-stage diagnostics next**, which are genuine link failures — a distinct class
+///    from a rejected translation, because the two implicate different parts of a compiler. Their
+///    scope is decided by [`link_scope`], on the same corroborated basis as test 5.
 /// 8. **A diagnostic at a source location next**, which is a rejected program: the documented
 ///    diagnostic shape is `file:line:col: error:`, and a diagnostic that names a place in the
 ///    source is a statement about the source.
 /// 9. **Anything else that failed** is a compile failure with the compiler answerable, which is
 ///    the conservative default: it keeps the full diagnostics attached for a human to adjudicate
 ///    rather than guessing a narrower class from evidence that did not match anything.
+///
+/// Note what is **not** in the list. No exit status is read as belonging to the bounding utility.
+/// The installed utility passes its child's status through verbatim, so 124, 125, 126 and 127
+/// carry no information about which process produced them; a compiler exiting 125 used to be
+/// reported as an environment failure, and therefore did not fail the run. Those statuses now
+/// reach test 9 like any other, and the watchdog's own observation carries the only timeout fact
+/// this module has.
 ///
 /// A build that succeeded is checked once more, for an artifact that is absent or empty. That
 /// case is reported here rather than left to surface later as an execution that could not start,
@@ -1890,93 +2543,43 @@ fn classify_failure(
 ) -> Option<BuildFailure> {
     let diagnostics = outcome.stderr_text();
     if outcome.timed_out {
-        let bound = if outcome.timeout_tool_used {
-            "the system timeout utility"
+        let outer = if outcome.timeout_tool_used {
+            ", with the system timeout utility standing behind it as an outer net at the budget \
+             plus a further margin"
         } else {
-            "the harness watchdog"
+            ""
         };
         return Some(BuildFailure::new(
             DivergenceClass::Timeout,
             FailureScope::Compiler,
             format!(
-                "the {} did not terminate within its {}-second budget and was killed by {bound}; \
-                 a compilation that completes promptly under one implementation and hangs under \
-                 another is a defect worth surfacing rather than an infrastructure error{}",
+                "the {} did not terminate within its {}-second budget and was killed by this \
+                 module's own watchdog{outer}; a compilation that completes promptly under one \
+                 implementation and hangs under another is a defect worth surfacing rather than \
+                 an infrastructure error{}",
                 outcome.compiler().label(),
                 outcome.budget().as_secs(),
                 excerpt_clause(&diagnostics)
             ),
         ));
     }
-    if outcome.timeout_tool_used {
-        if let Some(code) = outcome.exit_code() {
-            if TIMEOUT_TOOL_OWN_FAILURE_STATUSES.contains(&code) {
-                return Some(BuildFailure::new(
-                    DivergenceClass::CompileFailure,
-                    FailureScope::Environment,
-                    format!(
-                        "the system timeout utility bounding this invocation reported {} rather \
-                         than a status from the {}, so no compiler verdict was observed: {}{}",
-                        code,
-                        outcome.compiler().label(),
-                        describe_timeout_tool_status(code),
-                        excerpt_clause(&diagnostics)
-                    ),
-                ));
-            }
-        }
-    }
     let Some(status) = outcome.status() else {
         return Some(BuildFailure::new(
             DivergenceClass::CompileFailure,
-            FailureScope::Environment,
+            FailureScope::Harness,
             format!(
                 "the status of the {} could not be observed, so no verdict about the program was \
                  seen and none may be inferred; this is a fault in this process's own bookkeeping \
-                 rather than a judgement any compiler made{}",
+                 rather than a judgement any compiler made, and is therefore reported as a failure \
+                 of this suite rather than as a gap in this machine{}",
                 outcome.compiler().label(),
                 excerpt_clause(&diagnostics)
             ),
         ));
     };
-    if status.code() == Some(0) {
-        return classify_successful_build(outcome);
-    }
-    if let Some(line) = first_line_matching_signature(&diagnostics, ENVIRONMENT_LINK_SIGNATURES) {
-        let runtime = match caps.c_runtime_for(request.target()) {
-            Some(status) => status.describe(),
-            None => String::from("not probed"),
-        };
-        return Some(BuildFailure::new(
-            DivergenceClass::LinkFailure,
-            FailureScope::Environment,
-            format!(
-                "the static link for {} failed for want of a C runtime input rather than because \
-                 of anything the {} produced, so this is a gap in this machine's provisioning and \
-                 not a defect: {}. The probed runtime for that target is {}. Installing the \
-                 target's development package restores the arm; until then it is reported as an \
-                 environment gap, loudly, and never as a finding",
-                request.target().triple(),
-                outcome.compiler().label(),
-                truncate_for_summary(&line),
-                truncate_for_summary(&runtime)
-            ),
-        ));
-    }
-    if let Some(line) =
-        first_line_matching_signature(&diagnostics, TOOLCHAIN_INSTALLATION_SIGNATURES)
-    {
-        return Some(BuildFailure::new(
-            DivergenceClass::CompileFailure,
-            FailureScope::Environment,
-            format!(
-                "the {} could not run one of its own stages, which is an installation fault on \
-                 this machine rather than a judgement about the program: {}",
-                outcome.compiler().label(),
-                truncate_for_summary(&line)
-            ),
-        ));
-    }
+    // Facts before text. A signal is an unambiguous statement about the process, so it is settled
+    // before any diagnostic is read: a subject that crashed while printing a provisioning-shaped
+    // line must not be able to have the crash attributed to the machine.
     if status.code().is_none() {
         return Some(BuildFailure::new(
             DivergenceClass::CompileFailure,
@@ -1986,49 +2589,144 @@ fn classify_failure(
                  on this program instead of forming a judgement about it. Recorded as a compile \
                  failure because no artifact was produced, and reported as a crash in the summary \
                  because a compiler that dies on a valid program looks nothing like one that \
-                 declines it{}",
+                 declines it. Established before any diagnostic signature is consulted, so a \
+                 provisioning-shaped line printed on the way down cannot move the blame to this \
+                 machine{}",
                 outcome.compiler().label(),
                 excerpt_clause(&diagnostics)
             ),
         ));
     }
-    if let Some(line) = first_line_matching_signature(&diagnostics, LINKER_STAGE_SIGNATURES) {
+    if status.code() == Some(0) {
+        return classify_successful_build(outcome);
+    }
+    if let Some(line) = first_line_matching_signature(&diagnostics, ENVIRONMENT_LINK_SIGNATURES) {
+        // The diagnostic says a C runtime input was missing. The subject wrote the diagnostic, so
+        // it is a claim rather than evidence, and it is corroborated against the runtime probe
+        // this process performed itself — before the subject ran, through a driver of its own
+        // choosing. Only a probe that positively found the runtime incomplete may move a failure
+        // to the machine.
         let (scope, corroboration) = link_scope(request, caps);
-        return Some(BuildFailure::new(
-            DivergenceClass::LinkFailure,
-            scope,
+        // Expressed as a conditional rather than a match over the scope enumeration on purpose:
+        // `link_scope` answers exactly one question — did a probe positively find the runtime
+        // incomplete — so only two of the three scopes can arrive here, and anything that is not
+        // the corroborated environment answer must take the conservative one. A match would need
+        // an arm for a value this call cannot produce, and the honest reading of such an arm is
+        // "attribute to the compiler", which is what the fallthrough already does.
+        let summary = if scope == FailureScope::Environment {
             format!(
-                "translation completed but the link did not, for {} at {}: {}. {corroboration}",
+                "the static link for {} failed for want of a C runtime input rather than because \
+                 of anything the {} produced, so this is a gap in this machine's provisioning and \
+                 not a defect: {}. {corroboration}. Installing the target's development package \
+                 restores the arm; until then it is reported as an environment gap, loudly, and \
+                 never as a finding",
                 request.target().triple(),
-                outcome.opt().flag(),
+                outcome.compiler().label(),
                 truncate_for_summary(&line)
-            ),
+            )
+        } else {
+            format!(
+                "the {} reported a missing C runtime input for {} — {} — but that claim is not \
+                 corroborated: {corroboration}. A diagnostic is text the compiler chose to \
+                 print, and attributing a failure to this machine on that basis alone would let \
+                 an implementation excuse its own defects by naming a file it decided not to \
+                 find, so the failure is recorded against the compiler",
+                outcome.compiler().label(),
+                request.target().triple(),
+                truncate_for_summary(&line)
+            )
+        };
+        return Some(scoped_by_diagnostics(
+            BuildFailure::new(DivergenceClass::LinkFailure, scope, summary),
+            outcome,
         ));
     }
-    if let Some(line) = first_source_location_error(&diagnostics) {
-        return Some(BuildFailure::new(
-            DivergenceClass::CompileFailure,
-            FailureScope::Compiler,
-            format!(
-                "the {} rejected the program at a source location: {}. A program one \
-                 implementation refuses and another accepts is exactly the asymmetry this suite \
-                 exists to surface, so it is reported rather than treated as an error",
+    if let Some(line) =
+        first_line_matching_signature(&diagnostics, TOOLCHAIN_INSTALLATION_SIGNATURES)
+    {
+        // An installation fault means a driver could not exec a stage of its own. Only a
+        // multi-process driver can suffer one, and only the reference compiler is one: it runs a
+        // preprocessor, a compiler proper, an assembler and a linker as separate programs. The
+        // compiler under test is a single self-contained binary carrying its own assembler and
+        // integrated linker, so it has no stage to exec and cannot have failed to find one. The
+        // same text from it is a string it chose to print.
+        let summary = match request.compiler() {
+            Compiler::Reference => format!(
+                "the {} could not run one of its own stages, which is an installation fault on \
+                 this machine rather than a judgement about the program: {}. The reference \
+                 compiler is a driver that execs separate stages, so it is the one side of this \
+                 comparison for which this diagnostic is a fact about the machine",
                 outcome.compiler().label(),
                 truncate_for_summary(&line)
             ),
+            Compiler::Bcc => format!(
+                "the {} printed a stage-execution diagnostic — {} — but it is a single \
+                 self-contained binary with an integrated assembler and linker and has no \
+                 separate stage to exec, so this cannot be an installation fault on this machine \
+                 and is recorded against the compiler. Attributing it to the environment would \
+                 let the subject of the comparison excuse a defect by choosing what to print",
+                outcome.compiler().label(),
+                truncate_for_summary(&line)
+            ),
+        };
+        let scope = match request.compiler() {
+            Compiler::Reference => FailureScope::Environment,
+            Compiler::Bcc => FailureScope::Compiler,
+        };
+        return Some(scoped_by_diagnostics(
+            BuildFailure::new(DivergenceClass::CompileFailure, scope, summary),
+            outcome,
         ));
     }
-    Some(BuildFailure::new(
-        DivergenceClass::CompileFailure,
-        FailureScope::Compiler,
-        format!(
-            "the {} did not produce an artifact and its diagnostics match no recognised \
-             signature, so the conservative class is recorded and the whole captured text is kept \
-             for a human to adjudicate: {}{}",
-            outcome.compiler().label(),
-            describe_termination(outcome),
-            excerpt_clause(&diagnostics)
+    if let Some(line) = first_line_matching_signature(&diagnostics, LINKER_STAGE_SIGNATURES) {
+        let (scope, corroboration) = link_scope(request, caps);
+        return Some(scoped_by_diagnostics(
+            BuildFailure::new(
+                DivergenceClass::LinkFailure,
+                scope,
+                format!(
+                    "translation completed but the link did not, for {} at {}: {}. {corroboration}",
+                    request.target().triple(),
+                    outcome.opt().flag(),
+                    truncate_for_summary(&line)
+                ),
+            ),
+            outcome,
+        ));
+    }
+    if let Some(line) = first_source_location_error(&diagnostics) {
+        return Some(scoped_by_diagnostics(
+            BuildFailure::new(
+                DivergenceClass::CompileFailure,
+                FailureScope::Compiler,
+                format!(
+                    "the {} rejected the program at a source location: {}. A program one \
+                     implementation refuses and another accepts is exactly the asymmetry this \
+                     suite exists to surface, so it is reported rather than treated as an error",
+                    outcome.compiler().label(),
+                    truncate_for_summary(&line)
+                ),
+            ),
+            outcome,
+        ));
+    }
+    // The weakest evidence in the function, and therefore the site that most needs the gate: this
+    // branch concludes "compiler answerable" from the *absence* of every recognised signature, and
+    // a stream that was cut short is exactly where a signature goes missing without being absent.
+    Some(scoped_by_diagnostics(
+        BuildFailure::new(
+            DivergenceClass::CompileFailure,
+            FailureScope::Compiler,
+            format!(
+                "the {} did not produce an artifact and its diagnostics match no recognised \
+                 signature, so the conservative class is recorded and the whole captured text is \
+                 kept for a human to adjudicate: {}{}",
+                outcome.compiler().label(),
+                describe_termination(outcome),
+                excerpt_clause(&diagnostics)
+            ),
         ),
+        outcome,
     ))
 }
 
@@ -2047,7 +2745,7 @@ fn classify_successful_build(outcome: &CompileOutcome) -> Option<BuildFailure> {
                  an artifact that is not there is a defect in its own right, and naming it here \
                  keeps it from surfacing later as an execution that could not start",
                 outcome.compiler().label(),
-                outcome.artifact().display()
+                shown_path(outcome.artifact())
             ),
         )),
         Some(0) => Some(BuildFailure::new(
@@ -2057,7 +2755,7 @@ fn classify_successful_build(outcome: &CompileOutcome) -> Option<BuildFailure> {
                 "the {} reported success but left an empty file at {}; nothing can be executed \
                  from it, so the success is not one",
                 outcome.compiler().label(),
-                outcome.artifact().display()
+                shown_path(outcome.artifact())
             ),
         )),
         Some(_) => None,
@@ -2205,23 +2903,9 @@ fn describe_termination(outcome: &CompileOutcome) -> String {
             ),
         },
         None => String::from(
-            "its status could not be observed, which is a condition of this machine rather than a \
-             judgement about the program",
+            "its status could not be observed, which is a fault in this process's own bookkeeping \
+             rather than a judgement about the program",
         ),
-    }
-}
-
-/// Explain what a status from the bounding utility means.
-///
-/// The three are conventional and are all statements about the utility rather than about the
-/// command it was asked to run, which is precisely why they must not be read as a compiler's
-/// verdict.
-fn describe_timeout_tool_status(code: i32) -> &'static str {
-    match code {
-        125 => "the utility itself failed",
-        126 => "the compiler was found but could not be executed",
-        127 => "the compiler could not be found",
-        _ => "the utility reported a failure of its own",
     }
 }
 

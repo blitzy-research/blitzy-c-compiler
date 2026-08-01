@@ -50,7 +50,7 @@
 //!
 //! | Artifact | Content |
 //! | --- | --- |
-//! | [`REPRODUCER_SOURCE_NAME`] | The program, minimized as far as practical. See "Minimization" below. |
+//! | [`REPRODUCER_SOURCE_NAME`] | The program, copied **verbatim**. A run performs no reduction; the recorded minimization status says so and what to do next. See [`Minimization`]. |
 //! | [`REPRODUCER_RECORD_NAME`] | Its expectation record, so the reproducer remains runnable by the harness. |
 //! | [`MANIFEST_NAME`] | Identifier, area, program, divergence class, every diverging oracle and cell, the minimization status, and a one-paragraph description of the observed difference. |
 //! | [`COMMANDS_NAME`] | Exact, copy-pasteable compile and run lines for every cell involved — the artifact that reproduces the finding with **no harness, no Cargo and no Rust toolchain**. |
@@ -79,7 +79,8 @@
 //!   program never ran.
 //! - `.exit` is the termination: the raw wait status **and** its decoding, so `exited 0`,
 //!   `signalled 11` and `timed out` can never be confused. When there was no run it says so.
-//! - `.compile.stderr` and `.compile.exit` are always the **compiler's** diagnostics and status.
+//! - `.compile.stdout`, `.compile.stderr` and `.compile.exit` are always the **compiler's** own
+//!   streams and status, present for every side that ran a build and absent for one that did not.
 //!
 //! Standard error is captured here even though **no oracle ever compares it**: diagnostic wording
 //! legitimately differs between compilers, so comparing it would bury every real finding under a
@@ -89,14 +90,22 @@
 //! # The identifier, and why it is derived rather than counted
 //!
 //! ```text
-//! F-<NNNN>-<head>-<oracle letter>-<target>-<opt>-<class>
+//! F-<16 hex digits>-<cell slug>-<oracle letter>-<divergence class>
 //! ```
 //!
-//! `NNNN` is four digits derived from the finding's full identity — area, program, target,
-//! optimization level, oracle and divergence class — by the FNV-1a hash in [`fnv1a64`], reduced
-//! modulo [`ID_DIGIT_MODULUS`]. `head` is the area and program names in kebab case with their
-//! numeric prefixes dropped, and the four short components after it are never abbreviated, so the
-//! directory name states the whole identity in full.
+//! The **cell slug** is [`CellKey::slug`]: the area, program, target and optimization level with
+//! every byte outside `[A-Za-z0-9_]` escaped as `%XX` and the four parts joined with `+`. It is
+//! **injective** — two different cells cannot produce the same slug — and nothing in it is
+//! abbreviated or truncated. The **oracle letter** and the kebab-cased **divergence class** complete
+//! the identity, and the leading **digest** is [`super::stable_digest`] over exactly those same
+//! components, giving a short fixed-width handle to quote without it being the thing that
+//! distinguishes two findings.
+//!
+//! Every part is present in full, which is the property that matters: **two different divergences
+//! can never name the same directory**, so one can never overwrite another's evidence. An earlier
+//! design abbreviated the names to a fixed width and distinguished the remainder with four decimal
+//! digits of a hash; chosen program names could collide under it, and a collision here silently
+//! replaces one finding's reproducer and captures with another's.
 //!
 //! It is **derived, never counted**, and that is a correctness requirement rather than a
 //! preference. The fourteen feature-area tests run concurrently in one process, so a shared
@@ -134,7 +143,14 @@
 //!
 //! # Minimization
 //!
-//! Minimization is best-effort **by design**. The external reducer is used only if the
+//! **A run reduces nothing.** The reproducer it writes is a verbatim copy of the corpus program,
+//! and the manifest records that status explicitly — that no automated reduction was performed, why
+//! not, and the exact reducer command a maintainer can run against the copy. Nothing here, and
+//! nothing in the reports, describes the artifact as *minimized*, because that would name something
+//! it does not contain; reduction is a supervised activity, and a reduced reproducer reaches the
+//! curated set through a human.
+//!
+//! Minimization is therefore best-effort **by design**. The external reducer is used only if the
 //! environment has one, is never required, and its absence never fails a run and never suppresses
 //! an artifact — see [`Minimization`] for the full reasoning and for what is recorded instead.
 //!
@@ -150,10 +166,17 @@
 //!   `sh commands.sh`.
 //! - No `#[test]` function and no `main.rs` live in this directory, so Cargo treats it as a plain
 //!   module directory rather than a test target, and the suite's test count is unchanged by it.
-//! - Every write is beneath [`findings_root`]. Nothing is written outside the build directory and
-//!   no socket is ever opened.
-//! - Writing one finding touches only that finding's own directory, so concurrent areas never
-//!   contend and no lock is needed.
+//! - Every write is beneath [`findings_root`], and every directory from that root down to the leaf
+//!   is verified to be a real directory rather than a symbolic link before a byte is published.
+//!   Nothing is written outside the build directory and no socket is ever opened. That is
+//!   discipline over the paths this module constructs rather than an operating-system sandbox:
+//!   nothing here isolates a syscall or the network, and the captured bytes it copies were
+//!   produced by tools running unconfined.
+//! - Writing one finding touches only that finding's own directory, so two concurrent areas of the
+//!   same run never contend. Two concurrent *runs* sharing one build directory would address the
+//!   same directory, because its name is derived from the divergence rather than from the run, so
+//!   each finding directory carries a run-ownership stamp and a live foreign owner is refused —
+//!   the same mechanism the per-cell workspaces use, shared with them rather than reimplemented.
 //!
 //! Edition 2021, minimum supported Rust 1.70.
 
@@ -164,15 +187,24 @@ use std::path::{Path, PathBuf};
 use super::compare::{locate_stdout_divergence, unified_diff, Comparison};
 use super::compile::CompileOutcome;
 use super::env::Capabilities;
-use super::execute::RunOutcome;
-use super::manifest::Manifest;
+use super::execute::{RunOutcome, Termination};
+use super::manifest::{self, Manifest};
+use super::sandbox::{claim_ownership, live_foreign_owner_identity, RUN_OWNER_ENTRY};
 use super::{
-    findings_root, is_forbidden_for_side, posix_quote, require_contained_corpus_file,
-    sanitize_text_for_report, CellKey, CompilerSide, DivergenceClass, HarnessError, HarnessResult,
-    OptLevel, Oracle, Outcome, Target, Verdict,
+    create_directory_chain_below, findings_root, is_forbidden_for_side, posix_quote,
+    publish_bytes_no_follow, publish_text_no_follow, read_file_bounded, redact_secrets,
+    remove_entry, require_contained_corpus_file, require_directory_chain_below,
+    require_replaceable, run_generation, sanitize_text_for_report, shown_path, stable_digest,
+    CellKey, CompilerSide, DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Outcome,
+    Replaceable, Target, Verdict, MAX_INSPECTED_FILE_BYTES,
 };
 
-/// The minimized reproducer, a copy of the corpus program.
+/// The reproducer: a **verbatim**, byte-for-byte copy of the corpus program.
+///
+/// A run performs no automated reduction, so this file is never a reduced program. The
+/// accompanying [`Minimization`] record states that, states why, and — when the environment has
+/// a reducer — carries the exact command to reduce this copy. Reduction is a supervised
+/// activity performed on the copy before a finding is promoted to the curated set.
 pub const REPRODUCER_SOURCE_NAME: &str = "reproducer.c";
 
 /// The reproducer's expectation record, so the pair remains runnable by the harness and
@@ -181,6 +213,14 @@ pub const REPRODUCER_RECORD_NAME: &str = "reproducer.expected";
 
 /// The plain-text description of the finding, read in a terminal.
 pub const MANIFEST_NAME: &str = "MANIFEST.txt";
+
+/// The [`MANIFEST_NAME`] line that records a finding's identifier, without its value.
+///
+/// Shared by the renderer that writes the line and the identity check that reads it back, so that
+/// changing the manifest's field alignment can never quietly stop the check from finding the line it
+/// depends on. A check that silently stops checking is worse than no check, because it still reads
+/// like one.
+pub const MANIFEST_IDENTIFIER_PREFIX: &str = "finding_id       = ";
 
 /// The exact reproduction commands, runnable with `sh commands.sh`.
 pub const COMMANDS_NAME: &str = "commands.sh";
@@ -224,67 +264,51 @@ pub const SUBJECT_PREFIX: &str = "bcc";
 /// always announces itself, so a bounded diff can never be mistaken for a complete one.
 pub const MAX_DIFF_BYTES: usize = 256 * 1024;
 
-/// Modulus applied to the identity hash to produce the four-digit component of an identifier.
-///
-/// Four digits is what the artifact naming scheme calls for. The digits are a *rendering* of the
-/// identity, not a count, and the readable components after them carry the identity in full, so a
-/// coincidence in these four digits cannot make two findings share a directory.
-pub const ID_DIGIT_MODULUS: u64 = 10_000;
-
-/// Longest readable head an identifier may carry before it is abbreviated at a word boundary.
-///
-/// Only the descriptive head — the area and program names — is ever abbreviated. The oracle
-/// letter, target, optimization level and divergence class always follow it in full, so
-/// abbreviation can never make two identities that differ in one of those four render alike.
-const MAX_ID_HEAD_CHARS: usize = 48;
-
-/// FNV-1a 64-bit offset basis.
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-
-/// FNV-1a 64-bit prime.
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-/// Byte separating the components of the identity hashed into an identifier.
-///
-/// A zero byte, which cannot occur in any component, so the concatenation is unambiguous and two
-/// different component lists cannot hash the same input.
-const IDENTITY_SEPARATOR: u8 = 0;
-
-/// Hash a component list with FNV-1a, 64-bit.
-///
-/// Chosen because it is four lines of arithmetic with a fixed specification, so it produces the
-/// same value in every process, on every machine and under every toolchain version. That is the
-/// whole requirement here: the digits of an identifier must be stable forever, because they name a
-/// directory that is compared between runs and cited in a register. The standard library's default
-/// hasher is explicitly documented as unstable across releases and would rename every finding on a
-/// toolchain upgrade.
-///
-/// Not a cryptographic hash, and it does not need to be: the identity it summarizes is written out
-/// in full in the readable part of the identifier, so the digits are a label rather than a
-/// guarantee.
-fn fnv1a64(components: &[&str]) -> u64 {
-    let mut hash = FNV_OFFSET_BASIS;
-    for (index, component) in components.iter().enumerate() {
-        if index > 0 {
-            hash ^= u64::from(IDENTITY_SEPARATOR);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-        for byte in component.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-    }
-    hash
-}
+// Why this module derives an identifier that is injective rather than merely unlikely to repeat.
+//
+// A finding identifier decides a directory name, and that directory holds the whole of the
+// evidence for one divergence. Two identities that derived the same name would not produce a
+// warning: the second would publish over the first, and the surviving directory would carry a
+// manifest describing one divergence beside captures produced by another. Nobody reading it could
+// tell, which makes a collision worse than a crash.
+//
+// An earlier form of this identifier abbreviated the area and program names to a fixed character
+// budget, cut them at a hyphen, and distinguished what remained with four decimal digits of a
+// 64-bit hash. Neither half of that is sound. Abbreviation is not injective — two programs whose
+// kebab-cased names agree on their first characters render identically, and cutting at a hyphen
+// collapses more pairs still — and four decimal digits leave ten thousand buckets, so the
+// discriminator is a coincidence away from being no discriminator at all.
+//
+// The identifier below is injective by construction instead, which is what removes the need for any
+// collision check: a pre-existing directory bearing this name can only ever be the same identity.
+// Three facts carry the argument.
+//
+// - `CellKey::slug` is injective over the four cell components. It escapes every byte outside
+//   `[A-Za-z0-9_]` into a `%`-introduced hexadecimal pair and separates components with `+`, which
+//   escaping guarantees cannot appear inside one. So a slug recovers exactly the components that
+//   produced it.
+// - A slug therefore contains no hyphen, and neither does a hexadecimal digest nor a single oracle
+//   letter. The identifier's hyphens are consequently unambiguous separators, and the string
+//   decomposes back into digest, slug, oracle letter and class with no parsing rule beyond
+//   splitting.
+// - The oracle letters are pairwise distinct, and the six divergence-class labels remain pairwise
+//   distinct after kebab-casing, because each is already lower-case ASCII with underscores.
+//
+// The digest is retained, in full width rather than reduced to four decimal digits, and it is now a
+// label rather than a discriminator: it gives a stable short prefix a maintainer can grep for and
+// keeps the documented `F-<digits>-<slug>` shape. It is deliberately produced by the harness's
+// shared `stable_digest` rather than by a private hash, so that a digest written here means the
+// same thing as a digest written by a report.
 
 /// Render text as a kebab-case token: lower-case ASCII alphanumerics, single hyphens between
 /// runs of anything else, and no leading or trailing hyphen.
 ///
-/// Applied to the area and program names, which are already lower-case ASCII with underscores by
-/// corpus convention, so in practice this only exchanges underscores for hyphens. It is written to
-/// cope with anything because an identifier names a directory, and a name that reached the
-/// filesystem carrying a path separator or a control character would be a defect rather than an
-/// untidiness.
+/// Applied to the divergence class label, which is already lower-case ASCII words by construction,
+/// so in practice this only exchanges spaces and underscores for hyphens. The cell identity is not
+/// rendered through this function — it goes through [`CellKey::slug`], whose encoding is injective —
+/// but this one is still written to cope with anything, because an identifier names a directory and
+/// a name that reached the filesystem carrying a path separator or a control character would be a
+/// defect rather than an untidiness.
 fn kebab(raw: &str) -> String {
     let mut rendered = String::with_capacity(raw.len());
     for character in raw.chars() {
@@ -295,52 +319,6 @@ fn kebab(raw: &str) -> String {
         }
     }
     String::from(rendered.trim_matches('-'))
-}
-
-/// Drop the numeric ordering prefix a corpus name carries, leaving the descriptive part.
-///
-/// `04_bitfields` becomes `bitfields` and `005_straddling_and_zero_width` becomes
-/// `straddling_and_zero_width`. The ordering digits are how the corpus sorts its directories; they
-/// say nothing about the finding, and dropping them is what keeps an identifier readable within its
-/// length budget.
-///
-/// Anything that is not `<digits>_<rest>` is returned unchanged, so a name outside the convention
-/// is preserved rather than mangled.
-fn strip_numeric_prefix(stem: &str) -> &str {
-    match stem.split_once('_') {
-        Some((prefix, rest))
-            if !prefix.is_empty()
-                && !rest.is_empty()
-                && prefix.chars().all(|digit| digit.is_ascii_digit()) =>
-        {
-            rest
-        }
-        _ => stem,
-    }
-}
-
-/// Abbreviate `head` to at most [`MAX_ID_HEAD_CHARS`] characters, cutting at a hyphen where one is
-/// available so the result still reads as whole words.
-///
-/// Deterministic: the same input always abbreviates to the same output, which it must, because the
-/// result is part of a directory name that is compared between runs.
-///
-/// Counted and cut by characters rather than by bytes, and never sliced at an arbitrary index, so
-/// the function cannot panic on any input. That matters here beyond tidiness: an identifier is
-/// built on the failure path of a cell, where a panic would replace a diagnosable divergence with a
-/// harness crash.
-fn abbreviate_head(head: &str) -> String {
-    let mut budgeted: String = head.chars().take(MAX_ID_HEAD_CHARS).collect();
-    if budgeted.len() == head.len() {
-        return budgeted;
-    }
-    // `rfind` returns a character boundary by construction, so the truncation is always valid.
-    if let Some(boundary) = budgeted.rfind('-') {
-        if boundary > 0 {
-            budgeted.truncate(boundary);
-        }
-    }
-    String::from(budgeted.trim_matches('-'))
 }
 
 /// What part one capture played in the comparison that produced a finding.
@@ -562,12 +540,6 @@ impl Capture {
         self.run.as_ref()
     }
 
-    /// True when a program actually executed, as opposed to a build that failed or a recorded
-    /// contract that never ran.
-    pub fn ran(&self) -> bool {
-        self.run.is_some()
-    }
-
     /// The program's standard output: what the program printed, what it was recorded as printing,
     /// or nothing at all when it never ran.
     ///
@@ -686,23 +658,118 @@ impl Capture {
             compile.terminated_by_signal()
         ));
         report.push_str(&format!("timed_out = {}\n", compile.timed_out()));
+        // `timed_out` above is this harness's own watchdog observation and nothing else. Whether a
+        // bounding utility also stood behind it is recorded separately, as a fact about how the run
+        // was supervised, because no status that utility might report is interpreted anywhere.
+        report.push_str(&format!(
+            "outer_timeout_utility_used = {}\n",
+            compile.timeout_tool_used()
+        ));
+        report.push_str(&format!(
+            "artifact_present = {}\n",
+            compile.artifact_exists()
+        ));
         report.push_str(&format!(
             "artifact = {}\n",
             match compile.artifact_size() {
-                Some(bytes) => format!("{bytes} bytes at {}", compile.artifact().display()),
-                None => format!("absent at {}", compile.artifact().display()),
+                Some(bytes) => format!("{bytes} bytes at {}", shown_path(compile.artifact())),
+                None => format!("absent at {}", shown_path(compile.artifact())),
             }
         ));
+        // A compiler ordinarily prints nothing here, and the suite never compares it — the streams
+        // that decide a verdict are the *program's*. The byte count is recorded because a compiler
+        // that suddenly printed to standard output is worth a maintainer noticing, and the bytes
+        // themselves are written beside this record.
+        report.push_str(&format!("stdout_bytes = {}\n", compile.stdout().len()));
+        report.push_str(&format!("stderr_bytes = {}\n", compile.stderr().len()));
         report.push_str(&format!(
             "duration_ms = {}\n",
             compile.duration().as_millis()
         ));
-        if let Some(failure) = compile.failure() {
-            report.push_str(&format!("failure = {failure}\n"));
-            report.push_str(&format!("failure_scope = {}\n", failure.scope()));
+        for note in compile.notes() {
+            report.push_str(&format!("supervision_note = {note}\n"));
         }
+        if let Some(failure) = compile.failure() {
+            // The three facts are written on separate rows rather than through the `Display`
+            // rendering of the failure, which packs class, scope and summary into one line. A row
+            // per fact is what lets a reader compare two findings field by field, and it keeps the
+            // summary — the only part that quotes the compiler — on a line of its own.
+            report.push_str(&format!("failure_class = {}\n", failure.class()));
+            report.push_str(&format!("failure_scope = {}\n", failure.scope()));
+            report.push_str(&format!("failure = {}\n", failure.summary()));
+        }
+        // The line that reproduces the artifact by hand, and then the line that actually ran. They
+        // differ whenever a bounding utility wrapped the invocation, and a record that conflated
+        // them would either document a command a maintainer cannot use or hide the supervision the
+        // run really applied.
         report.push_str(&format!("argv = {}\n", compile.command_line()));
+        // What reproduces the artifact and what this run actually spawned are two different lines
+        // whenever the system timeout utility was available to wrap the compiler. Recording both,
+        // and saying which mechanism bounded the build, is what lets a reader attribute a build
+        // that was killed at its budget to the bound rather than to the compiler — while `argv`
+        // above stays the line a maintainer pastes, free of scaffolding this run added.
+        report.push_str(&format!("timeout_tool = {}\n", compile.timeout_tool_used()));
+        if compile.timeout_tool_used() {
+            report.push_str(&format!("spawned = {}\n", compile.spawned_command_line()));
+        }
         Some(report)
+    }
+
+    /// How this side terminated, and what a reproduction should therefore observe.
+    ///
+    /// # Why an exit code alone is not the expectation
+    ///
+    /// The oracles compare stdout bytes **and** termination, and the three ways a program can stop are
+    /// genuinely different outcomes: an ordinary exit carries a code the program chose, a signal death
+    /// carries a number the kernel chose, and a timeout means it never chose anything. The suite keeps
+    /// them apart by comparing raw wait status, which is why a crash can never be mistaken here for a
+    /// program that exited with the same small number.
+    ///
+    /// A reproduction script sees none of that. A shell reports every one of the three as a single
+    /// `$?`, folding a signal death into `128 + signal` and leaving a timeout to look like whichever
+    /// mechanism enforced it. So the expectation is returned in two parts: a sentence naming the
+    /// outcome as the suite observed it, and — where the shell's encoding of that outcome is
+    /// unambiguous — the number a reproduction should actually see. A timeout deliberately has no
+    /// number, because [`TIMEOUT_UTILITY_STATUS`] and a signalled `137` are both correct for it
+    /// depending on what did the terminating, and printing one of them as *the* expectation would be
+    /// telling the reader something untrue half the time.
+    fn shell_expectation(&self) -> (String, Option<i32>) {
+        if let Some(run) = &self.run {
+            return match run.termination() {
+                Termination::Exited(code) => (format!("exited with {code}"), Some(code)),
+                Termination::Signalled(signal) => (
+                    format!(
+                        "killed by signal {signal}, which a shell reports as {}",
+                        SHELL_SIGNAL_STATUS_BASE.saturating_add(signal)
+                    ),
+                    Some(SHELL_SIGNAL_STATUS_BASE.saturating_add(signal)),
+                ),
+                Termination::TimedOut => (
+                    format!(
+                        "exceeded its {} second budget and was terminated; a bounded reproduction \
+                         reports {TIMEOUT_UTILITY_STATUS} when the timeout utility enforced it, or \
+                         {} when a signal did",
+                        run.budget().as_secs(),
+                        SHELL_SIGNAL_STATUS_BASE.saturating_add(9)
+                    ),
+                    None,
+                ),
+            };
+        }
+        if let Some(recorded) = &self.recorded {
+            return (
+                format!(
+                    "never executed: this authority is the exit status the program's own \
+                     expectation record prescribes, {}",
+                    recorded.expect_exit
+                ),
+                Some(recorded.expect_exit),
+            );
+        }
+        (
+            String::from("never executed: the build produced no artifact to run"),
+            None,
+        )
     }
 
     /// One line describing this capture for a manifest row.
@@ -750,6 +817,11 @@ impl Capture {
             self.opt.flag()
         ))
     }
+    /// True when a program actually executed, as opposed to a build that failed or a recorded
+    /// contract that never ran.
+    pub fn ran(&self) -> bool {
+        self.run.is_some()
+    }
 }
 
 impl fmt::Display for Capture {
@@ -764,59 +836,102 @@ impl fmt::Display for Capture {
 /// so the same divergence is filed under the same name in every process and on every run. The
 /// module documentation explains why that is a correctness requirement rather than a convenience.
 ///
-/// The field is private because this value *decides a filesystem path*. A caller able to assign it
+/// The fields are private because this value *decides a filesystem path*. A caller able to assign it
 /// could name a directory that no divergence would ever derive, which would leave an artifact
 /// nobody could find again from a report row, or — worse — one whose name claimed a different
 /// identity from the one its contents describe.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FindingId {
     text: String,
+    digest: String,
 }
 
 impl FindingId {
     /// Derive the identifier of the finding for one cell, one oracle and one divergence class.
     ///
     /// A pure function of those three: no counter, no process identifier, no clock, no environment.
-    /// The four digits summarize the whole identity through [`fnv1a64`], and the readable components
-    /// after them state it in full, with only the descriptive head ever abbreviated.
+    /// The same divergence therefore derives the same identifier in every run and on every machine,
+    /// which is what lets a second run rewrite one directory instead of accumulating another and
+    /// lets a register entry keep pointing at the same evidence.
+    ///
+    /// # Why this is injective, and why that is not a nicety
+    ///
+    /// The identifier *decides a directory*, and that directory holds the only copy of a finding's
+    /// evidence. Two different findings that rendered the same identifier would file into the same
+    /// directory, and the second would overwrite the first — losing a deliverable silently, which
+    /// is the one outcome a findings register exists to prevent. Injectivity is therefore a
+    /// correctness property of this function, not a tidiness one, and it is what removes the need
+    /// for a collision check: a directory already bearing this name can only be this same identity.
+    ///
+    /// It is established structurally rather than hoped for:
+    ///
+    /// - [`CellKey::slug`] is injective over the four components of a cell identity. It renders
+    ///   each component through an escaping encoder whose output alphabet is `[A-Za-z0-9_]` plus
+    ///   `%`-introduced hexadecimal escapes, and joins them with `+`. Two different cell identities
+    ///   cannot render the same slug.
+    /// - That alphabet contains **no hyphen**, and neither does a hexadecimal digest nor a single
+    ///   oracle letter, so each occupies exactly one hyphen-delimited field. The identifier
+    ///   therefore parses uniquely from the left: `F`, the digest, the slug, the oracle letter, and
+    ///   then the divergence class.
+    /// - The oracle letters are pairwise distinct, and the six divergence-class labels remain
+    ///   pairwise distinct after kebab-casing, so neither can absorb or be confused with a
+    ///   neighbouring field.
+    ///
+    /// Nothing is abbreviated or truncated, deliberately — truncating the descriptive part is
+    /// precisely how an earlier form of this function could map two distinct programs onto one
+    /// directory, and reducing the digest to four decimal digits left ten thousand buckets where a
+    /// collision was a coincidence away. The digest is carried at full width and produced by the
+    /// harness's shared [`stable_digest`], so a digest written here means the same thing as a digest
+    /// written by a report.
     pub fn derive(key: &CellKey, oracle: Oracle, class: DivergenceClass) -> FindingId {
-        let oracle_letter = String::from(oracle.letter());
-        let digits = fnv1a64(&[
+        let oracle_letter = oracle.letter();
+        // Hashed from the unabbreviated names, so the digest reflects the identity in full.
+        let digest = stable_digest(&[
             key.area(),
             key.program(),
             key.target().short_name(),
             key.opt().short(),
-            &oracle_letter,
+            &String::from(oracle_letter),
             class.label(),
-        ]) % ID_DIGIT_MODULUS;
-        let head = abbreviate_head(&format!(
-            "{}-{}",
-            kebab(strip_numeric_prefix(key.area())),
-            kebab(strip_numeric_prefix(key.program()))
-        ));
+        ]);
         FindingId {
             text: format!(
-                "F-{digits:04}-{head}-{oracle_letter}-{}-{}-{}",
-                key.target().short_name(),
-                key.opt().short(),
+                "F-{digest}-{}-{oracle_letter}-{}",
+                key.slug(),
                 kebab(class.label())
             ),
+            digest,
         }
     }
 
     /// The identifier as text, for example
-    /// `F-4821-bitfields-straddling-and-zero-width-b-aarch64-O2-stdout-mismatch`.
+    /// `F-9d3c1a5f7b204e68-04_bitfields+005_straddling_and_zero_width+aarch64+O2-b-stdout-mismatch`.
     pub fn as_str(&self) -> &str {
         &self.text
     }
 
+    /// The digest of the identity this identifier was derived from, as fixed-width hexadecimal.
+    ///
+    /// The whole digest, never a remainder of it, and produced by the harness's shared
+    /// [`stable_digest`] so that the same components digested anywhere else in the suite render the
+    /// same text. Published so that a check can compare two identities without parsing a name apart,
+    /// which is what the identity verification on the write path does. Two identifiers with equal
+    /// digests and equal text describe the same finding; equal digests with differing text cannot
+    /// occur, because the digest is rendered into the text.
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
     /// The directory this finding owns, always a direct child of [`findings_root`].
     ///
-    /// The identifier is built from an area and program name that [`CellKey`] has already refused
-    /// to accept unless it is a canonical stem, and is then rendered through [`kebab`], which emits
-    /// only lower-case ASCII alphanumerics and hyphens. It can therefore contain no path separator
-    /// and can be neither `.` nor `..`, so joining it onto the findings root always yields a direct
-    /// child of that root. [`guarded_path`] re-establishes that on every write regardless.
+    /// The area and program names are ones [`CellKey`] has already refused to accept unless they are
+    /// canonical stems, and every part of the identifier draws on an alphabet that excludes the path
+    /// separator. The digest is hexadecimal; [`CellKey::slug`] emits only `[A-Za-z0-9_]`, `+` and
+    /// `%`-introduced hexadecimal pairs; the oracle letter is one ASCII letter; and [`kebab`] emits
+    /// only lower-case ASCII alphanumerics and hyphens. The identifier can therefore contain no path
+    /// separator and can be neither `.` nor `..`, so joining it onto the findings root always
+    /// yields a direct child of that root. [`guarded_path`] re-establishes that on every write
+    /// regardless.
     pub fn directory(&self) -> PathBuf {
         findings_root().join(&self.text)
     }
@@ -862,10 +977,7 @@ pub struct Minimization {
 impl Minimization {
     /// Describe the minimization of one finding's reproducer in this environment.
     pub fn describe_for(id: &FindingId, caps: &Capabilities) -> Minimization {
-        let reducer = caps
-            .reducer()
-            .path()
-            .map(|path| sanitize_text_for_report(&path.display().to_string()));
+        let reducer = caps.reducer().path().map(shown_path);
         let guidance = match &reducer {
             Some(path) => format!(
                 "A reducer is available at {path}. To reduce this reproducer, copy the {id} \
@@ -947,7 +1059,96 @@ pub struct Finding {
     source: PathBuf,
     record: PathBuf,
     marker_note: Option<String>,
+    /// The contract the program's own record declares, rendered once at construction.
+    ///
+    /// Copied out of the record here rather than read again at write time, and for the same reason
+    /// every other field is: a finding's manifest must describe the record that governed the cell
+    /// that diverged, and a record re-read later could have been edited in between.
+    contract: RecordedContract,
     captures: Vec<Capture>,
+}
+
+/// What a program's expectation record declares, as a finding's manifest states it.
+///
+/// Four facts, and each answers a question a maintainer asks before anything else.
+///
+/// - The **shared flag set** is requirement 3 made auditable at the point of failure: a reader
+///   judging a divergence must be able to see, without opening a second file, that both compilers
+///   were given the same flags and which ones.
+/// - The **raw run template** is requirement 4's "build commands recorded together". `commands.sh`
+///   carries the *expanded* line, which is what reproduces the cell; the unexpanded template is
+///   what shows the shape the record promised, and a difference between the two is exactly the
+///   kind of drift the harness cross-checks on every invocation.
+/// - The **golden stdout** is oracle (c)'s authority in text form. A finding whose divergence is a
+///   stdout difference is unreadable without it, and sending the reader to the record for it
+///   defeats the purpose of a self-contained artifact directory.
+/// - **Whether the program carries a marker at all** is stated explicitly, in both directions.
+///   When one exists but does not cover the cell, `marker_note` explains it; when none exists,
+///   nothing else in the manifest says so, and "this program is documented nowhere" is precisely
+///   what makes the divergence a finding rather than an expected divergence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedContract {
+    /// The flags the record declares are passed identically to both compilers.
+    shared_flags: Vec<String>,
+    /// The record's `run_command` template, unexpanded.
+    run_template: String,
+    /// The record's `expected_stdout`, verbatim.
+    golden_stdout: String,
+    /// Whether the record carries an expected-divergence marker of any scope.
+    carries_marker: bool,
+}
+
+impl RecordedContract {
+    /// Read the contract out of a validated record.
+    fn of(manifest: &Manifest) -> RecordedContract {
+        RecordedContract {
+            shared_flags: manifest.shared_flags(),
+            run_template: String::from(manifest.run_command()),
+            golden_stdout: String::from(manifest.expected_stdout()),
+            carries_marker: manifest.has_marker(),
+        }
+    }
+
+    /// The manifest section stating the contract, ready to append.
+    fn render(&self) -> String {
+        let mut text = String::from("\nTHE RECORDED CONTRACT\n---------------------\n");
+        text.push_str(
+            "Read from the program's own expectation record, so this finding can be judged without \
+             opening a second file. The record itself travels beside this manifest as \
+             reproducer.expected.\n\n",
+        );
+        text.push_str(&format!(
+            "  shared_flags        = {}\n",
+            if self.shared_flags.is_empty() {
+                String::from("(none declared)")
+            } else {
+                sanitize_text_for_report(&self.shared_flags.join(" "))
+            }
+        ));
+        text.push_str(&format!(
+            "  run_command         = {}\n",
+            sanitize_text_for_report(&self.run_template)
+        ));
+        text.push_str(&format!(
+            "  documented_by_marker = {}{}\n",
+            self.carries_marker,
+            if self.carries_marker {
+                " (a marker is present; the note above states why it does not cover this cell)"
+            } else {
+                " (no expected-divergence marker of any scope, which is what makes this \
+                 divergence undocumented and therefore a finding)"
+            }
+        ));
+        text.push_str("\n  expected_stdout (oracle c's authority, verbatim):\n");
+        if self.golden_stdout.is_empty() {
+            text.push_str("    (the record declares empty stdout)\n");
+        } else {
+            for line in self.golden_stdout.lines() {
+                text.push_str(&format!("    {}\n", sanitize_text_for_report(line)));
+            }
+        }
+        text
+    }
 }
 
 impl Finding {
@@ -1076,6 +1277,7 @@ impl Finding {
             source,
             record,
             marker_note,
+            contract: RecordedContract::of(manifest),
             captures: Vec::new(),
         })
     }
@@ -1130,14 +1332,22 @@ impl Finding {
     }
 
     /// The identifier, and therefore the directory name.
+    ///
+    /// The directory itself is not offered here: it is derived from this identifier by
+    /// [`FindingId::directory`], and a write goes through [`prepare_directory`] rather than
+    /// through any path a caller could have obtained in advance, so there is exactly one
+    /// derivation and no second spelling that could drift from it.
     pub fn id(&self) -> FindingId {
         FindingId::derive(&self.key, self.oracle, self.class)
     }
 
-    /// The directory this finding will occupy beneath [`findings_root`].
-    pub fn directory(&self) -> PathBuf {
-        self.id().directory()
-    }
+    // There is deliberately no `directory` accessor here. It would return exactly
+    // `self.id().directory()`, and a second spelling of one path is a second thing that can be
+    // updated without the other: a caller reading a finding's directory from the finding and another
+    // reading it from the identifier would look interchangeable right up until the derivation changed.
+    // Before a write, `FindingId::directory` is the one answer; after one, `FindingArtifacts`
+    // reports the directory that was actually written, which is the stronger fact and the one a report
+    // row should cite.
 
     /// The subject capture: the compiler under test at the diverging cell.
     pub fn subject(&self) -> Option<&Capture> {
@@ -1176,9 +1386,14 @@ impl fmt::Display for Finding {
 
 /// Every path one finding's artifacts occupy, returned by [`write`].
 ///
-/// Published so that a report can point a reader at the directory and a check can assert the file
-/// set without re-deriving either. The entries are in the order they were written, which is also the
-/// order [`REQUIRED_ARTIFACTS`] lists.
+/// Published so that a report can point a reader at the directory, and at the one command that
+/// reproduces the divergence there, without re-deriving either from the identity. The entries are
+/// recorded in the order they were written, which is also the order [`REQUIRED_ARTIFACTS`] lists,
+/// and their count is what [`FindingArtifacts::describe`] reports.
+///
+/// Completeness is deliberately **not** asserted against this list. [`require_complete`] probes the
+/// directory on disk instead, because the claim a finding makes is about the artifact a maintainer
+/// will open rather than about the paths this writer believes it produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindingArtifacts {
     id: FindingId,
@@ -1187,22 +1402,18 @@ pub struct FindingArtifacts {
 }
 
 impl FindingArtifacts {
-    /// The finding these artifacts belong to.
-    pub fn id(&self) -> &FindingId {
-        &self.id
-    }
-
     /// The directory holding them, always a direct child of [`findings_root`].
     pub fn directory(&self) -> &Path {
         &self.directory
     }
 
-    /// Every file written, in write order.
-    pub fn entries(&self) -> &[PathBuf] {
-        &self.entries
-    }
-
     /// The command that reproduces this finding with no harness, no Cargo and no Rust toolchain.
+    ///
+    /// The path goes through [`posix_quote`] rather than [`shown_path`] because this is a **shell**
+    /// sink, not a report sink: the returned text is meant to be pasted into a shell and must name
+    /// the directory exactly, so a byte is quoted for the shell rather than replaced by a visible
+    /// escape. Every consumer that renders it into a report — [`FindingArtifacts::describe`] and
+    /// [`Outcome::new`] — sanitizes the line it appears in, so the two requirements do not conflict.
     pub fn reproduction_command(&self) -> String {
         format!(
             "sh {}",
@@ -1211,14 +1422,29 @@ impl FindingArtifacts {
     }
 
     /// One line naming the finding, its directory and how many files it holds.
+    ///
+    /// Reads through this type's own accessors rather than its fields. That is not ceremony: the
+    /// accessors are the surface every caller outside this module has, and routing the renderer
+    /// through them means the surface is exercised by the code that depends on it most, so an
+    /// accessor that stopped agreeing with the field behind it would change this line rather than
+    /// going unnoticed until a caller relied on it.
     pub fn describe(&self) -> String {
         sanitize_text_for_report(&format!(
             "{} in {} ({} files); reproduce with: {}",
             self.id,
-            self.directory.display(),
+            shown_path(&self.directory),
             self.entries.len(),
             self.reproduction_command()
         ))
+    }
+    /// The finding these artifacts belong to.
+    pub fn id(&self) -> &FindingId {
+        &self.id
+    }
+
+    /// Every file written, in write order.
+    pub fn entries(&self) -> &[PathBuf] {
+        &self.entries
     }
 }
 
@@ -1254,6 +1480,16 @@ fn validate_component(context: &str, component: &str) -> HarnessResult<()> {
             format!(
                 "the artifact name {shown:?} contains a path separator; each component is named \
                  separately so that a write cannot reach outside the finding directory"
+            ),
+        ));
+    }
+    if component == RUN_OWNER_ENTRY {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "the artifact name {shown:?} is the finding directory's own run-ownership stamp; no \
+                 artifact may be written to that name, because a directory able to rewrite its own \
+                 claim could hand itself to a concurrent run halfway through publication"
             ),
         ));
     }
@@ -1299,8 +1535,8 @@ fn require_beneath_findings_root(context: &str, candidate: &Path) -> HarnessResu
                     "{} does not lie beneath the generated-findings root {}; this module writes \
                      nothing outside that directory, and in particular never into the committed \
                      finding set, which a human promotes after review",
-                    candidate.display(),
-                    root.display()
+                    shown_path(candidate),
+                    shown_path(&root)
                 ),
             ));
         }
@@ -1315,8 +1551,8 @@ fn require_beneath_findings_root(context: &str, candidate: &Path) -> HarnessResu
                     format!(
                         "{} contains a path component that is not a plain name, so it could lead \
                          out of the generated-findings root {}",
-                        candidate.display(),
-                        root.display()
+                        shown_path(candidate),
+                        shown_path(&root)
                     ),
                 ))
             }
@@ -1328,8 +1564,8 @@ fn require_beneath_findings_root(context: &str, candidate: &Path) -> HarnessResu
             format!(
                 "{} is the generated-findings root {} itself rather than a path beneath it; a \
                  finding owns one directory under that root and touches nothing else",
-                candidate.display(),
-                root.display()
+                shown_path(candidate),
+                shown_path(&root)
             ),
         ));
     }
@@ -1338,7 +1574,7 @@ fn require_beneath_findings_root(context: &str, candidate: &Path) -> HarnessResu
 
 /// Resolve one entry of a finding directory from its components, guarding the result.
 ///
-/// Every path this module writes passes through here, which is what makes the hermeticity claim
+/// Every path this module writes passes through here, which is what makes the write-path claim
 /// checkable in one place instead of at each write site.
 fn guarded_path(context: &str, directory: &Path, components: &[&str]) -> HarnessResult<PathBuf> {
     let mut resolved = PathBuf::from(directory);
@@ -1350,42 +1586,84 @@ fn guarded_path(context: &str, directory: &Path, components: &[&str]) -> Harness
     Ok(resolved)
 }
 
-/// Create a directory and every missing parent, attributing a failure to `context`.
+/// Create `path`, and every missing directory between [`findings_root`] and it, one level at a time.
+///
+/// Deliberately **not** `fs::create_dir_all`. That call follows a symbolic link at any level and
+/// reports success, so one planted link anywhere on the way down would place a whole finding — the
+/// reproducer, the captured evidence from every cell, the reproduction commands — wherever the link
+/// pointed, while every report row still named the path that was asked for. Because a finding
+/// directory's name is derived deterministically from the divergence, that name is predictable
+/// before the run that will use it, which is exactly the precondition such a link needs.
+///
+/// The walk itself lives in [`create_directory_chain_below`], which creates each level below the
+/// verified root and then requires it to be a real directory, refusing **at** the offending level
+/// and creating nothing beyond it. It is shared rather than written again here for the same reason
+/// as every other filesystem guard in this suite: `report.rs` publishes into deterministically
+/// named directories beneath a root too, and a second copy of the walk is a second chance to get
+/// one level wrong. What this function contributes is the part specific to a finding — that the
+/// path lies beneath the generated-findings root and nowhere else.
+///
+/// An already-present level is not an error. Two areas can record findings concurrently, and the
+/// idempotent re-run documented on [`prepare_directory`] rewrites a directory it created before.
 fn create_directory(context: &str, path: &Path) -> HarnessResult<()> {
-    fs::create_dir_all(path).map_err(|error| {
-        HarnessError::new(
-            String::from(context),
-            format!(
-                "{} could not be created: {error}; every artifact this module produces is written \
-                 beneath the Cargo build directory, so a directory that cannot be created stops the \
-                 finding from being recorded rather than diverting it elsewhere",
-                path.display()
-            ),
-        )
-    })
+    require_beneath_findings_root(context, path)?;
+    create_directory_chain_below(context, &findings_root(), path)
 }
 
-/// Write bytes to `path`, replacing whatever was there.
+/// Write bytes to `path`, replacing whatever was there through a guarded removal and a fresh create.
 ///
 /// Bytes rather than text for the captured streams, which are compared byte for byte and must be
 /// stored exactly as produced: no line-ending normalization, and no substitution for a byte that is
 /// not valid text.
+///
+/// Four guards run before a byte is written, and each closes a different way a predictable
+/// artifact name could be turned into a write somewhere else:
+///
+/// - the path must lie lexically beneath [`findings_root`], which is what keeps publication out of
+///   the corpus, out of the compiler's source and out of the committed finding set;
+/// - every directory from that root down to the parent must be a real directory rather than a link,
+///   established by [`require_directory_chain_below`];
+/// - the leaf is refused outright by [`require_replaceable`] if anything other than a regular file
+///   is already at it, because this module never puts anything else there and repairing it silently
+///   would discard the only evidence that something else did;
+/// - the bytes are then staged into a fresh temporary created exclusively — `O_CREAT | O_EXCL`
+///   refuses a link, a device node, a FIFO and a hard link into another file, even if one appears
+///   between the check and the write — and renamed over the destination.
+///
+/// A plain truncating write is the operation being replaced, and it is the one a planted link
+/// exploits: it would have opened the link's target and written a finding's evidence through it.
+/// Publishing by rename rather than by removing the destination first is what additionally keeps the
+/// previous evidence in place when a write fails, and keeps a concurrently reading maintainer from
+/// finding the file briefly absent.
 fn write_bytes(context: &str, path: &Path, bytes: &[u8]) -> HarnessResult<()> {
-    fs::write(path, bytes).map_err(|error| {
+    require_beneath_findings_root(context, path)?;
+    let parent = path.parent().ok_or_else(|| {
         HarnessError::new(
             String::from(context),
             format!(
-                "{} could not be written: {error}; a finding without its evidence is not a \
-                 deliverable, so this is reported rather than skipped",
-                path.display()
+                "{} has no parent directory, so the chain of directories above it cannot be \
+                 verified and nothing is written",
+                shown_path(path)
+            ),
+        )
+    })?;
+    require_directory_chain_below(context, &findings_root(), parent)?;
+    require_replaceable(context, path, Replaceable::RegularFile)?;
+    publish_bytes_no_follow(context, path, bytes).map_err(|error| {
+        HarnessError::new(
+            String::from(error.context()),
+            format!(
+                "{}; a finding without its evidence is not a deliverable, so this is reported \
+                 rather than skipped",
+                error.cause()
             ),
         )
     })
 }
 
-/// Write text to `path` as UTF-8, replacing whatever was there.
+/// Publish text at `path` as UTF-8, with the same refusal to follow a link.
 fn write_text(context: &str, path: &Path, text: &str) -> HarnessResult<()> {
-    write_bytes(context, path, text.as_bytes())
+    publish_text_no_follow(context, path, text)
 }
 
 /// Copy a corpus file into the finding directory.
@@ -1393,17 +1671,16 @@ fn write_text(context: &str, path: &Path, text: &str) -> HarnessResult<()> {
 /// One-directional by construction: this is how a program and its record enter a finding, and there
 /// is no counterpart that writes back out, so the corpus stays read-only to the suite. Both paths
 /// have already been proved to be regular files inside the corpus by [`Finding::new`].
+///
+/// Read-then-write rather than `fs::copy`, which follows a symbolic link at **both** ends: at the
+/// source it would read through a link out of the corpus, and at the destination it would write a
+/// corpus program through a link and out of the build directory. [`read_file_bounded`] refuses a
+/// link, refuses anything that is not a regular file, and refuses a file larger than the ceiling
+/// this suite reads — a corpus program is a few kilobytes, so the ceiling is only ever reached by
+/// something that is not one. The write then takes the guarded path above.
 fn copy_corpus_file(context: &str, source: &Path, destination: &Path) -> HarnessResult<()> {
-    fs::copy(source, destination).map(|_| ()).map_err(|error| {
-        HarnessError::new(
-            String::from(context),
-            format!(
-                "{} could not be copied to {}: {error}",
-                source.display(),
-                destination.display()
-            ),
-        )
-    })
+    let bytes = read_file_bounded(context, source, MAX_INSPECTED_FILE_BYTES)?;
+    write_bytes(context, destination, &bytes)
 }
 
 /// Create this finding's directory, replacing the captured outputs of any previous run.
@@ -1416,29 +1693,161 @@ fn copy_corpus_file(context: &str, source: &Path, destination: &Path) -> Harness
 ///
 /// The removal is therefore targeted at exactly one directory, whose path has been proved to lie
 /// strictly beneath [`findings_root`] and to be named [`OUTPUTS_DIR_NAME`] inside a directory named
-/// by a derived identifier. Nothing else is removed, and no parent is ever touched.
+/// by a derived identifier. Nothing else is removed, and no parent is ever touched. It goes through
+/// the shared [`remove_entry`], so an `outputs` that is a symbolic link is unlinked as a link rather
+/// than recursed into — a recursive removal aimed at a link is how a suite deletes somebody else's
+/// tree — and a stale plain file at that name is cleared instead of blocking the run.
+///
+/// # The two containment checks, and why one is not enough
+///
+/// [`require_beneath_findings_root`] decides the question **lexically**, before anything exists,
+/// which is the only way to vet a path that is about to be created. [`create_directory`] then decides
+/// it again **on the filesystem**, level by level as it creates, which is the only way to detect that
+/// a name was a symbolic link out of the build tree all along. A lexical check alone accepts a
+/// spelling whose resolution is elsewhere; a resolved check alone cannot run before the entry exists.
+/// Both are applied, in that order.
+///
+/// # Why a foreign occupant is refused
+///
+/// A directory that already holds a *different* finding's manifest is refused rather than written
+/// over. Under the identifier scheme above that cannot arise from two distinct divergences, so it
+/// means either that the scheme has changed or that the directory was created outside the suite —
+/// and in both cases overwriting would destroy another divergence's only copy of its evidence.
+///
+/// # Why ownership is stamped
+///
+/// Idempotence across *sequential* runs is desirable; the same behaviour between two *concurrent*
+/// runs sharing one build directory is not. Both would derive this identical directory, and the
+/// second would purge `outputs/` while the first was still writing captures into it, leaving a
+/// finding whose evidence came from two different runs — the one failure mode a reader of a finding
+/// cannot detect, because half-and-half evidence looks exactly like whole evidence.
+///
+/// So a live foreign owner is refused **before** anything is removed, and this run's identity is
+/// stamped afterwards, both through the same mechanism the per-cell workspaces use. Only a *live*
+/// foreign stamp refuses: a stamp from a run that has exited is stale and is replaced, which is what
+/// keeps the sequential re-run working exactly as documented above.
+///
+/// The stamp is bookkeeping rather than evidence. [`REQUIRED_ARTIFACTS`] does not list it,
+/// [`require_complete`] does not look for it, [`validate_component`] refuses it as an artifact name
+/// so nothing else can write to it, and it is not among the entries a [`FindingArtifacts`] reports.
 fn prepare_directory(id: &FindingId) -> HarnessResult<(PathBuf, PathBuf)> {
     let context = format!("preparing the artifact directory for finding {id}");
     let directory = id.directory();
     require_beneath_findings_root(&context, &directory)?;
+    require_no_foreign_occupant(&context, id, &directory)?;
+
+    if let Some((run, pid)) = live_foreign_owner_identity(&directory) {
+        return Err(HarnessError::new(
+            context,
+            format!(
+                "{} is already owned by run {} (process {}), which is still running. A finding \
+                 directory is named from the divergence itself so that a register row leads \
+                 straight to it, which means two concurrent runs recording the same divergence \
+                 address the same directory; publishing here would purge the captures that run is \
+                 still writing and leave a finding whose evidence came from two runs at once. Let \
+                 that run finish, or set CARGO_TARGET_DIR to a different build directory for this \
+                 one",
+                shown_path(&directory),
+                sanitize_text_for_report(&run),
+                pid
+            ),
+        ));
+    }
+
     create_directory(&context, &directory)?;
 
     let outputs = guarded_path(&context, &directory, &[OUTPUTS_DIR_NAME])?;
-    if outputs.is_dir() {
-        fs::remove_dir_all(&outputs).map_err(|error| {
-            HarnessError::new(
-                context.clone(),
-                format!(
-                    "the previous run's captures in {} could not be removed: {error}; they are \
-                     replaced rather than merged so that a stale capture cannot be mistaken for \
-                     evidence of the current divergence",
-                    outputs.display()
-                ),
-            )
-        })?;
-    }
+    require_replaceable(&context, &outputs, Replaceable::Directory)?;
+    remove_entry(&context, &outputs).map_err(|error| {
+        HarnessError::new(
+            error.context().to_string(),
+            format!(
+                "{}; the previous run's captures are replaced rather than merged so that a stale \
+                 capture cannot be mistaken for evidence of the current divergence",
+                error.cause()
+            ),
+        )
+    })?;
     create_directory(&context, &outputs)?;
+
+    claim_ownership(&context, &directory)?;
     Ok((directory, outputs))
+}
+
+/// Refuse to write into a directory a *different* finding already owns.
+///
+/// [`FindingId::derive`] is injective, so under normal operation the only finding that can name this
+/// directory is the one being written, and re-running the suite legitimately rewrites its own
+/// directory in place. This check is the belt for the case that injectivity argument does not
+/// cover: an identifier scheme changed by maintenance, a directory created by hand, or a stale
+/// directory left by an older build of the suite. In any of those, the occupant's evidence belongs
+/// to a divergence that is not this one, and overwriting it would destroy a deliverable — the
+/// single failure mode the findings register exists to prevent.
+///
+/// The occupant's identity is read from the first line of its own [`MANIFEST_NAME`] that declares
+/// `finding_id`, which [`render_manifest`] writes as the first identity line of every manifest. A
+/// directory with no manifest, or a manifest that declares nothing, is treated as this finding's own
+/// partial output from an interrupted run and is rewritten: refusing there would leave a run
+/// unable to make progress after a crash, and there is no other finding's evidence to protect.
+///
+/// # Errors
+///
+/// Returns an explanatory failure naming both identifiers when the occupant declares a different
+/// one. The caller turns that into a `FAIL` verdict rather than a `FINDING`, because a divergence
+/// whose evidence could not be filed has not been delivered.
+fn require_no_foreign_occupant(
+    context: &str,
+    id: &FindingId,
+    directory: &Path,
+) -> HarnessResult<()> {
+    let manifest = directory.join(MANIFEST_NAME);
+    let Ok(text) = fs::read_to_string(&manifest) else {
+        return Ok(());
+    };
+    let Some(occupant) = declared_finding_id(&text) else {
+        return Ok(());
+    };
+    if occupant == id.as_str() {
+        return Ok(());
+    }
+    Err(HarnessError::new(
+        String::from(context),
+        format!(
+            "{} already holds the artifacts of finding {}, which is a different finding from {}. \
+             Writing here would overwrite another divergence's only copy of its reproducer, its \
+             captured outputs and its reproduction commands, so the write is refused and this cell \
+             is reported as a failure rather than as a filed finding. Two findings can only name \
+             one directory if the identifier scheme has changed or the directory was created \
+             outside the suite: move or delete {} and re-run, and if the identifiers genuinely \
+             collide, treat that as a defect in the derivation rather than as something to \
+             overwrite",
+            directory.display(),
+            sanitize_text_for_report(&occupant),
+            id,
+            directory.display()
+        ),
+    ))
+}
+
+/// The identifier a manifest declares for itself, if it declares one.
+///
+/// Reads the first `finding_id = ...` line, which is the first identity line every manifest carries.
+/// Kept deliberately tolerant — leading whitespace and any run of spaces around the separator are
+/// accepted — because this parses an artifact written by a possibly older build of the suite, and
+/// the only question being asked is whose evidence is in this directory.
+fn declared_finding_id(manifest_text: &str) -> Option<String> {
+    for line in manifest_text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "finding_id" {
+            let declared = value.trim();
+            if !declared.is_empty() {
+                return Some(String::from(declared));
+            }
+        }
+    }
+    None
 }
 
 /// Shell variable holding the path to the source program, so every command line names one file.
@@ -1447,12 +1856,61 @@ const VAR_SOURCE: &str = "SRC";
 /// Shell variable holding the scratch directory a reproduction writes into.
 const VAR_WORK: &str = "WORK";
 
+/// Shell variable a reader sets to keep the scratch directory the script created for itself.
+///
+/// The cleanup trap is unconditional otherwise, so this is the documented way to inspect the
+/// captured streams after the script has finished rather than only while it is running.
+const VAR_KEEP: &str = "REPRO_KEEP";
+
+/// Shell variable the script sets for itself to record that it, and not its caller, owns the scratch
+/// directory — and therefore that the cleanup trap may remove it.
+///
+/// Kept distinct from [`VAR_WORK`] being set, because the two answer different questions: `WORK`
+/// says *where* the scratch is, this says *whose it is*. A directory the caller supplied is never
+/// removed however the script exits.
+const VAR_WORK_OWNED: &str = "WORK_OWNED";
+
+/// The shell function the script defines to refuse a scratch path that is already taken.
+///
+/// Named rather than repeated inline because it guards every one of the four or five redirection
+/// targets each capture block writes, and a guard that is written out five times per capture is a
+/// guard that will eventually be written out four times.
+const SH_REFUSE_EXISTING: &str = "refuse_existing";
+
 /// Shell variable holding the directory the script itself lives in, so the reproducer beside it can
 /// be found however the script was invoked.
 const VAR_FINDING_DIR: &str = "FINDING_DIR";
 
 /// Shell variable holding the compiler under test.
 const VAR_BCC: &str = "BCC";
+
+/// Shell variable holding the timeout utility every reproduced execution is bounded with.
+///
+/// # Why a reproduction must be bounded
+///
+/// One of the divergence classes this suite records **is** a timeout: a program that finishes
+/// promptly under one compiler and never finishes under another. An unbounded reproduction of that
+/// finding hangs the reader's shell, and the artifact whose purpose is to make the divergence easy to
+/// see instead makes it the reader's problem to notice and interrupt. A run that is bounded reports
+/// the timeout as a result.
+///
+/// Left empty when the environment had no such utility, in which case the script says so and runs
+/// unbounded rather than silently declining to reproduce.
+const VAR_TIMEOUT: &str = "TIMEOUT";
+
+/// Shell variable holding the per-execution budget, in whole seconds, that the recorded run used.
+const VAR_BUDGET: &str = "BUDGET_SECS";
+
+/// Exit status GNU `timeout` reports when it terminates the command it was bounding.
+///
+/// Documented in the script rather than relied upon by it: the classification the script prints names
+/// this value, so a reader who sees it knows the bound fired rather than the program choosing to exit
+/// with 124 of its own accord. The distinction cannot be made from the number alone, which is exactly
+/// why the recorded expectation is printed beside it.
+const TIMEOUT_UTILITY_STATUS: i32 = 124;
+
+/// Offset a POSIX shell adds to a signal number when reporting a command killed by a signal.
+const SHELL_SIGNAL_STATUS_BASE: i32 = 128;
 
 /// The tool paths a reproduction script lifts into its preamble.
 ///
@@ -1562,6 +2020,22 @@ fn collect_shell_variables(finding: &Finding) -> ShellVariables {
                 variables.declare(&runner_variable_name(capture.target()), text);
             }
         }
+        // The timeout utility and the budget the run was bounded with, taken from the launch vector
+        // the harness actually spawned rather than from the capability record, for the same reason
+        // every other tool path here is: the script must state what ran, not what was discovered.
+        //
+        // A wrapped launch is `<timeout> <secs> <program> ...`, so the utility is its first element.
+        // When the run was not wrapped the harness enforced the budget with its own watchdog and no
+        // utility appears in the vector; the budget is still declared, so a reader whose machine does
+        // have the utility can bound the reproduction with the same number.
+        if let Some(run) = capture.run() {
+            if run.launch_was_wrapped() {
+                if let Some(tool) = run.launch_argv().first() {
+                    variables.declare(VAR_TIMEOUT, tool);
+                }
+            }
+            variables.declare(VAR_BUDGET, &run.budget().as_secs().to_string());
+        }
     }
     variables
 }
@@ -1664,6 +2138,29 @@ fn comment(text: &str) -> String {
 /// what ran, whereas this *is* what ran, and a substitution that differed between the two would be
 /// invisible in a re-render and obvious here.
 ///
+/// # What makes it reproduce the oracle, and not half of it
+///
+/// Reconstructing the command lines is necessary and not sufficient. The oracles judge a cell on
+/// **stdout bytes and termination together**, so a script that reproduced the commands and then
+/// compared only stdout would report "did not reproduce" for every exit-code divergence — the one
+/// class where both sides' stdout is identical by definition — and would tell a maintainer their
+/// finding had gone away when nothing had changed at all. Three things follow, and the script does all
+/// three:
+///
+/// - **Each side's termination is recorded and compared.** Every executed side writes its status to a
+///   file, the recorded authority's prescribed status is materialized the same way, and the closing
+///   block compares the two. Both halves of the comparison are reported separately, because which one
+///   differs is itself the diagnosis.
+/// - **The recorded termination travels with each line.** A shell reports an ordinary exit, a signal
+///   death and a timeout as one number, folding the second into `128 + signal`; the suite keeps them
+///   apart by raw wait status and cannot hand that distinction to `sh`. So each side states how it
+///   terminated in the suite's own terms beside the number a reproduction should see — see
+///   [`Capture::shell_expectation`].
+/// - **Every build and every execution is bounded.** A timeout *is* one of the divergence classes, so
+///   an unbounded script reproduces that class by hanging, which converts the deliverable into a trap.
+///   The bound is applied through a runtime test on [`VAR_TIMEOUT`], so one script works with or
+///   without the utility and says which it is doing.
+///
 /// # Why it is not marked executable
 ///
 /// Setting a mode bit needs a platform-specific interface, and the `unsafe` keyword and
@@ -1726,8 +2223,20 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
     ));
     script.push_str("#\n");
     script.push_str(&comment(&format!(
-        "Scratch output goes to ${VAR_WORK}, which defaults to ./repro-work in the current \
-         directory. Set {VAR_WORK} to put it elsewhere. Nothing outside it is written."
+        "Scratch output goes to ${VAR_WORK}. By default the script creates that directory for itself \
+         with `mktemp -d` under a 077 umask — an unpredictable name, created exclusively, readable \
+         only by you — and removes it again however the script exits. Set {VAR_KEEP}=1 to keep it, \
+         or set {VAR_WORK} to an existing directory of your own, which the script then writes into \
+         but never creates and never removes. Nothing this script names is written outside it; the tools \
+         it runs keep their own temporaries wherever they normally do."
+    )));
+    script.push_str(&comment(&format!(
+        "A fixed scratch name such as ./repro-work is deliberately not used. Its path would be \
+         predictable before the script ran, so anything able to create that one name — or a single \
+         entry inside it — could redirect a build output or a captured stream through a symbolic \
+         link and have this script overwrite a file elsewhere on your machine while still reporting \
+         success. Every scratch path is therefore refused rather than reused if something is already \
+         at it, by {SH_REFUSE_EXISTING} below."
     )));
     script.push_str("\nset -eu\n\n");
 
@@ -1738,6 +2247,13 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
         "These correspond to the suite's own override variables, each with a BCC_ prefix: BCC_BIN, \
          BCC_REF_CC, BCC_REF_CC_<ARCH> and BCC_QEMU_<ARCH>.",
     ));
+    script.push_str(&comment(&format!(
+        "{VAR_TIMEOUT} and {VAR_BUDGET} bound every build and every execution below, because one of \
+         the divergence classes this suite records is a program that never finishes. If \
+         {VAR_TIMEOUT} is absent from the preamble the environment had no such utility and the \
+         reproduction runs unbounded — an execution that does not return is then the reader's to \
+         interrupt, and it is still the finding."
+    )));
     let preamble = variables.render();
     if preamble.is_empty() {
         script.push_str(&comment(
@@ -1762,14 +2278,125 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
     script.push_str(&format!(
         "{VAR_SOURCE}=\"${VAR_FINDING_DIR}/{REPRODUCER_SOURCE_NAME}\"\n"
     ));
-    script.push_str(&format!("{VAR_WORK}=\"${{{VAR_WORK}:-./repro-work}}\"\n"));
-    script.push_str(&format!("mkdir -p \"${VAR_WORK}\"\n"));
+    script.push_str(&render_scratch_setup());
 
     for capture in &captures {
         script.push_str(&render_capture_block(capture, &variables));
     }
     script.push_str(&render_comparison_block(finding, &captures));
     Ok(script)
+}
+
+/// Render the scratch-directory setup a reproduction script performs before it builds anything.
+///
+/// # Why this is not `mkdir -p ./repro-work`
+///
+/// A reproduction script runs on a maintainer's own machine, from a directory this suite knows
+/// nothing about, and it is the one artifact of a finding that a reader is explicitly invited to
+/// execute. A fixed relative scratch name is predictable **before** the script runs, and every path
+/// the script writes is then predictable too: the build outputs, the captured stdout of each side,
+/// the captured stderr. Anything able to create one of those names first — a symbolic link pointing
+/// at a file elsewhere — would have the script's own redirections truncate that file, because a
+/// shell `>` follows a link and creates through it. The script would report success throughout, and
+/// the damage would be attributed to whoever ran the reproduction rather than to the name that was
+/// planted.
+///
+/// So three properties are established, in this order:
+///
+/// 1. **An unpredictable, private, exclusively created root.** `mktemp -d` creates a directory whose
+///    name is not known in advance and, run under `umask 077`, one that only its owner can enter.
+///    The umask is set inside the command substitution so it applies to the creation and is gone
+///    again immediately, rather than silently changing the modes of everything the compilers write
+///    afterwards.
+/// 2. **A caller-supplied root is used but never created.** If `WORK` is already set, the script
+///    requires it to be an existing real directory and refuses a symbolic link — the one case where
+///    `mkdir -p` would have quietly accepted a link and written through it — and it is never removed,
+///    because the script did not create it.
+/// 3. **Every leaf is refused rather than reused.** `refuse_existing` is called on each redirection
+///    target before it is written, testing `-e` *and* `-L` so that a dangling link, which `-e`
+///    reports as absent, is caught as well.
+///
+/// # Cleanup
+///
+/// A directory the script created is removed on `EXIT`, and on `HUP`, `INT` and `TERM` so an
+/// interrupted reproduction does not leave one behind either. The guard is the ownership flag rather
+/// than the mere presence of `WORK`, so a caller's directory is never removed however the script
+/// ends, and the removal additionally re-tests that the path is non-empty before running `rm -rf`.
+/// Setting `REPRO_KEEP` keeps it, which is how a reader inspects the captured streams after the
+/// script has finished; the path is printed either way, so it can be found without reading the source
+/// of the script.
+fn render_scratch_setup() -> String {
+    let mut text = String::new();
+    text.push_str(&comment(&format!(
+        "{SH_REFUSE_EXISTING} guards every scratch path this script writes. A shell redirection \
+         follows a symbolic link and truncates its target, so a scratch name that already exists is \
+         refused rather than reused. -L is tested as well as -e, because a link pointing at nothing \
+         is reported absent by -e alone."
+    )));
+    text.push_str(&format!("{SH_REFUSE_EXISTING}() {{\n"));
+    text.push_str("    for candidate in \"$@\"; do\n");
+    text.push_str("        if [ -e \"$candidate\" ] || [ -L \"$candidate\" ]; then\n");
+    text.push_str(
+        "            printf 'refusing to write %s: something is already at that name, and a \
+         redirection would write through it\\n' \"$candidate\" >&2\n",
+    );
+    text.push_str("            exit 1\n");
+    text.push_str("        fi\n");
+    text.push_str("    done\n");
+    text.push_str("}\n\n");
+
+    text.push_str(&comment(&format!(
+        "Scratch root: a private directory this script creates, unless {VAR_WORK} names one already."
+    )));
+    text.push_str(&format!("if [ -n \"${{{VAR_WORK}:-}}\" ]; then\n"));
+    text.push_str(&format!("    if [ -L \"${VAR_WORK}\" ]; then\n"));
+    text.push_str(&format!(
+        "        printf '{VAR_WORK} is a symbolic link (%s); it is refused rather than followed, \
+         because every scratch write would go through it\\n' \"${VAR_WORK}\" >&2\n"
+    ));
+    text.push_str("        exit 1\n");
+    text.push_str("    fi\n");
+    text.push_str(&format!("    if [ ! -d \"${VAR_WORK}\" ]; then\n"));
+    text.push_str(&format!(
+        "        printf '{VAR_WORK} is not an existing directory (%s); create it yourself, or unset \
+         {VAR_WORK} to let this script make a private one\\n' \"${VAR_WORK}\" >&2\n"
+    ));
+    text.push_str("        exit 1\n");
+    text.push_str("    fi\n");
+    text.push_str(&format!("    {VAR_WORK_OWNED}=0\n"));
+    text.push_str("else\n");
+    text.push_str("    if ! command -v mktemp > /dev/null 2>&1; then\n");
+    text.push_str(&format!(
+        "        printf 'mktemp is required to create a private scratch directory; install it, or \
+         set {VAR_WORK} to an existing directory of your own\\n' >&2\n"
+    ));
+    text.push_str("        exit 1\n");
+    text.push_str("    fi\n");
+    text.push_str(&format!(
+        "    {VAR_WORK}=$(umask 077; mktemp -d) || exit 1\n"
+    ));
+    text.push_str(&format!("    if [ -z \"${VAR_WORK}\" ]; then\n"));
+    text.push_str(
+        "        printf 'mktemp -d produced no directory, so there is nowhere safe to write\\n' >&2\n",
+    );
+    text.push_str("        exit 1\n");
+    text.push_str("    fi\n");
+    text.push_str(&format!("    {VAR_WORK_OWNED}=1\n"));
+    text.push_str(&format!(
+        "    trap 'if [ \"${{{VAR_WORK_OWNED}:-0}}\" = 1 ] && [ -z \"${{{VAR_KEEP}:-}}\" ] && \
+         [ -n \"${{{VAR_WORK}:-}}\" ]; then rm -rf -- \"${VAR_WORK}\"; fi' EXIT HUP INT TERM\n"
+    ));
+    text.push_str("fi\n");
+    text.push_str(&format!(
+        "printf 'scratch directory: %s\\n' \"${VAR_WORK}\"\n"
+    ));
+    text.push_str(&format!("if [ \"${{{VAR_WORK_OWNED}}}\" = 1 ]; then\n"));
+    text.push_str(&format!(
+        "    if [ -n \"${{{VAR_KEEP}:-}}\" ]; then\n        printf 'it is kept on exit because \
+         {VAR_KEEP} is set\\n'\n    else\n        printf 'it is removed on exit; set {VAR_KEEP}=1 to \
+         keep it\\n'\n    fi\nfi\n"
+    ));
+    text
 }
 
 /// Render the build-and-run block for one capture.
@@ -1789,12 +2416,23 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
         "---------------------------------------------------------------------------",
     ));
 
+    let (expectation, expected_status) = capture.shell_expectation();
+
     if capture.role() == CaptureRole::GoldenRecord {
         block.push_str(&comment(&format!(
             "Nothing to build or run: this authority is the stdout recorded in \
              {REPRODUCER_RECORD_NAME}, which travels with this script. The bytes it prescribes are \
              in {OUTPUTS_DIR_NAME}/{stem}.stdout beside it."
         )));
+        block.push_str(&comment(&format!("Termination: {expectation}")));
+        // Materialized as a status file like every other side, so the comparison below can compare
+        // termination uniformly instead of special-casing the one authority that never ran.
+        if let Some(status) = expected_status {
+            block.push_str(&format!(
+                "printf '%s\\n' {} > \"${VAR_WORK}/{stem}.status\"\n",
+                posix_quote(&status.to_string())
+            ));
+        }
         return block;
     }
 
@@ -1823,14 +2461,29 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
     if let Some(compile) = capture.compile() {
         block.push_str(&comment("build, exactly as this run performed it:"));
         block.push_str(&comment(&format!("  {}", compile.command_line())));
-        block.push_str("status=0\n");
+        block.push_str(&comment(&format!(
+            "  bounded by the recorded {} second budget; the build reported {}",
+            compile.budget().as_secs(),
+            describe_compile_termination(compile)
+        )));
+        // Every path this build writes is refused if something is already at it. The compiled
+        // artifact is included: a link planted at that name would be written through by the
+        // compiler's own -o, not by a redirection, and the guard covers both.
         block.push_str(&format!(
-            "{} > \"${VAR_WORK}/{stem}.compile.stdout\" 2> \"${VAR_WORK}/{stem}.compile.stderr\" || status=$?\n",
-            render_argv(compile.argv(), variables, &substitutions)
+            "{SH_REFUSE_EXISTING} \"${VAR_WORK}/{stem}.out\" \"${VAR_WORK}/{stem}.compile.stdout\" \"${VAR_WORK}/{stem}.compile.stderr\"\n"
+        ));
+        block.push_str(&render_bounded_invocation(
+            &render_argv(compile.argv(), variables, &substitutions),
+            &format!("\"${VAR_WORK}/{stem}.compile.stdout\""),
+            &format!("\"${VAR_WORK}/{stem}.compile.stderr\""),
         ));
         block.push_str(&format!(
-            "printf 'build %s : exit %s\\n' {} \"$status\"\n",
-            posix_quote(&stem)
+            "printf '%s\\n' \"$status\" > \"${VAR_WORK}/{stem}.compile.status\"\n"
+        ));
+        block.push_str(&format!(
+            "printf 'build %s : exit %s (recorded: %s)\\n' {} \"$status\" {}\n",
+            posix_quote(&stem),
+            posix_quote(&describe_compile_termination(compile))
         ));
     }
 
@@ -1838,14 +2491,28 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
         Some(run) => {
             block.push_str(&comment("run, exactly as this run performed it:"));
             block.push_str(&comment(&format!("  {}", run.command_line())));
-            block.push_str("status=0\n");
+            block.push_str(&comment(&format!("  termination recorded: {expectation}")));
             block.push_str(&format!(
-                "{} > \"${VAR_WORK}/{stem}.stdout\" 2> \"${VAR_WORK}/{stem}.stderr\" || status=$?\n",
-                render_argv(run.argv(), variables, &substitutions)
+                "{SH_REFUSE_EXISTING} \"${VAR_WORK}/{stem}.stdout\" \"${VAR_WORK}/{stem}.stderr\"\n"
+            ));
+            block.push_str(&render_bounded_invocation(
+                &render_argv(run.argv(), variables, &substitutions),
+                &format!("\"${VAR_WORK}/{stem}.stdout\""),
+                &format!("\"${VAR_WORK}/{stem}.stderr\""),
+            ));
+            // The status is written to a file as well as printed, because the comparison at the foot
+            // of the script compares termination between the two sides and cannot read a number that
+            // only ever went to the terminal. The oracles compare stdout *and* termination, so a
+            // script that reproduced only the stdout half would report "did not reproduce" for every
+            // exit-code divergence — the one class where the stdout of both sides is identical by
+            // definition.
+            block.push_str(&format!(
+                "printf '%s\\n' \"$status\" > \"${VAR_WORK}/{stem}.status\"\n"
             ));
             block.push_str(&format!(
-                "printf 'run   %s : exit %s\\n' {} \"$status\"\n",
-                posix_quote(&stem)
+                "printf 'run   %s : exit %s (recorded: %s)\\n' {} \"$status\" {}\n",
+                posix_quote(&stem),
+                posix_quote(&expectation)
             ));
         }
         None => {
@@ -1854,12 +2521,75 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
                  line: the build above is the whole reproduction for it, and its diagnostics are in \
                  the outputs directory beside this script.",
             ));
+            block.push_str(&comment(&format!("  termination: {expectation}")));
             if let Some(failure) = capture.compile().and_then(CompileOutcome::failure) {
                 block.push_str(&comment(&format!("  recorded outcome: {failure}")));
             }
         }
     }
     block
+}
+
+/// Whether the script will have materialized this capture's stdout and status files.
+///
+/// One predicate for both streams because one condition governs both: a side that executed has its
+/// stdout redirected and its status recorded by the run line, and the recorded authority has both
+/// because its prescribed bytes are copied into `outputs/` and its prescribed status is written out
+/// literally, so termination can be compared uniformly rather than special-cased for the one
+/// authority that never ran.
+///
+/// False for a side whose build produced no artifact — the shape a compile refusal takes, where the
+/// capture holds diagnostics and no execution. That is not a gap in the script: it is the divergence,
+/// and the comparison block says so in those terms instead of comparing against files that were never
+/// written.
+fn has_comparable_output(capture: &Capture) -> bool {
+    capture.ran() || capture.recorded.is_some()
+}
+
+/// One sentence naming how a recorded build terminated.
+///
+/// The same three-way distinction [`Capture::shell_expectation`] draws for an execution, applied to a
+/// compiler invocation: a build that timed out and a build that was rejected both leave no artifact,
+/// and a reader told only "exit 1" cannot tell which happened.
+fn describe_compile_termination(compile: &CompileOutcome) -> String {
+    if compile.timed_out() {
+        return format!(
+            "exceeded its {} second budget and was terminated",
+            compile.budget().as_secs()
+        );
+    }
+    if compile.terminated_by_signal() {
+        return String::from("was killed by a signal rather than exiting");
+    }
+    match compile.exit_code() {
+        Some(code) => format!("exited with {code}"),
+        None => String::from("stopped with a status that could not be observed"),
+    }
+}
+
+/// Render one invocation, bounded by the timeout utility when the reader has one.
+///
+/// `status` is set to the command's exit status without `set -e` aborting the script, which matters
+/// because a finding's whole point is that at least one side does *not* succeed: an unguarded failing
+/// command under `set -e` would end the script before it reached the comparison it exists to perform.
+///
+/// The bound is applied through a runtime test rather than baked in, so one script works both where
+/// the utility exists and where it does not. Where it does not, the unbounded form runs and the
+/// preamble has already said the reproduction is unbounded — an execution the reader must interrupt is
+/// a poor outcome, but a silently skipped reproduction is a worse one.
+fn render_bounded_invocation(invocation: &str, stdout_file: &str, stderr_file: &str) -> String {
+    let mut rendered = String::from("status=0\n");
+    rendered.push_str(&format!("if [ -n \"${{{VAR_TIMEOUT}:-}}\" ]; then\n"));
+    rendered.push_str(&format!(
+        "    \"${VAR_TIMEOUT}\" \"${{{VAR_BUDGET}:-30}}\" {invocation} > {stdout_file} 2> \
+         {stderr_file} || status=$?\n"
+    ));
+    rendered.push_str("else\n");
+    rendered.push_str(&format!(
+        "    {invocation} > {stdout_file} 2> {stderr_file} || status=$?\n"
+    ));
+    rendered.push_str("fi\n");
+    rendered
 }
 
 /// Render the closing block that states the difference and compares the two streams.
@@ -1886,12 +2616,50 @@ fn render_comparison_block(finding: &Finding, captures: &[&Capture]) -> String {
         .iter()
         .find(|capture| capture.role().oracle() == Some(finding.oracle()));
     let (Some(subject), Some(authority)) = (subject, authority) else {
+        // One side was never observed, which is the shape a compile refusal takes: the compiler
+        // declined the program, so the arm that would have been compared against it was never
+        // attempted and there is no second stream to put beside the first.
+        //
+        // The conclusion is *printed* and not merely commented. A reader who runs this script has to
+        // be told what it concluded, and a deliverable that reproduces one build and then prints
+        // nothing reads like a script that stopped halfway rather than one whose finding is an
+        // absence.
+        let missing = if subject.is_none() {
+            String::from("the compiler under test")
+        } else {
+            format!("the {} authority", finding.oracle())
+        };
         block.push_str(&comment(
-            "Both sides of the comparison were not captured, so no automatic comparison is offered \
-             here; the captured outputs beside this script are the evidence.",
+            "Only one side of this comparison was captured, so no automatic stdout or status \
+             comparison is offered: the captured outputs beside this script are the evidence, and \
+             the absence itself is the divergence.",
+        ));
+        block.push_str(&format!(
+            "printf '\\nRESULT: %s was never observed, so there is nothing to compare against — \
+             that absence is the finding. The side that was observed is reproduced above, and its \
+             captured streams are in {OUTPUTS_DIR_NAME}/ beside this script.\\n' {}\n",
+            posix_quote(&missing)
         ));
         return block;
     };
+
+    // A side that produced no artifact in the recorded run produces none here either, so there is no
+    // stream for the script to compare: offering a comparison against a file this script will never
+    // create would print a difference whose cause is the missing file rather than the finding. The
+    // absence is stated instead, with the build line above as its whole reproduction.
+    for side in [subject, authority] {
+        if side.role() != CaptureRole::GoldenRecord && !side.ran() {
+            block.push_str(&comment(&format!(
+                "The {} produced no runnable artifact in the recorded run, so there is no stdout \
+                 stream to compare here: the difference this finding records IS that absence. Its \
+                 build line above reproduces the refusal, and the compiler's own diagnostics for it \
+                 are in {OUTPUTS_DIR_NAME}/{}.compile.stderr beside this script.",
+                side.role().label(),
+                side.file_stem()
+            )));
+            return block;
+        }
+    }
 
     // A side that ran is re-produced by this script in the scratch directory; the recorded
     // expectation was never produced by a process, so it is read from the copy that travels with the
@@ -1905,31 +2673,101 @@ fn render_comparison_block(finding: &Finding, captures: &[&Capture]) -> String {
     } else {
         format!("\"${VAR_WORK}/{}.stdout\"", authority.file_stem())
     };
+    let subject_status = format!("\"${VAR_WORK}/{}.status\"", subject.file_stem());
+    let authority_status = format!("\"${VAR_WORK}/{}.status\"", authority.file_stem());
+    let (subject_expectation, _) = subject.shell_expectation();
+    let (authority_expectation, _) = authority.shell_expectation();
+
     block.push_str(&comment(&format!(
-        "subject   : {} ({})",
+        "subject   : {} ({}), which {}",
         subject.file_stem(),
-        subject.role().label()
+        subject.role().label(),
+        subject_expectation
     )));
     block.push_str(&comment(&format!(
-        "authority : {} ({})",
+        "authority : {} ({}), which {}",
         authority.file_stem(),
-        authority.role().label()
+        authority.role().label(),
+        authority_expectation
     )));
     block.push('\n');
-    block.push_str("if command -v cmp > /dev/null 2>&1; then\n");
-    block.push_str(&format!(
-        "    if cmp {authority_file} {subject_file}; then\n"
+    block.push_str(&comment(
+        "Both halves of the oracle are checked. Either one differing is the finding, and they are \
+         reported separately because a difference in only one of them says something specific: an \
+         identical stdout with a differing status is an exit-code divergence, and a differing stdout \
+         with an identical status is an output divergence.",
     ));
+    block.push_str("differed=0\n\n");
+
+    // Whether each side's two files will exist is known here, at render time, so the script states
+    // the answer rather than testing for it. A side that executed has both; the recorded authority
+    // has both, because its prescribed bytes travel with this script and its prescribed status is
+    // materialized like any other; a side whose build produced no artifact has neither. Emitting a
+    // comparison against a file the renderer already knows cannot exist would put `cmp: No such file`
+    // into the output of a deliverable and then report the result as though a comparison had been
+    // made — and emitting a runtime `[ -f ]` guard instead would put a branch in the artifact that is
+    // dead the moment it is written. That absence is not a gap in the script: it is the divergence,
+    // and the block says so in those terms.
+    if has_comparable_output(subject) && has_comparable_output(authority) {
+        // --- stdout --------------------------------------------------------------------------
+        block.push_str("if command -v cmp > /dev/null 2>&1; then\n");
+        block.push_str(&format!(
+            "    if cmp {authority_file} {subject_file}; then\n"
+        ));
+        block.push_str("        printf 'stdout: identical here\\n'\n");
+        block.push_str("    else\n");
+        block.push_str("        printf 'stdout: DIFFERS\\n'\n");
+        block.push_str("        differed=1\n");
+        block.push_str("    fi\n");
+        block.push_str("else\n");
+        block.push_str(&format!(
+            "    printf 'stdout: cmp is unavailable; compare %s and %s by hand\\n' \
+             {authority_file} {subject_file}\n"
+        ));
+        block.push_str("    differed=1\n");
+        block.push_str("fi\n\n");
+
+        // --- termination ---------------------------------------------------------------------
+        block.push_str(&format!("authority_status=$(cat {authority_status})\n"));
+        block.push_str(&format!("subject_status=$(cat {subject_status})\n"));
+        block.push_str("if [ \"$authority_status\" = \"$subject_status\" ]; then\n");
+        block.push_str("    printf 'status: identical here (both %s)\\n' \"$authority_status\"\n");
+        block.push_str("else\n");
+        block.push_str(
+            "    printf 'status: DIFFERS (authority %s, subject %s)\\n' \"$authority_status\" \
+             \"$subject_status\"\n",
+        );
+        block.push_str("    differed=1\n");
+        block.push_str("fi\n\n");
+    } else {
+        let stalled = if has_comparable_output(subject) {
+            authority
+        } else {
+            subject
+        };
+        block.push_str(&comment(&format!(
+            "stdout and status: not compared, because the {} side never reached execution — it {}. \
+             That asymmetry is itself the divergence; the terminations recorded above and the \
+             compiler diagnostics in {OUTPUTS_DIR_NAME}/ beside this script are its evidence.",
+            stalled.role().label(),
+            stalled.shell_expectation().0
+        )));
+        block.push_str("differed=1\n\n");
+    }
+
+    block.push_str("if [ \"$differed\" -eq 0 ]; then\n");
     block.push_str(
-        "        printf 'stdout: identical here, so the recorded difference did not reproduce\\n'\n",
+        "    printf '\\nRESULT: neither stdout nor status differed here, so the recorded \
+         divergence did NOT reproduce.\\n'\n",
     );
-    block.push_str("    else\n");
-    block.push_str("        printf 'stdout: DIFFERS, which is the finding\\n'\n");
-    block.push_str("    fi\n");
-    block.push_str("else\n");
     block.push_str(&format!(
-        "    printf 'stdout: cmp is unavailable; compare %s and %s by hand\\n' {authority_file} {subject_file}\n"
+        "    printf 'Compare {ENVIRONMENT_NAME} against your toolchain before concluding the \
+         compiler changed.\\n'\n"
     ));
+    block.push_str("else\n");
+    block.push_str(
+        "    printf '\\nRESULT: the recorded divergence reproduced, which is the finding.\\n'\n",
+    );
     block.push_str("fi\n");
     block
 }
@@ -1950,12 +2788,29 @@ fn render_comparison_block(finding: &Finding, captures: &[&Capture]) -> String {
 /// was discovered and how. Appended to it are the shell variable values the script's preamble
 /// declares, which is what lets a reader confirm that the script they are about to run points at the
 /// same tools this run used before concluding anything from a difference in its output.
+///
+/// # Why the whole file is redacted, and `commands.sh` is not
+///
+/// This is the artifact of a finding most likely to be read by somebody other than the person who
+/// produced it, and the one a maintainer promotes into the committed finding set. Its content is not
+/// all authored here: a tool's version banner is whatever that tool chose to print, and a tool path
+/// is whatever an override variable named. `env.rs` already redacts and sanitizes a banner at the
+/// moment it captures it, so the fingerprint arrives clean; [`redact_secrets`] is applied to the
+/// assembled file as well, as the last thing before it is returned, because the tool **paths** come
+/// from a different source than the banners and a credential that appears in one of them would
+/// otherwise be committed.
+///
+/// The reproduction script is deliberately **not** redacted, and the asymmetry is the point: that
+/// file has to *run*, and a path with `[redacted]` spliced into it names nothing. The two artifacts
+/// have different jobs — one is read, one is executed — so the one that is read is the one that is
+/// rewritten to be safe to read.
 fn render_environment(
     finding: &Finding,
     caps: &Capabilities,
     variables: &ShellVariables,
 ) -> String {
     let id = finding.id();
+    let generation = run_generation();
     let mut text = format!("# environment for finding {id}\n");
     text.push_str(&format!("# cell   : {}\n", finding.key()));
     text.push_str(&format!("# oracle : {}\n", finding.oracle()));
@@ -1964,10 +2819,22 @@ fn render_environment(
          a\n# toolchain change rather than to the compiler. Compare this file before concluding \
          anything\n# from a difference between two runs.\n#\n",
     );
+    // Provenance, recorded here rather than in the manifest. The generated findings root is emptied
+    // at the start of every run, so a directory beneath it always belongs to the run in progress —
+    // but a maintainer holding a copied or archived directory has no way to tell which run that was,
+    // and a stale artifact mistaken for a fresh one is a wrong answer that reads like a right one.
+    // It is deliberately absent from `MANIFEST.txt`, which is compared between runs to see whether a
+    // divergence changed and would show a difference on every comparison if it carried a token.
+    text.push_str(&format!("run_token     = {}\n", generation.token()));
+    text.push_str(&format!("configuration = {}\n", generation.configuration()));
+    text.push_str(
+        "# The token names the process that produced this directory; the configuration fingerprint \
+         is\n# deterministic, so a reduced run's evidence can never be mistaken for a full run's.\n",
+    );
     text.push_str(&caps.render_fingerprint());
 
     text.push_str(&format!(
-        "\n# tool paths the {COMMANDS_NAME} preamble was written against\n"
+        "\n# tool paths and execution bounds the {COMMANDS_NAME} preamble was written against\n"
     ));
     let preamble = variables.render();
     if preamble.is_empty() {
@@ -1978,7 +2845,7 @@ fn render_environment(
     } else {
         text.push_str(&preamble);
     }
-    text
+    redact_secrets(&text)
 }
 
 /// Render the computed difference.
@@ -2094,7 +2961,12 @@ fn render_manifest(
 ) -> String {
     let mut text = String::from("BLITZY C COMPILER — DIFFERENTIAL CONFORMANCE FINDING\n");
     text.push_str("====================================================\n\n");
-    text.push_str(&format!("finding_id       = {id}\n"));
+    text.push_str(&format!("{MANIFEST_IDENTIFIER_PREFIX}{id}\n"));
+    // The identity digest, stated on its own line as well as inside the identifier. Two artifact
+    // directories describe the same finding exactly when these agree, so a register cross-check or a
+    // maintainer comparing two archived directories can settle that from one field instead of parsing
+    // a name apart. Deterministic, so `MANIFEST.txt` stays comparable between runs.
+    text.push_str(&format!("identity_digest  = {}\n", id.digest()));
     text.push_str(&format!("area             = {}\n", finding.key().area()));
     text.push_str(&format!("program          = {}\n", finding.key().program()));
     text.push_str(&format!(
@@ -2133,13 +3005,18 @@ fn render_manifest(
         text.push_str(&format!("\n  note: {note}\n"));
     }
 
+    text.push_str(&finding.contract.render());
+
     text.push_str("\nARTIFACTS IN THIS DIRECTORY\n---------------------------\n");
     text.push_str(&format!(
         "  {REPRODUCER_SOURCE_NAME:<22} the program, copied from the corpus\n"
     ));
     text.push_str(&format!(
-        "  {REPRODUCER_RECORD_NAME:<22} its expectation record, so the pair remains runnable by the \
-         harness\n"
+        "  {REPRODUCER_RECORD_NAME:<22} its expectation record; the pair was loaded back through \
+         the harness's\n  {:<22} reproducer loader before this finding was declared complete, so it \
+         is runnable\n  {:<22} as it stands — no editing of the stem, the area or the location is \
+         required\n",
+        "", ""
     ));
     text.push_str(&format!("  {MANIFEST_NAME:<22} this file\n"));
     text.push_str(&format!(
@@ -2215,23 +3092,23 @@ fn render_manifest(
     text.push_str("\nPROVENANCE\n----------\n");
     text.push_str(&format!(
         "corpus_source = {}\n",
-        sanitize_text_for_report(&finding.source.display().to_string())
+        shown_path(&finding.source)
     ));
     text.push_str(&format!(
         "corpus_record = {}\n",
-        sanitize_text_for_report(&finding.record.display().to_string())
+        shown_path(&finding.record)
     ));
     text.push_str(&format!(
         "reference_cc  = {}\n",
         match caps.ref_cc_for(finding.key().target()) {
-            Some(path) => sanitize_text_for_report(&path.display().to_string()),
+            Some(path) => shown_path(path),
             None => String::from("(none discovered for this target)"),
         }
     ));
     text.push_str(&format!(
         "runner        = {}\n",
         match caps.runner_for(finding.key().target()) {
-            Some(path) => sanitize_text_for_report(&path.display().to_string()),
+            Some(path) => shown_path(path),
             None => String::from("(native execution: no runner)"),
         }
     ));
@@ -2253,13 +3130,26 @@ fn render_observation_paragraph(finding: &Finding) -> String {
         );
     };
 
-    let mut text = format!(
-        "The compiler under test built and ran this program for {} at {}. Judged against {}, the \
-         two results differ.\n\n",
-        finding.key().target().triple(),
-        finding.key().opt().flag(),
-        authority.role().label()
-    );
+    // Stated from what the capture actually holds rather than from the common case: a finding about
+    // a program the compiler refused has a build and no run, and an opening sentence claiming it
+    // "built and ran" would be the one false statement in an artifact whose whole value is that
+    // every line of it is an observation.
+    let mut text = match subject.ran() {
+        true => format!(
+            "The compiler under test built and ran this program for {} at {}. Judged against {}, \
+             the two results differ.\n\n",
+            finding.key().target().triple(),
+            finding.key().opt().flag(),
+            authority.role().label()
+        ),
+        false => format!(
+            "The compiler under test produced no usable artifact for this program at {} for {}, so \
+             it never ran. Judged against {}, that absence is itself the difference.\n\n",
+            finding.key().opt().flag(),
+            finding.key().target().triple(),
+            authority.role().label()
+        ),
+    };
     text.push_str(&format!(
         "  authority {:<14} {} stdout bytes, {}\n",
         authority.file_stem(),
@@ -2277,9 +3167,28 @@ fn render_observation_paragraph(finding: &Finding) -> String {
         Some(divergence) => {
             text.push_str(&format!("\n{}\n", divergence.summary()));
         }
+        // Identical stdout when one side never executed is a different story from identical stdout
+        // when both did, and the two must not read alike. A reader told only "the streams match"
+        // would go looking for the difference in the exit status of a process that does not exist,
+        // whereas the real difference is that one side produced no run at all. Which side is named
+        // explicitly, because that is the first thing to look at next.
+        None if !subject.ran() || !authority.ran() => {
+            let absence = if !subject.ran() && !authority.ran() {
+                String::from("neither side executed")
+            } else if !subject.ran() {
+                format!("the subject {} did not execute", subject.file_stem())
+            } else {
+                format!("the authority {} did not execute", authority.file_stem())
+            };
+            text.push_str(&format!(
+                "\nThe two streams are byte-identical, but {absence}: the difference is the \
+                 absence of a run rather than a difference in what was printed. The build \
+                 diagnostics in {OUTPUTS_DIR_NAME} are the evidence for it.\n"
+            ));
+        }
         None => text.push_str(
-            "\nThe two streams are byte-identical, so the difference is in the exit status or in \
-             whether a side ran at all rather than in what was printed.\n",
+            "\nBoth sides ran and their streams are byte-identical, so the difference is in the \
+             exit status rather than in what was printed.\n",
         ),
     }
     text
@@ -2298,14 +3207,20 @@ fn describe_termination(capture: &Capture) -> String {
 
 /// Write one capture's entries into `outputs/`, returning the paths written.
 ///
-/// Four entries at most, and the rule for which stream goes where has no exceptions:
+/// Six entries at most, and the rule for which stream goes where has no exceptions:
 ///
 /// - `.stdout` and `.stderr` always hold the **program's** streams, byte for byte, and are empty
 ///   when the program never ran;
 /// - `.exit` always states how the program ended, or that it did not, and never presents a status it
 ///   does not have;
-/// - `.compile.stderr` and `.compile.exit` always hold the **compiler's** diagnostics and outcome,
-///   and are absent only when there was no build at all.
+/// - `.compile.stdout`, `.compile.stderr` and `.compile.exit` always hold the **compiler's** own
+///   streams and outcome, and are absent only when there was no build at all.
+///
+/// The compiler's standard output is written even though a compiler ordinarily leaves it empty,
+/// because the reproduction script this module emits redirects that stream to a file of the same
+/// name: a maintainer who runs the script and compares its output against the recorded evidence
+/// needs both sides of every stream to exist, and an entry that is absent for one build and present
+/// for another would make the comparison a case analysis rather than a diff.
 ///
 /// One rule rather than a case analysis is deliberate. A reader opening `a-aarch64-O2.stderr` must
 /// be able to know what stream it holds without first working out whether that side's build
@@ -2328,9 +3243,24 @@ fn write_capture(context: &str, outputs: &Path, capture: &Capture) -> HarnessRes
     written.push(exit);
 
     if let Some(compile) = capture.compile() {
+        // Written even though a compiler ordinarily prints nothing here, because `commands.sh`
+        // directs a maintainer's re-run into `<stem>.compile.stdout` — so without this entry the
+        // reproduction would produce a file with nothing from this run to compare it against.
+        let compile_stdout = guarded_path(context, outputs, &[&format!("{stem}.compile.stdout")])?;
+        write_bytes(context, &compile_stdout, compile.stdout())?;
+        written.push(compile_stdout);
+
         let compile_stderr = guarded_path(context, outputs, &[&format!("{stem}.compile.stderr")])?;
         write_bytes(context, &compile_stderr, compile.stderr())?;
         written.push(compile_stderr);
+
+        // Written even though a compiler ordinarily prints nothing here. An empty entry states
+        // that the stream was captured and was empty, which is a different fact from an entry
+        // that was never written at all — and a compiler that does print here on the program
+        // that provoked the finding would otherwise leave its only clue unrecorded.
+        let compile_stdout = guarded_path(context, outputs, &[&format!("{stem}.compile.stdout")])?;
+        write_bytes(context, &compile_stdout, compile.stdout())?;
+        written.push(compile_stdout);
 
         if let Some(report) = capture.compile_report() {
             let compile_exit = guarded_path(context, outputs, &[&format!("{stem}.compile.exit")])?;
@@ -2346,25 +3276,109 @@ fn write_capture(context: &str, outputs: &Path, capture: &Capture) -> HarnessRes
 /// The last step of a write rather than a separate check a caller might not perform. A finding whose
 /// directory is missing one artifact is not a deliverable, and the moment to discover that is while
 /// the run that produced it is still able to say so.
-fn require_complete(context: &str, directory: &Path) -> HarnessResult<()> {
+///
+/// # Why the check does not follow a link
+///
+/// `is_file` and `is_dir` answer about a link's *target*, so a link planted at one of these
+/// predictable names would report an artifact as present while the finding directory holds nothing but
+/// a pointer elsewhere — the completeness check would then certify exactly the state it exists to
+/// rule out. Metadata is read without following, so only an entry this run actually published counts.
+fn require_complete(context: &str, directory: &Path, key: &CellKey) -> HarnessResult<()> {
     for name in REQUIRED_ARTIFACTS {
         let entry = guarded_path(context, directory, &[name])?;
-        let present = if *name == OUTPUTS_DIR_NAME {
-            entry.is_dir()
-        } else {
-            entry.is_file()
+        let observed = fs::symlink_metadata(&entry).ok();
+        let present = match &observed {
+            Some(metadata) if *name == OUTPUTS_DIR_NAME => metadata.is_dir(),
+            Some(metadata) => metadata.is_file(),
+            None => false,
         };
         if !present {
+            let found = match &observed {
+                None => String::from("nothing is there"),
+                Some(metadata) if metadata.file_type().is_symlink() => String::from(
+                    "a symbolic link is there, which is not an artifact this run published and is \
+                     not followed",
+                ),
+                Some(metadata) if metadata.is_dir() => String::from("a directory is there"),
+                Some(_) => String::from("a non-regular file is there"),
+            };
             return Err(HarnessError::new(
                 String::from(context),
                 format!(
-                    "the finding directory is missing {}; a finding without its complete evidence \
-                     is not a deliverable, so this is reported rather than left to be discovered by \
-                     whoever reads the register",
-                    entry.display()
+                    "the finding directory is missing {} ({found}); a finding without its complete \
+                     evidence is not a deliverable, so this is reported rather than left to be \
+                     discovered by whoever reads the register",
+                    shown_path(&entry)
                 ),
             ));
         }
+    }
+    require_reproducer_pair_usable(context, directory, key)
+}
+
+/// Confirm the emitted reproducer pair is one the harness can actually load.
+///
+/// # Why existence is not enough
+///
+/// The two files that make a finding reproducible are a program and its expectation record. The
+/// record is what carries the build commands, the target and optimization matrix, and the golden
+/// output, so "the pair remains runnable by the harness" is a claim about the record **parsing**,
+/// not about the file existing. A directory holding an unparseable record satisfies every existence
+/// check and still delivers nothing: the reproduction it promises cannot be performed, and the
+/// verdict that announced it would be a `FINDING` with no usable evidence behind it.
+///
+/// So the record is read back from disk after it is written and put through the real parser, with the
+/// finding's own area and program as the expected identity — see [`manifest::parse_standalone_str`]
+/// for why the identity must be supplied rather than derived from the path here. Reading back rather
+/// than trusting the copy is what makes this a check on the artifact a maintainer will open, not on
+/// the value the writer intended to produce.
+///
+/// Three properties are established, each the failure of one real defect:
+///
+/// 1. The record parses under every rule of the format, so its templates and its golden output are
+///    the ones the harness would honour.
+/// 2. It declares the identity of the cell this finding is about, so the pair cannot be a copy of a
+///    different program left behind by an earlier run or an interrupted write.
+/// 3. Its sibling source resolves to the reproducer beside it, so the record governs the program in
+///    this directory rather than one somewhere else.
+///
+/// # Errors
+///
+/// Returns an explanatory failure carrying the parser's own diagnostic. The caller turns that into a
+/// [`Verdict::Fail`], which is the point: a finding that cannot be reproduced must not be reported
+/// as a finding that can.
+fn require_reproducer_pair_usable(
+    context: &str,
+    directory: &Path,
+    key: &CellKey,
+) -> HarnessResult<()> {
+    let record_path = guarded_path(context, directory, &[REPRODUCER_RECORD_NAME])?;
+    let record =
+        manifest::load_replay(&record_path, key.area(), key.program()).map_err(|error| {
+            HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} was written but the harness cannot load it: {error}. A finding is only a \
+                     deliverable if its reproducer and its record can be run again, so this cell \
+                     is reported as a failure rather than as a filed finding",
+                    record_path.display()
+                ),
+            )
+        })?;
+    let sibling = record.source_path();
+    let expected_source = guarded_path(context, directory, &[REPRODUCER_SOURCE_NAME])?;
+    if sibling != expected_source {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "the emitted record at {} resolves its program to {}, but the reproducer beside it \
+                 is {}; a record that names a different program than the one filed with it would \
+                 reproduce something other than this finding",
+                record_path.display(),
+                sibling.display(),
+                expected_source.display()
+            ),
+        ));
     }
     Ok(())
 }
@@ -2393,11 +3407,15 @@ fn require_complete(context: &str, directory: &Path) -> HarnessResult<()> {
 /// because its membership can shrink and a stale capture is worse than a missing one: it looks like
 /// evidence.
 ///
-/// # Hermeticity
+/// # Write-path discipline
 ///
 /// Every path written passes through [`guarded_path`], which proves it lies strictly beneath the
 /// generated-findings root. Nothing here writes into the corpus, into the committed finding set, or
-/// anywhere else in the repository; the curated set is promoted by a human after review.
+/// anywhere else in the repository; the curated set is promoted by a human after review. That is a
+/// property of the paths this function builds, not isolation of anything: the outputs it records
+/// were produced by unconfined tools, and the artifacts deliberately retain their stderr, their
+/// absolute tool paths and their exact commands, because those are what make a finding
+/// reproducible.
 ///
 /// # Errors
 ///
@@ -2408,6 +3426,20 @@ fn require_complete(context: &str, directory: &Path) -> HarnessResult<()> {
 pub fn write(finding: &Finding, caps: &Capabilities) -> HarnessResult<FindingArtifacts> {
     let id = finding.id();
     let context = format!("writing the artifacts for finding {id}");
+
+    // Establish the run's identity before anything is written beneath the findings root.
+    //
+    // The generated-findings root is emptied once per process, and until that has happened the root
+    // still holds the *previous* run's directories. A finding written before it would land beside
+    // stale neighbours and then be retired along with them by whichever caller initialized the run
+    // second — so this run's own deliverable would vanish, and the report row pointing at it would
+    // name a directory that no longer existed.
+    //
+    // Making it a precondition of the write rather than of the caller is what closes that for good:
+    // the driver, the flag probe, the audit gate and any later caller all get the same guarantee
+    // without having to know they need it. Initialization is performed once per process under a
+    // `OnceLock`, so every call after the first is a load and a comparison.
+    super::sandbox::ensure_roots()?;
 
     // Rendered before the directory exists, so a refusal leaves nothing behind.
     let commands = render_commands(finding, &id)?;
@@ -2424,11 +3456,11 @@ pub fn write(finding: &Finding, caps: &Capabilities) -> HarnessResult<FindingArt
     // check read in the same sequence as the documented artifact table.
     let source = guarded_path(&context, &directory, &[REPRODUCER_SOURCE_NAME])?;
     copy_corpus_file(&context, &finding.source, &source)?;
-    entries.push(source);
+    entries.push(source.clone());
 
     let record = guarded_path(&context, &directory, &[REPRODUCER_RECORD_NAME])?;
     copy_corpus_file(&context, &finding.record, &record)?;
-    entries.push(record);
+    entries.push(record.clone());
 
     let manifest_path = guarded_path(&context, &directory, &[MANIFEST_NAME])?;
     write_text(&context, &manifest_path, &manifest)?;
@@ -2450,7 +3482,7 @@ pub fn write(finding: &Finding, caps: &Capabilities) -> HarnessResult<FindingArt
         entries.extend(write_capture(&context, &outputs, capture)?);
     }
 
-    require_complete(&context, &directory)?;
+    require_complete(&context, &directory, finding.key())?;
     Ok(FindingArtifacts {
         id,
         directory,
@@ -2488,10 +3520,13 @@ pub fn record(finding: &Finding, caps: &Capabilities) -> Outcome {
             Some(finding.class()),
             None,
             format!(
-                "{} — undocumented divergence recorded as a deliverable, not patched. Evidence in \
-                 {}; reproduce with no harness, no Cargo and no Rust toolchain using: {}",
+                "{} — undocumented divergence recorded as a deliverable, not patched. Finding {} \
+                 holds {} artifact files in {}; reproduce with no harness, no Cargo and no Rust \
+                 toolchain using: {}",
                 finding.summary(),
-                artifacts.directory().display(),
+                artifacts.id(),
+                artifacts.entries().len(),
+                shown_path(artifacts.directory()),
                 artifacts.reproduction_command()
             ),
         ),
@@ -2503,7 +3538,10 @@ pub fn record(finding: &Finding, caps: &Capabilities) -> Outcome {
             None,
             format!(
                 "an undocumented divergence was observed and its artifacts could NOT be written, so \
-                 there is no reproducer to act on: {error}. The divergence itself was: {}",
+                 there is no reproducer to act on: {error}. The directory they were being written \
+                 into is {}, which may hold a partial set worth inspecting. The divergence itself \
+                 was: {}",
+                shown_path(&finding.id().directory()),
                 finding.summary()
             ),
         ),

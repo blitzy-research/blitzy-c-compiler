@@ -15,9 +15,11 @@ ub_notes           <<END
 NORETURN DESIGN. C11 makes it undefined behaviour for a function declared _Noreturn to return
 to its caller, so this program is built so that it provably cannot happen. terminate_now is
 declared _Noreturn, prints one line, and then calls exit. exit is itself declared _Noreturn --
-hand-declared as _Noreturn void exit(int), because no header may be included -- so it never
-returns, and therefore control never reaches the closing brace of terminate_now. There is no
-return statement anywhere in terminate_now, and no path through it can fall off the end. The
+hand-declared as _Noreturn void exit(int), which makes this the one program in the corpus that
+hand-declares two libc prototypes rather than printf alone, because stdlib.h is not in bcc's
+bundled set at all and the corpus's only sanctioned inclusion is area 07's <stdarg.h> -- so it
+never returns, and therefore control never reaches the closing brace of terminate_now. There is
+no return statement anywhere in terminate_now, and no path through it can fall off the end. The
 _Noreturn contract is honoured absolutely rather than merely intended, and the sanitizer gate
 independently confirms it: UndefinedBehaviorSanitizer instruments _Noreturn functions and
 reports when one actually returns, so a clean sanitizer run is positive evidence rather than

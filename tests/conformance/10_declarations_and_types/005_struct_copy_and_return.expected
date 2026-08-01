@@ -47,15 +47,20 @@ conversion specifier used in the program is %d.
 BOTH SIDES OF THE ABI THRESHOLD. struct small2 at 8 bytes and struct large8 at 32 bytes sit on
 opposite sides of the by-register versus by-memory threshold on x86_64, aarch64 and riscv64,
 where that threshold is 16 bytes, so on those three backends both aggregate-passing code paths
-are exercised. On i686 the two sit on the same side of it: that ABI passes every aggregate on
-the stack and returns one through a hidden pointer whatever its size, which was measured here
-rather than assumed, so both sizes travel i686's single memory path. Nothing is excluded on any
-target either way, because what the oracles compare is the member values that come back out and
-not the route they took. Every member is read back individually rather than summarized, so a
-single wrong member localizes to a single wrong field. The passthrough line is the most
-diagnostic in the program: it asserts both that the callee's mutation appeared in its return
-value and that the caller's original object was left unchanged, which a backend passing the
-aggregate by reference instead of by value would violate visibly.
+are exercised. On i686 the two sit on the same side of it: the i386 System V ABI passes every
+aggregate on the stack and returns one through a hidden pointer whatever its size, so both
+sizes travel i686's single memory path. That is ABI context rather than something this program
+demonstrates: the compared bytes are member values, and the route an aggregate took is visible
+only in generated code. It is verifiable there rather than assumed -- disassembling an i686
+build (i686-linux-gnu-gcc 13.4.0, -O1) shows the hidden pointer arriving in the first stack
+slot, returned in %eax, with the callee popping it via ret $0x4, while the same source built
+for x86_64 returns the 8-byte aggregate packed in %rax and never touches memory. Nothing is
+excluded on any target either way, because what the oracles compare is the member values that
+come back out and not the route they took. Every member is read back individually rather than
+summarized, so a single wrong member localizes to a single wrong field. The passthrough line is
+the most diagnostic in the program: it asserts both that the callee's mutation appeared in its
+return value and that the caller's original object was left unchanged, which a backend passing
+the aggregate by reference instead of by value would violate visibly.
 END
 expected_stdout    <<END
 small_folded=1 2

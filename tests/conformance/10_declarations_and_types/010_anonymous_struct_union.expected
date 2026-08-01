@@ -56,11 +56,17 @@ members are not named anywhere in this repository's documentation: the technical
 covers the C11 keyword inventory, the declaration parser and the type system, but never mentions
 anonymous aggregate members specifically. The feature is nevertheless written and executed
 here, because excluding a language feature for being undocumented or awkward is forbidden.
-Crucially, no expected-divergence marker is attached and no target restriction is applied: the
-area carries no markers at all, and the three markers identified in advance for the whole corpus
-all belong to other areas. A divergence in this program is therefore a genuine finding, to be
-delivered as a minimized reproducer with exact reproduction commands and never patched, rather
-than an expected divergence to be excused.
+Crucially, no expected-divergence marker is attached and no target restriction is applied. That
+is not a property of this area alone: the corpus currently carries NO active marker anywhere, in
+any area. The reason is the rule rather than an accident -- a marker's basis must be a repository
+artifact that explicitly documents the limitation, and an inventory omission, which is all that
+exists for this feature and for the other candidates examined during design, is not one. Each
+candidate that was analysed and deliberately not minted is recorded in
+tests/conformance/EXPECTED_DIVERGENCES.md section 4, together with the reason it was rejected. A
+divergence in this program is therefore a genuine finding, to be delivered as a verbatim
+reproducer with its recorded minimization status, the captured per-compiler and per-backend
+outputs and the exact reproduction commands, and reported rather than patched, instead of an
+expected divergence to be excused.
 END
 expected_stdout    <<END
 anon_union_direct=1 16

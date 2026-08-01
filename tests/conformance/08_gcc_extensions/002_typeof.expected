@@ -13,15 +13,6 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
 ub_notes           <<END
-UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
--pedantic from the default warning gate. Reason: the constructs under test are
-non-standard GCC extensions by definition, and -pedantic exists precisely to reject
-them; retaining it would fail every program in the area for doing exactly what it is
-meant to do. This is the only area-wide deviation in the corpus. No other warning is
-relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0.
-
 UB-FREEDOM ARGUMENT. All arithmetic is on small int and unsigned int values far from
 INT_MIN, INT_MAX and UINT_MAX, so there is no signed overflow; the unsigned multiplies
 are modular by definition and do not wrap here in any case. No shift operator is used.
@@ -36,6 +27,15 @@ addresses of unrelated objects. Macro locals sw_t and ad_t are uniquely prefixed
 neither macro is nested inside itself, so -Wshadow is not tripped.
 END
 impl_defined_notes <<END
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
+gcc 13.3.0.
+
 Nothing implementation-defined is observed, so no target restriction is needed and all
 four targets are compared. The four rank checks are deliberately expressed as
 SELF-REFERENTIAL RELATIONS rather than absolute widths: each compares sizeof of the type
