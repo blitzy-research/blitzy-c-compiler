@@ -6,7 +6,7 @@
 
 program            = 004_switch_edge_cases
 area               = 06_control_flow
-description        = Empty body, default first, default absent, single label, and dense versus sparse label sets
+description        = Switch edge cases: empty body, default first, default absent, single label, unordered labels, and the discriminating dense versus sparse label sets that select jump-table versus comparison-chain lowering
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,12 +18,42 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-No case label is duplicated in any switch and every selector is an initialized int whose
-value is inside the range of the labels or deliberately outside them to reach default.  All
-accumulation stays inside the range of int.  Each switch is driven once by a constant and
-once from volatile storage, so no dispatch is available for compile-time substitution.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Every controlling value is an integer literal, staged through the volatile int
+vin in the runtime variant, and every case label is a distinct integer constant
+expression. The widest label magnitude is 1000000 and the widest input magnitude
+is 1000000, both far inside the range of a 32-bit int on all four targets, so no
+signed overflow is possible. The largest accumulated value is 1720, the sum of
+the sixteen dense results, which is likewise far inside range. There is no
+shift, no division, no remainder and no pointer arithmetic. Every object is
+written before it is read: r is assigned on every reachable path in each helper,
+and is pre-initialised in empty_body, default_absent and single_label where a
+non-matching value runs no arm at all; the static const input tables have
+initialisers; vin is assigned before each read; and every out[] element is
+written before it is printed, including the two accumulators which are set to
+zero before their sweep loops. No object is modified twice between sequence
+points; each volatile write and each volatile read stands in its own statement or
+its own controlling expression. There is no aliasing, no address is taken, no
+uninitialised storage is read, and nothing depends on padding bytes or on the
+relative addresses of unrelated objects. No evaluation order is relied upon: the
+helper calls appearing together in one printf argument list are pure. The empty
+switch body is well formed and executes nothing for any value.
+END
+impl_defined_notes <<END
+Nothing implementation-defined is printed. Plain char is never used as a value,
+which matters because char signedness was measured to differ across the four
+targets: signed on x86_64 and i686, unsigned on aarch64 and riscv64. Every
+printed value has type int, which is 32 bits on all four targets, so no value
+depends on the measured pointer and long width difference (4 bytes on i686,
+8 bytes on the other three). No address, no pointer value, no sizeof result and
+no floating-point value is printed. The choice of switch lowering strategy is
+deliberately allowed to differ between targets and between optimization levels:
+assembly inspection of the reference compiler at -O0 confirmed that the dense
+sixteen-label switch and the biased eight-label switch each lower to a single
+indirect jump through a jump table, while the six-label sparse switch lowers to a
+comparison chain with no indirect jump at all. That difference is a difference of
+generated code, not of observable result, so it is not an implementation-defined
+value difference and needs no target restriction. All 12 cells are therefore
+expected to produce byte-identical stdout.
 END
 expected_stdout    <<END
 const_empty_body=5 5

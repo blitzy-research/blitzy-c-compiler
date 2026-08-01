@@ -884,10 +884,10 @@ set as it stands:
 | Matrix | Areas | Programs | `bcc` compile-and-run cells | Differential and golden assertions |
 |---|---:|---:|---:|---:|
 | **Final planned target** | 14 | 108 | 1,296 (108 × 4 targets × 3 levels) | ≈ 3,564 across the three oracles |
-| **Committed today** | 9 | 73 | 876 (73 × 4 × 3) | ≈ 2,409 across the three oracles |
+| **Committed today** | 11 | 92 | 1,104 (92 × 4 × 3) | ≈ 3,036 across the three oracles |
 
 The committed figure is what a reader can verify right now by counting `tests/conformance/*/*.c`;
-the planned figure is what the suite's design calls for once the five remaining areas land. Quoting
+the planned figure is what the suite's design calls for once the three remaining areas land. Quoting
 the planned figure as though it were the present state would be exactly the unverifiable claim the
 paragraph above refuses to make.
 

@@ -1,12 +1,6 @@
-# Expectation record for 06_control_flow/007_conditional_operator.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 007_conditional_operator
 area               = 06_control_flow
-description        = Conditional operator result typing and single-branch evaluation
+description        = Conditional operator result typing and single-branch evaluation, with the un-taken branch's absence observed through a volatile counter and pointer selection observed only by comparison
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,12 +12,41 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Exactly one branch is evaluated, and that absence is made observable by recording each side
-effect in a volatile counter printed after the expression.  The result type is the common
-type of the two branches after the usual arithmetic conversions; the double values used are
-exactly representable, so the printed text is exact.  No address is printed: the
-pointer-typed branches are observed only by comparison.  No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Free of undefined and unspecified behaviour. Single-branch evaluation is an
+absence assertion, so the side-effect counter branch_calls is declared volatile:
+a plain counter could legally be removed by dead-code elimination, which would
+make the assertion vacuous. Every object is assigned before it is read; the
+static const array sel4 has a complete initialiser and the out array is fully
+written by the four-iteration loop before any element is read. All arithmetic is
+on int values of small magnitude, so no signed overflow is possible. There are
+no shifts and no divisions. The two automatic objects x and y are distinct
+addressable objects in the same function; their addresses are only compared for
+equality, never dereferenced through a converted type and never printed, so
+there is no aliasing violation and no dependence on relative addresses beyond
+the defined equality comparison. The conditional operator imposes a sequence
+point after its controlling expression, and each volatile object is read exactly
+once into a plain local before use, so no expression contains two volatile
+accesses whose relative order would be unspecified. No object is modified twice
+between sequence points. The only floating-point values are 1.0 and 2.5, both
+exactly representable, printed at fixed precision. The single loop has a fixed
+bound of four iterations and always terminates.
+END
+impl_defined_notes <<END
+Nothing implementation-defined is observed. Every sizeof in this program is
+applied to a conditional expression whose common type is int, double or float,
+so the printed sizes are 4, 4, 8 and 4 on all four targets; sizeof is never
+applied to long, to a pointer, to size_t or to ptrdiff_t, whose widths were
+measured to differ (4 bytes on i686, 8 elsewhere). Each sizeof result is cast to
+int and printed with %d, so the size_t width itself is never exposed. The (char)
+and (short) casts appear only inside sizeof, where only the promoted operand's
+size is observed, so the measured plain-char signedness difference (signed on
+x86_64 and i686, unsigned on aarch64 and riscv64) cannot affect the output; no
+plain-char value is ever printed. Pointer selection is observed only through an
+equality comparison yielding 0 or 1, so no address appears in the output. The
+floating-point values 1.0 and 2.5 are exactly representable and are printed with
+%.2f, which was measured byte-identical across all twelve target-and-
+optimization configurations. All four targets and all three optimization levels
+are therefore compared, and all three oracles are enabled.
 END
 expected_stdout    <<END
 const_true_branch r=10 branch_calls=1

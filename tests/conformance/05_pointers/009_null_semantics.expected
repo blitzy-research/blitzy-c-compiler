@@ -1,12 +1,6 @@
-# Expectation record for 05_pointers/009_null_semantics.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 009_null_semantics
 area               = 05_pointers
-description        = Null pointer constant forms, comparison, truth value and conversion across pointer types
+description        = Null pointer constant forms, comparison, truth value and conversion, using 0 and (void *)0 only
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,15 +12,32 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-The two spellings used are the integer constant zero and a cast of zero to void pointer,
-both of which the standard itself defines as null pointer constants, so no macro definition
-is needed.  A null pointer is never dereferenced: every null fact is observed through an
-equality comparison, a truth-value test or a conversion.  No address is printed.
-Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+No null pointer is dereferenced anywhere in this program. Every dereference is guarded,
+either by a preceding null comparison, by the guard inside takes_pointer, or by the pointer
+having just been assigned the address of a live object. The two null pointer constant
+spellings used are the integer constant 0 and the cast form (void *)0, which are exactly
+the forms the standard defines as null pointer constants. The stddef.h null-pointer macro
+is deliberately NOT used because it comes from a header and no header may be included; the
+literal token does not appear anywhere in the source. The null function pointer is compared
+and tested for truth but NEVER called. The partly initialized static table has its
+unmentioned members null by static initialization, which is guaranteed, not assumed.
+No signed integer overflow, no shift out of range, no aliasing violation, no read of
+uninitialized storage, no object modified twice between sequence points, at most one
+side-effecting argument per call, and no dependence on padding bytes or on the relative
+addresses of unrelated objects. The only external symbol is printf; no header is included,
+no file, socket, environment variable, clock or random source is touched, and every input
+is a literal in this source file.
+END
+impl_defined_notes <<END
+Nothing about the null pointer's representation is printed or relied upon: only equality
+results, truth values and conversion results appear in the output, so an implementation
+whose null pointer is not all-zero bits would produce identical text.
+No address or pointer value is printed. Pointer facts appear only as differences,
+comparisons and alignment residues, and every pointer difference is cast to long long
+before printing, so the printed text is identical whether ptrdiff_t is 32 or 64 bits.
+Plain char is never printed in a signedness-dependent way. The only conversion
+specifiers used anywhere in this program are %d, %lld and fixed-precision %.3f, all of
+which are target-width independent.
 END
 expected_stdout    <<END
 zero_form_is_null=1

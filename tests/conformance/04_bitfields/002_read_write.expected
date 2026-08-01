@@ -6,7 +6,7 @@
 
 program            = 002_read_write
 area               = 04_bitfields
-description        = Reading and writing each bitfield of a struct, folded and volatile-runtime
+description        = Read and write of every bitfield across mixed signedness and width, folded and volatile runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,14 +18,46 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every value stored into a bitfield is inside the range its declared width and signedness
-can represent, so no store is out of range and no implementation-defined truncation is
-relied upon.  Each field carries an explicit signed or unsigned base type.  No padding bit
-or padding byte is ever read.  Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+The default undefined-behaviour warning gate applies unmodified, with no deviation:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror.  The program
+was verified to pass that gate and to run cleanly under
+-fsanitize=undefined,address -fno-sanitize-recover=all.
+
+Every store lands inside the destination field's representable range.  The folded variant
+stores only constants that fit.  The runtime variant reads each field through volatile
+storage, adds one, and stores the result: each unsigned destination is masked to its exact
+field width, so the conversion back into the field is provably value-preserving, and each
+signed destination receives a value one step inside its range.  No signed overflow can occur
+because every signed operand is promoted to int before the addition and the result is far
+from the int limits.  No shift is performed anywhere in the program.  No aliasing violation:
+no pointer is formed to any bitfield and no type-punning of any kind occurs.  No
+uninitialized read: the folded object has an explicit constant initializer, and the volatile
+object has static storage duration and so is zero-initialized, and in any case every one of
+its fields is written before it is read.  No object is modified twice between sequence points;
+each read-modify-write is a separate full statement.  No pointer value, address, timestamp,
+random value or locale-dependent format is printed.
+END
+impl_defined_notes <<END
+Every bitfield is declared with an explicit signed int or unsigned int base type.  A plain
+int bitfield's signedness is implementation-defined, so using it would manufacture a spurious
+divergence; stating the signedness in the declaration removes that dependency entirely.  The
+struct deliberately mixes both signednesses and five widths (3, 5, 9, 12 and 1 bits) inside a
+single four-byte storage unit.
+
+Plain char is not used.  Plain char signedness was measured to differ across the four targets
+(signed on x86_64 and i686, unsigned on aarch64 and riscv64), so it is avoided entirely.
+
+No value whose width varies by target is printed.  sizeof(long) and sizeof(void *) differ on
+i686 (4) from the other three targets (8), so neither is printed, and no pointer value or
+address appears in the output.  Every bitfield is declared on an int base type, and int is
+four bytes on all four targets, so every printed value is target-invariant by derivation.
+Every printf argument is explicitly cast to unsigned or int, so no default argument promotion
+is relied upon implicitly.
+
+All four targets and all three oracles remain enabled.  Bitfield read-back values and the
+minimum value of a narrow signed field were measured identical on all four targets, so a
+cross-backend divergence here is a genuine finding rather than an implementation-defined
+difference.
 END
 expected_stdout    <<END
 folded_read u3=6 s5=-13 u9=400 s12=-1500 u1=1

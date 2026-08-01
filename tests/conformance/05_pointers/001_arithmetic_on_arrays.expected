@@ -1,12 +1,6 @@
-# Expectation record for 05_pointers/001_arithmetic_on_arrays.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 001_arithmetic_on_arrays
 area               = 05_pointers
-description        = Pointer increment, decrement, indexing and element scaling within one array
+description        = Pointer increment, decrement and indexing scaled by element size, folded and volatile-runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,15 +12,30 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every pointer stays within its own array, and no pointer is advanced past one element
-beyond the last.  Element offsets are expressed as differences between pointers into the
-same array object, never by subtracting character views of distinct element subobjects,
-which would not be a subtraction within one object.  No address is printed and no pointer
-one past the end is dereferenced.  Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Every pointer formed stays within its array, and every index used is inside bounds:
+i_arr and s_arr have 8 elements and are indexed 0..7, d_arr and p_arr have 4 and are
+indexed 0..3. Pointers are advanced and retreated only across positions that exist, and
+each is dereferenced only while it designates a real element. The byte-distance
+computations subtract two pointers to elements of one array object, which is defined,
+then scale that element count by the element size. No character view of a distinct
+element subobject is subtracted, because such a difference would not be defined.
+No signed integer overflow, no shift out of range, no aliasing violation, no read of
+uninitialized storage, no object modified twice between sequence points, at most one
+side-effecting argument per call, and no dependence on padding bytes or on the relative
+addresses of unrelated objects. The only external symbol is printf; no header is included,
+no file, socket, environment variable, clock or random source is touched, and every input
+is a literal in this source file.
+END
+impl_defined_notes <<END
+Element-size scaling is printed as a byte distance between adjacent elements of the same
+array. sizeof(short), sizeof(int), sizeof(double) and sizeof(struct pair {int; int;}) are
+2, 4, 8 and 8 on all four supported targets, so those distances are target independent.
+No address or pointer value is printed. Pointer facts appear only as differences,
+comparisons and alignment residues, and every pointer difference is cast to long long
+before printing, so the printed text is identical whether ptrdiff_t is 32 or 64 bits.
+Plain char is never printed in a signedness-dependent way. The only conversion
+specifiers used anywhere in this program are %d, %lld and fixed-precision %.3f, all of
+which are target-width independent.
 END
 expected_stdout    <<END
 folded_index=10 20 50 80

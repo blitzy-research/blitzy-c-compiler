@@ -289,7 +289,7 @@ never reaches a comparison, so a rule demanding one would make the whole class u
 
 Every program has a sibling `<program>.expected` record. This single file is what makes each test
 reproducible in isolation and what supplies oracle (c). This section is **binding on every record**
-— the 73 committed on this branch and every one still to be authored — and matches the hand-written
+— the 75 committed on this branch and every one still to be authored — and matches the hand-written
 parser (`manifest.rs`) in
 [`../conformance_harness/`](../conformance_harness/) exactly. A maintainer authoring a new program
 should copy from here.
@@ -956,8 +956,8 @@ diagnostic during design.
 of 108 programs the audit produces **216 gate results** — 108 programs × 2 gates — and it performs
 them with **324 process invocations**, because a program costs three processes: one warning-gate
 compile, one sanitizer build, and one sanitizer **run** (the sanitizer gate only means anything if the
-instrumented binary is actually executed). At the 73 programs committed today that is **146 gate
-results** from **219 process invocations**. The audit prints both figures and reconciles them, so a
+instrumented binary is actually executed). At the 92 programs committed today that is **184 gate
+results** from **276 process invocations**. The audit prints both figures and reconciles them, so a
 missing invocation is visible rather than inferred.
 `AuditReport::gate_result_count` counts the gate applications and the report tabulates them;
 `AuditReport::invocations_expected` states the invocation figure and `invocations_performed`
@@ -1111,26 +1111,26 @@ one and says so.
 ### The enumerable matrix
 
 Two columns, deliberately. The **final planned target** is what the suite's design calls for; **the
-committed corpus** is what a reader can count in this directory right now, with five of the fourteen
+committed corpus** is what a reader can count in this directory right now, with three of the fourteen
 areas not yet landed. Quoting the planned column as though it described the present state would be
 exactly the unverifiable claim the paragraph below refuses to make.
 
 | Quantity | Final planned target | Committed today |
 | --- | --- | --- |
-| Feature areas | 14 | **9** |
-| Programs | 108 | **73** |
+| Feature areas | 14 | **11** |
+| Programs | 108 | **92** |
 | Optimization levels per program | 3 | 3 |
 | Targets per program | 4, unless the record restricts them with a recorded reason | 4, same rule |
-| **`bcc` compile-and-run cells** | **1,296** (108 × 4 × 3) | **876** (73 × 4 × 3) |
-| Reference cells, native | **324** (108 × 3) | **219** (73 × 3) |
-| Reference cells, cross | up to **972** (108 × 3 × 3) | up to **657** (73 × 3 × 3) |
-| Oracle (a) comparisons | **1,296** | **876** |
-| Oracle (b) comparisons | **972** | **657** |
-| Oracle (c) assertions | **1,296** | **876** |
-| **Total differential and golden assertions** | **≈3,564, from 108 programs** | **≈2,409, from 73 programs** |
+| **`bcc` compile-and-run cells** | **1,296** (108 × 4 × 3) | **1,104** (92 × 4 × 3) |
+| Reference cells, native | **324** (108 × 3) | **276** (92 × 3) |
+| Reference cells, cross | up to **972** (108 × 3 × 3) | up to **828** (92 × 3 × 3) |
+| Oracle (a) comparisons | **1,296** | **1,104** |
+| Oracle (b) comparisons | **972** | **828** |
+| Oracle (c) assertions | **1,296** | **1,104** |
+| **Total differential and golden assertions** | **≈3,564, from 108 programs** | **≈3,036, from 92 programs** |
 
-The five areas still to land are `02_constant_expressions`, `03_initializers`, `12_preprocessor`,
-`13_floating_point` and `14_abi_calling_convention`; the per-area table below marks each one.
+The three areas still to land are `12_preprocessor`, `13_floating_point` and
+`14_abi_calling_convention`; the per-area table below marks each one.
 
 **Never publish a coverage percentage in this file or in either register.** Coverage instrumentation
 requires a development dependency, which this repository forbids absolutely — so no percentage in this
@@ -1147,8 +1147,8 @@ directory today or still to land.
 | Area directory | Programs | Mandated | State |
 | --- | --- | --- | --- |
 | `01_integer_conversions` | 10 | yes | committed |
-| `02_constant_expressions` | 8 | yes | **planned** |
-| `03_initializers` | 11 | yes | **planned** |
+| `02_constant_expressions` | 8 | yes | committed |
+| `03_initializers` | 11 | yes | committed |
 | `04_bitfields` | 7 | yes | committed |
 | `05_pointers` | 10 | yes | committed |
 | `06_control_flow` | 10 | yes | committed |
@@ -1160,12 +1160,12 @@ directory today or still to land.
 | `12_preprocessor` | 6 | supplementary | **planned** |
 | `13_floating_point` | 4 | supplementary | **planned** |
 | `14_abi_calling_convention` | 6 | supplementary | **planned** |
-| **Planned total** | **108** | | **73 committed across 9 areas** |
+| **Planned total** | **108** | | **92 committed across 11 areas** |
 
 The nine mandated areas are the acceptance floor set by the requirements; each carries no fewer than
 six programs. The five supplementary areas were added because they carry the widest cross-backend
-divergence surface. Six of the nine mandated areas are committed; the remaining three and two of the
-five supplementary areas are still to land, which is what the `State` column and the committed column
+divergence surface. All nine mandated areas are committed; of the five supplementary areas two are
+committed and three are still to land, which is what the `State` column and the committed column
 of the matrix above both record.
 
 ### Measured performance budget
@@ -1445,7 +1445,7 @@ run can never be mistaken for a full one. The same stamping applies when a name 
 
 Run `infra_oracle_capability_report` first in any new environment. It prints the discovered oracle
 inventory and states exactly which arms of which oracles will run, so a misconfigured environment is
-diagnosed **before** the matrix executes — 876 `bcc` cells on the committed corpus, 1,296 once all
+diagnosed **before** the matrix executes — 1,104 `bcc` cells on the committed corpus, 1,296 once all
 fourteen areas have landed.
 
 ---
@@ -2019,7 +2019,9 @@ record mechanically; the *protection* is already in place.
 
 **Committed and tracked — this folder.** Present today:
 
-- 73 programs and their 73 expectation records, across nine area directories;
+- 92 programs across eleven area directories, and 75 expectation records; the 17 programs of
+  `02_constant_expressions` and `03_initializers` still awaiting a record are named in the per-area
+  table above;
 - `support/`;
 - two Markdown files: this contract and [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md).
 
@@ -2235,7 +2237,7 @@ its name **relative to** the corpus root rather than its location on disk.
 
 A file that could not be read, or a feature area that could not be enumerated, contributes the *fact*
 that it contributed no bytes — **per file and per area, never all-or-nothing**. That granularity is
-load-bearing on a branch like this one, where five of the fourteen area directories have not landed: a
+load-bearing on a branch like this one, where three of the fourteen area directories have not landed: a
 digest that collapsed to a single "corpus unreadable" value the moment one area was missing would be a
 constant here, and would detect nothing whatever.
 

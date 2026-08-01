@@ -6,7 +6,7 @@
 
 program            = 006_in_union_and_nested
 area               = 04_bitfields
-description        = Bitfields inside unions and nested aggregates, read back through the member last written
+description        = Bitfields declared inside unions and inside nested aggregates, with same-member union read-back, folded and volatile runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,15 +18,67 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every union access reads back the member that was last written; no union is written through
-one member and read through another, so no type punning is relied upon, and no padding
-byte or padding bit is ever observed.  Every stored value is inside its field's range and
-every field carries an explicit signed or unsigned base type.
-Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
+The default undefined-behaviour warning gate applies unmodified, with no deviation:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror.  The program
+was verified to pass that gate and to run cleanly under
+-fsanitize=undefined,address -fno-sanitize-recover=all.
+
+Every union access reads back the member that was last written, and this is the program's
+central safety property.  Reading a union member other than the one last written would yield an
+unspecified value, so a divergence there would prove nothing about either compiler.  The union
+of three views has each view written completely and then read on its own, and the views are
+never mixed; the union of two single bitfields is written and read one member at a time; the
+union nested inside a struct has its flat member written and read, and then both members of its
+pair sub-struct written before either is read.  No read anywhere in the program follows a write
+to a different member.
+
+No padding is observed anywhere.  Several of these aggregates necessarily contain padding bits
+or padding bytes, whose values are unspecified even after every named field has been assigned,
+so the program prints no byte image at all and reads only named members.
+
+Every store is a constant inside the destination field's representable range, so no conversion
+can change a value.  No arithmetic is performed on any bitfield, so no signed overflow can
+occur, and no shift operator appears anywhere in the program.  No aliasing violation: no pointer
+is formed to any bitfield and no type-punning of any kind occurs.  No uninitialized read: every
+object has static storage duration, the one with nested aggregates carries an explicit constant
+initializer and the rest are zero-initialized, and in every case each member is written before
+it is read.  No object is modified twice between sequence points.  No pointer value, address,
+timestamp, random value or locale-dependent format is printed.
+
+Every property is computed twice, once from literal constants and once from volatile-qualified
+storage, so the constant folder's answer cannot stand in for the one the backend computes at run
+time.
+
 No header is included and printf is declared by hand, so nothing here depends on a
 standard-library header bcc does not ship.
+END
+impl_defined_notes <<END
+Every bitfield is declared with an explicit signed int or unsigned int base type, at every
+nesting level, including the members of the sub-struct inside the nested union.  A plain int
+bitfield's signedness is implementation-defined, so using it would manufacture a spurious
+divergence; stating the signedness in the declaration removes that dependency entirely.
+
+Plain char is not used.  Plain char signedness was measured to differ across the four targets
+(signed on x86_64 and i686, unsigned on aarch64 and riscv64), so it is avoided entirely.
+
+No value whose width varies by target is printed.  sizeof(long) and sizeof(void *) differ on
+i686 (4) from the other three targets (8), so neither is printed, and no pointer value or
+address appears in the output.  Every bitfield is declared on an int base type, and int is four
+bytes on all four targets, so every printed size and alignment is target-invariant by derivation:
+the inner struct is four bytes, the outer struct is twenty, the tagged struct is twelve, and both
+unions are four.  Every bitfield read is cast explicitly to unsigned int or int before it is
+passed to printf, and the one non-bitfield value printed, the whole-word view of the first
+union, is already an unsigned int of a width the format specifier matches on every target.
+
+The distinctive assertion of this program is non-disturbance across nesting levels.  Four of the
+eight members of the nested aggregate are modified and the other four are asserted unchanged, and
+one three-bit field inside a union inside a struct is modified with its three neighbours asserted
+unchanged.  A bitfield insert that read, modified and wrote back too wide a storage unit would
+change one of those neighbours and be caught here.
+
+All four targets and all three oracles remain enabled.  Bitfield layout, size, alignment and
+read-back values were measured identical on all four targets, so a cross-backend divergence here
+is a genuine finding rather than an implementation-defined difference.
 END
 expected_stdout    <<END
 size_views=4 align_views=4

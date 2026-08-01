@@ -6,7 +6,7 @@
 
 program            = 004_multilevel
 area               = 05_pointers
-description        = Multilevel indirection and retargeting through pointer-to-pointer objects
+description        = Multilevel indirection and pointer-to-pointer modification, folded and volatile-runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,15 +18,30 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every indirection at every level reaches a live object of the expected type, and each
-pointer object is assigned before it is read, so no indeterminate pointer is dereferenced.
-Retargeting writes only through pointers that designate objects that are not const.  No
-address is printed: identity is shown by comparison alone.
-Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Every pointer at every level designates a live object for as long as it is used. The
+second- and third-level pointers point at pointer objects that are in scope, and the block
+that introduces the nested pointer pair uses the third-level pointer only inside that
+block, so no pointer to an object with automatic storage duration outlives its object: on
+leaving the block the third-level pointer is assigned before it is next read, never read
+while stale. All table indices are within pslots' four elements, and the two one-past-end
+pointers the span lines build -- pslots + 4 and &(*parr)[4] -- are subtracted only and are
+never dereferenced. The table and slots[3] are explicitly restored before the runtime
+section so its starting state is stated rather than assumed.
+Writes go only to objects that are not const.
+No signed integer overflow, no shift out of range, no aliasing violation, no read of
+uninitialized storage, no object modified twice between sequence points, at most one
+side-effecting argument per call, and no dependence on padding bytes or on the relative
+addresses of unrelated objects. The only external symbol is printf; no header is included,
+no file, socket, environment variable, clock or random source is touched, and every input
+is a literal in this source file.
+END
+impl_defined_notes <<END
+No address or pointer value is printed. Pointer facts appear only as differences,
+comparisons and alignment residues, and every pointer difference is cast to long long
+before printing, so the printed text is identical whether ptrdiff_t is 32 or 64 bits.
+Plain char is never printed in a signedness-dependent way. The only conversion
+specifiers used anywhere in this program are %d and %lld, both of which are
+target-width independent.
 END
 expected_stdout    <<END
 level1=1

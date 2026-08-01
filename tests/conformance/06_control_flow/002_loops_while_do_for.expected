@@ -6,7 +6,7 @@
 
 program            = 002_loops_while_do_for
 area               = 06_control_flow
-description        = All three loop forms with zero-iteration, single-iteration and countdown boundaries
+description        = All three loop forms at their zero-iteration and single-iteration boundaries, omitted for-clauses, continue, and nested break and continue, with every bound read from volatile storage
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,12 +18,31 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every loop bound is read from volatile storage, so no iteration count is available for
-compile-time substitution.  Each loop terminates: bounds are small positive constants or
-volatile values written immediately before use, and every counter stays inside the range of
-int.  No array is indexed out of bounds and no object is read before assignment.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Every loop bound is a small non-negative literal staged through the volatile int
+vlimit, so every loop terminates and no trip count can be negative. The largest
+accumulated value anywhere is 55, so no signed overflow is possible on any plain
+int. The for(;;) loop is exited by an unconditional break once count reaches 4,
+so it cannot run away. There is no shift, no pointer arithmetic and no division;
+the only remainder operations are i % 2 and i % 3 on non-negative i, so the
+divisor is never zero and the dividend is never negative. Every object is
+written before it is read: vlimit is assigned before each read, n, sum, count, i
+and the block-scoped j and k are all assigned before use. No object is modified
+twice between sequence points; each volatile write and each volatile read stands
+in its own statement or its own controlling expression. There is no aliasing, no
+address is taken, no uninitialised storage is read, and nothing depends on
+padding bytes or on the relative addresses of unrelated objects. No evaluation
+order is relied upon: no printf argument list contains a side effect.
+END
+impl_defined_notes <<END
+Nothing implementation-defined is printed. Plain char is never used as a value,
+which matters because char signedness was measured to differ across the four
+targets: signed on x86_64 and i686, unsigned on aarch64 and riscv64. Every
+printed value has type int, which is 32 bits on all four targets, so no value
+depends on the measured pointer and long width difference (4 bytes on i686,
+8 bytes on the other three). No address, no pointer value, no sizeof result and
+no floating-point value is printed. The loop counters are all small so no result
+approaches any width boundary. All 12 cells are therefore expected to produce
+byte-identical stdout, and no target restriction is needed.
 END
 expected_stdout    <<END
 while_zero=0

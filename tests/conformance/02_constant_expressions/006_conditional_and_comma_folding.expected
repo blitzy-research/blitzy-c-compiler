@@ -1,0 +1,146 @@
+# Expectation record for 02_constant_expressions/006_conditional_and_comma_folding.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 006_conditional_and_comma_folding
+area               = 02_constant_expressions
+description        = Folding through the conditional and comma operators, folded and runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined behaviour, which is the property the differential oracle
+rests on.  The two operators under test are precisely the two that impose a sequence point,
+so the ordering of every side effect printed here is fixed by the standard rather than left
+unspecified: the comma operator sequences all side effects of its left operand before its
+right operand is evaluated (C11 6.5.17p2), and the conditional operator evaluates exactly one
+of its second and third operands after its controlling expression (C11 6.5.15p4).  Nothing
+here depends on unspecified evaluation order, which requirement 1 forbids.
+No object is modified twice between two sequence points.  Every modification of a counter or
+an accumulator is separated from the next by a comma operator's sequence point or by a
+statement boundary, and the program contains no expression of the form v = v++, no v++ + v++,
+and no modification of an object outside a comma chain that the same chain also modifies.
+Every comma expression's left operand performs a real side effect -- an assignment to
+volatile or to plain storage, an increment, or a for-clause -- so no operand is evaluated for
+nothing, and holding the observed counters in volatile storage is what makes the ordering part
+of the program's observable behaviour instead of an unobservable internal detail.
+No call receives more than one argument with a side effect.  Where a printed line needs both a
+value produced by a side-effecting expression and a counter read afterwards, the side effect is
+sequenced in a statement of its own first and the counter is snapshotted into a plain local
+before the call, so nothing depends on the unspecified order in which arguments are evaluated.
+Otherwise: no signed overflow -- every signed result is small except the long long product
+6 * 1000000000, which is 6000000000 and inside the range C11 guarantees for long long; the one
+unsigned result printed as 4294967295 is modular reduction, which C11 6.2.5p9 defines for every
+value and which is therefore not undefined at all; no shift of any kind; no aliasing violation;
+no read of uninitialized storage, since every object is initialized before its first read; no
+pointer arithmetic and no pointer value printed; no dependence on padding bytes or on the
+addresses of unrelated objects; and sizeof does not evaluate its operand (C11 6.5.3.4p2), so the
+volatile objects that appear inside a sizeof are never accessed there.
+This program names no header at all and declares printf by hand, so nothing here depends on a
+standard-library header bcc does not ship.  Every value is printed with %d or %lld matched
+exactly to its argument's type, so no output is locale-dependent, address-dependent or
+plain-char-signedness-dependent.
+END
+impl_defined_notes <<END
+Three lines print (int)sizeof applied to a conditional expression, which reports the width of
+the common type its two arms select: int against int gives 4, int against long long gives 8,
+and unsigned int against unsigned int gives 4.  Those widths are implementation-defined in
+principle, because C11 fixes only minimum ranges for the integer types.  They were measured
+rather than assumed: the program was executed on all four supported targets at -O0, -O1 and -O2
+-- twelve configurations -- and every one printed the same 67 lines byte-identically, including
+fold_result_size_int=4, fold_result_size_llong=8 and fold_result_size_uint=4 together with
+their runtime twins.  Because the widths agree on all four targets and the measured values
+agree, cross-backend comparison of this program is sound and oracle (b) remains enabled for it.
+The two measured differences between the supported targets cannot reach this program by
+construction.  Plain char is never used and no character value is printed, so the plain-char
+signedness difference -- signed on x86_64 and i686, unsigned on aarch64 and riscv64 -- is
+unreachable here.  Plain long is never declared and never printed, so the i686 difference in
+sizeof(long) and sizeof(void *), 4 there against 8 on the other three, is unreachable as well;
+every wide value uses long long and is printed with %lld.  No address or pointer value is
+printed anywhere.
+What would legitimately break that assumption, and how it must then be handled: a target on
+which sizeof(int), sizeof(unsigned int) or sizeof(long long) differed would still be
+conforming, so the resulting difference would be an implementation-defined divergence rather
+than a compiler defect.  It must in that case be recorded as an expected divergence with this
+record's target list narrowed and the reason stated here -- never left to surface as a finding
+against a backend that did nothing wrong, and never resolved by dropping the conditional
+operator's result-type coverage, which is part of what requirement 2 asks this program to cover.
+END
+expected_stdout    <<END
+fold_cond=42
+runtime_cond=42
+fold_cond_false=42
+runtime_cond_false=42
+fold_nested=42
+runtime_nested=42
+fold_result_size_int=4
+runtime_result_size_int=4
+fold_result_size_llong=8
+runtime_result_size_llong=8
+fold_result_size_uint=4
+runtime_result_size_uint=4
+fold_cond_llong=42
+runtime_cond_llong=42
+fold_cond_uint_wrap=4294967295
+runtime_cond_uint_wrap=4294967295
+fold_then_value=11
+fold_then_hits then_hits=1 else_hits=0
+fold_else_value=22
+fold_else_hits then_hits=0 else_hits=1
+runtime_then_value=11
+runtime_then_hits then_hits=1 else_hits=0
+runtime_else_value=22
+runtime_else_hits then_hits=0 else_hits=1
+fold_array_bound=42
+fold_enumerator=42
+runtime_same_arithmetic=42
+fold_comma_seq_after_add=6
+fold_comma_seq_after_mul=12
+fold_comma_seq_value=12
+fold_comma_seq_stored=12
+runtime_comma_seq_after_add=6
+runtime_comma_seq_after_mul=12
+runtime_comma_seq_value=12
+runtime_comma_seq_stored=12
+fold_comma=42
+fold_comma_left_effects a=3 b=14
+runtime_comma=42
+runtime_comma_left_effects a=3 b=14
+fold_comma_llong=6000000000
+runtime_comma_llong=6000000000
+for_comma_fold_i=7
+for_comma_fold_j=7
+for_comma_fold_sum=28
+for_comma_fold_iterations=7
+for_comma_runtime_i=7
+for_comma_runtime_j=7
+for_comma_runtime_sum=28
+for_comma_runtime_iterations=7
+fold_comma_control_value=11
+fold_comma_control_hits then_hits=1 else_hits=0
+fold_comma_control_ticks=1
+runtime_comma_control_value=11
+runtime_comma_control_hits then_hits=1 else_hits=0
+runtime_comma_control_ticks=1
+fold_comma_arms_then_value=42
+fold_comma_arms_then_ticks=1
+fold_comma_arms_else_value=42
+fold_comma_arms_else_ticks=100
+runtime_comma_arms_then_value=42
+runtime_comma_arms_then_ticks=1
+runtime_comma_arms_else_value=42
+runtime_comma_arms_else_ticks=100
+fold_comma_in_argument=42
+fold_comma_in_argument_ticks=1
+runtime_comma_in_argument=42
+runtime_comma_in_argument_ticks=1
+END

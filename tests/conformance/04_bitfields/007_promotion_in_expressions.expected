@@ -6,7 +6,7 @@
 
 program            = 007_promotion_in_expressions
 area               = 04_bitfields
-description        = Bitfield promotion as an operand, contrasting sub-int widths with a full 32-bit field
+description        = Integer promotion of a bitfield used as an operand, including the narrow-unsigned-to-int and full-width-unsigned-to-unsigned split, folded and volatile runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,16 +18,83 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-A bitfield narrower than int promotes to int even when its base type is unsigned, so
-subtracting below zero yields a negative int; a 32-bit unsigned field promotes to unsigned
-int and wraps modularly.  Both behaviours are defined, and that contrast is the subject of
-the file.  Every product and shift is chosen to stay inside the range of the promoted type,
-so no signed overflow occurs and every shift count is in range.
-Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+The default undefined-behaviour warning gate applies unmodified, with no deviation:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror.  The program
+was verified to pass that gate and to run cleanly under
+-fsanitize=undefined,address -fno-sanitize-recover=all.
+
+Every store into a bitfield is a constant that lies inside the destination field's
+representable range, so no conversion can change a value.  No compound assignment is applied to
+any bitfield anywhere in the program: all arithmetic is performed on promoted operands in
+expressions whose results are printed and never written back into a narrow field.  That is what
+allows the strict gate to pass with no deviation while promotion is still exercised exhaustively.
+
+No signed overflow occurs.  Every arithmetic expression is evaluated after integer promotion has
+already widened its operand to int, and each result was checked against the range of int, whose
+maximum is 2147483647 on every one of the four targets.  The largest magnitude any signed result
+reaches is 32505856, from thirty-one shifted left by twenty; the next largest is one hundred
+thousand in magnitude, from minus one thousand times one hundred; and no other signed result
+exceeds 10922 in magnitude.  The only two results that wrap, the full-width field minus one and
+the full-width maximum plus one, are computed in unsigned int, where wraparound is defined rather
+than undefined.
+
+The program performs exactly two shifts, and both are safe by inspection.  One is a left shift by
+twenty of an operand whose promoted type is int and whose value is thirty-one, so the count is
+strictly less than the width of the promoted type, the left operand is non-negative, and the
+result is representable in int.  The other is a right shift by eight of an operand whose promoted
+type is int and whose value is 65535, so that count is strictly in range and that left operand is
+non-negative too.  Division uses only the non-zero constant divisors three and two, neither
+division can be the one signed division that overflows, and no remainder operator appears at all.
+
+No aliasing violation: no pointer is formed to any bitfield, and no type-punning occurs.  No
+uninitialized read: the folded object has an explicit constant initializer for every member, the
+volatile object has static storage duration and so is zero-initialized, and every one of its
+fields is additionally written explicitly before it is read.  No object is modified twice between
+sequence points, and no printf call receives more than one side-effecting argument.  Where a
+single argument reads the same volatile field twice, which is the case only in the two squaring
+expressions, no write intervenes between the two reads, so both yield the same value and the
+result cannot depend on the order in which the reads occur.  No padding byte is ever observed and
+no byte image is printed.  No pointer value, address, timestamp, random value or locale-dependent
+format is printed.
+
+No unsigned expression is compared against less than zero anywhere; the promoted value is printed
+instead.  A comparison of that shape would be rejected by -Wtype-limits, which -Wextra enables.
+END
+impl_defined_notes <<END
+Every bitfield is declared with an explicit signed int or unsigned int base type.  A plain int
+bitfield's signedness is implementation-defined, so using it would manufacture a spurious
+divergence; stating the signedness in the declaration removes that dependency entirely.  This
+matters more in this program than anywhere else in the area, because the whole subject under test
+is what type a bitfield acquires when it is promoted.
+
+No plain char value is ever held, computed with, or printed.  Plain char signedness was measured
+to differ across the four targets (signed on x86_64 and i686, unsigned on aarch64 and riscv64), so
+the type appears only as const char *, the element type of printf's format string and of the tag
+string each reporting function forwards to it, and no char object is ever read as a number.
+
+No value whose width varies by target is printed.  sizeof(long) and sizeof(void *) differ on
+i686 (4) from the other three targets (8), so neither is printed, and no pointer value or address
+appears in the output.  Every numeric printf argument is explicitly cast to int or unsigned,
+except in the three nocast properties, each printed once from the folded object and once from the
+volatile object, which deliberately pass a bitfield with no cast at all in order to exercise
+default argument promotion at the call boundary.
+
+Every printed value is target-invariant by derivation rather than by coincidence.  Every bitfield
+is declared on an int base type, and int is four bytes on all four targets, so INT_MAX is
+2147483647 and UINT_MAX is 4294967295 everywhere.  Consequently the sizeof of every promoted
+bitfield expression is four on every target, a bitfield narrower than int always promotes to int,
+a thirty-one-bit unsigned bitfield still promotes to int because its maximum equals INT_MAX, and a
+thirty-two-bit-wide unsigned bitfield always promotes to unsigned int because int cannot represent
+all of its values.  That split is the program's central assertion and it is identical on every one
+of the four targets.
+
+All four targets and all three oracles remain enabled.  Bitfield layout, size, alignment and
+read-back values were measured identical on all four targets, and the promotion rules exercised
+here are fully specified by the standard with no implementation-defined latitude, so a
+cross-backend divergence in this program is a genuine finding rather than an implementation-defined
+difference.  This program's own twelve reference cells were measured byte-identical: the reference
+compiler at -O0, -O1 and -O2 for x86_64, i686, aarch64 and riscv64, executed natively or under the
+target's emulator, produced the same fifty lines and exit status zero in every one.
 END
 expected_stdout    <<END
 folded_sizeof_promoted_u5=4

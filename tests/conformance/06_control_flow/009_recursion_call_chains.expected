@@ -1,12 +1,6 @@
-# Expectation record for 06_control_flow/009_recursion_call_chains.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 009_recursion_call_chains
 area               = 06_control_flow
-description        = Recursive and mutually recursive call chains at bounded depth
+description        = Direct recursion, a branching call tree, two mutual-recursion pairs, a recursion keeping values live across the call, a recursion holding a local array live across the call, and a recursion dispatching through a switch, all at bounded shallow depth
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,12 +12,58 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every recursion depth is bounded and shallow - the deepest chain is thirty-one levels - so
-no run can approach stack exhaustion, including under user-mode emulation.  All arithmetic
-stays well inside the range of a 32-bit int, the largest value produced being ten
-factorial, so no signed overflow can occur.  Each chain is driven once by a constant and
-once by an argument read from volatile storage.  No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Free of undefined and unspecified behaviour, and bounded by design.
+
+The recursion bound is 31 frames. The deepest chain is sum_to(30), which
+occupies 31 frames counting the base case. Every other chain is shallower:
+is_odd(21) reaches 22 frames, is_even(20) reaches 21, fib(15) reaches depth 15,
+ping(10) and pong(10) reach 11, fact(10) reaches 10, and switched(10) and
+frames(5) each reach 6.
+
+The bound was chosen from both directions. It is deep enough to force real
+call-frame work on every target: 31 nested frames guarantee prologue and
+epilogue emission, argument passing and return-value propagation, and in chain
+and frames they additionally force callee-saved register spill and restore,
+because chain keeps two values live across its recursive call and frames keeps a
+fully written eight-element local array live across its own. It is shallow
+enough that no target can approach stack exhaustion under user-mode emulation:
+each frame holds only a handful of int objects plus, in frames alone, one
+eight-element int array at a depth of six, and the repository's own
+runtime-verified recursion depths are single digit (factorial(5) and fib(7)), so
+31 frames stays in the same order of magnitude. Raising any bound would risk an
+emulated stack overflow, which the harness would classify as a run crash and
+misattribute to the compiler.
+
+No signed overflow is possible. Every bound was chosen against the 32-bit int
+range that all four targets share: the largest value produced anywhere is
+3628800, which is 10 factorial. fib stops at 15 so the tree of 1973 calls
+completes instantly under emulation and inside the per-cell time budget. Every
+recursion has a reachable base case for every argument actually passed, and no
+negative argument is ever passed. The local array in frames is fully written by
+a loop before the early return and before any element is read, so no
+indeterminate storage is ever read; it is automatic storage, never dynamically
+allocated. There are no shifts, no pointer arithmetic and no type punning,
+therefore no aliasing violation and no dependence on padding bytes. No object is
+modified twice between sequence points. The multi-argument printf calls pass
+only calls to pure helper functions that read no mutable global, write no global
+and touch no volatile object, so although their relative evaluation order is
+unspecified it is unobservable and no dependence on unspecified order exists.
+Each volatile object is read exactly once per use.
+END
+impl_defined_notes <<END
+Nothing implementation-defined is observed. Only int values are printed, so the
+measured plain-char signedness difference (signed on x86_64 and i686, unsigned
+on aarch64 and riscv64) cannot affect the output, and the measured width
+difference for long and pointers (4 bytes on i686, 8 elsewhere) is never exposed
+because no long, pointer, size_t or ptrdiff_t value is printed and no sizeof
+result appears in the output. int is 32 bits on all four targets, and every
+computed value including the negative intermediate in chain lies far inside that
+range. No address is printed. No floating point is used. The four backends
+implement four different application binary interfaces, and chain and frames are
+deliberately shaped to exercise callee-saved register preservation on each of
+them, so cross-backend comparison here is meaningful rather than
+implementation-defined. All four targets and all three optimization levels are
+therefore compared, and all three oracles are enabled.
 END
 expected_stdout    <<END
 const_fact=1 120 3628800

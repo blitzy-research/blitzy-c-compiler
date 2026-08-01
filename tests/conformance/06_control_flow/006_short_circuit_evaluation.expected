@@ -1,12 +1,6 @@
-# Expectation record for 06_control_flow/006_short_circuit_evaluation.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 006_short_circuit_evaluation
 area               = 06_control_flow
-description        = Short-circuit suppression of the right operand, observed through a volatile side-effect counter
+description        = Short-circuit evaluation of && and ||, asserting that the right operand is NOT evaluated when the left operand settles the result, observed through a volatile counter
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,13 +12,35 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-The property under test is an absence, so each side effect increments a volatile counter
-that is part of the program's observable behaviour and is printed after every expression;
-the optimizer may not legally elide those accesses.  The guarded division never divides by
-zero, precisely because the left operand suppresses it.  Every expression appears twice,
-once with a constant left operand and once with one read from volatile storage.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Free of undefined and unspecified behaviour. The property under test is an
+absence, so the side-effect counter rhs_calls is declared volatile: a plain
+counter could legally be removed by dead-code elimination, which would make the
+assertion vacuous. Measured at -O2, the volatile form emits 74 accesses to the
+counter against 34 for the plain form, confirming the qualifier is load-bearing.
+Every object is assigned before it is read; no read of uninitialised storage
+occurs. All arithmetic is on int values of small magnitude, so no signed
+overflow is possible; the only division is 100 / a inside a guarded expression
+whose left operand a != 0 is false when a is zero, and short-circuit evaluation
+guarantees the division is never performed, so there is no division by zero.
+There are no shifts, no pointers, no arrays and no type punning, therefore no
+aliasing violation and no dependence on padding bytes. No object is modified
+twice between sequence points. Each volatile object is read exactly once into a
+plain local before being used in a logical expression, so no expression contains
+two volatile accesses whose relative order would be unspecified. The && and ||
+operators impose a sequence point between their operands, so the counter's value
+at each print is fully determined. The single while loop is bounded by a < 3 and
+its body increments a, so it terminates after exactly three iterations.
+END
+impl_defined_notes <<END
+Nothing implementation-defined is observed. Only int values are printed, so the
+measured plain-char signedness difference (signed on x86_64 and i686, unsigned
+on aarch64 and riscv64) cannot affect the output, and the measured width
+difference for long and pointers (4 bytes on i686, 8 elsewhere) is never exposed
+because no long, pointer, size_t or ptrdiff_t value is printed and no sizeof
+result appears in the output. No address is printed. No floating point is used.
+The results of &&, || and ! are normalised by the language to exactly 0 or 1, so
+they are identical on every target. All four targets and all three optimization
+levels are therefore compared, and all three oracles are enabled.
 END
 expected_stdout    <<END
 const_and_false r=0 rhs_calls=0

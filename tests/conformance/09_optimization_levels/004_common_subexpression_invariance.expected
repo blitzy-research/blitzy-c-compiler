@@ -6,7 +6,7 @@
 
 program            = 004_common_subexpression_invariance
 area               = 09_optimization_levels
-description        = Repeated subexpressions producing identical results whether or not they are eliminated
+description        = Repeated subexpressions produce identical results whether or not eliminated, at -O0, -O1 and -O2
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,14 +18,28 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every repeated subexpression is evaluated over operands that stay inside the range of their
-type, so no signed overflow occurs and no divisor is zero.  No subexpression has a side
-effect, so sharing one cannot change the program's behaviour, and only printed values are
-compared, never which subexpressions were shared.  Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Free of undefined and unspecified behaviour. No signed overflow: the largest signed value
+computed is product at 9216. The unsigned seed 3000000000 is inside UINT_MAX and unsigned
+arithmetic is modular by definition, so no overflow question arises there either. Division
+and modulo use divisor 7 and 7u, never zero and never the INT_MIN over -1 case. No shift
+operator appears. The negation -(a * b + c) negates 96, not INT_MIN. The variable branchy is
+assigned on both arms of the if, so it is never read uninitialized. No pointer arithmetic,
+no aliasing violation, no object modified twice between sequence points, at most one
+side-effecting argument per call, and no dependence on padding bytes or on relative
+addresses.
+Several volatile objects are read within a single expression; their relative order is
+unspecified, but no volatile object is modified anywhere in the program, so every read of a
+given object yields the same value and the printed output does not depend on the ordering.
+END
+impl_defined_notes <<END
+No implementation-defined behaviour is observed. Widths are normalized: only int and
+unsigned int are used, both 32 bits on all four targets, and long is never used because
+sizeof(long) is 4 on i686 and 8 on the other three targets. Plain char is not used, so the
+measured plain-char signedness difference (signed on x86-64 and i686, unsigned on AArch64
+and RISC-V 64) cannot be observed. Unsigned values are printed with %u. No address, pointer
+value, sizeof or _Alignof result is printed. No floating point is used. The four seeds are
+volatile so their values are opaque to the constant folder, while the arithmetic derived
+from them is pure and is therefore a legitimate common subexpression elimination candidate.
 END
 expected_stdout    <<END
 e1=96

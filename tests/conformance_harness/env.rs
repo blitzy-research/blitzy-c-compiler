@@ -1564,6 +1564,9 @@ fn exec_program_word<'a>(words: impl Iterator<Item = &'a str>) -> Option<&'a str
 /// cannot stall pre-flight or exhaust memory. A short read is not an error: a wrapper script is a
 /// few hundred bytes and the prefix is all that is wanted.
 fn read_file_prefix(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    // `Read` is already in scope from the module-level import; re-importing it here is redundant
+    // and is reported as an unused import by the minimum supported toolchain, which the project
+    // documents as 1.70 and requires to build with zero warnings.
     let file = fs::File::open(path)?;
     let mut bytes = Vec::new();
     file.take(limit as u64).read_to_end(&mut bytes)?;
@@ -5200,6 +5203,8 @@ fn probe_kernel() -> String {
         .iter()
         .find_map(|candidate| resolve_tool(candidate));
     if let Some(uname) = resolved {
+        // `uname` is not used again, so it is moved rather than borrowed here, matching every
+        // other process launch in this module and keeping the minimum toolchain's lints clean.
         if let Some(capture) = run_bounded_probe(Command::new(uname).arg("-a")) {
             if !capture.timed_out {
                 if let Some(line) = first_non_empty_line(&capture.stdout) {

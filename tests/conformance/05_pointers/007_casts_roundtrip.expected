@@ -6,7 +6,7 @@
 
 program            = 007_casts_roundtrip
 area               = 05_pointers
-description        = Object-pointer round trips through integer carriers wide enough to hold them
+description        = Object-pointer casts round-tripped through a sufficiently wide integer type, asserted only by pointer equality
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,24 +18,40 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-No conversion narrows: every carrier is at least as wide as a pointer and the bridge type
-back to a pointer is exactly pointer width, and both width relations are checked at run
-time rather than assumed.  Each round-tripped pointer is compared and dereferenced only
-after being restored to its original type, so no object is accessed through an
-incompatible type.  Neither a pointer nor a carrier value is ever printed.
-Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Each round-trip is exact, so every reconstructed pointer designates the same object as the
+original and dereferencing it is defined. No cast anywhere in this file crosses a width
+boundary, so no value is ever truncated. The null pointer round-trip reconstructs a null
+pointer and that pointer is compared but NEVER dereferenced. Every interior pointer used
+is inside its array: iarr has 8 elements indexed 0..7 and carr has 16 indexed 0..15. The
+char-pointer byte view is formed and converted back but is never used to write, so no
+aliasing rule is violated. The const object cobj is read through a const-qualified pointer
+and is never written.
+No signed integer overflow, no shift out of range, no aliasing violation, no read of
+uninitialized storage, no object modified twice between sequence points, at most one
+side-effecting argument per call, and no dependence on padding bytes or on the relative
+addresses of unrelated objects. The only external symbol is printf; no header is included,
+no file, socket, environment variable, clock or random source is touched, and every input
+is a literal in this source file.
 END
 impl_defined_notes <<END
-Converting a pointer to an integer and back is implementation-defined; the standard
-guarantees the result only for a round trip through void pointer.  The program therefore
-prints no pointer or carrier value at all and asserts only equality with the original,
-the value of the object reached, and offsets - facts that hold on every target that can
-represent a pointer in the carrier, which the program itself verifies.  uintptr_t is not
-used because it is an optional typedef and would require a header.
+WIDTH REASONING, recorded because it is what makes this program portable across all four
+targets. sizeof(void *) is 4 on i686 and 8 on x86-64, AArch64 and RISC-V 64. The carrier
+type is unsigned long long, which is 8 bytes on all four targets and is therefore always
+sufficiently wide; uintptr_t is deliberately NOT used because it would require stdint.h
+and no header may be included. The conversion back to a pointer is bridged through
+unsigned long, which is exactly pointer width on all four targets (8 on x86-64, AArch64
+and RISC-V 64; 4 on i686), so a direct cast between an 8-byte integer and a 4-byte pointer
+never occurs and nothing can be truncated on i686.
+Neither the pointer nor the integer carrier is ever printed; the round-trip is asserted
+ONLY by comparing the reconstructed pointer for equality with the original, and by reading
+the object it designates. The two leading lines assert the two width facts this program
+depends on rather than assuming them: both are 1 on all four targets.
+No address or pointer value is printed. Pointer facts appear only as differences,
+comparisons and alignment residues, and every pointer difference is cast to long long
+before printing, so the printed text is identical whether ptrdiff_t is 32 or 64 bits.
+Plain char is never printed in a signedness-dependent way. The only conversion
+specifiers used anywhere in this program are %d, %lld and fixed-precision %.3f, all of
+which are target-width independent.
 END
 expected_stdout    <<END
 carrier_wide_enough=1

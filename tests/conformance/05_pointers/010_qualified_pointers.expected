@@ -1,12 +1,6 @@
-# Expectation record for 05_pointers/010_qualified_pointers.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 010_qualified_pointers
 area               = 05_pointers
-description        = const, volatile and restrict qualified pointers and pointed-to types
+description        = const and volatile qualified pointers and qualified pointed-to types, with volatile reads forcing genuine loads
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,16 +12,32 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-const is never cast away and then written through: every write targets an object that is
-not itself const and is merely reached through a const view, so no attempt is made to
-modify an object defined with a const type.  The restrict-qualified parameters are used
-truthfully, receiving distinct objects that never alias.  Every volatile access is to a
-real volatile object.  No address is printed.
-Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+const is NEVER cast away and then written through. Every write goes to an object that is
+not itself const: plain, mpair and the volatile objects vval, varr, vcounter and vsink are
+all declared without const. The genuinely const objects cval, carr, cvval and cpair are
+only ever read, through const-qualified pointers. Adding a qualifier to a pointer type is
+an implicit, legal conversion and is used in that direction only, never the reverse. Every
+index is inside bounds: carr and varr have 5 elements indexed 0..4. The volatile counter
+arithmetic stays far inside int range. Writing through a const-qualified POINTER to a
+non-const object, as in int *const, is legal and is what the bump helper does.
+No signed integer overflow, no shift out of range, no aliasing violation, no read of
+uninitialized storage, no object modified twice between sequence points, at most one
+side-effecting argument per call, and no dependence on padding bytes or on the relative
+addresses of unrelated objects. The only external symbol is printf; no header is included,
+no file, socket, environment variable, clock or random source is touched, and every input
+is a literal in this source file.
+END
+impl_defined_notes <<END
+volatile only constrains how accesses are performed, never what values result, so a
+compiler that emits more or fewer loads still produces identical output. Every volatile
+read and write in this program is to an object whose value is fully determined by earlier
+statements in the same program, so the printed values are deterministic.
+No address or pointer value is printed. Pointer facts appear only as differences,
+comparisons and alignment residues, and every pointer difference is cast to long long
+before printing, so the printed text is identical whether ptrdiff_t is 32 or 64 bits.
+Plain char is never printed in a signedness-dependent way. The only conversion
+specifiers used anywhere in this program are %d and %lld, both of which are
+target-width independent.
 END
 expected_stdout    <<END
 read_pointer_to_const=11

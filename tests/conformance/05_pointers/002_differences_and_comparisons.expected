@@ -1,12 +1,6 @@
-# Expectation record for 05_pointers/002_differences_and_comparisons.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 002_differences_and_comparisons
 area               = 05_pointers
-description        = Pointer differences and relational comparisons, with a one-past-end sentinel never dereferenced
+description        = Pointer differences and relational comparisons; one-past-end formed and compared but never dereferenced
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,18 +12,36 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-A pointer one past the last element is formed, compared and subtracted but never
-dereferenced, which is exactly what the standard permits.  A pointer TWO past the end is
-never formed at all: each strided walk advances only while a full stride of elements
-genuinely remains, and the overshoot a further stride would have produced is derived by
-integer arithmetic from the last legal difference instead.  Every difference is between
-pointers into the same array object.  Each result is cast to long long before printing, so
-the text does not depend on the width of ptrdiff_t.  No address is printed.
-Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+ONE-PAST-END REASONING, stated explicitly because it is what makes this program's
+comparison sound. C permits forming a pointer one past the last element of an array, and
+permits comparing and subtracting such a pointer; only DEREFERENCING it would be
+undefined. This program forms one-past-end pointers for i_buf (i_buf + 10), s_buf, d_buf,
+p_buf and for the single object solo (&solo + 1), and uses them ONLY as loop sentinels, as
+operands of == != < > >=, and as operands of pointer subtraction. There is no *end, no
+(*end), no end-> and no end[...] anywhere in this file. The reverse loop decrements the
+pointer BEFORE dereferencing it, so the sentinel value is never read as an object. Two
+independently formed one-past-end pointers (end and end_alias) are compared to each other
+rather than to themselves, which keeps the comparison non-tautological.
+Every subtraction is between two pointers into the same array, so each difference is
+representable and defined. The strided loops use < rather than != and their final pointer
+is at most one past the end, which is again only compared and subtracted.
+No signed integer overflow, no shift out of range, no aliasing violation, no read of
+uninitialized storage, no object modified twice between sequence points, at most one
+side-effecting argument per call, and no dependence on padding bytes or on the relative
+addresses of unrelated objects. The only external symbol is printf; no header is included,
+no file, socket, environment variable, clock or random source is touched, and every input
+is a literal in this source file.
+END
+impl_defined_notes <<END
+Pointer differences are element counts, not byte counts, and are cast to long long before
+printing, so a 32-bit ptrdiff_t on i686 and a 64-bit ptrdiff_t elsewhere both render
+identically.
+No address or pointer value is printed. Pointer facts appear only as differences,
+comparisons and alignment residues, and every pointer difference is cast to long long
+before printing, so the printed text is identical whether ptrdiff_t is 32 or 64 bits.
+Plain char is never printed in a signedness-dependent way. The only conversion
+specifiers used anywhere in this program are %d, %lld and fixed-precision %.3f, all of
+which are target-width independent.
 END
 expected_stdout    <<END
 folded_span=10
