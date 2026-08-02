@@ -6,7 +6,7 @@
 
 program            = 002_nested_aggregate
 area               = 03_initializers
-description        = Nested aggregate initialization -- struct within struct, struct within struct within struct, array of struct, and two- and three-dimensional arrays -- in fully braced, brace-elided and partially braced spellings, every member of every level read back individually, each shape declared once with static and once with automatic storage duration
+description        = Nested aggregate initialization -- struct within struct, struct within struct within struct, array of struct, and two- and three-dimensional arrays -- in fully braced spellings, every member of every level read back individually, each shape declared once with static and once with automatic storage duration; the brace-elided spelling is excluded, narrowly and with its reason recorded in impl_defined_notes, because the frozen warning gate rejects every spelling of it
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -24,13 +24,12 @@ anything at all, so a divergence over it would prove nothing about either one.
 A member or element left unmentioned by a brace-enclosed initializer is initialized as an object
 of static storage duration would be, that is to zero, for automatic and static duration alike
 (C11 6.7.9p19 and p21), so every value printed has a determinate value and no uninitialized
-storage is ever read. Every fully braced object here is completely initialized, and every
-brace-elided object supplies exactly as many initializers as the aggregate has scalar members, so
-no slot depends on the zero guarantee either. Brace elision itself is well-defined C11 (6.7.9p20):
-initializers are consumed from the flat list as the current object descends and ascends. Every
+storage is ever read. Every object here is FULLY braced and supplies exactly as many initializers
+as the aggregate has scalar members, so no slot depends on the zero guarantee either and the
+guarantee is stated above only to show that no route to an indeterminate value exists. Every
 object is FULLY initialized by its initializer list before any part of it is read, and nothing is
-modified after initialization: g_outer, g_arr, g_deep, g_matrix and g_cube at file scope with
-their _flat and _partial twins, and l_outer, l_arr and l_deep inside main. No read of an
+modified after initialization: g_outer, g_arr, g_deep, g_matrix and g_cube at file scope, and
+l_outer, l_arr and l_deep inside main. No read of an
 indeterminate value is therefore reachable, no object is modified twice between two sequence
 points, and no modification races a read of the same object.
 No arithmetic is performed on the initialized data at all, so no overflow of any kind is
@@ -70,51 +69,54 @@ compiler. This area is granted no header exception; the corpus has exactly two, 
 and the dedicated bundled-header probe in area 12.
 This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
 under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under
-the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+-Werror at -O0, -O1 and -O2 with all four reference drivers, with no diagnostic of any kind and no
+source-level diagnostic suppression anywhere in the translation unit, and it builds and runs clean
+under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
 reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched. How the brace-elided spellings stay gate-clean without any flag change is recorded in
-impl_defined_notes below.
+untouched. One initializer spelling is excluded to reach that clean audit rather than suppressed
+inside it, and the exclusion, its measured reason and where the rule it would have covered stays
+under test are recorded in impl_defined_notes below.
 END
 impl_defined_notes <<END
-This record narrows nothing: all four targets, all three optimization levels and all three
-oracles are enabled, no expected-divergence marker is carried, no initializer spelling is
-excluded, and no implementation-defined value reaches this program's output.
-SCOPED DIAGNOSTIC PRAGMA, AND WHY THIS RECORD CARRIES NO ub_audit_flags DEVIATION. Brace
-elision -- omitting the braces around a subaggregate's initializer, after which initializers
-are consumed from the flat list as the current object descends and ascends -- is well-defined
-C11 (6.7.9p20) but GCC reports it under -Wmissing-braces, which -Wall enables and the audit
-gate's -Werror makes fatal. Five elided spellings were measured against the gate -- a
+This record narrows nothing that the harness reads: all four targets, all three optimization
+levels and all three oracles are enabled, no expected-divergence marker is carried, no gate
+deviation is claimed under the ub_audit_flags key, and no implementation-defined value reaches
+this program's output. One initializer SPELLING is nevertheless excluded from the source, and the
+paragraph below states which, why, and where the rule it would have covered remains under test.
+CONSTRAINT-C3 EXCLUSION -- THE BRACE-ELIDED SPELLING. Brace elision -- omitting the braces
+around a subaggregate's initializer, after which initializers are consumed from the flat list as
+the current object descends and ascends -- is well-defined C11 (6.7.9p20), but GCC reports it
+under -Wmissing-braces, which -Wall enables and which the audit gate's -Werror makes fatal.
+Five elided spellings were MEASURED against that gate with the reference compiler -- a
 two-dimensional array written flat, a struct-in-struct written flat, a struct-in-array written
-flat, an array-in-struct written flat, and a single-member struct written flat -- and every one
-is rejected. There is therefore no spelling of this coverage that the unmodified gate accepts,
-so the affected declarations -- and only those -- are bracketed in the source by `#pragma GCC
-diagnostic push` / `ignored "-Wmissing-braces"` / `pop`, wrapped in `#if defined(__GNUC__)` so
-a compiler that does not advertise GCC compatibility never sees them. This is deliberately NOT
-a gate deviation: no command-line flag changes, so this program is audited with the suite's
-DEFAULT full gate -- -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror,
-every flag in force including -Werror -- and the ub_audit_flags key is absent from this record
-by design. Nothing about undefined-behaviour detection is weakened: -Wmissing-braces reports
-defined behaviour, not undefined behaviour, and the sanitizer gate
-(-fsanitize=undefined,address -fno-sanitize-recover=all) runs unchanged and clean. Verified by
-negative test: deleting the `ignored` line makes the gate fire again with
-[-Werror=missing-braces], so the pragma is load-bearing rather than decorative.
-This is the reason no constraint-C3 exclusion appears in this record. The alternative would have
-been to drop the elided spelling and disclose the gap; a scoped pragma that changes no flag keeps
-the spelling under test instead, which is what constraint C3 actually asks for.
-WHY BRACE ELISION IS TESTED RATHER THAN EXCLUDED. It is a materially different path through the
-initializer walker than the fully braced form, so a compiler can implement one correctly and the
-other incorrectly. Each elided object is paired with a fully braced object of the SAME shape and
-the SAME values -- g_matrix_flat with g_matrix, g_cube_flat with g_cube, g_outer_flat with
-g_outer, g_arr_flat with g_arr, g_deep_flat and g_deep_partial with g_deep -- so the two paths
-are compared against each other line for line as well as against this record. g_deep_partial is
-the partially braced mixture, where the walker has to switch between guided and unguided descent
-mid-initializer. The elision rule is exercised in two further places in this area, so the coverage
-does not rest on this program alone: 007_string_array.c initializes char g_grid_exact[2][5] and
-char g_grid_room[2][6] from unbraced string literals, which is brace elision for the inner arrays
-and is gate-clean unaided because a string literal may initialize a character array without braces
-(C11 6.7.9p14), and 003_partial_zero_fill.c's { 0 } idiom on a nested aggregate relies on the same
-subaggregate-consumption rule of 6.7.9p20.
+flat, an array-in-struct written flat, and a partially braced mixture -- and every one is
+rejected. No spelling of that coverage exists that the unmodified gate accepts, and no
+admissible deviation exists either: the gate's removable members are exactly -pedantic, for the
+GCC-extensions area, and -Wconversion with -Wsign-conversion, for the deliberate
+narrowing program, so -Wall is not removable and area 03 is granted no deviation at all. A
+source-level
+diagnostic-suppression directive is not an alternative to that: it neutralizes a gate member from
+inside the translation unit while this record still claims the unchanged gate, which would make
+this record's own claim false rather than making the program clean. The spelling is therefore
+dropped from the source, and constraint C3 is satisfied the way it asks to be -- the exclusion is
+narrow, it is scoped to one spelling of one rule, it changes no target, no optimization level and
+no oracle, and its reason is recorded here and in the program's own header comment. What is lost
+is one route through the initializer walker; what is kept is a gate whose result means what the
+harness reports it to mean.
+THE ELISION RULE ITSELF REMAINS UNDER TEST IN THIS AREA, which is what keeps the exclusion narrow
+rather than a gap. 007_string_array.c initializes char g_grid_exact[2][5] and char
+g_grid_room[2][6] from unbraced string literals, which is brace elision for the inner arrays and
+is gate-clean unaided because a string literal may initialize a character array without braces
+(C11 6.7.9p14); and 003_partial_zero_fill.c's { 0 } idiom on a nested aggregate relies on the
+same subaggregate-consumption rule of 6.7.9p20 and is likewise gate-clean. What this program no
+longer holds is the flat-integer spelling of the rule and the elided-versus-braced pairing that
+compared the two walker paths line for line; that pairing is the specific loss the exclusion
+costs, and it is stated rather than left to be inferred.
+WHAT THIS PROGRAM DOES TEST. Every initializer here is fully braced, and the coverage is the
+nesting itself: struct within struct (g_outer, l_outer), struct within struct within struct with
+an array of struct beside it (g_deep, l_deep), array of struct (g_arr, l_arr), and two- and
+three-dimensional arrays (g_matrix, g_cube). Every member of every level is read back on its own
+line, so a single divergent line names one level of one shape.
 WIDTH NORMALIZATION. Every object is a plain int printed with %d, so no type whose width differs
 between the ILP32 target and the three LP64 targets ever reaches a format string, and no long,
 size_t, ptrdiff_t, pointer or floating value is printed. i686 is ELF32 with a four-byte long and
@@ -131,7 +133,7 @@ initializers supply are.
 EXECUTION CHARACTER SET. Nothing character-valued is printed, so C11 5.2.1 leaves nothing here to
 the implementation.
 Nothing address-valued, clock-derived, random or locale-dependent is printed, and iteration order
-is fixed. Every member of every level gets its own output line, 106 in total, and nothing is
+is fixed. Every member of every level gets its own output line, 48 in total, and nothing is
 summarized, so one divergent line localizes the defect to one initializer form; combined with the
 disjoint value ranges, a value surfacing in the wrong place also names the aggregate it escaped
 from.
@@ -146,9 +148,11 @@ compiled at all three levels and their answers are printed separately, and a def
 cannot be covered up by the other. A volatile operand would add nothing here, because the subject
 is what an initializer produces rather than what an operator computes.
 MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
--O1 and -O2 -- twelve configurations -- and every one produced these 106 lines byte-identically
+-O1 and -O2 -- twelve configurations -- and every one produced these 48 lines byte-identically
 with exit status 0, which is why oracle (b) compares this program's targets against each other
-without any narrowing and why oracle (c) can hold these bytes as the golden record.
+without any narrowing and why oracle (c) can hold these bytes as the golden record. The same
+twelve configurations were re-measured after the excluded spelling was removed, so the 48 lines
+below are the current source's output rather than a residue of an earlier one.
 END
 expected_stdout    <<END
 g_outer.tag=1
@@ -199,62 +203,4 @@ l_deep.pair[0].p=94
 l_deep.pair[0].q=95
 l_deep.pair[1].p=96
 l_deep.pair[1].q=97
-g_matrix_flat[0][0]=1
-g_matrix_flat[0][1]=2
-g_matrix_flat[0][2]=3
-g_matrix_flat[1][0]=4
-g_matrix_flat[1][1]=5
-g_matrix_flat[1][2]=6
-g_cube_flat[0][0][0]=1
-g_cube_flat[0][0][1]=2
-g_cube_flat[0][1][0]=3
-g_cube_flat[0][1][1]=4
-g_cube_flat[1][0][0]=5
-g_cube_flat[1][0][1]=6
-g_cube_flat[1][1][0]=7
-g_cube_flat[1][1][1]=8
-g_outer_flat.tag=1
-g_outer_flat.in.p=2
-g_outer_flat.in.q=3
-g_outer_flat.trailer=4
-g_arr_flat[0].p=10
-g_arr_flat[0].q=11
-g_arr_flat[1].p=20
-g_arr_flat[1].q=21
-g_arr_flat[2].p=30
-g_arr_flat[2].q=31
-g_deep_flat.o.tag=60
-g_deep_flat.o.in.p=61
-g_deep_flat.o.in.q=62
-g_deep_flat.o.trailer=63
-g_deep_flat.pair[0].p=64
-g_deep_flat.pair[0].q=65
-g_deep_flat.pair[1].p=66
-g_deep_flat.pair[1].q=67
-g_deep_partial.o.tag=60
-g_deep_partial.o.in.p=61
-g_deep_partial.o.in.q=62
-g_deep_partial.o.trailer=63
-g_deep_partial.pair[0].p=64
-g_deep_partial.pair[0].q=65
-g_deep_partial.pair[1].p=66
-g_deep_partial.pair[1].q=67
-l_matrix_flat[0][0]=71
-l_matrix_flat[0][1]=72
-l_matrix_flat[0][2]=73
-l_matrix_flat[1][0]=74
-l_matrix_flat[1][1]=75
-l_matrix_flat[1][2]=76
-l_outer_flat.tag=81
-l_outer_flat.in.p=82
-l_outer_flat.in.q=83
-l_outer_flat.trailer=84
-l_deep_flat.o.tag=90
-l_deep_flat.o.in.p=91
-l_deep_flat.o.in.q=92
-l_deep_flat.o.trailer=93
-l_deep_flat.pair[0].p=94
-l_deep_flat.pair[0].q=95
-l_deep_flat.pair[1].p=96
-l_deep_flat.pair[1].q=97
 END

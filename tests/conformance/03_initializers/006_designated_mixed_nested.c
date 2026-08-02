@@ -4,7 +4,7 @@
  * the C11 "current object" (6.7.9) correctly as it descends into a brace,
  * applies a designator there, ascends again, and resumes positionally.
  *
- * Eight mixed forms are covered, each in its own object so a wrong slot names the
+ * Six mixed forms are covered, each in its own object so a wrong slot names the
  * form that produced it:
  *
  *   1. positional outer, designated inner        g_pos_desig_in
@@ -19,26 +19,43 @@
  *   6. three levels, all designated, including a
  *      nested submember designator and a
  *      combined index-and-member designator      g_deep_desig
- *   7. OVERLAPPING designators at depth: an inner
- *      aggregate brace-initialized, then one of
- *      its members named again                   g_deep_override
- *   8. OVERLAPPING designators on a whole nested
- *      element, plus the same submember named
- *      twice at two different depths              g_deep_override_elem
  *
- * Forms 1, 3, 5 and 7 are repeated at automatic storage duration inside main, so
+ * Forms 1, 3 and 5 are repeated at automatic storage duration inside main, so
  * the static-image path and the run-time path are both exercised; form 3's twin
  * uses the combined [2].q spelling rather than [2] = { ... }.
  *
- * Forms 7 and 8 are the nested half of the overlapping-designator coverage whose
- * flat forms live in 004_designated_array.c. They matter separately because the
- * override has to interact correctly with the "current object" descent: an
- * implementation that resolved designators against the wrong nesting level would
- * override a sibling, or the outer object, rather than the subobject named.
- * C11 6.7.9p19 fixes the answer -- initialization proceeds in initializer-list
- * order, so the last initializer to name a subobject supplies its value, and a
+ * ONE SPELLING IS EXCLUDED, and it is stated here rather than left to be noticed.
+ * An OVERLAPPING designator at depth -- an inner aggregate brace-initialized and
+ * then one of its members named again, or the reverse of that order -- is
+ * well-defined C11: 6.7.9p19 has initialization proceed in initializer-list
+ * order, so the last initializer to name a subobject supplies its value and a
  * brace covering a whole subobject discards whatever earlier initializers had
- * placed inside it.
+ * placed inside it. It would be worth testing separately from the flat override,
+ * because the override has to interact correctly with the "current object"
+ * descent and an implementation that resolved designators against the wrong
+ * nesting level would override a sibling, or the outer object, rather than the
+ * subobject named. It is nevertheless not written here. -Wextra enables
+ * -Woverride-init and the suite's authoring gate promotes every diagnostic to an
+ * error, and fourteen override spellings -- the flat and the nested ones alike,
+ * enumerated in 004_designated_array.c -- were measured against that gate with
+ * the reference compiler and every one is rejected. An override carrying a side
+ * effect is no escape either: -Woverride-init-side-effects is on by default and
+ * C11 6.7.9 leaves the evaluation of an overridden initializer's side effects
+ * unspecified, which requirement 1 forbids outright. No admissible deviation
+ * exists: the gate's removable members are exactly -pedantic, for the
+ * GCC-extensions area, and -Wconversion with -Wsign-conversion, for the
+ * deliberate narrowing program, so -Wextra is not removable and area 03 is
+ * granted no deviation at all. A source-level diagnostic-suppression directive is
+ * not an alternative: it neutralizes a gate member from inside the translation
+ * unit while the record still claims the unchanged gate, which makes the record's
+ * own claim false rather than making the program clean. Constraint C3 asks for
+ * exactly what is done instead -- the exclusion is narrow, it is scoped to one
+ * spelling, and its reason is recorded here and in this program's expectation
+ * record. What remains under test is the harder half of the same question: forms
+ * 1 through 6 make the compiler descend into a brace, apply a designator there,
+ * ascend and resume positionally, and form 6's `.o = { .in.p = 42 }` with
+ * `.pr = { { 43, 44 }, [1].q = 46 }` reaches two levels down and combines an
+ * index with a member designator without ever revisiting a slot.
  *
  * Every member at every nesting level is read back and printed on its own line,
  * including every member left implicitly zero, so a single divergent line
@@ -52,16 +69,24 @@
  * a designator and every fully positional struct initializer supplies all of
  * its members. Removing a designator would trip the gate. Second, -Wall enables
  * -Wmissing-braces, so every nested aggregate is fully braced; eliding a brace
- * would trip the gate as well. Third, -Wextra enables -Woverride-init, which
- * reports the well-defined override that forms 7 and 8 exist to test; no spelling
- * of an override survives the unmodified gate, so those two declarations -- and
- * only those -- are bracketed by a scoped diagnostic pragma that suppresses that
- * one style warning and pops it again immediately. Every gate flag, -Werror
- * included, stays in force, no command-line flag changes, so the record carries no
- * ub_audit_flags deviation, and nothing about undefined-behaviour detection is
- * weakened: -Woverride-init describes defined behaviour, and the sanitizer gate
- * runs unchanged. The pragma is wrapped in #if defined(__GNUC__) so a compiler
- * that does not advertise GCC compatibility never sees it. */
+ * would trip the gate as well. Third, -Wextra enables -Woverride-init, so no
+ * initializer here may name a subobject an earlier one already named -- which is
+ * the exclusion recorded above. All three facts are properties of the REFERENCE
+ * compiler's authoring gate rather than limitations of the compiler under test,
+ * and all three are honoured by writing gate-clean source rather than by
+ * suppressing a diagnostic: this translation unit contains no diagnostic-
+ * suppression directive of any kind, so the record's claim to the unchanged
+ * seven-flag gate is literally true and the audit result means what the harness
+ * reports it to mean.
+ *
+ * Two neighbouring programs make the same choice for the same reason, so the
+ * three exclusions across this area are a coherent set rather than three
+ * accidents: 003_partial_zero_fill.c excludes the positional partial STRUCT
+ * spelling that -Wmissing-field-initializers rejects, 002_nested_aggregate.c
+ * excludes the brace-elided spelling that -Wmissing-braces rejects, and
+ * 004_designated_array.c excludes the flat overlapping-designator spelling that
+ * -Woverride-init rejects. Each records its own reason in its own header and its
+ * own expectation record, and each keeps everything the gate does accept. */
 
 int printf(const char *, ...);
 
@@ -92,32 +117,6 @@ static struct deep  g_deep_mixed = { { 31, { .q = 33 }, 34 }, { [1] = { 37, 38 }
  * designator [1].q, which must set pr[1].q and leave pr[1].p zero. */
 static struct deep  g_deep_desig = { .o = { .in.p = 42 }, .pr = { { 43, 44 }, [1].q = 46 } };
 
-#if defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Woverride-init"
-#endif
-/* Form 7: inside .o, the whole .in is brace-initialized to { 51, 52 } and then .in.q is
- * named again.  Only q may change, so in reads { 51, 59 }; .o.tag and .o.trailer are set
- * positionally around it and must be unaffected by the override two levels down.  Inside
- * .pr, element 0 is brace-initialized and then its .p is overridden, so pr[0] reads
- * { 58, 54 } while pr[1] stays entirely zero. */
-static struct deep g_deep_override = {
-    .o  = { .tag = 50, .in = { 51, 52 }, .in.q = 59, .trailer = 53 },
-    .pr = { [0] = { 55, 54 }, [0].p = 58 }
-};
-/* Form 8: the reverse direction at every level.  .in.q is named FIRST and then the whole
- * .in is brace-initialized, so the brace wins and q reads 62, not 69 -- the mirror image of
- * form 7 and the case that separates "last writer wins" from "any explicit member survives".
- * Likewise .pr element 1 gets a submember, then the whole element, so pr[1] reads { 65, 66 }
- * and the earlier 68 is gone. */
-static struct deep g_deep_override_elem = {
-    .o  = { .tag = 60, .in.q = 69, .in = { 61, 62 }, .trailer = 63 },
-    .pr = { [1].p = 68, [1] = { 65, 66 } }
-};
-#if defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
-
 int main(void)
 {
     /* Automatic-duration twins of forms 1, 3 and 5. An automatic aggregate with
@@ -128,19 +127,6 @@ int main(void)
     struct outer l_pos_desig_in = { 51, { .q = 53 }, 54 };
     struct inner l_arr_mixed[3] = { { 61, 62 }, [2].q = 66 };
     struct deep  l_deep_mixed   = { { 71, { .p = 72 }, 74 }, { [0].q = 76 } };
-    /* Automatic twin of form 7: the same nested override, but materialized by emitted
-     * code on entry rather than as a data-section image. */
-#if defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Woverride-init"
-#endif
-    struct deep l_deep_override = {
-        .o  = { .tag = 80, .in = { 81, 82 }, .in.q = 89, .trailer = 83 },
-        .pr = { [0] = { 85, 84 }, [0].p = 88 }
-    };
-#if defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
     int i;
     int j;
 
@@ -192,34 +178,6 @@ int main(void)
     for (i = 0; i < 2; i++) {
         printf("l_deep_mixed.pr[%d].p=%d\n", i, l_deep_mixed.pr[i].p);
         printf("l_deep_mixed.pr[%d].q=%d\n", i, l_deep_mixed.pr[i].q);
-    }
-
-    /* Forms 7 and 8 and form 7's automatic twin, every member at every level printed
-     * individually including the ones that must stay zero, so an override that landed on
-     * a sibling or on the wrong nesting level is its own line. */
-    printf("g_deep_override.o.tag=%d\n", g_deep_override.o.tag);
-    printf("g_deep_override.o.in.p=%d\n", g_deep_override.o.in.p);
-    printf("g_deep_override.o.in.q=%d\n", g_deep_override.o.in.q);
-    printf("g_deep_override.o.trailer=%d\n", g_deep_override.o.trailer);
-    for (i = 0; i < 2; i++) {
-        printf("g_deep_override.pr[%d].p=%d\n", i, g_deep_override.pr[i].p);
-        printf("g_deep_override.pr[%d].q=%d\n", i, g_deep_override.pr[i].q);
-    }
-    printf("g_deep_override_elem.o.tag=%d\n", g_deep_override_elem.o.tag);
-    printf("g_deep_override_elem.o.in.p=%d\n", g_deep_override_elem.o.in.p);
-    printf("g_deep_override_elem.o.in.q=%d\n", g_deep_override_elem.o.in.q);
-    printf("g_deep_override_elem.o.trailer=%d\n", g_deep_override_elem.o.trailer);
-    for (i = 0; i < 2; i++) {
-        printf("g_deep_override_elem.pr[%d].p=%d\n", i, g_deep_override_elem.pr[i].p);
-        printf("g_deep_override_elem.pr[%d].q=%d\n", i, g_deep_override_elem.pr[i].q);
-    }
-    printf("l_deep_override.o.tag=%d\n", l_deep_override.o.tag);
-    printf("l_deep_override.o.in.p=%d\n", l_deep_override.o.in.p);
-    printf("l_deep_override.o.in.q=%d\n", l_deep_override.o.in.q);
-    printf("l_deep_override.o.trailer=%d\n", l_deep_override.o.trailer);
-    for (i = 0; i < 2; i++) {
-        printf("l_deep_override.pr[%d].p=%d\n", i, l_deep_override.pr[i].p);
-        printf("l_deep_override.pr[%d].q=%d\n", i, l_deep_override.pr[i].q);
     }
     return 0;
 }

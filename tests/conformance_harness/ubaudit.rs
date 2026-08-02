@@ -452,10 +452,16 @@ impl DiagnosticsBudget {
     /// A gate that was never invoked is not charged and is not counted: the buckets below add up to
     /// the number of captures actually taken, which is what makes the reported figure checkable
     /// against [`AuditReport::invocations_performed`].
-    fn charge(&mut self, retained: usize, bound: Option<DiagnosticsBound>) {
+    ///
+    /// `line_elisions` is why a capture with no whole-capture `bound` is not automatically complete.
+    /// The per-line cap is a per-result ceiling exactly as the line and byte ceilings are, so a
+    /// capture it shortened belongs in the bounded bucket; filing it as complete would make the
+    /// environment section's "kept in full" figure count captures that were not.
+    fn charge(&mut self, retained: usize, bound: Option<DiagnosticsBound>, line_elisions: usize) {
         self.spent = self.spent.saturating_add(retained);
         match bound {
-            None => self.complete += 1,
+            None if line_elisions == 0 => self.complete += 1,
+            None => self.bounded += 1,
             Some(DiagnosticsBound::Run) => self.curtailed += 1,
             Some(DiagnosticsBound::Lines | DiagnosticsBound::Bytes) => self.bounded += 1,
         }
@@ -472,9 +478,11 @@ impl DiagnosticsBudget {
              reduced by a per-result ceiling and {} by the run-wide ceiling; per result at most \
              {MAX_GATE_DIAGNOSTIC_LINES} line(s) and {MAX_GATE_DIAGNOSTIC_BYTES} byte(s), taken \
              from the head of the capture, and at most {MAX_GATE_DIAGNOSTIC_LINE_BYTES} byte(s) of \
-             any one line. A gate that PASSED retains nothing, so the whole allowance stays \
-             available to the gate failures whose diagnostics an author acts on; zero captures \
-             means no gate failed rather than a bound that did not work",
+             any one line — a capture shortened by that per-line ceiling alone is counted as \
+             reduced by a per-result ceiling too, never as kept in full. A gate that PASSED retains \
+             nothing, so the whole allowance stays available to the gate failures whose diagnostics \
+             an author acts on; zero captures means no gate failed rather than a bound that did not \
+             work",
             self.spent, self.complete, self.bounded, self.curtailed
         )
     }
@@ -486,31 +494,50 @@ impl DiagnosticsBudget {
 /// its counters is a fragment a reader would take for the whole thing, which is a worse record than
 /// no record at all — the same reason the sandbox refuses to prune a retained file silently.
 ///
-/// The counters describe the **capture**, in the decoded text the streams held, while the ceilings
-/// apply to the **excerpt**, in the rendered bytes actually held in memory. The two are deliberately
-/// different quantities: the rendered form is larger than the text it came from whenever a byte had
-/// to be escaped, so bounding memory means bounding the rendered form, and telling a reader what was
-/// left out means counting the captured form. Section headers and elision notices belong to the
-/// excerpt's structure rather than to the capture, so they are charged against the ceilings and are
-/// not counted as captured lines or bytes.
+/// The counters describe the **capture**, in the decoded and *redacted* text the streams held, while
+/// the ceilings apply to the **excerpt**, in the rendered bytes actually held in memory. The two are
+/// deliberately different quantities: the rendered form is larger than the text it came from whenever
+/// a byte had to be escaped, so bounding memory means bounding the rendered form, and telling a
+/// reader what was left out means counting the captured form. Section headers and elision notices
+/// belong to the excerpt's structure rather than to the capture, so they are charged against the
+/// ceilings and are not counted as captured lines or bytes.
+///
+/// Redaction is applied before either counter advances, and the redacted form is therefore the unit
+/// both are expressed in. That is the only formulation in which their difference is exactly what a
+/// reader is not being shown: a credential the report replaces with a placeholder is withheld rather
+/// than omitted, so counting the pre-redaction length would report bytes as missing that no excerpt
+/// could ever have carried. The exact original bytes stay on disk in the persisted streams, which
+/// [`Diagnostics::account`] names, so nothing about the substitution loses evidence.
 ///
 /// A line the per-line cap shortened counts as **retained**, because it was reached and is partly
 /// shown; the bytes it did not reproduce appear in the omitted byte figure. That keeps the retained
 /// and captured figures one quantity whose difference is exactly what a reader is not being shown.
+/// Such a capture is never reported as complete: the per-line cap is a per-result ceiling like the
+/// other two, so it is counted in the budget's bounded bucket and named by
+/// [`Diagnostics::account`] even when no whole-capture ceiling bit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostics {
     /// The retained text, in labelled sections, each line already made safe to render.
     excerpt: String,
     /// Lines the capture held in total, across every section.
     captured_lines: usize,
-    /// Bytes of decoded text the capture held in total, across every section.
+    /// Bytes of decoded, redacted text the capture held in total, across every section.
     captured_bytes: usize,
     /// Lines of captured text the excerpt reproduces.
     retained_lines: usize,
     /// Bytes of captured text the excerpt reproduces.
     retained_bytes: usize,
     /// Which ceiling stopped the retention, absent when the capture was retained in full.
+    ///
+    /// Deliberately not extended to cover the per-line cap. This field doubles as the capture loop's
+    /// stop-retaining sentinel, so setting it for a shortened line would abandon every line after it;
+    /// [`Diagnostics::line_elisions`] carries that fact separately for exactly that reason.
     bound: Option<DiagnosticsBound>,
+    /// Retained lines the per-line cap shortened, each of which contributed only its head.
+    ///
+    /// A count rather than a flag, so the account can say how many lines a reader is seeing only
+    /// part of instead of merely that some line was cut.
+    line_elisions: usize,
     /// Workspace entries holding the exact untruncated bytes, in section order.
     ///
     /// Every gate persists each stream into its own workspace *before* the excerpt is taken, so
@@ -538,6 +565,7 @@ impl Diagnostics {
             retained_lines: 0,
             retained_bytes: 0,
             bound: None,
+            line_elisions: 0,
             sources: Vec::new(),
         }
     }
@@ -555,7 +583,16 @@ impl Diagnostics {
     ///
     /// A line longer than [`MAX_GATE_DIAGNOSTIC_LINE_BYTES`] contributes its head with the elision
     /// announced on the line itself, rather than being dropped: one such line would otherwise be able
-    /// to exhaust a result's whole allowance and leave a failing gate showing nothing.
+    /// to exhaust a result's whole allowance and leave a failing gate showing nothing. Every such
+    /// shortening is also counted, so [`Diagnostics::account`] reports it and the budget never files
+    /// the capture as complete.
+    ///
+    /// **Redaction precedes truncation, and the order is load-bearing.** [`redact_secrets`] matches a
+    /// credential by its exact value, so cutting a line first can split a credential that straddles
+    /// the cut and leave the leading half matching nothing — which would then be reproduced verbatim
+    /// into the report and into whatever log captures it. Each line is therefore redacted whole, the
+    /// already-redacted text is what the per-line cap shortens, and report-safe escaping is applied
+    /// last because it rewrites the bytes redaction has to read.
     fn capture(budget: &mut DiagnosticsBudget, sections: &[(&str, &[u8], &str)]) -> Diagnostics {
         let allowance = budget.allowance();
         // A shortfall against the per-result ceiling can only come from the run-wide one, so the
@@ -575,14 +612,21 @@ impl Diagnostics {
             let text = String::from_utf8_lossy(bytes);
             let mut header_pending = true;
             for line in text.trim_end_matches('\n').split('\n') {
+                // Redacted before anything is measured or shown, and redacted whole. A credential is
+                // matched by its exact value, so a cut taken first could split one and leave the
+                // leading half unmatched and reproduced verbatim. Redacting the whole line first
+                // makes the boundary irrelevant, and it also makes the redacted form the single unit
+                // both counters below are expressed in.
+                let redacted = redact_secrets(line);
                 record.captured_lines += 1;
-                // Counted in the decoded text as the report reproduces it — the content of the line
+                // Counted in the redacted text as the report reproduces it — the content of the line
                 // plus the one line feed that ends it — so the retained and captured figures are the
                 // same quantity and their difference is exactly what a reader is not being shown.
                 // It tracks the persisted stream's size on disk closely rather than exactly: bytes
-                // that were not valid text were replaced when the stream was decoded, and trailing
+                // that were not valid text were replaced when the stream was decoded, a credential
+                // stands in the count at its placeholder's length rather than its own, and trailing
                 // blank lines are trimmed rather than reproduced.
-                record.captured_bytes += line.len() + 1;
+                record.captured_bytes += redacted.len() + 1;
                 if record.bound.is_some() {
                     continue;
                 }
@@ -590,17 +634,19 @@ impl Diagnostics {
                     record.bound = Some(DiagnosticsBound::Lines);
                     continue;
                 }
-                let (head, elided) = head_of_line(line);
+                let (head, elided) = head_of_line(&redacted);
                 let mut addition = String::new();
                 if header_pending {
                     addition.push_str(&format!("--- {label} ---\n"));
                 }
-                addition.push_str(&sanitize_line(head));
+                addition.push_str(&sanitize_text_for_report(head));
                 if elided {
+                    // Both figures are lengths of the redacted text, so the notice describes the same
+                    // quantity the counters do and cannot imply that more was shown than was.
                     addition.push_str(&format!(
                         " [line truncated: the first {} of {} byte(s) are shown]",
                         head.len(),
-                        line.len()
+                        redacted.len()
                     ));
                 }
                 addition.push('\n');
@@ -613,11 +659,16 @@ impl Diagnostics {
                 record.retained_lines += 1;
                 // The head, not the whole line: a line the per-line cap elided is reached and
                 // partly shown, so it counts as retained while the bytes it did not reproduce show
-                // up in the omitted figure. That is what keeps the two counters one quantity.
+                // up in the omitted figure. That is what keeps the two counters one quantity. The
+                // shortening is counted separately as well, because a capture whose every line was
+                // reached is still not a capture shown in full.
                 record.retained_bytes += head.len() + 1;
+                if elided {
+                    record.line_elisions += 1;
+                }
             }
         }
-        budget.charge(record.excerpt.len(), record.bound);
+        budget.charge(record.excerpt.len(), record.bound, record.line_elisions);
         record
     }
 
@@ -638,7 +689,12 @@ impl Diagnostics {
 
     /// The one-line account of what was left out and where the exact bytes are, when anything was.
     ///
-    /// `None` for a capture retained in full, which is the ordinary case and reads as silence.
+    /// `None` only for a capture reproduced in full, which is the ordinary case and reads as silence.
+    /// Three reductions can make it `Some`, and all three are reported: either whole-capture ceiling,
+    /// the run-wide ceiling, and the per-line cap. The last of those is the reason the check is not
+    /// simply `self.bound?`: a capture whose every line was reached but one of whose lines was
+    /// shortened has omitted bytes with no ceiling recorded, and returning `None` there would leave
+    /// the report asserting completeness it does not have and withholding the recovery path.
     ///
     /// `workspace` is the gate's retained directory, present exactly when the gate failed or the run
     /// was asked to keep every workspace. When it is present the omitted bytes are named file by
@@ -646,18 +702,37 @@ impl Diagnostics {
     /// the gate passed and its workspace was discarded, so the honest instruction is the command
     /// lines listed immediately above, which reproduce the capture exactly.
     pub fn account(&self, workspace: Option<&Path>) -> Option<String> {
-        let bound = self.bound?;
-        let mut text = format!(
-            "[bounded by {}: the {} line(s) / {} byte(s) shown above are the head of a capture of \
-             {} line(s) / {} byte(s), so {} line(s) / {} byte(s) are omitted here]",
-            bound.describe(),
+        if self.bound.is_none() && self.line_elisions == 0 {
+            return None;
+        }
+        let mut text = String::from("[");
+        match self.bound {
+            Some(bound) => {
+                text.push_str(&format!("bounded by {}", bound.describe()));
+                if self.line_elisions > 0 {
+                    text.push_str(&format!(
+                        ", and the per-line ceiling of {MAX_GATE_DIAGNOSTIC_LINE_BYTES} byte(s) \
+                         shortened {} of the line(s) that were retained",
+                        self.line_elisions
+                    ));
+                }
+            }
+            None => text.push_str(&format!(
+                "every captured line was retained, but the per-line ceiling of \
+                 {MAX_GATE_DIAGNOSTIC_LINE_BYTES} byte(s) shortened {} of them",
+                self.line_elisions
+            )),
+        }
+        text.push_str(&format!(
+            ": the {} line(s) / {} byte(s) shown above are taken from a capture of {} line(s) / {} \
+             byte(s), so {} line(s) / {} byte(s) are omitted here]",
             self.retained_lines,
             self.retained_bytes,
             self.captured_lines,
             self.captured_bytes,
             self.captured_lines.saturating_sub(self.retained_lines),
             self.captured_bytes.saturating_sub(self.retained_bytes),
-        );
+        ));
         match workspace {
             Some(root) if !self.sources.is_empty() => {
                 text.push_str(
@@ -1891,6 +1966,12 @@ fn sanitize_line(raw: &str) -> String {
 /// The cut is moved back to a character boundary, so a multi-byte sequence is never split: the
 /// remainder would render as replacement characters and read as corruption rather than as elision.
 /// Pure, so the same line always yields the same head and the report stays byte-deterministic.
+///
+/// `line` must already have been through [`redact_secrets`]. This function cuts blindly, and
+/// [`redact_secrets`] matches a credential by its exact value, so a cut taken first can split one
+/// and leave the leading half matching nothing to redact against — after which the fragment is
+/// reproduced verbatim. The only caller, [`Diagnostics::capture`], redacts each line whole and passes
+/// the result here for exactly that reason.
 fn head_of_line(line: &str) -> (&str, bool) {
     if line.len() <= MAX_GATE_DIAGNOSTIC_LINE_BYTES {
         return (line, false);

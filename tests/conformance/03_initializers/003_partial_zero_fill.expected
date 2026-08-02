@@ -6,7 +6,7 @@
 
 program            = 003_partial_zero_fill
 area               = 03_initializers
-description        = Implicit zero fill of every member and element left unmentioned by an initializer and of every static object declared without one, across nine designated and positional partial situations plus automatic-duration twins, each slot read back individually
+description        = Implicit zero fill of every member and element left unmentioned by an initializer and of every static object declared without one, across nine partial and designated situations plus automatic-duration twins, each slot read back individually; the positional partial STRUCT spelling is excluded, narrowly and with its reason recorded in impl_defined_notes, because the frozen warning gate rejects every spelling of it
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -31,7 +31,7 @@ ones. The elements and members left unmentioned by a partial initializer are lik
 initialized to zero by C11 6.7.9p19 and 6.7.9p21, and that applies to the automatic-duration
 objects exactly as it does to the static ones, because an object with ANY initializer is fully
 initialized. Every automatic object in main -- l_arr, l_all_zero, l_zero_struct, l_part, l_arr_st
-and l_matrix, together with the positional twins -- carries an initializer, so none of them holds
+and l_matrix -- carries an initializer, so none of them holds
 an indeterminate value at any point. The program asserts an OMISSION rather than a store: nothing
 here writes the zeros it prints, so a slot that came back non-zero would mean the compiler failed
 to supply a guarantee the source never spelled out. The guarantee is the standard's, not an
@@ -78,50 +78,54 @@ compiler. This area is granted no header exception; the corpus has exactly two, 
 and the dedicated bundled-header probe in area 12.
 This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
 under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under the
-sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+-Werror at -O0, -O1 and -O2 with all four reference drivers, with no diagnostic of any kind and no
+source-level diagnostic suppression anywhere in the translation unit, and it builds and runs clean
+under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
 reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched. How the positional partial spelling stays gate-clean without any flag change is recorded
-in impl_defined_notes below.
+untouched. One initializer spelling is excluded to reach that clean audit rather than suppressed
+inside it, and the exclusion, its measured reason and what the zero guarantee retains regardless
+are recorded in impl_defined_notes below.
 END
 impl_defined_notes <<END
-This record narrows nothing: all four targets, all three optimization levels and all three
-oracles are enabled, no expected-divergence marker is carried, no initializer spelling is
-excluded, and no implementation-defined value reaches this program's output.
-SCOPED DIAGNOSTIC PRAGMA, AND WHY THIS RECORD CARRIES NO ub_audit_flags DEVIATION. The
-positional partial struct initializer -- `struct outer v = { 41 };`, which names members
-positionally and leaves the rest to the zero guarantee -- is well-defined C11 (6.7.9p19 and
-p21) but GCC reports it under -Wmissing-field-initializers, which -Wextra enables and the audit
-gate's -Werror makes fatal. The diagnostic reports the very guarantee under test. There is
-therefore no spelling of this coverage that the unmodified gate accepts, so the affected
-declarations -- and only those -- are bracketed in the source by `#pragma GCC diagnostic push`
-/ `ignored "-Wmissing-field-initializers"` / `pop`, wrapped in `#if defined(__GNUC__)` so a
-compiler that does not advertise GCC compatibility never sees them. This is deliberately NOT a
-gate deviation: no command-line flag changes, so this program is audited with the suite's
-DEFAULT full gate -- -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror,
-every flag in force including -Werror -- and the ub_audit_flags key is absent from this record
-by design. Nothing about undefined-behaviour detection is weakened:
--Wmissing-field-initializers reports defined behaviour, not undefined behaviour, and the
-sanitizer gate (-fsanitize=undefined,address -fno-sanitize-recover=all) runs unchanged and
-clean. Verified by negative test: deleting the `ignored` line makes the gate fire again with
-[-Werror=missing-field-initializers], so the pragma is load-bearing rather than decorative.
-This is the reason no constraint-C3 exclusion appears in this record. The alternative would have
-been to drop the positional spelling and disclose the gap; a scoped pragma that changes no flag
-keeps the spelling under test instead, which is what constraint C3 actually asks for.
-WHY THE POSITIONAL FORM IS TESTED RATHER THAN EXCLUDED. It is a different route through the
-initializer walker than the designated form: the designated form repositions the cursor
-explicitly, whereas the positional form relies on the cursor simply stopping where the list runs
-out. A compiler can get one right and the other wrong. Four positional partial objects are
-covered at three descent depths -- g_pos_part (one member named), g_pos_part_mid (the nested
-aggregate reached but left partial, which is where an off-by-one shows up as a stray value in
-trailer), g_pos_part_deep (the nested aggregate passed entirely) -- plus g_pos_arr_st, a partial
-struct inside an array whose later elements are never reached, and three automatic twins.
-Note that `= { 0 }` needs no pragma at all: GCC treats the all-zero idiom as intentional and does
-not diagnose it, and -Wmissing-field-initializers does not fire for a designated initializer
-either -- both measured rather than assumed -- which is why zero-fill situations 2 and 3 and the
-designated forms are written plainly. The nearest gate-clean relative of the positional form, a
-designator followed by positional continuation, is additionally covered in
-006_designated_mixed_nested.c, which spells { 1, { .q = 3 }, 4 } and
+This record narrows nothing that the harness reads: all four targets, all three optimization
+levels and all three oracles are enabled, no expected-divergence marker is carried, no gate
+deviation is claimed under the ub_audit_flags key, and no implementation-defined value reaches
+this program's output. One initializer SPELLING is nevertheless excluded from the source, and the
+paragraph below states which, why, and what the zero guarantee retains regardless.
+CONSTRAINT-C3 EXCLUSION -- THE POSITIONAL PARTIAL STRUCT SPELLING. `struct outer v = { 1 };`,
+which supplies the leading members POSITIONALLY and leaves the rest to the zero guarantee, is
+well-defined C11 (6.7.9p19 and p21), and it is a materially different route through the
+initializer walker than `{ .tag = 1 }`: the designated form repositions the cursor explicitly,
+whereas the positional form relies on the cursor stopping where the list runs out. GCC
+nevertheless reports it under -Wmissing-field-initializers, which -Wextra enables and which the
+audit gate's -Werror makes fatal -- the diagnostic reports the very guarantee under test.
+Sixteen spellings were MEASURED against that gate with the reference compiler, and the positional
+partial STRUCT is the only shape it rejects; it rejects every variant of that shape, so no
+spelling of that particular route exists that the unmodified gate accepts. No admissible
+deviation exists either: the gate's removable members are exactly -pedantic, for the
+GCC-extensions area, and -Wconversion with -Wsign-conversion, for the deliberate
+narrowing program, so -Wextra is not removable and area 03 is granted no deviation at all. A
+source-level
+diagnostic-suppression directive is not an alternative to that: it neutralizes a gate member from
+inside the translation unit while this record still claims the unchanged gate, which would make
+this record's own claim false rather than making the program clean. The spelling is therefore
+dropped from the source, and constraint C3 is satisfied the way it asks to be -- the exclusion is
+narrow, it is scoped to one spelling, it changes no target, no optimization level and no oracle,
+and its reason is recorded here and in the program's own header comment. The specific loss is the
+positional-cursor route through a STRUCT, at the three descent depths and in the
+array-of-struct-element form the excluded objects used to cover; that loss is stated rather than
+left to be inferred.
+THE ZERO GUARANTEE ITSELF LOSES NOTHING, which is what keeps the exclusion narrow. The same
+measurement established that -Wmissing-field-initializers does NOT fire for a designated
+initializer, nor for the `= { 0 }` idiom, nor for a partial ARRAY, nor for a partial
+array-of-struct, nor for partial two-dimensional rows -- GCC treats the all-zero idiom as
+intentional and treats element omission as unremarkable -- so all nine zero-fill situations, which
+are the whole of this program's mandate, are written plainly and all remain under test. Positional
+exhaustion is itself still exercised here: g_arr and l_arr are int[6] = { 1, 2 }, which the gate
+accepts unaided because -Wmissing-field-initializers is about members rather than elements, so the
+cursor-runs-out path is covered for elements even though it is no longer covered for members. The
+nearest gate-clean relative of the excluded spelling, a designator followed by positional
+continuation, is covered in 006_designated_mixed_nested.c, which spells { 1, { .q = 3 }, 4 } and
 { .tag = 11, { .p = 12, .q = 13 }, 14 }.
 EXECUTION CHARACTER SET, PINNED AT TRANSLATION TIME. One printed value is the numeric code of the
 'f' in "first", and C11 5.2.1 leaves the values of the execution character set to the
@@ -154,10 +158,12 @@ A compiler can implement one correctly and the other incorrectly, and only holdi
 by side distinguishes the two. At a higher optimization level the compiler may instead propagate
 contents it already knows, which is why the sweep covers -O0, -O1 and -O2 rather than one level.
 MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
--O1 and -O2 -- twelve configurations -- and every one produced these 107 lines byte-identically
+-O1 and -O2 -- twelve configurations -- and every one produced these 75 lines byte-identically
 with exit status 0, which is why oracle (b) compares this program's targets against each other
-without any narrowing and why oracle (c) can hold these bytes as the golden record. The output is a
-fixed sequence of 107 key=value lines, one per property claimed and nothing summarized, so one
+without any narrowing and why oracle (c) can hold these bytes as the golden record. The same
+twelve configurations were re-measured after the excluded spelling was removed, so the 75 lines
+below are the current source's output rather than a residue of an earlier one. The output is a
+fixed sequence of 75 key=value lines, one per property claimed and nothing summarized, so one
 divergent line localizes the defect to one zero-fill situation.
 END
 expected_stdout    <<END
@@ -236,36 +242,4 @@ l_matrix[0][2]=0
 l_matrix[1][0]=0
 l_matrix[1][1]=0
 l_matrix[1][2]=0
-g_pos_part.tag=41
-g_pos_part.in.p=0
-g_pos_part.in.q=0
-g_pos_part.trailer=0
-g_pos_part_mid.tag=42
-g_pos_part_mid.in.p=43
-g_pos_part_mid.in.q=0
-g_pos_part_mid.trailer=0
-g_pos_part_deep.tag=44
-g_pos_part_deep.in.p=45
-g_pos_part_deep.in.q=46
-g_pos_part_deep.trailer=0
-g_pos_arr_st[0].p=47
-g_pos_arr_st[0].q=0
-g_pos_arr_st[1].p=0
-g_pos_arr_st[1].q=0
-g_pos_arr_st[2].p=0
-g_pos_arr_st[2].q=0
-l_pos_part.tag=91
-l_pos_part.in.p=0
-l_pos_part.in.q=0
-l_pos_part.trailer=0
-l_pos_part_mid.tag=92
-l_pos_part_mid.in.p=93
-l_pos_part_mid.in.q=0
-l_pos_part_mid.trailer=0
-l_pos_arr_st[0].p=94
-l_pos_arr_st[0].q=0
-l_pos_arr_st[1].p=0
-l_pos_arr_st[1].q=0
-l_pos_arr_st[2].p=0
-l_pos_arr_st[2].q=0
 END

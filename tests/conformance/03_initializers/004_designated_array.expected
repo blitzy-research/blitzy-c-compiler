@@ -6,7 +6,7 @@
 
 program            = 004_designated_array
 area               = 03_initializers
-description        = Designated array initializers -- sparse, out-of-order, designator-then-positional continuation, implied length, constant-expression designators, row and element designators for a two-dimensional array in both orders, member designators through an array of struct, and seven families of OVERLAPPING designators where the later initializer wins, including where a whole-object brace discards earlier member initializers and where an initializer for another subobject follows the override
+description        = Designated array initializers -- sparse, out-of-order, designator-then-positional continuation, implied length, constant-expression designators, row and element designators for a two-dimensional array in both orders, and member and element designators through an array of struct, every slot read back individually at both storage durations; the OVERLAPPING-designator spelling is excluded, narrowly and with its reason recorded in impl_defined_notes, because the frozen warning gate rejects every spelling of it
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -24,23 +24,24 @@ anything at all, so a divergence over it would prove nothing about either one.
 The rule this program has to satisfy that an ordinary initializer program does not is C11 6.7.9p23:
 the evaluations of an initializer list's expressions are indeterminately sequenced with respect to
 one another, so the order in which their SIDE EFFECTS occur is unspecified. Every initializer
-expression here is an integer constant expression -- 1, 10 through 13, 30, 70, 99, 101, 110 through
-113, 130, 170, and the small constants in the two-dimensional, struct and overriding cases -- and a
-constant expression has no side effects at all, so that unspecified order is unobservable. This is
-what makes the OVERLAPPING designators in this program well-defined rather than order-dependent in
-the unspecified sense: which value a twice-designated subobject ends up holding is fixed by C11
-6.7.9p19, which initializes in initializer-list order, and that is a separate rule from the
-sequencing of side effects that 6.7.9p23 leaves open. Because no initializer expression has a side
-effect, there is nothing left for 6.7.9p23 to make unspecified. -Woverride-init-side-effects is on
-by DEFAULT in GCC and is not a gate member at all, which is a second reason side-effecting
-initializers are avoided here rather than suppressed.
+expression here is an integer constant expression -- 1, 10 through 13, 30, 50, 70, 101, 110 through
+113, 130, 170, and the small constants in the two-dimensional and struct cases -- and a
+constant expression has no side effects at all, so that unspecified order is unobservable. This
+matters because several of these forms depend on initializer-list ORDER for their answer:
+g_continue resumes positionally after a designator and is then repositioned backwards,
+g_row_then_elem and g_elem_then_row spell one aggregate in two orders, and g_st_brace lists its
+element braces [2] before [0]. Which slot each initializer lands in is fixed by C11 6.7.9p19,
+which initializes in initializer-list order, and that is a separate rule from the sequencing of
+side effects that 6.7.9p23 leaves open. Because no initializer expression has a side
+effect, there is nothing left for 6.7.9p23 to make unspecified, and no initializer here names a
+subobject an earlier one already named, so the one form whose answer would turn on that
+distinction is the form this record excludes.
 Every designator is in range for its array, and each is a constant expression the compiler resolves
 before the program runs: g_sparse is int[8] designated at 7, 3 and 0; g_continue is int[6]
 designated at 1 and 0 with the unnamed run 12, 13 continuing at indices 2 and 3, which C11 6.7.9p17
 fixes to resume at the element following the designated one; g_constexpr is int[6] designated at
 2 + 1, 1 * 2 and 0, which are 3, 2 and 0; the three two-dimensional arrays are int[2][3] designated
-within [0..1][0..2]; the two struct arrays are struct pair[3] designated at 0 and 2; and the
-overriding objects designate indices and members strictly inside their own declared extents.
+within [0..1][0..2]; and the two struct arrays are struct pair[3] designated at 0 and 2.
 g_implied has no declared bound, so C11 6.7.9p22 sizes it from its largest designator: its one
 designator is [4], making it int[5], and the program reads exactly the length it computes with
 sizeof rather than a literal, so a mis-sized array shows up as a wrong g_implied_len line instead of
@@ -81,65 +82,66 @@ compiler. This area is granted no header exception; the corpus has exactly two, 
 and the dedicated bundled-header probe in area 12.
 This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
 under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under the
-sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+-Werror at -O0, -O1 and -O2 with all four reference drivers, with no diagnostic of any kind and no
+source-level diagnostic suppression anywhere in the translation unit, and it builds and runs clean
+under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
 reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched. How the overriding designators stay gate-clean without any flag change is recorded in
-impl_defined_notes below.
+untouched. One initializer spelling is excluded to reach that clean audit rather than suppressed
+inside it, and the exclusion, its measured reason and which order-dependent forms remain under test
+are recorded in impl_defined_notes below.
 END
 impl_defined_notes <<END
-This record narrows nothing: all four targets, all three optimization levels and all three
-oracles are enabled, no expected-divergence marker is carried, no initializer spelling is
-excluded, and no implementation-defined value reaches this program's output.
-SCOPED DIAGNOSTIC PRAGMA, AND WHY THIS RECORD CARRIES NO ub_audit_flags DEVIATION. Overriding a
+This record narrows nothing that the harness reads: all four targets, all three optimization
+levels and all three oracles are enabled, no expected-divergence marker is carried, no gate
+deviation is claimed under the ub_audit_flags key, and no implementation-defined value reaches
+this program's output. One initializer SPELLING is nevertheless excluded from the source, and the
+paragraph below states which, why, and which order-dependent forms remain under test.
+CONSTRAINT-C3 EXCLUSION -- THE OVERLAPPING-DESIGNATOR SPELLING. Overriding a
 designated initializer -- naming one subobject twice, so that the LATER initializer supplies
 its value -- is well-defined C11 (6.7.9p19, which fixes initialization in initializer-list
-order) but GCC reports it under -Woverride-init, which -Wextra enables and the audit gate's
--Werror makes fatal; in this environment `{ [0] = 1, [1] = 2, [0] = 9 }` is rejected with
-"initialized field overwritten [-Werror=override-init]". TEN distinct spellings of an override
-were measured against the gate -- duplicate element designator, identical-value override,
-zero-then-value, whole-row brace then element, duplicate struct member, two union members,
-nested .a.x then .a, positional-then-designator, designator-then-positional, and an override
-inside a compound literal -- and every one is rejected. A second diagnostic,
--Woverride-init-side-effects, is on by DEFAULT and is not a gate member at all, which is why
-side-effecting initializers are avoided rather than suppressed. There is therefore no spelling
-of this coverage that the unmodified gate accepts, so the affected declarations -- and only
-those -- are bracketed in the source by `#pragma GCC diagnostic push` / `ignored
-"-Woverride-init"` / `pop`, wrapped in `#if defined(__GNUC__)` so a compiler that does not
-advertise GCC compatibility never sees them. This is deliberately NOT a gate deviation: no
-command-line flag changes, so this program is audited with the suite's DEFAULT full gate --
--Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror, every flag in force
-including -Werror -- and the ub_audit_flags key is absent from this record by design. Nothing
-about undefined-behaviour detection is weakened: -Woverride-init reports defined behaviour, not
-undefined behaviour, and the sanitizer gate (-fsanitize=undefined,address
--fno-sanitize-recover=all) runs unchanged and clean. Verified by negative test: deleting the
-`ignored` line makes the gate fire again with [-Werror=override-init], so the pragma is
-load-bearing rather than decorative.
-This is the reason no constraint-C3 exclusion appears in this record. The alternative would have
-been to drop the overlapping spelling and disclose the gap; a scoped pragma that changes no flag
-keeps it under test instead, which is what constraint C3 actually asks for.
-WHY OVERLAPPING DESIGNATORS ARE TESTED RATHER THAN EXCLUDED. They are required coverage for this
-program, and getting the ORDER wrong is a realistic compiler defect that is invisible unless a
-program actually overrides something: a front end that folded designators into a map keyed by
+order), and getting the order wrong is a realistic compiler defect that stays invisible unless
+a program actually overrides something: a front end that folded designators into a map keyed by
 index would keep whichever value it happened to insert last, which need not be the one the source
-ordered last. g_override_elem
-names [1] twice, so it must end at 99 while [2] -- named once, between the two -- survives at 22
-and [0] and [3] stay zero-filled. g_override_row braces a whole row and then replaces one element
-inside it. g_override_row_last is the REVERSE nesting and is the discriminating case: the brace
-initializes the entire row, so the earlier element designator is DISCARDED rather than merged,
-which separates "the last initializer to name a subobject wins" from "any explicitly named member
-survives". g_override_positional sets [2], repositions the cursor to [0] and lets three positional
-initializers resume, so the third lands back on [2]. g_override_memb braces a struct element and
-then overrides one of its members. g_override_row_after is the reverse nesting again, but with an
-initializer for a DIFFERENT row listed AFTER the override: the brace discards [0][1] = 90 and the
-later [1][2] = 6 must still land in row 1, which pins where the current object is left once a
-whole-row brace has overridden an element -- a front end that reset the cursor to the start of the
-aggregate would lose the 6, and one that left it inside row 0 would write the 6 into the wrong row.
-g_override_st is the struct counterpart of that discrimination: .p and .q are each set by their own
-designator and then the whole element is braced, so NEITHER earlier member initializer survives and
-the element reads 5,6 rather than 1,2 or 5,2. l_override_elem, l_override_positional and
-l_override_memb repeat the forms at automatic duration, where the initializer is emitted code rather
-than a data image. Seven static and three automatic overriding objects are covered in total.
+ordered last. GCC nevertheless reports it under -Woverride-init, which -Wextra enables and which
+the audit gate's -Werror makes fatal; in this environment `{ [0] = 1, [1] = 2, [0] = 9 }` is
+rejected with "initialized field overwritten [-Werror=override-init]". FOURTEEN spellings of an
+override were MEASURED against that gate with the reference compiler -- duplicate element
+designator, identical-value override, zero-then-value, whole-row brace then element, element then
+whole-row brace, that reverse nesting with a later initializer for a different row, positional
+continuation running back over an earlier designator, struct-element brace then one member of it,
+two member designators then a whole-struct brace, duplicate struct member, two union members, a
+nested whole-member brace then one of its members, the reverse of that, and an override inside a
+compound literal -- and every one is rejected, so no spelling of that particular route exists that
+the unmodified gate accepts. An override carrying a side effect is not an escape either:
+-Woverride-init-side-effects is on by DEFAULT and is not a gate member at all, and C11 6.7.9p23
+leaves the sequencing of an initializer list's side effects unspecified, which requirement 1
+forbids outright -- so the one construction that would have slipped past the diagnostic is barred
+by the soundness precondition instead. No admissible deviation exists: the gate's removable
+members are exactly -pedantic, for the GCC-extensions area, and -Wconversion with
+-Wsign-conversion, for the deliberate narrowing program, so -Wextra is not removable and area 03
+is granted no deviation at all. A source-level diagnostic-suppression directive is not an
+alternative to that: it neutralizes a gate member from inside the translation unit while this
+record still claims the unchanged gate, which would make this record's own claim false rather
+than making the program clean. The spelling is therefore dropped from the source, and constraint
+C3 is satisfied the way it asks to be -- the exclusion is narrow, it is scoped to one spelling, it
+changes no target, no optimization level and no oracle, and its reason is recorded here and in
+the program's own header comment. The specific loss is the seven overriding families the file used
+to carry, of which the discriminating one was the reverse nesting that separates "the last
+initializer to name a subobject wins" from "any explicitly named member survives"; that loss is
+stated rather than left to be inferred, and it is a gap in this area that no program closes.
+THE ORDERING RULE ITSELF REMAINS UNDER TEST IN THIS PROGRAM, which is what keeps the exclusion
+narrow rather than a wholesale retreat from order-dependence. g_continue is
+`{ [1] = 11, 12, 13, [0] = 10 }`: a designator, two positional initializers that C11 6.7.9p17
+requires to resume at indices 2 and 3, and then a designator that moves the cursor BACKWARDS, so
+an implementation that resumed from the wrong place or refused to reposition is caught without any
+slot being named twice. g_row_then_elem and g_elem_then_row spell one int[2][3] with a row brace
+and an element designator in both orders and must agree. g_elem_only supplies three element
+designators out of row order. g_st_brace lists its element braces [2] before [0], and g_st_memb
+interleaves member designators across two elements. g_sparse and l_sparse designate descending
+indices 7, 3, 0. Every one of those is gate-clean precisely because no initializer in it revisits
+a slot an earlier one already named. The bracketed-range designator `[0 ... 3] = 7`, which would
+express a repeated fill without an override, is a GCC extension rejected by -Werror=pedantic and
+belongs to area 08 rather than here.
 WIDTH NORMALIZATION. Every printed datum is a plain int printed with %d, and the one derived
 quantity, g_implied_len, is an element COUNT rather than a size in bytes, so it is 5 on every
 target regardless of how wide an int is. No type whose width differs between the ILP32 target and
@@ -160,12 +162,15 @@ THE DISCRIMINATING VARIANT is the pairing of storage durations, which is why all
 levels matter: a static designated initializer is resolved before program startup and emitted into
 the data image, whereas the automatic twin's placement is a run-time act the backend performs on
 entry to the block, and at a higher level either path may be folded into immediate operands. Every
-element of every object is read back individually, so a wrong winner, a disturbed neighbour or a
-lost zero fill is each its own line, and nothing is summarized.
+element of every object is read back individually, so a value landing in the wrong slot, a
+disturbed neighbour or a lost zero fill is each its own line, and nothing is summarized.
 MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
--O1 and -O2 -- twelve configurations -- and every one produced these 104 lines byte-identically
+-O1 and -O2 -- twelve configurations -- and every one produced these 70 lines byte-identically
 with exit status 0, which is why oracle (b) compares this program's targets against each other
-without any narrowing and why oracle (c) can hold these bytes as the golden record.
+without any narrowing and why oracle (c) can hold these bytes as the golden record. The count is
+the mechanically measured length of the golden block below rather than a hand-written figure, and
+the same twelve configurations were re-measured after the excluded spelling was removed, so these
+70 lines are the current source's output rather than a residue of an earlier one.
 END
 expected_stdout    <<END
 g_sparse[0]=1
@@ -238,48 +243,4 @@ l_continue[2]=112
 l_continue[3]=113
 l_continue[4]=0
 l_continue[5]=0
-g_override_elem[0]=0
-g_override_elem[1]=99
-g_override_elem[2]=22
-g_override_elem[3]=0
-g_override_row[0][0]=1
-g_override_row[0][1]=99
-g_override_row[0][2]=3
-g_override_row[1][0]=0
-g_override_row[1][1]=0
-g_override_row[1][2]=0
-g_override_row_last[0][0]=1
-g_override_row_last[0][1]=2
-g_override_row_last[0][2]=3
-g_override_row_last[1][0]=0
-g_override_row_last[1][1]=0
-g_override_row_last[1][2]=0
-g_override_positional[0]=1
-g_override_positional[1]=2
-g_override_positional[2]=3
-g_override_memb[0].p=1
-g_override_memb[0].q=9
-g_override_memb[1].p=0
-g_override_memb[1].q=0
-g_override_row_after[0][0]=1
-g_override_row_after[0][1]=2
-g_override_row_after[0][2]=3
-g_override_row_after[1][0]=0
-g_override_row_after[1][1]=0
-g_override_row_after[1][2]=6
-g_override_st[0].p=5
-g_override_st[0].q=6
-g_override_st[1].p=0
-g_override_st[1].q=0
-l_override_elem[0]=0
-l_override_elem[1]=199
-l_override_elem[2]=122
-l_override_elem[3]=0
-l_override_positional[0]=101
-l_override_positional[1]=102
-l_override_positional[2]=103
-l_override_memb[0].p=101
-l_override_memb[0].q=109
-l_override_memb[1].p=0
-l_override_memb[1].q=0
 END
