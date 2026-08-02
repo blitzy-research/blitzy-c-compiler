@@ -84,6 +84,26 @@ RISC-V 64, so it is never asserted and never observed. Plain char appears only a
 one-byte size probe whose signedness cannot affect a size, and the one character value that
 is printed is read from an explicitly signed char holding 65, which every char signedness
 represents exactly.
+THE EXECUTION CHARACTER SET IS A SEPARATE IMPLEMENTATION-DEFINED PROPERTY FROM CHAR
+SIGNEDNESS, AND IT IS PINNED RATHER THAN ASSUMED. Routing a character through an explicitly
+signed char settles the signedness question and settles nothing about which code the letter
+carries: C11 5.2.1 leaves the members of the execution character set and their codes
+implementation-defined, so an implementation is free to place A somewhere other than 65.
+Exactly two printed lines observe a character's value here -- fold_char_a, which prints
+(int)'A' from a constant expression, and run_char_a, which prints the same value back out of
+the signed char -- and nothing else in the program observes one: msg is measured only by its
+size and by the offset of its terminator, probe_char only by its element size, and no line
+renders a literal. A single assertion therefore closes the whole accounting, and the program
+carries it: _Static_assert('A' == 65, "the execution character set places A at 65 (ASCII) on
+this target"). All four enabled targets were measured to use the same ASCII-family basic
+execution character set, so the condition holds on every cell of this record's matrix. The
+assertion is the mechanism that keeps the two oracles honest: on an implementation whose
+character set differed, the cell would FAIL TO TRANSLATE naming the reason -- accusing the
+environment, where the difference actually lives -- instead of printing a different number
+that oracle (a) or oracle (b) would charge to the compiler under test. A future target that
+disagreed would announce itself at the build, and the correct response would be to narrow
+this record's target list with the reason recorded here, never to delete the assertion or the
+two lines it protects.
 Two implementation-defined layout facts are relied on and were verified rather than assumed.
 struct triple is int, short, unsigned char and union scalar_bytes has an 8-byte widest
 member; the standard leaves their exact sizes to the implementation, and both were measured

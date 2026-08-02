@@ -1,3 +1,9 @@
+# Expectation record for 06_control_flow/007_conditional_operator.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
 program            = 007_conditional_operator
 area               = 06_control_flow
 description        = Conditional operator result typing and single-branch evaluation, with the un-taken branch's absence observed through a volatile counter and pointer selection observed only by comparison

@@ -1,0 +1,270 @@
+# Expectation record for 02_constant_expressions/002_constant_expression_contexts.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_constant_expression_contexts
+area               = 02_constant_expressions
+description        = The four contexts C requires an integer constant expression in -- array bounds, case labels, bitfield widths and enumerator initializers -- each observed at run time and paired with a volatile-operand twin that recomputes the same value
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined behaviour and depends on no unspecified behaviour, which is the
+precondition both differential oracles rest on rather than a stylistic preference: undefined
+behaviour would license either compiler to do anything at all, so a divergence between them would
+prove nothing about either. The paragraphs below are the written argument required of every program
+in this suite; the warning gate and the sanitizer gate are its machine half.
+EVERY ARRAY INDEX IS PROVABLY INSIDE ITS BOUND, and the bounds are the subject under test rather
+than an assumption. Each loop is driven by the array's own extent computed as sizeof arr /
+sizeof arr[0], so vec is walked over exactly its 10 elements, mat over exactly its 3 rows and 2
+columns, wide over exactly its 8 elements and spanned over exactly its 7, and each end-value line
+indexes only element 0 and element bound-1. The deliberate reads of the last element of every array
+are there precisely to prove that the constant expression in the bound admitted the element count it
+claimed. Because an index and its limit are derived from the SAME expression, a bound that folded
+wrongly would change both together and be caught by the printed length rather than by an
+out-of-range access, and thirteen _Static_assert declarations pin every bound, every enumerator
+value and every bitfield width before the program runs, so a mis-folded constant expression is a
+translation failure rather than an out-of-bounds access. No index is computed from an unbounded
+quantity.
+EVERY BITFIELD STORE IS INSIDE THE FIELD'S REPRESENTABLE RANGE, and that is asserted statically in
+the source rather than left to inspection, so no implementation-defined truncation of an
+out-of-range store can occur. The four-bit signed field is written with -8 and 7 -- and on the
+runtime path with -(src & 7), which lies in [-7, 0], or with -8 or -1 explicitly, or with src & 7 in
+[0, 7] -- the five-bit unsigned field only with src & 31u in [0, 31], and the three-bit unsigned tail
+field only with src & 7u in [0, 7]. In each case those are the extremes of exactly what the declared
+width can hold, which is what makes the width observable through values, and nothing relies on the
+value of a field beyond its width.
+EVERY SWITCH SELECTOR IS EITHER MATCHED BY A LABEL OR DELIBERATELY ROUTED TO default, so no dispatch
+falls off the end of a switch without a defined destination, no path leaves the statement with a
+value unaccounted for, and every case body ends in a return or a break. No case label is duplicated,
+which the compiler would reject in any event.
+EVERY SHIFT COUNT IS A SMALL NON-NEGATIVE CONSTANT, or a volatile object holding one, strictly below
+the width of its promoted left operand -- 1 << 10, 1 << 4 through the WIDTH_BASE macro, one << shift
+with shift equal to 4, and the two long long shifts by 33 and 30 against a 64-bit left operand. Every
+shifted left operand is the positive literal 1 or 1LL, so only non-negative values are shifted left
+and no negative value is right-shifted.
+NO DIVISION IS UNDEFINED AND NO REMAINDER OPERATOR APPEARS. Every division is by 2, by 7 or by a
+sizeof of a complete object type, which the standard guarantees is non-zero, and no most-negative
+value is divided by -1. The one division performed at run time divides by a volatile object
+initialized to 1LL << 30 in its own declaration and never assigned afterwards, so a zero divisor is
+not reachable there either.
+THE WIDE ARITHMETIC CANNOT OVERFLOW. The widest int value printed is 4000, reached as
+(int)sizeof(int) * 1000 in a case label, and the widest computed int value is 49. The two wide values
+are long long throughout, written with LL-suffixed literals: 1LL << 33 == 8589934592 and 1LL << 30.
+The 64-bit division twin is performed by repeated addition and comparison rather than by the division
+operator, because every backend implements addition and comparison directly while 64-bit division may
+go through a compiler support routine that is not this program's subject; eight additions of 2^30
+reach exactly 2^33, so the quotient is 8 and the accumulated dividend is 8589934592 -- both printed
+above, and both nowhere near the long long maximum, whose 64-bit minimum width means no overflow is
+possible even on the 32-bit target. Plain long is never used.
+NO POINTER IS FORMED ANYWHERE IN THIS PROGRAM and there is no pointer arithmetic beyond array
+subscripting, so there is no aliasing rule to break, no one-past-the-end question to answer, no
+object representation to inspect, no padding byte to observe and no dependence on the relative
+addresses of unrelated objects. Every object is accessed only through its own declared type, and the
+volatile struct is read and written only through its own members.
+NO STORAGE IS READ UNINITIALIZED. Every automatic object is initialized in its own declaration, and
+every object with static storage duration is zero-initialized before any read; vec, mat, wide and
+spanned are fully written by their loops before their end values are read; live_bits is a volatile
+static, so it starts zeroed, and each of its fields is assigned before the block that reads it; and
+the elements printed as zero are exactly the ones no assignment reaches.
+SEQUENCING IS EXPLICIT RATHER THAN INCIDENTAL. Each volatile object is read exactly once, into a
+plain local, in a statement of its own; the arithmetic is then performed on the locals. The volatile
+read is the optimization barrier, and the pattern keeps every full expression to a single side effect
+and leaves every printf argument free of side effects, so the count and order of the volatile
+accesses is fixed by statement boundaries rather than left unspecified. Every volatile increment --
+the five walk counters -- stands alone in its own statement, and the loop counters compared against a
+sizeof expression are read, not modified, inside the controlling expression. The two switch dispatch
+lines are the one place worth naming: their two arguments are a constant-argument call and a
+volatile-argument call to the SAME PURE function, which only switches on its parameter and returns,
+so exactly one argument has an effect -- the volatile read -- and the other cannot be affected by it
+in either evaluation order, which is what makes those lines independent of the unspecified order of
+argument evaluation. No object is modified twice between two sequence points.
+NO CONSTANT COMMA EXPRESSION APPEARS. A comma expression whose left operand has no side effect is
+rejected by -Werror=unused-value under the default gate, and folding through the comma operator is
+the subject of 006_conditional_and_comma_folding.c, which supplies side-effecting operands for it.
+Every _Static_assert in the file is SATISFIED, which is a soundness requirement rather than a
+preference: both mandated oracles compare binaries that were built successfully, so a deliberately
+failing assertion would stop compilation on both sides and leave nothing to compare. Error
+detection -- the correct rejection of an invalid program -- is a noted non-goal of this suite for
+exactly that reason.
+NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, printf, is declared by
+hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
+bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so a directive
+naming that header would fail on the bcc side of oracle (a) while succeeding on the reference side --
+a spurious divergence caused by the test rather than by the compiler under test. _Alignof is a C11
+keyword and needs no header; stdalign.h is deliberately not named because it would only add the
+lowercase macro spellings. Nothing in the file is a GCC extension, so no include exception and no
+gate deviation is available to area 02 and none is needed; the corpus has exactly two header
+exceptions, area 07's stdarg.h and the dedicated bundled-header probe in area 12.
+THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
+is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers,
+and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
+-fno-sanitize-recover=all run natively to completion. Both gates are reference-compiler-only and are
+never applied to bcc, so requirement 3's shared-flag discipline is untouched.
+END
+impl_defined_notes <<END
+This record narrows nothing. All four targets, all three optimization levels and all three
+oracles are enabled, and no expected-divergence marker is attached. These notes exist to
+record how that was achieved, because a program in this area could easily have had to narrow:
+constant evaluation reaches straight into the type system, which is where the four supported
+targets differ.
+THE TWO-VARIANT RULE AND WHY BOTH HALVES ARE NEEDED. Every property is printed twice: once
+from a constant expression, so the answer comes from the constant evaluator, and once from
+volatile-qualified operands, which no implementation may read at translation time, so that
+answer comes from the code generator. The mechanism was verified at instruction level rather
+than assumed: volatile int x = 7; return x * 6; emits a genuine runtime multiply at -O2 where
+the non-volatile form collapses to a single immediate move. Without the runtime half,
+optimization substitutes the folder's answer for the backend's and a code-generation defect
+escapes detection entirely while the suite still reports a pass. With it, a divergent fold_
+line accuses the constant evaluator, a divergent runtime_ line accuses the backend, and a
+pair that disagrees with itself accuses one of the two.
+WIDTH NORMALIZATION. sizeof(long) and sizeof(void *) were MEASURED at 4 bytes on i686 and 8
+bytes on x86-64, AArch64 and RISC-V 64 (docs/technical-specifications.md target table, lines
+457-462), so no plain long, no size_t, no ptrdiff_t and no pointer value is printed anywhere.
+Where the program computes a value too wide for int, that value is written in long long with
+LL-suffixed literals and printed with %lld, which is 64 bits on every enabled target; every
+other integer reaches stdout through %d, with an explicit cast wherever the expression's own
+type is an enumerator, a bitfield, wider or unsigned. No floating value reaches a format string.
+Array bounds are consequently printed as ELEMENT-COUNT RATIOS -- sizeof of the array divided by
+sizeof of its element -- and never as a sizeof in its own right. A ratio is target-invariant
+where a byte count is not, and it is still the constant expression in the bound that determines
+it, so no coverage is given up by the normalization.
+PLAIN-char SIGNEDNESS. Plain char was MEASURED as signed on x86-64 and i686 and unsigned on
+AArch64 and RISC-V 64. No plain-char value is printed and no printed line depends on that
+choice.
+BITFIELD LAYOUT IS DELIBERATELY NOT OBSERVED HERE, AND THAT IS A DECISION RATHER THAN A GAP.
+C11 leaves the assignment of bitfields to allocation units, and whether a field may straddle a
+unit boundary, implementation-defined. This program prints only the VALUES each declared width
+can hold -- never sizeof(struct bits) and never _Alignof of it -- so no layout property reaches
+stdout and no padding bit is ever observed, and the printed result follows from the width the
+constant expression fixed rather than from the layout the ABI chose. The layout claim is owned by
+04_bitfields/001_layout_and_size.c, which prints sizeof and _Alignof for five bitfield structs
+and records that their sizes, alignments and byte images were MEASURED identical on all four
+targets -- as were the read-back values of the sequence used here, including the signed field at
+its minimum, -8 -- so a cross-backend divergence in these lines would be a genuine finding rather
+than an implementation-defined difference. Duplicating area 04's layout assertion here would add
+an implementation-defined layout property to a program whose subject is constant evaluation, and
+no declared width goes untested as a result.
+BITFIELD SIGNEDNESS IS FIXED IN THE SOURCE RATHER THAN INHERITED. A bitfield declared on
+unqualified int has implementation-defined signedness, and this program prints its fields'
+values, so the base types are written as explicitly signed int and unsigned int. The
+zero-width unnamed member between them is the standard separator that ends the current
+allocation unit; it is used for its layout effect only, and no value is printed for it, because
+it has none.
+THE SIZE OF AN ENUMERATED TYPE IS IMPLEMENTATION-DEFINED and is neither asserted nor printed.
+Only the enumerator VALUES appear, and those are fixed by the constant expressions that
+initialize them, which is exactly the property this context is here to test.
+ONE TARGET ASSUMPTION IS RELIED ON, AND IT IS DELIBERATELY LEFT UNASSERTED. The sparse switch
+carries the label (int)sizeof(int) * 1000, so the line sparse_sel4000 exists only because
+sizeof(int) is 4; C11 fixes only a minimum range for int, not its width, and 4 was MEASURED on
+all four supported targets. Wrapping that in a _Static_assert would be the reflex, and it would
+be wrong here: a failed static assertion refuses the whole translation unit and costs every other
+observation in the cell, whereas leaving the fact to the dispatch means a target where int had
+some other width shows up as exactly one differing line -- sparse_sel4000 -- with the other
+fifty-three still compared. The choice is between one informative divergence and fifty-four
+lost ones.
+NOTHING HERE ASSERTS OR OBSERVES THE CODE SHAPE A BACKEND CHOOSES FOR A SWITCH. Label density is
+the property a backend typically consults when it selects a dispatch strategy, and the dense and
+sparse label sets below are written to put both cases in front of it, but which shape it picks --
+a jump table or a comparison chain -- is at its discretion and is a property of the generated code
+rather than of the printed result. The claim under test is that each selector value selects its own
+label and yields its own result, whatever code is emitted and however that code differs between
+targets or between optimization levels.
+WHAT WOULD LEGITIMATELY BREAK THAT, AND HOW IT MUST THEN BE HANDLED. A conforming target with a
+different sizeof(int) would print a different sparse_sel4000 line and a different
+enum_shifted/bound_wide pair without being defective. That is an implementation-defined
+divergence rather than a compiler defect, and it must then be recorded as an expected divergence
+with this record's target list narrowed and the reason stated in this field -- never left to
+surface as a finding against a backend that did nothing wrong, and never resolved by removing the
+sizeof-derived case label, which is one of the constant-expression contexts requirement 2 asks
+this program to cover.
+EXECUTION CHARACTER SET: NOT ENGAGED, VERIFIED RATHER THAN ASSERTED. C11 5.2.1 leaves the
+members of the execution character set and their codes implementation-defined, so a program
+that printed a character's numeric code, or rendered a literal as bytes, would owe an
+accounting here. This one owes none: it contains no character constant at all -- checked
+mechanically, by stripping comments and string literals and finding zero -- and derives no
+printed VALUE from a character. Its only string literals are printf format strings and, where
+it declares any, _Static_assert messages -- the messages consumed by the compiler and never
+emitted, the format strings contributing only fixed label text that is byte-identical in all
+twelve cells of the matrix and in the golden above. There is therefore no code to pin and
+nothing to narrow. That is precisely what distinguishes this program from 004_sizeof_alignof.c
+and 007_string_literal_constants.c in the same area, both of which do print character codes and
+both of which pin every code they print with a _Static_assert for that reason.
+HERMETIC AND DETERMINISTIC. Every input is a literal in the source: nothing is read from the
+clock, the environment, the command line, a file or a socket, and nothing is written anywhere.
+Output is one line per semantic property claimed, in a fixed order, so a single divergent line
+names the construct that produced it. No address or pointer value is printed, there is no
+randomness, no locale-dependent formatting and no data-dependent iteration order, and the
+program returns 0 -- well inside the 0-125 range the suite requires so that no exit status is
+truncated by the operating system.
+MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at
+-O0, -O1 and -O2 -- twelve configurations -- and every one produced these 54 lines
+byte-identically with exit status 0, which is why cross-backend comparison is sound, oracle (b)
+is enabled with no narrowing, and oracle (c) can hold these bytes as the golden record.
+END
+expected_stdout    <<END
+bound_vec=10
+bound_mat_rows=3
+bound_mat_cols=2
+bound_wide=8
+bound_spanned=7
+fold_wide_quotient=8
+fold_wide_shifted=8589934592
+run_bound_vec=10
+run_bound_mat_rows=3
+run_bound_mat_cols=2
+run_bound_wide=8
+run_bound_spanned=7
+run_wide_quotient=8
+run_wide_shifted=8589934592
+vec_ends first=3 last=30
+mat_ends first=10 last=31
+wide_ends first=1 last=8
+spanned_ends first=7 last=49
+dense_sel0 fold=11 run=11
+dense_sel1 fold=15 run=15
+dense_sel2 fold=12 run=12
+dense_sel3 fold=18 run=18
+dense_sel4 fold=13 run=13
+dense_sel5 fold=17 run=17
+dense_default fold=-1 run=-1
+sparse_sel_minus5 fold=20 run=20
+sparse_sel9 fold=21 run=21
+sparse_sel42 fold=22 run=22
+sparse_sel100 fold=23 run=23
+sparse_sel1024 fold=24 run=24
+sparse_sel4000 fold=25 run=25
+sparse_default fold=-1 run=-1
+bits_fixed s=-6 u=21 t=5
+bits_edge_low s=-8 u=0 t=0
+bits_edge_high s=7 u=31 t=7
+run_bits_fixed s=-6 u=21 t=5
+run_bits_edge_low s=-8 u=0 t=0
+run_bits_edge_high s=7 u=31 t=7
+enum_base=5
+enum_derived=20
+enum_masked=17
+enum_negative=-3
+enum_stepped=-2
+enum_span=7
+enum_shifted=16
+run_enum_base=5
+run_enum_derived=20
+run_enum_masked=17
+run_enum_negative=-3
+run_enum_stepped=-2
+run_enum_span=7
+run_enum_shifted=16
+seeds=8 18 7
+run_seeds=8 18 7
+END

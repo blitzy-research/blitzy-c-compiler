@@ -1,6 +1,12 @@
+# Expectation record for 09_optimization_levels/007_struct_copy_invariance.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
 program            = 007_struct_copy_invariance
 area               = 09_optimization_levels
-description        = Aggregate construction, return by value, assignment copy and pass by value unchanged at -O0, -O1 and -O2
+description        = Aggregate construction, return by value, assignment copy and pass by value across all four shapes unchanged at -O0, -O1 and -O2, every parameter member observed inside the consumer
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -12,49 +18,109 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Free of undefined and unspecified behaviour. No signed overflow: the largest value computed
-is sum_large at 249. Every member of every aggregate is assigned before it is read:
+Free of undefined and unspecified behaviour. No signed overflow: the largest integer value
+computed is sum_large at 249. Every member of every aggregate is assigned before it is read:
 make_small sets both members, make_boundary all four, make_mixed both, and make_large
 initializes checksum to zero, then writes all eight elements of v and sets flag, so no
 member is ever read uninitialized. Array indices run from 0 to 7 on an eight-element array,
 strictly in bounds. No padding byte is ever read, printed or compared: only named members
 are accessed, no struct is compared with memcmp, and no object representation is inspected.
 No shift, no division, no pointer arithmetic, no aliasing violation, and no struct is
-accessed through a pointer of a different type. No object is modified twice between sequence
-points, and the sum_small, sum_boundary and sum_large arguments are pure, so no printf
-argument expression has a side effect. No dependence on relative addresses.
+accessed through a pointer of a different type. The only floating-point arithmetic is
+sum_mixed's (double)s.tag + s.value: 5 converts to double exactly, 6.75 is exactly
+representable, and their sum 11.75 is exact, so the conversion is value-preserving and no
+result is ever outside its destination type's range. No object is modified twice between
+sequence points. Each of the four by-value consumers prints the members it received, so
+every consumer call is a statement of its own whose result is stored in a local before it is
+printed; no printf argument expression has a side effect anywhere in the program, and the
+order of the printed lines is fixed by statement order rather than by an unspecified
+argument evaluation order. No dependence on relative addresses.
 Several volatile objects are read within a single expression; their relative order is
 unspecified, but no volatile object is modified anywhere in the program, so every read of a
 given object yields the same value and the printed output does not depend on the ordering.
 END
 impl_defined_notes <<END
-No implementation-defined behaviour is observed. Widths are normalized: only int and double
-are used, both of fixed width on all four targets, and long is never used because sizeof(long)
-is 4 on i686 and 8 on the other three targets. long double is deliberately avoided because
-its representation was measured at 16, 12, 16 and 16 bytes across the four targets; that
+No implementation-defined behaviour is observed. Member widths are normalized: only int and
+double are used, both of fixed width on all four targets, and long is never used because
+sizeof(long) is 4 on i686 and 8 on the other three targets. Normalizing the member widths does
+not normalize aggregate layout, and nothing here assumes it does: padding and alignment remain
+each ABI's decision, which is why no aggregate size, alignment or padding byte is observed at
+all. long double is deliberately avoided because its representation was measured at 16, 12,
+16 and 16 bytes across the four targets; that
 hazard belongs to the floating-point area, not here. Plain char is not used, so the measured
 plain-char signedness difference (signed on x86-64 and i686, unsigned on AArch64 and RISC-V
 64) cannot be observed. No address, pointer value, sizeof, _Alignof or offsetof result is
 printed, and no padding byte is observed, so the differing aggregate layouts and alignment
-rules of the four ABIs have no observable effect. The double value 6.75 is exactly
-representable in binary floating point and is printed with %.3f, fixed precision with margin,
-which was measured byte-identical across all twelve target and optimization configurations.
-The aggregates deliberately straddle each target's by-register versus by-memory threshold:
-small at 8 bytes, boundary at exactly 16 bytes, mixed at 16 bytes spanning two register
-classes, and large at 40 bytes passed in memory everywhere. i686 passes every aggregate on
-the stack while the other three targets use a 16-byte threshold, and how each compiler
-implements an aggregate copy, whether by register moves, a memcpy equivalent or field by
-field, is at its discretion. None of that is observable; only the printed member values are.
+rules of the four ABIs have no observable effect. The double value 6.75 and its by-value
+reduction 11.75 are both exactly representable in binary floating point and are printed with
+%.3f, fixed precision with margin, which was measured byte-identical across all twelve target
+and optimization configurations.
+The aggregates deliberately straddle each target's by-register versus by-memory threshold, and
+the four ABIs draw that threshold in four different places. The sizes and alignments were
+MEASURED on all four targets with the four reference drivers rather than assumed, because
+three of the four aggregates are target-invariant and one is not:
+  struct small      8 bytes,  alignment 4, on all four targets
+  struct boundary  16 bytes,  alignment 4, on all four targets
+  struct mixed     16 bytes / alignment 8 on x86-64, AArch64 and RISC-V 64, double at offset 8,
+                   but 12 bytes / alignment 4 on i686, double at offset 4
+  struct large     40 bytes,  alignment 4, on all four targets
+struct mixed is the interesting one precisely because it differs: it is an int followed by a
+double, so its size depends on the alignment the ABI gives a double -- 8 bytes on the three
+LP64 targets, which forces four bytes of padding after the int, and 4 bytes on i686, which
+forces none. So mixed straddles the 16-byte boundary on three targets and sits well inside it
+on the fourth, which is precisely why it belongs in this program.
+How each target passes and returns those aggregates was verified by reading the reference
+compiler's generated assembly on each of the four, not assumed from the sizes:
+  x86_64  -- passes small in one general register and boundary in two; passes mixed in one
+             general register plus one SSE register, so it spans two register classes; passes
+             large by copying it onto the caller's stack. Returns small in one register and
+             boundary in two, and returns large through a hidden destination pointer in the
+             first argument register, which displaces the real first argument to the second.
+  i686    -- passes EVERY aggregate on the stack, including the 8-byte small, and returns
+             EVERY aggregate through a hidden destination pointer that the callee pops on
+             return, including the 8-byte small. Its threshold is therefore zero, not 16
+             bytes, in both directions.
+  aarch64 -- passes small in one general register and boundary in two; passes mixed in two
+             GENERAL registers rather than a general plus a floating-point one, because a
+             struct of an int and a double is not a homogeneous floating-point aggregate;
+             passes large as a pointer to a copy the caller allocates. Returns small in one
+             register and boundary in two, and returns large through the dedicated indirect
+             result register, which leaves the real arguments where they were.
+  riscv64 -- passes small in one general register and boundary in two; passes mixed in one
+             general register plus one floating-point register under the rule that flattens a
+             two-field struct with a floating-point member; passes large as a pointer to a
+             caller-allocated copy. Returns small in one register and boundary in two, and
+             returns large through a hidden destination pointer in the first argument register.
+THE i686 SIZE AND ALIGNMENT DIFFERENCE IS AN IMPLEMENTATION-DEFINED LAYOUT DIFFERENCE, NOT A
+DEFECT, and it is invisible here by construction: no sizeof, _Alignof or offsetof result is
+printed, no padding byte is read, and every aggregate is observed only through its named
+members. Had the program printed a size, this record would have needed a restricted target
+list; because it does not, all four targets stay comparable and the difference is recorded
+rather than avoided.
+ALL FOUR SHAPES ARE PASSED BY VALUE as well as constructed, returned and copied, so mixed
+exercises the integer-plus-floating register-class split on the ARGUMENT path and not only on
+the return path, and every member that crossed that boundary is printed from inside the
+consumer that received it.
+None of the rest is observable from this program's output either, which is the point: the four
+conventions differ in threshold, in mechanism and in which register class each half of mixed
+lands in, and the printed member values must still be identical across all four. How each
+compiler implements the copy itself -- register moves, a memcpy equivalent, or field by field
+-- is likewise at its discretion and equally unobservable. Only the printed member values
+are compared, and no size, alignment, offset or address is printed at all.
 END
 expected_stdout    <<END
 small a=5 b=10
 small_copy a=5 b=10
+small_param a=5 b=10
 small_byvalue=15
 boundary a=5 b=6 c=7 d=8
 boundary_copy a=5 b=6 c=7 d=8
+boundary_param a=5 b=6 c=7 d=8
 boundary_byvalue=26
 mixed tag=5 value=6.750
 mixed_copy tag=5 value=6.750
+mixed_param tag=5 value=6.750
+mixed_byvalue=11.750
 large v[0]=5 copy_v[0]=5
 large v[1]=8 copy_v[1]=8
 large v[2]=11 copy_v[2]=11
@@ -65,5 +131,14 @@ large v[6]=23 copy_v[6]=23
 large v[7]=26 copy_v[7]=26
 large checksum=124 flag=1
 large_copy checksum=124 flag=1
+large_param v[0]=5
+large_param v[1]=8
+large_param v[2]=11
+large_param v[3]=14
+large_param v[4]=17
+large_param v[5]=20
+large_param v[6]=23
+large_param v[7]=26
+large_param checksum=124 flag=1
 large_byvalue=249
 END

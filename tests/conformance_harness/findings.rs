@@ -2013,6 +2013,18 @@ const VAR_WORK_OWNED: &str = "WORK_OWNED";
 /// guard that will eventually be written out four times.
 const SH_REFUSE_EXISTING: &str = "refuse_existing";
 
+/// The shell function the script defines to remove a scratch directory it created.
+///
+/// Named rather than repeated inline because four traps share it, and because separating the
+/// *removal* from the *disposition of a signal* is what makes the signal handling correct. A single
+/// `trap '<remove>' EXIT HUP INT TERM` looks tidier and is wrong: on a signal the handler runs,
+/// returns, and the shell **resumes at the next command** with the scratch directory already gone,
+/// so every later redirection writes into a path that no longer exists and the script carries on
+/// after the reader asked it to stop. Removal therefore sits on `EXIT`, and each signal handler
+/// removes, restores the signal's default disposition and re-raises it at this shell, so the script
+/// dies from the signal and its caller sees the conventional `128 + signal` status.
+const SH_CLEANUP: &str = "repro_cleanup";
+
 /// Shell variable holding the directory the script itself lives in, so the reproducer beside it can
 /// be found however the script was invoked.
 const VAR_FINDING_DIR: &str = "FINDING_DIR";
@@ -2518,9 +2530,13 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
 /// # Cleanup
 ///
 /// A directory the script created is removed on `EXIT`, and on `HUP`, `INT` and `TERM` so an
-/// interrupted reproduction does not leave one behind either. The guard is the ownership flag rather
-/// than the mere presence of `WORK`, so a caller's directory is never removed however the script
-/// ends, and the removal additionally re-tests that the path is non-empty before running `rm -rf`.
+/// interrupted reproduction does not leave one behind either — but the two cases are handled
+/// differently on purpose, for the reason given on [`SH_CLEANUP`]: `EXIT` carries the removal, while
+/// each signal handler removes, restores that signal's default disposition and re-raises it, so an
+/// interrupted script **dies from the signal** instead of resuming with its scratch directory
+/// already deleted. The guard is the ownership flag rather than the mere presence of `WORK`, so a
+/// caller's directory is never removed however the script ends, and the removal additionally
+/// re-tests that the path is non-empty before running `rm -rf`.
 /// Setting `REPRO_KEEP` keeps it, which is how a reader inspects the captured streams after the
 /// script has finished; the path is printed either way, so it can be found without reading the source
 /// of the script.
@@ -2542,6 +2558,24 @@ fn render_scratch_setup() -> String {
     text.push_str("            exit 1\n");
     text.push_str("        fi\n");
     text.push_str("    done\n");
+    text.push_str("}\n\n");
+
+    text.push_str(&comment(&format!(
+        "{SH_CLEANUP} removes a scratch directory this script created, and only such a directory: \
+         the guard is the ownership flag rather than the mere presence of {VAR_WORK}, so a directory \
+         you supplied is never removed, and {VAR_KEEP} suppresses the removal entirely. It is a \
+         function because the traps below share it: removal is installed on EXIT, while each signal \
+         handler removes, restores that signal's default disposition and re-raises it, so an \
+         interrupted script dies from the signal instead of resuming with its scratch directory \
+         already deleted."
+    )));
+    text.push_str(&format!("{SH_CLEANUP}() {{\n"));
+    text.push_str(&format!(
+        "    if [ \"${{{VAR_WORK_OWNED}:-0}}\" = 1 ] && [ -z \"${{{VAR_KEEP}:-}}\" ] && \
+         [ -n \"${{{VAR_WORK}:-}}\" ]; then\n"
+    ));
+    text.push_str(&format!("        rm -rf -- \"${VAR_WORK}\"\n"));
+    text.push_str("    fi\n");
     text.push_str("}\n\n");
 
     text.push_str(&comment(&format!(
@@ -2581,10 +2615,12 @@ fn render_scratch_setup() -> String {
     text.push_str("        exit 1\n");
     text.push_str("    fi\n");
     text.push_str(&format!("    {VAR_WORK_OWNED}=1\n"));
-    text.push_str(&format!(
-        "    trap 'if [ \"${{{VAR_WORK_OWNED}:-0}}\" = 1 ] && [ -z \"${{{VAR_KEEP}:-}}\" ] && \
-         [ -n \"${{{VAR_WORK}:-}}\" ]; then rm -rf -- \"${VAR_WORK}\"; fi' EXIT HUP INT TERM\n"
-    ));
+    text.push_str(&format!("    trap {SH_CLEANUP} EXIT\n"));
+    for signal in ["HUP", "INT", "TERM"] {
+        text.push_str(&format!(
+            "    trap '{SH_CLEANUP}; trap - {signal}; kill -{signal} $$' {signal}\n"
+        ));
+    }
     text.push_str("fi\n");
     text.push_str(&format!(
         "printf 'scratch directory: %s\\n' \"${VAR_WORK}\"\n"

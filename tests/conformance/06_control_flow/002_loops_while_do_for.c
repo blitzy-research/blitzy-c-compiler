@@ -1,5 +1,14 @@
-/* Every loop bound is read from volatile storage, so no iteration count below is
- * available for compile-time substitution. */
+/* Nearly every loop bound is read from volatile storage, so those iteration
+ * counts are not available for compile-time substitution.  Two loops are
+ * deliberate exceptions and are named here rather than left to be discovered:
+ * the for(;;) loop has no controlling expression at all and is left by an
+ * unconditional break once its counter reaches 4, which is the construct under
+ * test there; and the outer for of the nested do-while runs a fixed three
+ * iterations so that it can drive the INNER bound through volatile storage,
+ * which is where that pair's discrimination lives.  Both are free to be
+ * unrolled, folded or eliminated entirely -- this suite compares stdout bytes
+ * and exit status, never generated code, so neither loop needs to survive
+ * translation for its line to be checked. */
 
 int printf(const char *, ...);
 

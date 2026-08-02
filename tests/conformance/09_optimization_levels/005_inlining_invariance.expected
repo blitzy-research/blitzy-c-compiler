@@ -39,12 +39,12 @@ which is 32 bits on all four targets, and long is never used because sizeof(long
 i686 and 8 on the other three targets. Plain char is not used, so the measured plain-char
 signedness difference (signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64) cannot
 be observed. No address, pointer value, function pointer, sizeof or _Alignof result is
-printed. No floating point is used. Arguments are sourced from volatile storage so the calls
-are genuinely materialized at -O0, which exercises each target's calling convention: System V
-AMD64 on x86-64, cdecl with all arguments on the stack on i686, AAPCS64 on AArch64 and LP64D
-on RISC-V 64. Whether the reference compiler inlines those calls at -O1 or -O2 while bcc
-emits real calls at every level is a code-generation difference with no observable effect,
-so the printed values are identical on every target at every level.
+printed. No floating point is used. Arguments are sourced from volatile storage, so a compiler
+may not substitute them at translation time and each call has real operands to pass, which
+exercises each target's calling convention: System V AMD64 on x86-64, cdecl with all arguments
+on the stack on i686, AAPCS64 on AArch64 and LP64D on RISC-V 64. Whether either compiler
+inlines a given call at a given level, and at which levels, is its own decision and has no
+observable effect, so the printed values are identical on every target at every level.
 END
 expected_stdout    <<END
 add3=24

@@ -19,23 +19,16 @@
  * side-effecting left operand is exactly what makes the sequence point observable,
  * and observable sequencing is the interesting property of the comma operator.
  *
- * Undefined-behaviour freedom.  Every side effect is separated from the next by a
- * sequence point - the comma operator supplies one between its operands, and the
- * conditional operator supplies one after its controlling expression - so no object
- * is modified twice between sequence points and nothing depends on unspecified
- * evaluation order.  No call receives more than one side-effecting argument: each
- * volatile counter is copied into a plain local in its own statement before it is
- * printed.  All signed arithmetic stays far inside the range of its type; the one
- * unsigned subtraction is modular by definition and is not overflow.  There is no
- * shift, no pointer arithmetic, no type punning and no read of uninitialized
- * storage: the one array has static storage duration and is only ever measured,
- * never read.  This program names no header at all and declares printf by hand, so
- * nothing here depends on a standard-library header bcc does not ship.
- *
- * Determinism.  The output is a fixed sequence of lines, one per property claimed,
- * printed with %d for int and %lld for long long and nothing else.  No address, no
- * plain char, no plain long and no floating-point value is printed, so no line
- * varies with a target's pointer width, char signedness or long width.
+ * Freedom from undefined behaviour rests on sequencing here, which is worth stating
+ * because sequencing is also the subject: the comma operator supplies a sequence
+ * point between its operands and the conditional operator supplies one after its
+ * controlling expression, so no object is modified twice between sequence points and
+ * nothing depends on unspecified evaluation order.  No call receives more than one
+ * side-effecting argument -- each volatile counter is copied into a plain local in
+ * its own statement before being printed.  All signed arithmetic stays far inside
+ * range, and the one unsigned subtraction is modular by definition rather than
+ * overflow.  The undefined-behaviour argument in full, and the recorded command
+ * lines, live in the sibling .expected record.
  */
 
 int printf(const char *, ...);

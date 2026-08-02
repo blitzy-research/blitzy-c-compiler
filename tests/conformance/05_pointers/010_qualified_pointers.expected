@@ -1,3 +1,9 @@
+# Expectation record for 05_pointers/010_qualified_pointers.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
 program            = 010_qualified_pointers
 area               = 05_pointers
 description        = const and volatile qualified pointers and qualified pointed-to types, with volatile reads forcing genuine loads

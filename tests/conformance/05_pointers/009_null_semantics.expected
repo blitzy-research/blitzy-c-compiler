@@ -1,3 +1,9 @@
+# Expectation record for 05_pointers/009_null_semantics.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
 program            = 009_null_semantics
 area               = 05_pointers
 description        = Null pointer constant forms, comparison, truth value and conversion, using 0 and (void *)0 only
@@ -32,12 +38,10 @@ impl_defined_notes <<END
 Nothing about the null pointer's representation is printed or relied upon: only equality
 results, truth values and conversion results appear in the output, so an implementation
 whose null pointer is not all-zero bits would produce identical text.
-No address or pointer value is printed. Pointer facts appear only as differences,
-comparisons and alignment residues, and every pointer difference is cast to long long
-before printing, so the printed text is identical whether ptrdiff_t is 32 or 64 bits.
-Plain char is never printed in a signedness-dependent way. The only conversion
-specifiers used anywhere in this program are %d, %lld and fixed-precision %.3f, all of
-which are target-width independent.
+No address or pointer value is printed, and no pointer difference is formed anywhere in this
+program, so ptrdiff_t width cannot reach the output at all. Plain char is never printed in a
+signedness-dependent way. The only conversion specifiers this program uses are %d and
+fixed-precision %.3f, both of which are target-width independent.
 END
 expected_stdout    <<END
 zero_form_is_null=1

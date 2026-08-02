@@ -14,25 +14,24 @@
    which makes the terminator's presence or absence a single-line difference
    between two otherwise identical groups.
 
-   Plain char is never printed as itself.  Its signedness is implementation
-   defined and was measured signed on x86_64 and i686 but unsigned on aarch64
-   and riscv64, so a plain-char value would diverge across backends for a reason
-   that is not a compiler defect, which would destroy the oracle.  Two
-   mechanisms are therefore applied together: every array the requirement names
-   is spelled unsigned char or signed char and read back through (int), whose
-   value is unambiguous by declaration; and every plain-char object, plus the
-   const char * dereference, is read back through (int)(unsigned char), which
-   the dump_plain helper exists solely to centralise.  Each cast is a value
-   conversion of an already-loaded character, never pointer punning.  Every
-   literal here is US-ASCII, so in practice the two spellings agree -- the cast
-   is applied unconditionally anyway, so the rule holds by construction and
-   cannot be broken by a later edit that introduces a high-bit character.
+   Plain char is never printed as itself, because its signedness is
+   implementation defined.  Two mechanisms are applied together: every array the
+   requirement names is spelled unsigned char or signed char and read back
+   through (int), whose value is unambiguous by declaration; and every
+   plain-char object, plus the const char * dereference, is read back through
+   (int)(unsigned char), which the dump_plain helper exists solely to
+   centralise.  Each cast is a value conversion of an already-loaded character,
+   never pointer punning.  Every literal here is US-ASCII, so in practice the
+   two spellings agree -- the cast is applied unconditionally anyway, so the
+   rule holds by construction and cannot be broken by a later edit that
+   introduces a high-bit character.
 
-   Every printed value is an int, printed with %d.  Each sizeof is taken of a
-   character array, so its value is a count of bytes and is identical on all
-   four targets; sizeof is deliberately never taken of g_ptr, whose width
-   differs between the targets.  No hosted header is used: the compiler under
-   test ships only freestanding headers, so printf is declared by hand. */
+   Every printed value is an int, printed with %d, and each sizeof is taken of a
+   character array, so its value is a byte count identical on all four targets;
+   sizeof is deliberately never taken of g_ptr.  No header is named: bcc ships
+   no stdio.h, its bundled set being the nine required freestanding headers plus
+   a bonus stdatomic.h, ten files in all (docs/project-guide.md line 212), so
+   printf is declared by hand. */
 int printf(const char *, ...);
 
 /* Exact width, no room for a terminator: g_exact_u, g_exact_s, g_grid_exact.
@@ -55,6 +54,23 @@ static char          g_grid_exact[2][5] = { "hello", "world" };
 static char          g_grid_room[2][6]  = { "hello", "world" };
 static unsigned char g_desig[6]    = { [0] = 'a', [2] = 'c' };
 static const char   *g_ptr         = "lit";
+
+/* EXECUTION CHARACTER SET, pinned rather than assumed.  This program prints the numeric
+ * codes of the characters in its literals, and C11 5.2.1 leaves those values to the
+ * implementation: nothing in the standard says 'a' is 97.  All four supported targets were
+ * measured to use ASCII, and the two assertions below pin exactly the characters this
+ * program depends on, so an implementation with a different execution character set fails
+ * to TRANSLATE rather than printing different numbers that an oracle would then have to
+ * attribute to a compiler defect.  The two numeric escapes in g_escapes need no assertion:
+ * C11 6.4.4.4p7 fixes \\x41 and \\102 at 65 and 66 by their numeric value regardless of
+ * charset, which is precisely why they are spelled numerically.  The simple escape \\n does
+ * need one, because 6.4.4.4p4 gives it a charset-dependent value. */
+_Static_assert('a' == 97 && 'b' == 98 && 'c' == 99 && 'd' == 100 && 'e' == 101
+                   && 'h' == 104 && 'i' == 105 && 'l' == 108 && 'o' == 111
+                   && 'r' == 114 && 't' == 116 && 'w' == 119 && 'x' == 120
+                   && 'y' == 121 && 'z' == 122,
+               "every letter this program prints sits at its ASCII code");
+_Static_assert('\n' == 10, "the simple escape \\n is the ASCII line feed");
 
 /* Each helper reads exactly n elements, and every call below passes the
    declared element count, so an exact-width array is never read past its last
@@ -88,8 +104,8 @@ static void dump_plain(const char *name, const char *a, int n)
 int main(void)
 {
     /* Automatic-duration twins of the static cases: the same two forms, but
-       initialized by emitted code at run time rather than into a data section
-       at translation time. */
+       performed on entry to the block at run time rather than settled at
+       translation time. */
     unsigned char l_exact_u[3] = "def";
     char          l_room[4]    = "gh";
     int i;

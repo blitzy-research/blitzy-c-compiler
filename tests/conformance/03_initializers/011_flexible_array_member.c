@@ -8,18 +8,22 @@
  * allocation is performed at all.  The storage is therefore an
  * allocated-equivalent STATIC object.
  *
- * Two techniques were probed against the mandatory strict gate and the result
- * eliminated one of them outright, so the choice below is measured rather than
- * stylistic:
+ * Direct initialization -- static struct fam d = { 3, {1,2,3} }; -- is not
+ * available either: initializing a flexible array member is a compiler extension
+ * rather than standard C, and the mandatory -pedantic -Werror gate exists precisely
+ * to reject one, with no deviation sanctioned for this area.  The exclusion is
+ * scoped to that one SPELLING of the initializer and rests on the plan rather than
+ * on difficulty: this program's entry prescribes access through allocated-equivalent
+ * static storage and assigns GNU extensions to the 08_gcc_extensions area, and the
+ * reason is recorded in this program's expectation record.  It costs no coverage of
+ * the FEATURE -- declaration, the sizeof contribution, access through the incomplete
+ * type across a function boundary, and mutation through both union arms are all
+ * exercised below, at both storage durations.
  *
- *   - Direct initialization -- static struct fam d = { 3, {1,2,3} }; -- is
- *     REJECTED: "error: initialization of a flexible array member" under
- *     -Werror=pedantic.  Initializing a flexible array member is a compiler
- *     extension, not standard C, and -pedantic exists precisely to reject one.
- *     No gate deviation is sanctioned for this area, so this technique is out.
- *   - A file-scope union pairing the flexible-array struct with a same-prefix
- *     SIZED struct is accepted, and is gate-clean at -O0, -O1 and -O2 as well as
- *     sanitizer-clean.  That is what appears below.
+ * The storage is therefore spelled as a union pairing the flexible-array struct with
+ * a same-prefix SIZED struct, which is gate-clean at -O0, -O1 and -O2 and
+ * sanitizer-clean, and which appears once at file scope and once at block scope so
+ * that the data-section image and the emitted-store path are both covered.
  *
  * The union is also the better answer on its own merits, not merely the one that
  * compiles.  A bare "static int backing[N]" cast to "struct fam *" would be a
@@ -31,18 +35,16 @@
  * same element type, so every access reads or writes storage last written through
  * an lvalue of that same type.
  *
- * Portability: every value is int and every conversion is printed with %d, so
- * nothing here depends on a type whose width was measured to differ between i686
- * and the three 64-bit targets, and sizeof is never applied to a pointer.  Both
- * sizeof results are cast to int before reaching the variadic call, so no wider
- * type is passed.  int is 4 bytes and 4-byte aligned on all four targets, hence
- * no padding sits between count and data in either union arm and both printed
- * sizes are target-invariant: sizeof(struct fam) is 4, because the flexible array
- * member adds nothing, and sizeof(union fam_storage) is 4 + 8*4 = 36.  No object
- * representation is inspected and nothing is read byte by byte, so neither
- * padding nor endianness can influence the output, and no address is ever
- * printed -- the two views are reached only through int-typed lvalues at
- * identical offsets.
+ * Every value is int and every conversion is printed with %d, sizeof is never
+ * applied to a pointer, and both sizeof results are cast to int before reaching the
+ * variadic call, so no target-varying width reaches the output.  Because int is 4
+ * bytes and 4-byte aligned on all four targets, no padding sits between count and
+ * data in either union arm and both printed sizes follow by derivation:
+ * sizeof(struct fam) is 4, the flexible array member adding nothing, and
+ * sizeof(union fam_storage) is 4 + 8*4 = 36.  No object representation is inspected
+ * and nothing is read byte by byte, so neither padding nor endianness can influence
+ * the output, and no address is ever printed -- the two views are reached only
+ * through int-typed lvalues at identical offsets.
  */
 
 int printf(const char *, ...);
@@ -77,6 +79,14 @@ static int sum_prefix(const struct fam *p)
 int main(void)
 {
     struct fam *p = &g_store.flex;
+    /* Automatic-duration twin of the same technique: identical union, identical
+     * designated initializer, but materialized by emitted stores on entry to this block
+     * rather than as a data-section image.  A compiler can get the static image right
+     * and the run-time stores wrong, so both paths are held side by side. */
+    union fam_storage l_store = {
+        .sized = { 4, { 11, 22, 33, 44, 0, 0, 0, 0 } }
+    };
+    struct fam *lp = &l_store.flex;
     int i;
 
     /* Read-back phase: the prefix was written through the sized arm by the
@@ -105,5 +115,22 @@ int main(void)
         printf("after[%d]=%d\n", i, g_store.flex.data[i]);
     }
     printf("after_sum=%d\n", sum_prefix(&g_store.flex));
+
+    /* The automatic twin, read back and mutated through the same two arms.  Its highest
+     * touched index is 4 against a capacity of 8, and its largest printed value is 121,
+     * so every access is in bounds and no overflow is reachable. */
+    printf("l_count=%d\n", lp->count);
+    for (i = 0; i < lp->count; i++) {
+        printf("l_data[%d]=%d\n", i, lp->data[i]);
+    }
+    printf("l_sum=%d\n", sum_prefix(lp));
+    l_store.flex.data[1] = 99;
+    l_store.flex.count = 5;
+    l_store.flex.data[4] = 55;
+    printf("l_after_count=%d\n", l_store.flex.count);
+    for (i = 0; i < l_store.flex.count; i++) {
+        printf("l_after[%d]=%d\n", i, l_store.flex.data[i]);
+    }
+    printf("l_after_sum=%d\n", sum_prefix(&l_store.flex));
     return 0;
 }

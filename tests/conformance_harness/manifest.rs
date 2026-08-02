@@ -2679,9 +2679,9 @@ fn parse_ub_audit_flags(origin: &Path, raw: &RawField, area: &str) -> HarnessRes
                 "the deviation drops {}, which no program may drop. Only {} are authorized \
                  removals — strict-conformance diagnostics, for the supported-extension area, \
                  where an extension is non-standard by definition and that diagnostic exists \
-                 precisely to reject one; and the conversion diagnostics, for the deliberate \
-                 narrowing programs, where a narrowing conversion is the behaviour under test \
-                 rather than a mistake. Every other member is non-negotiable",
+                 precisely to reject one; and the conversion diagnostics, for the corpus's one \
+                 deliberate narrowing-conversion program, where a narrowing conversion is the \
+                 behaviour under test rather than a mistake. Every other member is non-negotiable",
                 comma_separated(&unauthorized),
                 comma_separated(UB_AUDIT_GATE_REMOVABLE)
             ),

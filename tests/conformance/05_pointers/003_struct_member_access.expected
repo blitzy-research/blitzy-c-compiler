@@ -1,3 +1,9 @@
+# Expectation record for 05_pointers/003_struct_member_access.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
 program            = 003_struct_member_access
 area               = 05_pointers
 description        = Member access through pointers including nested members, array members and a self-referential list
@@ -29,12 +35,12 @@ impl_defined_notes <<END
 No member offset and no struct size is printed, so struct layout differences could not
 affect the output even if they existed; only member VALUES and element-count differences
 are printed.
-No address or pointer value is printed. Pointer facts appear only as differences,
-comparisons and alignment residues, and every pointer difference is cast to long long
-before printing, so the printed text is identical whether ptrdiff_t is 32 or 64 bits.
-Plain char is never printed in a signedness-dependent way. The only conversion
-specifiers used anywhere in this program are %d, %lld and fixed-precision %.3f, all of
-which are target-width independent.
+No address or pointer value is printed: pointer facts reach the output only as equality
+comparison results and as element-count differences, and every one of those differences is
+cast to long long before printing, so a 32-bit ptrdiff_t on i686 and a 64-bit ptrdiff_t
+elsewhere render identically. Plain char is never printed in a signedness-dependent way.
+The only conversion specifiers this program uses are %d and %lld, both of which are
+target-width independent.
 END
 expected_stdout    <<END
 arrow_id=7

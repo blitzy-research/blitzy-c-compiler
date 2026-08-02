@@ -1,0 +1,187 @@
+# Expectation record for 03_initializers/011_flexible_array_member.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 011_flexible_array_member
+area               = 03_initializers
+description        = Flexible array member declaration, sizing and access through allocated-equivalent storage at BOTH storage durations: a union pairing the incomplete-array struct with a same-prefix sized struct, instantiated once as a file-scope static image and once as an automatic twin inside main, each read back across a function boundary that knows only the incomplete type, then mutated in place through the flexible arm
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined and no unspecified behaviour, which is the precondition both
+differential oracles rest on: undefined behaviour would license either compiler to do anything at
+all, so a divergence between two compilers over it would prove nothing about either one. The storage
+technique below was chosen precisely to keep that true.
+THE USUAL HEAP IDIOM IS UNAVAILABLE, AND ITS ABSENCE COSTS NO COVERAGE. Populating a flexible array
+member is normally done with an allocation sized as the fixed header plus n elements; here no header
+may be included, so no allocator is even declared, and the suite is hermetic, so no dynamic
+allocation is performed at all. The storage is an allocated-equivalent object instead -- once with
+STATIC storage duration at file scope and once with AUTOMATIC storage duration inside main -- and
+both exercise the same access paths.
+ALIASING IS THE HAZARD IN THIS CONSTRUCT, AND IT IS MADE LEGAL BY CONSTRUCTION RATHER THAN BY HOPE.
+A bare `static int backing[N]` cast to `struct fam *` WOULD be a strict-aliasing violation -- the
+storage would be written as an int array and read through an unrelated struct type -- so that
+spelling is not used. Instead both types are members of the SAME union: C11 6.5.2.3p6 permits
+inspecting the common initial sequence of structures that share a union, which here is the leading
+`int count`, and the two data arrays begin at the same offset with the same element type, so every
+access reads or writes storage last written through an lvalue of that same type. No pointer cast
+appears anywhere in the program.
+The flexible array member itself contributes nothing to sizeof the struct (C11 6.7.2.1p18), which is
+asserted directly rather than relied on silently: sizeof_struct_fam is printed and must read 4.
+EVERY SUBSCRIPT IS IN BOUNDS, AND EVERY BOUND IS DERIVED FROM THE OBJECT RATHER THAN ASSUMED.
+The sized arm provides FAM_CAP == 8 elements in both unions, and sum_prefix loops to p->count, taking
+the element count from the object itself across a function boundary at which the callee knows only
+the incomplete type. The static object's count is only ever 5 then 6 and the highest index it touches
+is 5; the automatic object's count is only ever 4 then 5 and the highest index it touches is 4. All
+four counts are strictly below the capacity, so no access reaches past the backing array, no
+one-past-the-end pointer is formed or dereferenced, and no pointer arithmetic leaves its object. `p`
+designates the file-scope object, which lives for the whole run, and `lp` designates the automatic
+object, which is read only inside main where it is alive, so neither pointer is ever dangling.
+NO UNINITIALIZED STORAGE IS READ, at either storage duration. Both unions carry a designated
+initializer for their sized arm, so every element of that arm is determinate -- the live values plus
+the explicit trailing zeros -- and a member or element an initializer had omitted would be zeroed in
+any case, for automatic and static duration alike (C11 6.7.9p19 and p21). The static object is
+additionally covered by C11 6.7.9p10, which defines a static-duration object without an initializer as
+zero, but the automatic twin does not rely on any such pre-zeroing: its whole image is established by
+emitted stores on entry to the block, which is the very difference the twin exists to test. In each
+half, the one slot the mutation phase newly brings inside the count -- index 5 in the static object and
+index 4 in the automatic one -- is written before it is read.
+No signed overflow is possible: the largest printed value is 2133 and the largest element is 600,
+while INT_MAX is at least 2147483647 on every conforming target. There is no shift, no division, no
+remainder and no integer-to-pointer conversion anywhere in the program.
+No object is modified twice between two sequence points. Each mutation phase is three separate
+statements -- one element rewritten in place, the count grown by one, one previously zero slot filled
+-- and `total += p->data[i];` inside sum_prefix is a statement of its own. Every printf call receives
+at most one loop counter and one already-computed value, so the unspecified order in which a function
+call's arguments are evaluated cannot be observed.
+No object representation is inspected and nothing is read byte by byte, so neither padding nor byte
+order can influence the output, and no address is printed -- the two views are reached only through
+int-typed lvalues at identical offsets. Nothing depends on the relative addresses of unrelated
+objects: no pointer difference is taken and no two addresses are compared.
+Every conversion specifier is %d and every corresponding argument has type int after the default
+argument promotions -- including both sizeof results, each cast to int before reaching the variadic
+call so that no wider type and no size_t is passed -- so no variadic argument is read at the wrong
+width.
+main returns 0, inside the 0-125 range the suite requires so that no exit status is truncated by the
+operating system. Every input is a literal in this file: nothing is read from the environment, the
+clock, the file system or the network, and iteration order is fixed by counts the program itself
+printed, so every cell is reproducible from this source and this record alone.
+No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
+bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no standard
+I/O header (docs/project-guide.md line 212), so naming one would fail on the bcc side of oracle (a)
+while succeeding on the reference side -- a spurious divergence caused by the test rather than by a
+compiler. This area is granted no header exception; the corpus has exactly two, area 07's stdarg.h
+and the dedicated bundled-header probe in area 12.
+This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
+under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
+-Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under the
+sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
+END
+impl_defined_notes <<END
+This record narrows one SPELLING of the initializer, and records the reason below as the suite
+requires, but it narrows no target, no optimization level and no oracle, it carries no
+expected-divergence marker, and no `ub_audit_flags` key appears because the program passes the
+suite's full default warning gate unmodified.
+ONE SPELLING OF THIS CONSTRUCT IS EXCLUDED, NARROWLY AND ON AN EXPLICIT PLAN BASIS RATHER THAN ON
+DIFFICULTY. Direct initialization -- `static struct fam d = { 3, {1,2,3} };` -- was probed against
+the mandatory strict gate in this environment and REJECTED with "error: initialization of a flexible
+array member" under -Werror=pedantic. Unlike every other gate interaction in this feature area, this
+one is NOT a style diagnostic reporting a well-defined construct: initializing a flexible array
+member is a GNU EXTENSION rather than standard C, which is exactly why -pedantic -- whose entire
+purpose is to reject extensions -- diagnoses it. It is the one place in this area where the gate is
+reporting a real portability fact.
+THE BASIS FOR EXCLUDING IT is the plan's own specification for this program, which PRESCRIBES the
+technique to use, naming "flexible array member declaration, sizing, and access through
+allocated-equivalent static storage", and which assigns GNU extensions to the 08_gcc_extensions
+area, whose fixed program list this construct is not on. Area 03 sanctions no gate deviation, and
+inventing one to admit a non-standard spelling would weaken requirement 1's machine half for every
+other program in the area. Suppressing -pedantic here with a scoped pragma -- the mechanism used
+elsewhere in this area for genuinely standard constructs -- would not merely relax a style check: it
+would move the construct under test from standard C to a GNU extension while leaving it in an area
+that does not test extensions, so the divergence surface would no longer be the one this program is
+named for.
+THE EXCLUSION IS SCOPED TO ONE WAY OF FILLING THE MEMBER AND COSTS NO COVERAGE OF THE FEATURE, and
+it is recorded here rather than left to look like an oversight. Declaration of the incomplete last
+member, its zero contribution to sizeof, access through the incomplete type across a function
+boundary where the callee must take the element count from the object itself, and mutation through
+both union arms are all exercised -- and now at BOTH storage durations, since g_store is a
+data-section image and l_store is materialized by emitted stores on entry to main. A compiler can get
+the static image right and the run-time stores wrong, so both paths are held side by side. The union
+technique that appears instead was probed the same way and is gate-clean at -O0, -O1 and -O2 as well
+as sanitizer-clean, and it is the better answer on its own merits rather than merely the one that
+compiles, because it makes the aliasing legitimate by construction.
+WIDTH NORMALIZATION. Every value is an int printed with %d, and both printed sizes are cast to int
+before they reach the variadic call, so no size_t is ever passed. sizeof is never applied to a
+pointer, and no long, ptrdiff_t, pointer, floating or character value appears anywhere, so neither
+the MEASURED pointer width -- four bytes on i686 and eight on x86_64, aarch64 and riscv64
+(docs/technical-specifications.md target table, lines 457-462) -- nor the MEASURED plain-char
+signedness split, signed on x86_64 and i686 and unsigned on aarch64 and riscv64, can influence a byte
+of stdout.
+SIZES ARE TARGET-INVARIANT FOR A REASON THAT WAS CHECKED RATHER THAN ASSUMED. int is 4 bytes and
+4-byte aligned on all four targets, so no padding sits between count and data in either union arm:
+sizeof(struct fam) is 4, because the flexible array member contributes nothing to the size of the
+struct (C11 6.7.2.1p18), and sizeof(union fam_storage) is 4 + 8 * 4 == 36, the size of its sized arm.
+PADDING, BYTE ORDER AND ADDRESSES. No object representation is inspected and nothing is read byte by
+byte, so neither padding nor endianness can influence the output, and no address is ever printed --
+the two views are reached only through int-typed lvalues at identical offsets.
+EXECUTION CHARACTER SET. No character data appears anywhere, so C11 5.2.1 leaves nothing here to the
+implementation.
+THE TWO STORAGE DURATIONS ARE THIS PROGRAM'S VARIANT AXIS. The file-scope union is a translation-time
+data-section image, while its automatic twin -- identical union, identical designated initializer --
+must be materialized by emitted stores on entry to the block, so the same syntax travels two
+different paths through the compiler. Both are compiled at all three optimization levels, and no
+volatile operand is added: qualifying one would suppress exactly the optimizer behaviour the pairing
+exists to survive.
+MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
+-O1 and -O2 -- twelve configurations -- and every one produced these 30 lines byte-identically with
+exit status 0, which is why oracle (b) compares this program's targets against each other without any
+narrowing and why oracle (c) can hold these bytes as the golden record. Every live element is printed
+individually in both the read-back and the post-mutation phase of both halves, so a single wrong slot
+localizes to one initializer form at one storage duration rather than to the aggregate, and the four
+sum lines confirm that the same storage is reached through both union arms rather than merely that
+each arm is self-consistent.
+END
+expected_stdout    <<END
+sizeof_struct_fam=4
+sizeof_storage=36
+count=5
+data[0]=100
+data[1]=200
+data[2]=300
+data[3]=400
+data[4]=500
+sum=1500
+after_count=6
+after[0]=100
+after[1]=200
+after[2]=333
+after[3]=400
+after[4]=500
+after[5]=600
+after_sum=2133
+l_count=4
+l_data[0]=11
+l_data[1]=22
+l_data[2]=33
+l_data[3]=44
+l_sum=110
+l_after_count=5
+l_after[0]=11
+l_after[1]=99
+l_after[2]=33
+l_after[3]=44
+l_after[4]=55
+l_after_sum=242
+END

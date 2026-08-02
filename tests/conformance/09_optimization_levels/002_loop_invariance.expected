@@ -6,7 +6,7 @@
 
 program            = 002_loop_invariance
 area               = 09_optimization_levels
-description        = Loop results unchanged under invariant motion, strength reduction and unrolling at -O0, -O1 and -O2
+description        = Loop results byte-identical at -O0, -O1 and -O2 under whatever transformations each compiler's pipeline applies -- shapes chosen so that invariant motion and strength reduction are genuinely applicable, with no pass and no surviving loop assumed
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -37,9 +37,39 @@ which is 32 bits on all four targets, and long is never used because sizeof(long
 i686 and 8 on the other three targets. Plain char is not used, so the measured plain-char
 signedness difference (signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64)
 cannot be observed. No address, pointer value, sizeof or _Alignof result is printed. No
-floating point is used. Loop bounds and factors are read from volatile storage, so no loop
-can be folded into a constant and the backend must emit real loop code at every
-optimization level.
+floating point is used.
+WHAT THIS PROGRAM ASSERTS, STATED EXACTLY, because a wider claim would be unverifiable from its
+output. It asserts that the eight printed results are identical at -O0, -O1 and -O2 on every
+target, and it assumes nothing about which transformations produce that. It does NOT assert that
+any particular transformation ran: nothing in a program's stdout can reveal which passes fired,
+and the two compilers under comparison document different optimization sets, which is the very
+difference that must not be observable. The documented pipeline for the compiler under test is
+-O0 with no passes, -O1 with mem2reg, constant folding and dead-code elimination, and -O2 adding
+common-subexpression elimination and simplification iterated to a fixed point
+(docs/technical-specifications.md line 535). Loop-invariant code motion and strength reduction
+are not among them, and loop unrolling and vectorization are explicitly out of scope for this
+project, so this record neither names nor requires any of the four. The reference compiler
+applies a larger and differently documented set, and that asymmetry is precisely why only the
+printed values may be compared.
+THE LOOP SHAPES ARE STILL CHOSEN SO THAT THE TWO TRANSFORMATIONS THE PLAN NAMES FOR THIS PROGRAM
+ARE GENUINELY APPLICABLE -- sum_inv adds the loop-invariant product k * m, and sum_mul and
+sum_pow2 accumulate i * k and i * 8, the textbook strength-reduction candidates -- so the
+invariance being asserted is invariance across those transformations being applied or not
+applied, by either compiler, at any level. Loop unrolling is deliberately NOT named as covered:
+the repository documents no unroller for the compiler under test and lists loop unrolling among
+the transformations explicitly out of scope (docs/technical-specifications.md line 717), and the
+minimal shared flag set gives no guarantee
+that the reference compiler unrolls either, so a claim of unrolling coverage would be a claim
+this program cannot support.
+MOST BOUNDS AND FACTORS ARE READ FROM VOLATILE STORAGE, which means those loops cannot be reduced
+to a constant by the folder alone and the backend must emit real loop code -- that is what keeps
+the runtime path under test at -O1 and -O2. One loop is a deliberate exception and is named
+rather than left implicit: the do-while whose controlling expression is the literal-false i < 0
+runs exactly once by construction, which is the single-iteration boundary it exists to check, and
+it may legitimately be folded straight to its result of 5. No loop anywhere in this program is
+required to survive translation, and no line below depends on generated code: a loop that is
+unrolled, rotated, inverted, turned into a closed form or eliminated entirely still produces the
+value that is compared.
 END
 expected_stdout    <<END
 sum_mul=135

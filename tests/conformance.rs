@@ -3603,10 +3603,21 @@ fn line_locators(citation: &str) -> Vec<(usize, usize)> {
     let mut rest = lowered.as_str();
     let mut consumed = 0usize;
     while let Some(position) = rest.find("line") {
-        let starts_word = lowered[..consumed + position]
+        // "no preceding character, or a preceding character that is not alphanumeric", spelled as a
+        // negated `is_some_and`. The reading is unchanged either way: absent a preceding character
+        // the word does stand on its own, and a preceding character disqualifies it only when that
+        // character is alphanumeric. The spelling is chosen rather than incidental, because the two
+        // obvious alternatives each fail a gate. `Option::is_none_or` stabilized in Rust 1.82, above
+        // the 1.70 minimum this file and every harness module document, so it makes the suite
+        // unbuildable on a supported toolchain and clippy reports it as `incompatible_msrv`.
+        // `map_or(true, ..)` builds on 1.70 but clippy reports it as `unnecessary_map_or` wherever
+        // the effective minimum admits `is_none_or` -- including when no minimum is declared at all
+        // -- so it fails `-D warnings` instead. `is_some_and` has been stable since 1.70 itself and
+        // is clean under every combination, so no allow attribute is needed to keep it so.
+        let starts_word = !lowered[..consumed + position]
             .chars()
             .next_back()
-            .is_none_or(|character| !character.is_ascii_alphanumeric());
+            .is_some_and(|character| character.is_ascii_alphanumeric());
         let after = &rest[position + "line".len()..];
         let after = after.strip_prefix('s').unwrap_or(after);
         consumed = lowered.len() - after.len();

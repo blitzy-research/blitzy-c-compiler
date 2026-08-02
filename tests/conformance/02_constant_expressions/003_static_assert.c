@@ -1,103 +1,61 @@
 /* _Static_assert across the type system, on SATISFIED conditions only.
  *
- * WHY EVERY ASSERTION HERE IS TRUE, AND WHY THAT IS NOT A COMPROMISE.  Both
- * mandated oracles compare the observable behaviour of a binary that was built
- * successfully: the reference-compiler oracle compares stdout bytes and exit
- * status between two builds of this program, and the cross-backend oracle
- * compares the four targets' builds against one another.  A deliberately
- * failing _Static_assert would make the translation unit fail to compile under
- * BOTH compilers, producing no output for either oracle to compare, so it would
- * assert nothing about the compiler under test.  Error detection -- the correct
- * REJECTION of an invalid program -- is a noted non-goal of this suite,
- * recorded as a deliberate decision rather than an oversight, precisely because
- * neither oracle can measure it.  Every one of the assertions below is
- * therefore satisfied, and each is paired with a printed line that reports the
- * same property at run time, so a compiler that accepted the assertion while
- * computing the property differently still changes stdout.
+ * Every assertion here is satisfied, and that is a decision rather than a
+ * compromise.  Both mandated oracles compare the behaviour of a binary that was
+ * built successfully, so a deliberately failing _Static_assert would refuse the
+ * translation unit under BOTH compilers and leave neither oracle anything to
+ * compare.  Correct REJECTION of an invalid program is a noted non-goal of this
+ * suite for exactly that reason.  Each assertion is instead paired with a printed
+ * line reporting the same property at run time, so a compiler that accepted the
+ * assertion while computing the property differently still changes stdout.
  *
- * WHAT IS UNDER TEST.  The assertions exercise the declaration parser's
- * handling of _Static_assert in every context the standard allows, and the
- * semantic analyser's constant evaluator and target-parametric type-size
- * computation, which must agree with the assertion for the program to compile
- * at all.  The printed lines then exercise the same facts through the code
- * generator, which is a genuinely independent path to the same numbers.
+ * EVERY ASSERTION IS TARGET-INVARIANT, which is the critical hazard here: an
+ * assertion whose truth depended on a target-varying property would make this
+ * program fail to compile on some targets, destroying the four-way comparison
+ * rather than testing it.  Only two kinds of condition therefore appear -- exact
+ * widths and alignments identical on all four supported targets (sizeof
+ * char/short/int/long long/float/double = 1/2/4/8/4/8, _Alignof
+ * char/short/int/float = 1/2/4/4), and RELATIONS between quantities, which hold
+ * whatever the individual values are.
  *
- * EVERY ASSERTION IS TARGET-INVARIANT, AND THAT IS THE CRITICAL HAZARD HERE.
- * An assertion whose truth depended on a target-varying property would make
- * this program fail to compile on some targets, which would destroy the
- * four-way comparison rather than test it.  So only two kinds of condition
- * appear: exact widths and alignments that are identical on all four supported
- * targets -- sizeof char/short/int/long long/float/double = 1/2/4/8/4/8 and
- * _Alignof char/short/int/float = 1/2/4/4 -- and RELATIONS between quantities,
- * which hold whatever the individual values are.
+ * Deliberately NOT asserted, with the reason: sizeof(long), sizeof(void *),
+ * sizeof(long double) and the alignments of double, long long, long and pointers
+ * all vary by target (pointer and long width is 4 bytes on i686 and 8 elsewhere;
+ * long double measured 16, 12, 16 and 16).  Each is still covered, but only
+ * through relations true everywhere -- long is exactly pointer width, size_t and
+ * ptrdiff_t are exactly pointer width, double is no wider than long double.  Plain
+ * char signedness is never asserted and never observed: plain char appears only as
+ * a one-byte size probe.  Pinning the width-varying types per target belongs to
+ * 10_declarations_and_types/007_alignof_alignas.c.
  *
- * DELIBERATELY NOT ASSERTED, with the reason.  sizeof(long), sizeof(void *),
- * sizeof(long double) and the alignments of double, long long, long and
- * pointers all differ by target: pointer and long width is 4 bytes on i686 and
- * 8 on x86-64, AArch64 and RISC-V 64, and long double was measured at 16, 12,
- * 16 and 16 bytes respectively (x87 80-bit versus IEEE binary128).  Those
- * quantities are still covered, but only through relations -- long is exactly
- * pointer width, size_t and ptrdiff_t are exactly pointer width, double is no
- * wider than long double -- each of which is true everywhere.  Plain char
- * signedness (measured signed on x86-64 and i686, unsigned on AArch64 and
- * RISC-V 64) is never asserted and never observed: plain char appears only as a
- * one-byte size probe, and the one character value printed is cast from an
- * explicitly signed char holding 65, which every signedness represents.  The
- * exact alignment and size of the width-varying types is the subject of
- * 10_declarations_and_types/007_alignof_alignas.c, which pins them per target
- * through the architecture predefined macros; this program deliberately does
- * not duplicate that and keeps to invariants.
- *
- * THE TWO-VARIANT RULE, AND HOW A SIZE FACT GETS A RUNTIME TWIN.  A
- * _Static_assert emits no code, so a folded line alone would let the constant
+ * A _Static_assert emits no code, so a folded line alone would let the constant
  * evaluator answer for the backend.  Each fold_ line is therefore paired with a
- * run_ line that recomputes the same property from values the compiler is not
- * permitted to fold.  For sizes the runtime form is a MEASUREMENT: the byte
- * distance between two adjacent elements of a static array, taken through
- * volatile-qualified character pointers in stride_of below, so the number is
- * produced by address arithmetic the code generator emits rather than by the
- * constant folder.  For arithmetic and for alignments the operands are held in
- * volatile objects, which the optimizer may not fold: verified at -O2 on all
- * four backends, which emit a genuine multiply, divide and shift pair
- * (imul/idiv/sal/sar, imull/idivl/sall/sarl, madd/sdiv/lsl/asr and
- * mulw/div/sllw/sraw) together with the pointer subtractions and the flag
- * materialisations for the measured relations.
+ * run_ line that recomputes the property from values no compiler may fold.  For
+ * sizes the runtime form is a MEASUREMENT -- the byte distance between adjacent
+ * elements of a static array, taken through volatile character pointers in
+ * stride_of below, so the number comes from address arithmetic the code generator
+ * emitted.  For arithmetic and alignments the operands are held in volatile
+ * objects instead.
  *
- * NO HEADER IS INCLUDED.  printf is hand-declared: bcc bundles nine
- * freestanding headers and ships no stdio.h, so an include would fail against
- * bcc while succeeding against the reference compiler -- a divergence caused by
- * the test rather than the compiler.  _Static_assert and _Alignof are C11
- * KEYWORDS and need no header at all; stdalign.h would only add the lowercase
- * alignas/alignof macro spellings, and it is deliberately not included.  Every
- * assertion uses the two-argument form with a message, because the
- * message-less form is C23 and the mandatory -pedantic -Werror gate rejects it.
+ * No header is named and printf is hand-declared.  bcc ships no stdio.h: its
+ * bundled set is the nine required freestanding headers plus a bonus stdatomic.h,
+ * ten files in all (docs/project-guide.md line 212).  _Static_assert and _Alignof
+ * are C11 KEYWORDS needing no header; stdalign.h would only add the lowercase
+ * alignas/alignof spellings.  Every assertion uses the two-argument form with a
+ * message, because the message-less form is C23 and the mandatory -pedantic
+ * -Werror gate rejects it.
  *
- * FREEDOM FROM UNDEFINED BEHAVIOUR.  No arithmetic can overflow: the folded
- * expressions are small constants, and the runtime twins recompute exactly
- * those values.  Both shift counts are within range (10 and 4, on a 32-bit
- * int).  Both divisions have a non-zero divisor, and the one division by a
- * measured value is guarded by a positivity test so that no divisor can reach
- * it unchecked.  No storage is read uninitialized: the probe arrays are static
- * and therefore zero-initialized, and are never read at all -- only their
- * element addresses are subtracted -- and every automatic object is initialized
- * where it is declared.  The one one-past-end pointer, table + TABLE_LEN, is
- * formed and subtracted but never dereferenced.  The string scan is bounded by
- * the array's own size, so it cannot read past the terminator.  No object is
- * modified twice between sequence points, no call takes more than one argument
- * with a side effect, no aliasing rule is broken -- every reinterpretation is
- * through a character type -- and nothing depends on padding bytes or on the
- * relative addresses of unrelated objects.
+ * WARNING-GATE NOTE FOR MAINTAINERS.  This program is clean under the full default
+ * gate with no deviation, and one detail must not be simplified away: the pair
+ * array in local_type_probe is volatile and stride_of takes const volatile void *.
+ * Making the array plain lets the optimizer delete its dead initializing stores
+ * and then report -Wmaybe-uninitialized when its address is passed on, while
+ * dropping the volatile from stride_of's parameters would discard a qualifier at
+ * the call and trip -Wdiscarded-qualifiers.  As written the pair is both
+ * gate-clean and unfoldable, which is what the runtime variant needs.
  *
- * WARNING-GATE NOTE FOR MAINTAINERS.  This program is clean under the full
- * default gate with no deviation, and one detail must not be simplified away.
- * The pair array in local_type_probe is volatile and stride_of takes
- * const volatile void *.  Making the array plain lets the optimizer delete its
- * dead initializing stores and then report -Wmaybe-uninitialized when its
- * address is passed on -- measured as an error at -O1 with all four reference
- * drivers -- while dropping the volatile from stride_of's parameters would
- * discard a qualifier at the call and trip -Wdiscarded-qualifiers.  The pair as
- * written is both gate-clean and unfoldable, which is exactly what the runtime
- * variant needs.
+ * The undefined-behaviour argument and the recorded command lines live in the
+ * sibling .expected record.
  */
 
 int printf(const char *, ...);
@@ -111,13 +69,10 @@ int printf(const char *, ...);
 #define FOLD_WIDE (4294967296LL / 65536)
 #define LOCAL_PAIR_SUM (11 + 22 + 33 + 44)
 
-/* Self-describing output: the number of _Static_assert declarations this file
- * carries and the number of distinct contexts they appear in.  Both are literal
- * facts about this source file, verified by counting the declarations, and
- * neither is derived from the environment.  The five contexts are: file scope
- * before any other declaration, a struct member list, file scope after the
- * declarations, block scope inside a helper function, and block scope inside
- * main. */
+/* Self-describing output: how many _Static_assert declarations this file carries
+ * and how many distinct contexts they appear in.  The five contexts are file
+ * scope before any other declaration, a struct member list, file scope after the
+ * declarations, block scope in a helper, and block scope in main. */
 #define STATIC_ASSERT_COUNT 34
 #define STATIC_ASSERT_CONTEXTS 5
 
@@ -170,18 +125,35 @@ _Static_assert(_Alignof(char) <= sizeof(char) && _Alignof(short) <= sizeof(short
 _Static_assert(FOLD_SUM == 14, "a macro-supplied constant expression folds to 14");
 _Static_assert(FOLD_SHIFT == 64, "a shift identity within range folds to 64");
 _Static_assert(FOLD_WIDE == 65536, "a wide constant division folds to 65536");
+/* THE ONE EXECUTION-CHARACTER-SET FACT THIS PROGRAM OBSERVES, PINNED HERE.
+ *
+ * Exactly two of the printed lines carry a character's numeric code --
+ * fold_char_a, which prints (int)'A' from a constant expression, and run_char_a,
+ * which prints the same value back out of a volatile signed char.  Nothing else
+ * in this file observes a character's value: msg is measured only by size and by
+ * terminator offset, probe_char only by element size, and no line renders a
+ * literal.  So a single assertion closes the whole accounting.
+ *
+ * It is needed rather than decorative.  C11 5.2.1 leaves the members and codes of
+ * the execution character set implementation-defined, and the explicit signed
+ * char that carries the run-time half normalizes plain char's SIGNEDNESS, which
+ * is a different property and says nothing about which code the letter A carries.
+ * With this assertion in place an implementation whose character set differed
+ * fails to TRANSLATE, naming the reason, instead of printing a different number
+ * that oracle (a) or oracle (b) would charge to the compiler under test -- a
+ * build failure accuses the environment, which is where the difference lives.
+ * All four supported targets were measured to use the same ASCII-family basic
+ * execution character set, so the condition holds on every enabled cell.  The
+ * record's impl_defined_notes carries this accounting in prose. */
 _Static_assert('A' == 65,
-               "the execution character set is ASCII compatible on all four targets");
+               "the execution character set places A at 65 (ASCII) on this target");
 
-/* ---------------------------------------------------------------------------
- * Declarations.  The aggregates are shaped so that their sizes are invariant
- * across all four targets: struct triple lays out as int, short, unsigned char
- * with int alignment, giving 4 + 2 + 1 rounded up to 8 everywhere, and
- * union scalar_bytes is 8 everywhere because its widest member is 8 bytes and
- * its alignment -- 8 on x86-64, AArch64 and RISC-V 64, 4 on i686 -- divides 8
- * in either case.  Anything whose padding depended on the alignment of double
- * or long long would have produced a different size on i686 and is avoided.
- * ------------------------------------------------------------------------- */
+/* Declarations.  The aggregates are shaped so their sizes are invariant across
+ * all four targets: struct triple is int, short, unsigned char at int alignment,
+ * giving 8 everywhere, and union scalar_bytes is 8 everywhere because its widest
+ * member is 8 bytes and its alignment divides 8 either way.  Anything whose
+ * padding depended on the alignment of double or long long would differ on i686
+ * and is avoided. */
 
 struct triple {
     int first;
@@ -208,11 +180,9 @@ union scalar_bytes {
  * neither asserted nor printed. */
 enum limits { LIMIT_ZERO = 0, LIMIT_TWO = 2, LIMIT_GAP = 10, LIMIT_NEG = -1 };
 
-/* Carrier for the local-type probe's six results.  A pointer to this struct is
- * passed to the probe rather than returning it by value, so this program does
- * not depend on aggregate-return ABI correctness -- that is the subject of
- * 14_abi_calling_convention/005_struct_return_by_value.c -- and a defect there
- * cannot be mistaken for a defect in _Static_assert handling here. */
+/* Carrier for the local-type probe's six results, passed by pointer rather than
+ * returned by value so this program does not depend on aggregate-return ABI
+ * correctness and a defect there cannot be mistaken for one here. */
 struct local_type_report {
     int fold_size_ok;
     int fold_align_ok;
@@ -223,11 +193,9 @@ struct local_type_report {
 };
 
 /* Two-element probe arrays, one per type whose size is measured at run time.
- * They are static, so they are zero-initialized and no read of uninitialized
- * storage is possible; their contents are never read at all.  Only the byte
- * distance between element 0 and element 1 is taken, which is exactly the
- * element size.  probe_char is a plain char array because sizeof(char) is the
- * property being measured; its signedness is never observed. */
+ * Their contents are never read: only the byte distance between element 0 and
+ * element 1 is taken, which is exactly the element size.  probe_char is plain
+ * char because sizeof(char) is the property measured, never its signedness. */
 static char probe_char[2];
 static short probe_short[2];
 static long long probe_llong[2];
@@ -276,11 +244,10 @@ _Static_assert(sizeof(&table[1] - &table[0]) == sizeof(void *),
  * ------------------------------------------------------------------------- */
 
 /* Measure, at run time, the byte distance between two addresses in the same
- * object.  Both pointers are read out of volatile-qualified objects, so neither
- * the difference nor the values feeding it can be folded, which is what makes
- * every run_ size line an independent measurement rather than a restatement of
- * the constant folder's answer.  The parameters are const volatile void * so
- * that a pointer into either a plain or a volatile object converts without
+ * object.  Both pointers are read out of volatile objects, so neither the
+ * difference nor its operands can be folded -- which is what makes every run_
+ * size line an independent measurement.  The parameters are const volatile void *
+ * so a pointer into either a plain or a volatile object converts without
  * discarding a qualifier. */
 static int stride_of(const volatile void *first, const volatile void *second)
 {
@@ -340,17 +307,11 @@ static void local_type_probe(struct local_type_report *out)
 }
 
 
-/* ---------------------------------------------------------------------------
- * Context 5 of 5 -- block scope inside main, followed by the printed report.
- *
- * Output shape: one line per semantic property family, in a fixed order, with
- * every fold_ line immediately followed by its run_ twin so that a single
+/* Context 5 of 5 -- block scope inside main, followed by the printed report.
+ * Every fold_ line is immediately followed by its run_ twin, so a single
  * divergent line says whether the constant evaluator or the code generator
- * disagreed.  Raw values are printed only where they are identical on all four
- * targets; every property whose value varies by target is printed as a 0/1
- * relation instead.  No address, no pointer value, no plain long and no
- * plain-char signedness-dependent value is ever printed.
- * ------------------------------------------------------------------------- */
+ * disagreed.  Raw values appear only where identical on all four targets; a
+ * target-varying property is printed as a 0/1 relation instead. */
 
 int main(void)
 {
@@ -527,4 +488,3 @@ int main(void)
     printf("run_local_type=%d %d %d\n", local.run_size_ok, local.run_align_ok, local.run_sum);
     return 0;
 }
-

@@ -1,3 +1,9 @@
+# Expectation record for 05_pointers/002_differences_and_comparisons.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
 program            = 002_differences_and_comparisons
 area               = 05_pointers
 description        = Pointer differences and relational comparisons; one-past-end formed and compared but never dereferenced
@@ -36,12 +42,10 @@ impl_defined_notes <<END
 Pointer differences are element counts, not byte counts, and are cast to long long before
 printing, so a 32-bit ptrdiff_t on i686 and a 64-bit ptrdiff_t elsewhere both render
 identically.
-No address or pointer value is printed. Pointer facts appear only as differences,
-comparisons and alignment residues, and every pointer difference is cast to long long
-before printing, so the printed text is identical whether ptrdiff_t is 32 or 64 bits.
-Plain char is never printed in a signedness-dependent way. The only conversion
-specifiers used anywhere in this program are %d, %lld and fixed-precision %.3f, all of
-which are target-width independent.
+No address or pointer value is printed: pointer facts reach the output only as the
+element-count differences described above and as the results of the equality and relational
+comparisons. Plain char is never printed in a signedness-dependent way. The only conversion
+specifiers this program uses are %d and %lld, both of which are target-width independent.
 END
 expected_stdout    <<END
 folded_span=10

@@ -72,8 +72,8 @@ Three independent oracles judge every cell. Two are mandated by the requirements
 nothing and closes a hole the other two structurally cannot see.
 
 The **Cell volume** column below states the **final planned** figures, for the full 108-program
-corpus. The committed corpus is smaller today; both sets of numbers are published side by side under
-[the enumerable matrix](#the-enumerable-matrix).
+corpus. The corpus present on this branch is smaller — 92 runnable programs — and both sets of
+numbers are published side by side under [the enumerable matrix](#the-enumerable-matrix).
 
 | Oracle | Compares | Detects | Cell volume (final planned) |
 | --- | --- | --- | --- |
@@ -289,7 +289,7 @@ never reaches a comparison, so a rule demanding one would make the whole class u
 
 Every program has a sibling `<program>.expected` record. This single file is what makes each test
 reproducible in isolation and what supplies oracle (c). This section is **binding on every record**
-— the 75 committed on this branch and every one still to be authored — and matches the hand-written
+— the 92 present on this branch and every one still to be authored — and matches the hand-written
 parser (`manifest.rs`) in
 [`../conformance_harness/`](../conformance_harness/) exactly. A maintainer authoring a new program
 should copy from here.
@@ -520,9 +520,9 @@ Append all five keys, or none of them, to the record above. This is the **syntax
 may legitimately be written is a separate and much stricter question, answered immediately below.
 
 The block below is an **illustration of the grammar only**. The identifier, the basis and the
-observation are placeholders, deliberately not any real marker: no program in the corpus carries a
-marker today, and [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) is the sole register of the
-ones that ever do.
+observation are placeholders, deliberately not any real marker: no program in the corpus on this
+branch carries a marker, and [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) is the sole register
+of the ones that ever do.
 
 ```text
 expected_divergence.id       = ILLUSTRATION-ONLY-NOT-A-REAL-MARKER
@@ -747,11 +747,13 @@ carry a program is passed over silently:
   from outside the corpus would decide both while every report still showed a corpus path.
 
 The corpus's genuine companions are **siblings** of the area directories rather than children, so
-nothing legitimate is displaced by these rules. Two of them are committed on this branch —
-`support/`, and `EXPECTED_DIVERGENCES.md` alongside this contract. Three more are **specified by the
-plan but not yet present**: `tools/`, `findings/` and `FINDINGS.md`. They are named here as plain
-text rather than linked, precisely because a link to a path that does not exist is a broken link. The
-sibling rule already accommodates all five, so landing the missing three needs no parser change.
+nothing legitimate is displaced by these rules. Three of them are committed on this branch —
+`support/`, `EXPECTED_DIVERGENCES.md` alongside this contract, and `findings/`, which is an empty
+placeholder holding only `.gitkeep` because no curated finding has been recorded in it yet. Two more
+are **specified by the plan but not yet present**: `tools/` and `FINDINGS.md`. Those two are named
+here as plain text rather than linked, precisely because a link to a path that does not exist is a
+broken link. The sibling rule already accommodates all five, so landing the missing two needs no
+parser change.
 
 ### Read-only, and the golden-record rule
 
@@ -821,9 +823,11 @@ conflating them is a defect in the test material, so they are stated separately.
 
 **Exception 2 — `12_preprocessor/003_bundled_header_inclusion.c`: the nine required bundled headers.**
 
-- **Scope:** that one program, and no other. It is the **dedicated probe for the bundled header set**,
-  so it may include the nine **required** freestanding headers — `stddef.h`, `stdint.h`, `stdarg.h`,
-  `stdbool.h`, `limits.h`, `float.h`, `stdalign.h`, `stdnoreturn.h` and `iso646.h`.
+- **Scope:** that one program, and no other — planned with the preprocessor area, so the exception is
+  recorded here for when it lands rather than describing a program present today. It is the
+  **dedicated probe for the bundled header set**, so it may include the nine **required** freestanding
+  headers — `stddef.h`, `stdint.h`, `stdarg.h`, `stdbool.h`, `limits.h`, `float.h`, `stdalign.h`,
+  `stdnoreturn.h` and `iso646.h`.
 - **Reason:** it is the only place the suite exercises `include/` at all. Restricting it to
   `<stdarg.h>` would leave eight of the nine shipped headers never included by anything, which is a
   coverage hole rather than a discipline.
@@ -923,7 +927,7 @@ stated under [Recorded reasons](#every-validation-the-parser-enforces):
 | Deviation | Where | Why |
 | --- | --- | --- |
 | Drop `-pedantic` | area `08_gcc_extensions` only | An extension is non-standard by definition, and `-pedantic` exists precisely to reject one |
-| Drop `-Wconversion -Wsign-conversion` | the deliberate narrowing-conversion programs | A narrowing conversion is the **behaviour under test**, not a mistake, and those diagnostics exist to catch an accidental one |
+| Drop `-Wconversion -Wsign-conversion` | `01_integer_conversions/004_narrowing_conversions` only — the one program that declares this deviation | A narrowing conversion is the **behaviour under test**, not a mistake, and those diagnostics exist to catch an accidental one |
 
 A deviation is expressed as a **removal from the fixed gate, never as an addition**. `-Werror` can
 never be dropped: a gate that warned without failing would be a gate in name only, and every
@@ -952,13 +956,25 @@ program must be clean under both UndefinedBehaviorSanitizer and AddressSanitizer
 The gate genuinely bites rather than decorating: it rejected the author's own probe program on a real
 diagnostic during design.
 
-**The volume, counted two ways, because the two numbers are different.** At the final planned corpus
-of 108 programs the audit produces **216 gate results** — 108 programs × 2 gates — and it performs
-them with **324 process invocations**, because a program costs three processes: one warning-gate
-compile, one sanitizer build, and one sanitizer **run** (the sanitizer gate only means anything if the
-instrumented binary is actually executed). At the 92 programs committed today that is **184 gate
-results** from **276 process invocations**. The audit prints both figures and reconciles them, so a
-missing invocation is visible rather than inferred.
+**The volume, counted three ways, because the three numbers are different.** At the final planned
+corpus of 108 programs the audit produces **216 gate results** — 108 programs × 2 gates — and it
+performs them with **324 process invocations**, because a program costs three processes: one
+warning-gate compile, one sanitizer build, and one sanitizer **run** (the sanitizer gate only means
+anything if the instrumented binary is actually executed). Over the 92 programs present on this branch
+the same arithmetic gives a **nominal** 184 gate results from 276 invocations.
+
+**Performed on this branch: zero, and the reason is this gate's own design.** The audit enumerates the
+corpus **globally** — every one of the fourteen declared areas, so that a program can never be dropped
+from it quietly — and three of those directories are not present. The enumeration therefore fails
+before the first program is gated, the gate is recorded `UNPERFORMED`, and it blocks every area (see
+[the enumerable matrix](#the-enumerable-matrix)). Landing those three areas is what unblocks it:
+every program present is already paired with a readable record, so nothing else stands in the way,
+and a record that could not be read would leave the warning gate undecidable, which the audit records
+as a **defect** rather than passing it. Both figures above are therefore what the audit *will* perform
+on a complete corpus, never a claim about what it has performed.
+
+The audit prints its expected and its performed figures side by side and reconciles them, so a missing
+invocation is visible rather than inferred.
 `AuditReport::gate_result_count` counts the gate applications and the report tabulates them;
 `AuditReport::invocations_expected` states the invocation figure and `invocations_performed`
 states what actually happened, so the two are equal exactly when every gate was applied — which
@@ -1110,71 +1126,158 @@ one and says so.
 
 ### The enumerable matrix
 
-Two columns, deliberately. The **final planned target** is what the suite's design calls for; **the
-committed corpus** is what a reader can count in this directory right now, with three of the fourteen
-areas not yet landed. Quoting the planned column as though it described the present state would be
-exactly the unverifiable claim the paragraph below refuses to make.
+Three columns, deliberately, and they are three different numbers. The **final planned target** is
+what the suite's design calls for. The **present** column is what a reader can count in this directory
+on this branch, where three of the fourteen areas have not landed, and its cell figures are **nominal**:
+what those pairs *represent*, not what a run has established. The **admitted as evidence** column
+counts the cells whose result the suite accepts as evidence — equivalently, the cells belonging to an
+area that can *complete* — and it is **zero** until the corpus is complete. Read that third column
+precisely: it is deliberately *not* a count of cells the machinery will attempt, because the machinery
+does run. Collapsing any of the three into another would be exactly the unverifiable claim the
+paragraph below refuses to make.
 
-| Quantity | Final planned target | Committed today |
-| --- | --- | --- |
-| Feature areas | 14 | **11** |
-| Programs | 108 | **92** |
-| Optimization levels per program | 3 | 3 |
-| Targets per program | 4, unless the record restricts them with a recorded reason | 4, same rule |
-| **`bcc` compile-and-run cells** | **1,296** (108 × 4 × 3) | **1,104** (92 × 4 × 3) |
-| Reference cells, native | **324** (108 × 3) | **276** (92 × 3) |
-| Reference cells, cross | up to **972** (108 × 3 × 3) | up to **828** (92 × 3 × 3) |
-| Oracle (a) comparisons | **1,296** | **1,104** |
-| Oracle (b) comparisons | **972** | **828** |
-| Oracle (c) assertions | **1,296** | **1,104** |
-| **Total differential and golden assertions** | **≈3,564, from 108 programs** | **≈3,036, from 92 programs** |
+| Quantity | Final planned target | Present on this branch | Admitted as evidence |
+| --- | --- | --- | --- |
+| Feature areas | 14 | **11** | **0** |
+| C source programs (`*.c`) | 108 | **92** | — |
+| Expectation records (`*.expected`) | 108 | **92** | — |
+| **Runnable programs** — a source **paired with** its record | **108** | **92** | **0** |
+| Sources with no record, which contribute nothing | 0 | **0** | — |
+| Records with no source, which are corpus defects | 0 | **0** | — |
+| Optimization levels per program | 3 | 3 | — |
+| Targets per program | 4, unless the record restricts them with a recorded reason | 4, same rule | — |
+| **`bcc` compile-and-run cells** | **1,296** (108 × 4 × 3) | **1,104** nominal (92 × 4 × 3) | **0** |
+| Reference cells, native | **324** (108 × 3) | **276** nominal (92 × 3) | **0** |
+| Reference cells, cross | up to **972** (108 × 3 × 3) | up to **828** nominal (92 × 3 × 3) | **0** |
+| Oracle (a) comparisons | **1,296** | **1,104** nominal | **0** |
+| Oracle (b) comparisons | **972** | **828** nominal | **0** |
+| Oracle (c) assertions | **1,296** | **1,104** nominal | **0** |
+| **Total differential and golden assertions** | **≈3,564, from 108 runnable programs** | **≈3,036 nominal, from 92 runnable programs** | **0** |
 
-The three areas still to land are `12_preprocessor`, `13_floating_point` and
-`14_abi_calling_convention`; the per-area table below marks each one.
+**Every cell figure multiplies the `Runnable programs` row, never the source count** — and the two
+rows above it exist so that the difference can never hide. A `.c` file with no sibling record is not a
+test that merely lacks a golden: it cannot execute at all, because the record is where the command
+templates and the `expect_exit` value live, and oracle (c) would have nowhere to read a golden from.
+Such a file contributes **zero** cells and zero assertions while still inflating a count of `*.c`
+files, so quoting the source count as the matrix basis would over-state the suite by twelve cells per
+unpaired program. Both discrepancy rows are therefore published even when — as here — both are zero,
+because a row that only appears when it is non-zero is a row a reader cannot rely on.
+
+Each figure is countable from the file set with no tooling beyond a shell, which is what makes this
+table evidence rather than assertion:
+
+```text
+ls -d tests/conformance/[0-9][0-9]_*/ | wc -l                     # feature areas         -> 11
+find tests/conformance -name '*.c'        | wc -l                 # C source programs     -> 92
+find tests/conformance -name '*.expected' | wc -l                 # expectation records   -> 92
+for f in $(find tests/conformance -name '*.c'); do \
+  [ -f "${f%.c}.expected" ] || echo "$f"; done | wc -l            # unpaired sources      ->  0
+for f in $(find tests/conformance -name '*.expected'); do \
+  [ -f "${f%.expected}.c" ] || echo "$f"; done | wc -l            # orphan records        ->  0
+```
+
+Runnable programs is then the source count less the unpaired sources — 92 − 0 — and every remaining
+figure follows by multiplication: 92 × 4 × 3 = 1,104 `bcc` cells, 92 × 3 = 276 native reference cells,
+92 × 3 × 3 = 828 cross reference cells and 828 oracle (b) comparisons, 1,104 oracle (c) assertions,
+so 1,104 + 828 + 1,104 = 3,036 assertions in total.
+
+**Why the third column is zero, and why that is correct.** Two independent mechanisms, both
+deliberately fail-closed, hold it there — neither is a defect to work around, and together they are
+what stops a partial corpus from reporting a green matrix:
+
+1. **A program with no `.expected` record is a hard error, never a skip** (see
+   [Corpus discovery](#corpus-discovery)). On this branch that mechanism removes nothing, because the
+   pairing is complete at 92 — but it is why the source count carries no cell figure of its own, and
+   it is the rule that would fail the run closed the moment a program landed without its record.
+2. **The undefined-behaviour audit enumerates the corpus globally, across all fourteen declared
+   areas**, and three of those directories are not present. The enumeration fails, so the audit is
+   recorded as `UNPERFORMED` and **blocks unconditionally** — the licence that lets an `UNPERFORMED`
+   gate pass outside strict mode covers an absent *tool*, not a corpus that cannot be read (see
+   [What every report says about the gates](#what-every-report-says-about-the-gates)). Because that
+   gate names no area, it governs **all** of them, including the nine mandated areas whose own
+   comparisons would have passed: a corpus that was never audited cannot make any divergence
+   attributable, which is exactly what requirement 1 exists to guarantee. The gate machinery is
+   described under
+   [Two of those four are gates, and every area is judged against them](#two-of-those-four-are-gates-and-every-area-is-judged-against-them).
+
+**Measured, not assumed.** The suite has been run on this branch, in an out-of-repo scratch package,
+against a **surrogate** compiler under test rather than `bcc`. The cell machinery does run and it
+traverses the middle column's nominal figures; what it does not do is complete a single one of the
+fourteen area tests, because the audit gate is unmet while three area directories are absent — the two
+survivors of a run are `infra_flag_capability_probe` and `infra_oracle_capability_report`, neither of
+which reads the corpus. The suite says why in its own report: while that gate is unmet, an area's
+passes "are not evidence of agreement" and its divergences "are not evidence of a defect". So the
+middle column is honest arithmetic that a run will indeed traverse, and the third column is what any
+of it is worth as evidence — which is nothing, yet. Two caveats travel with any figure measured that
+way: the compiler under test was a surrogate, so none of it is evidence about `bcc`; and it is quoted
+only to show that the middle column is arithmetic anyone can reproduce, never as a result.
+
+The three areas still to land are `12_preprocessor` (6 programs), `13_floating_point` (4) and
+`14_abi_calling_convention` (6) — **16 programs**, which is exactly the difference between 92 and the
+planned 108. The per-area table below marks each one. The present column counts the corpus, and a cell
+is only judgeable once its program carries an expectation record, so the `Records` column of that
+table is where record coverage is read separately from program coverage. Those two readings agree on
+this branch — every one of the 92 programs present carries a record — and the column stays in the
+table because the two can diverge and, when they do, the present column alone would overstate what a
+run can actually judge.
 
 **Never publish a coverage percentage in this file or in either register.** Coverage instrumentation
 requires a development dependency, which this repository forbids absolutely — so no percentage in this
 repository is measurable, and publishing one would be fabrication. The matrix above **is** the coverage
-evidence: the committed column is countable directly from the file set, and the run summary re-reports
-what it discovered on every execution. `report.rs` treats a discovered count that disagrees with the
-figures the harness holds as a corpus defect, so the numbers cannot silently drift away from the files.
+evidence: the present column is countable directly from the file set, the admitted column is how much
+of that a run may present as evidence, and the run summary re-reports what it discovered on every
+execution. `report.rs` treats a discovered count that disagrees with the figures the harness holds as
+a corpus defect, so the numbers cannot silently drift away from the files.
 
 ### The 14 feature areas
 
-`Programs` is the planned count for each area. `State` says whether that area is committed in this
-directory today or still to land.
+`Programs` is the planned count for each area. `Records` is how many of those programs carry an
+expectation record in this directory on this branch, which is where a landed program still awaiting a
+record would be visible. `State` says whether that area is present on this branch or still to land; an
+area marked `present` carries its full planned count as complete source-and-record pairs, with no
+partial area anywhere.
 
-| Area directory | Programs | Mandated | State |
-| --- | --- | --- | --- |
-| `01_integer_conversions` | 10 | yes | committed |
-| `02_constant_expressions` | 8 | yes | committed |
-| `03_initializers` | 11 | yes | committed |
-| `04_bitfields` | 7 | yes | committed |
-| `05_pointers` | 10 | yes | committed |
-| `06_control_flow` | 10 | yes | committed |
-| `07_variadics` | 6 | yes | committed |
-| `08_gcc_extensions` | 8 | yes | committed |
-| `09_optimization_levels` | 8 | yes | committed |
-| `10_declarations_and_types` | 10 | supplementary | committed |
-| `11_literals_and_strings` | 4 | supplementary | committed |
-| `12_preprocessor` | 6 | supplementary | **planned** |
-| `13_floating_point` | 4 | supplementary | **planned** |
-| `14_abi_calling_convention` | 6 | supplementary | **planned** |
-| **Planned total** | **108** | | **92 committed across 11 areas** |
+| Area directory | Programs | Records | Mandated | State |
+| --- | --- | --- | --- | --- |
+| `01_integer_conversions` | 10 | 10 of 10 | yes | present |
+| `02_constant_expressions` | 8 | 8 of 8 | yes | present |
+| `03_initializers` | 11 | 11 of 11 | yes | present |
+| `04_bitfields` | 7 | 7 of 7 | yes | present |
+| `05_pointers` | 10 | 10 of 10 | yes | present |
+| `06_control_flow` | 10 | 10 of 10 | yes | present |
+| `07_variadics` | 6 | 6 of 6 | yes | present |
+| `08_gcc_extensions` | 8 | 8 of 8 | yes | present |
+| `09_optimization_levels` | 8 | 8 of 8 | yes | present |
+| `10_declarations_and_types` | 10 | 10 of 10 | supplementary | present |
+| `11_literals_and_strings` | 4 | 4 of 4 | supplementary | present |
+| `12_preprocessor` | 6 | 0 of 6 | supplementary | **planned** |
+| `13_floating_point` | 4 | 0 of 4 | supplementary | **planned** |
+| `14_abi_calling_convention` | 6 | 0 of 6 | supplementary | **planned** |
+| **Planned total** | **108** | **92 of 108** | | **92 present across 11 areas; 16 still to land across 3** |
 
 The nine mandated areas are the acceptance floor set by the requirements; each carries no fewer than
 six programs. The five supplementary areas were added because they carry the widest cross-backend
-divergence surface. All nine mandated areas are committed; of the five supplementary areas two are
-committed and three are still to land, which is what the `State` column and the committed column
-of the matrix above both record.
+divergence surface. All nine mandated areas are present and complete; of the five supplementary areas
+two are present and three are still to land, which is what the `State` column here and the present
+column of [the enumerable matrix](#the-enumerable-matrix) both record. Every one of the 92 programs
+present carries a record, so the `Records` column and the `Programs` count agree for all eleven landed
+areas; a landed program without a record is the only way the two columns can disagree, and the column
+exists so that such a gap would be auditable at a glance rather than discovered by a failing run.
 
 ### Measured performance budget
 
 - ≈**72.5 ms** per compile-and-run pair, including emulator startup (36 pairs completed in 2.612 s
   wall time).
-- The **final planned** matrix is ≈2,592 compile-and-run pairs, so ≈**188 s serially**, and well under
-  a minute spread across the harness's default thread pool given 14 independent area tests. The
-  **committed** matrix is ≈1,752 pairs, so ≈**127 s serially**.
+- The **final planned** matrix is ≈2,592 compile-and-run pairs (1,296 `bcc` + 324 native reference +
+  972 cross reference), so ≈**188 s serially**, and well under a minute spread across the harness's
+  default thread pool given 14 independent area tests.
+- That is 24 pairs per program — 12 `bcc` cells, 3 native reference cells and up to 9 cross
+  reference cells, the last nine reached only when the three cross drivers are installed — so
+  the 92 programs **present on this branch** represent 2,208 pairs (1,104 + 276 + 828), or
+  **160.1 s serially** at that rate. That cost is real, and a run on this branch traverses those
+  pairs — but it buys nothing yet, because the third column of
+  [the enumerable matrix](#the-enumerable-matrix) is zero: no area completes, so none of the work is
+  admissible as evidence.
 - A per-cell timeout bounds any runaway execution, and a timeout is classified as a divergence
   rather than swallowed as an infrastructure error.
 
@@ -1208,7 +1311,7 @@ and cannot be established in each case:
 | `cargo test --test conformance --no-run` | ❌ **blocked** — no manifest to discover the target from | ✅ runs |
 | `cargo clippy -- -D warnings` | ❌ **blocked** — clippy drives Cargo | ✅ runs |
 | `cargo fmt -- --check` | ❌ **blocked** — `cargo fmt` drives Cargo | ✅ runs |
-| `cargo test --test conformance` (execution: 1,296 cells) | ❌ **blocked**, and additionally there is no `bcc` to test | ✅ runs |
+| `cargo test --test conformance` (execution: 1,296 cells once the corpus is complete — [today zero](#the-enumerable-matrix)) | ❌ **blocked**, and additionally there is no `bcc` to test | ✅ runs |
 | Whole-repository health gate `cargo test` | ❌ **blocked**, and the existing suites are not present either | ✅ runs |
 
 The two direct invocations in the first two rows are not a substitute for the Cargo gates and are not
@@ -1318,12 +1421,25 @@ area_06_control_flow               area_13_floating_point
 area_07_variadics                  area_14_abi_calling_convention
 ```
 
-All fourteen are declared in the driver. Five of them — `area_02_constant_expressions`,
-`area_03_initializers`, `area_12_preprocessor`, `area_13_floating_point` and
-`area_14_abi_calling_convention` — name area directories that have **not landed on this branch yet**,
-so they cannot pass here: corpus discovery treats a missing area directory as a corpus defect rather
-than as an empty area, which is deliberate, because silently reporting success for zero programs is
-the one failure mode a coverage claim must never have.
+All fourteen are declared in the driver. Three of them — `area_12_preprocessor`,
+`area_13_floating_point` and `area_14_abi_calling_convention` — name area directories that have
+**not landed on this branch**, so they cannot pass here: corpus discovery treats a missing area
+directory as a corpus defect rather than as an empty area, which is deliberate, because silently
+reporting success for zero programs is the one failure mode a coverage claim must never have. The
+other eleven, `area_01_integer_conversions` through `area_11_literals_and_strings`, name directories
+that are present and complete here, each program paired 1:1 with its expectation record; this is
+the same split the [enumerable matrix](#the-enumerable-matrix) and the
+[per-area table](#the-14-feature-areas) record, and those two tables are the authority for it.
+
+Because corpus discovery is **global** rather than per-area, those three absent directories are not
+contained to their own three tests: any test that enumerates the whole corpus — both gates among them
+— reports the same corpus defect, so enumeration fails before any area's comparisons are reached and
+every area test reports it, including the eleven whose own programs are complete. An area whose own
+comparisons all pass still fails while the three are missing. That is the intended behaviour — an
+incomplete corpus must not be able to report a green run — but it means a red result on this branch
+does **not** by itself indicate a divergence in the eleven landed areas, and it is why the numbers
+above distinguish what is present from what is planned instead of reporting a partial run as a whole
+one.
 
 Plus four infrastructure tests:
 
@@ -1386,6 +1502,16 @@ does not fail; under `BCC_CONFORMANCE_STRICT` — the intended continuous-integr
 toolchain is installed deliberately — it does. A gate that could not be performed is never silently a
 pass, in either mode.
 
+**One `UNPERFORMED` case blocks unconditionally, in either mode: a gate whose own machinery could not
+run at all.** If the flag probe cannot be performed, or if the corpus cannot be enumerated so that the
+audit has nothing to gate, then nothing whatever was established — no flag was shown to mean one thing
+to both compilers, and no program was shown free of undefined behaviour. The strict setting's licence is
+for an absent *tool*, and this is neither: it is a suite that cannot answer the question. Such a gate is
+recorded with no area attached, so it governs every area, and every area's assertion fails on it. That is
+the case a corpus missing a declared feature area or a program's `.expected` record produces, and it is
+why the third column of [the enumerable matrix](#the-enumerable-matrix) reads zero rather than eleven
+areas' worth of cells.
+
 A run that recorded **no** preflight at all is treated as fail-closed: the section says `NOT RECORDED`,
 the report is stamped partial, and the blocking count reads `1` rather than `0`, because a zero would be
 indistinguishable in every table and every machine-readable field from a preflight that ran and held.
@@ -1445,8 +1571,13 @@ run can never be mistaken for a full one. The same stamping applies when a name 
 
 Run `infra_oracle_capability_report` first in any new environment. It prints the discovered oracle
 inventory and states exactly which arms of which oracles will run, so a misconfigured environment is
-diagnosed **before** the matrix executes — 1,104 `bcc` cells on the committed corpus, 1,296 once all
-fourteen areas have landed.
+diagnosed **before** the matrix executes — 1,296 `bcc` cells once all fourteen areas and all 108
+records have landed, and a **nominal** 1,104 for the 92 complete pairs present on this branch. On this
+branch a run traverses those 1,104 but no area completes, so the number of cells it can present as
+evidence is **zero**, for the two fail-closed reasons given under
+[the enumerable matrix](#the-enumerable-matrix); the capability report is still worth running, because
+it reads the environment rather than the corpus and so tells you what the oracles would do once the
+corpus is complete.
 
 ---
 
@@ -1629,24 +1760,29 @@ qemu-i386 --version    || qemu-i386-static --version      # expect 10.1.0 on 25.
 qemu-aarch64 --version || qemu-aarch64-static --version   # expect 10.1.0 on 25.10
 qemu-riscv64 --version || qemu-riscv64-static --version   # expect 10.1.0 on 25.10
 
-# Static C runtimes: each must resolve inside its own target sysroot, not fail.
+# Static C runtimes: each must resolve inside its own target sysroot, not fail. GCC prints the path
+# unnormalized, with ".." segments still in it, so compare where it RESOLVES -- pipe through
+# `realpath -m` if you want the plain answer -- rather than matching the printed string literally.
 gcc-13                   -static -print-file-name=libc.a
 i686-linux-gnu-gcc-13    -static -print-file-name=libc.a  # expect /usr/i686-linux-gnu/lib/...
 aarch64-linux-gnu-gcc-13 -static -print-file-name=libc.a  # expect /usr/aarch64-linux-gnu/lib/...
 riscv64-linux-gnu-gcc-13 -static -print-file-name=libc.a  # expect /usr/riscv64-linux-gnu/lib/...
-
+```
 
 **If you put a pinned driver on `PATH` under an unversioned name, use a script and not a symbolic
 link.** GCC derives its exec prefix from `argv[0]`, so a symlink at `/usr/local/bin/gcc` makes it
 search `/usr/local/libexec/gcc/…` and fail with `cannot execute 'cc1'`. A one-line script that
 `exec`s the real driver by absolute path works, and naming the drivers through the `BCC_REF_CC*`
 overrides avoids the question entirely.
+
+```bash
 cargo test --test conformance infra_oracle_capability_report -- --nocapture
 ```
 
-The last line is the authoritative check and the only one that inspects the suite's own view of the
-environment; the rest exist so that a failure is diagnosed against a single tool rather than against
-the whole oracle inventory at once. It requires the Cargo package — see
+The command in that second block is the authoritative check and the only one that inspects the
+suite's own view of the environment; the probes in the first block exist so that a failure is
+diagnosed against a single tool rather than against the whole oracle inventory at once. It requires
+the Cargo package — see
 [the Cargo integration precondition](#the-cargo-integration-precondition).
 
 ### Toolchain of record
@@ -1723,7 +1859,7 @@ each one held:
 | `char` signedness | signed on x86-64 and i686, **unsigned** on AArch64 and RISC-V 64 |
 | `sizeof(long)` / `sizeof(void *)` | 4 on i686, 8 on the other three |
 | `sizeof(long double)` | 16 / 12 / 16 / 16 |
-| Right shift of a negative, division and modulo signs, endianness | Arithmetic shift, truncation toward zero, dividend-signed remainder, little-endian — identical on all four |
+| Right shift of a negative, division and modulo signs, endianness | Arithmetic shift, truncation toward zero, dividend-signed remainder, little-endian — identical on all four. Division and remainder are **fixed by C11 6.5.5p6**, so that part confirms conformance rather than establishing agreement; the arithmetic right shift (implementation-defined under C11 6.5.7p5) and the byte order are not fixed by the standard, and there the measurement is what establishes it |
 | Exit status of `return 300` | **44**, which is why expected exit codes are confined to 0–125 |
 | ELF identification the flag probe reads | type field at offset `0x10`: `1` object, `2` static executable, `3` dynamic; `PT_INTERP` present only when dynamic; `.debug_info` present with `-g` and absent without |
 | `timeout` behaviour, all five documented spellings | `timeout 1 sleep 5` → 124 at 1.007 s; `timeout -s KILL 1 sleep 5` → 124 at **5.008 s**, so no signal is sent; `timeout -s KILL 1 <spin>` → **never returned**; `timeout -k 1 1 <spin>` → **125**; `timeout 1 <spin>` → 124 |
@@ -1832,7 +1968,8 @@ expect_exit        = 0
 
 Every placeholder resolved. The script below is literal and copy-pasteable from the repository root.
 It creates its own private working directory, keeps every artifact inside it, quotes every expansion,
-uses no `eval`, and removes the directory on exit — including on failure:
+uses no `eval`, **bounds every compile and every run**, and removes the directory on exit — including
+on failure and on interrupt, where it then stops rather than carrying on:
 
 ```bash
 #!/usr/bin/env bash
@@ -1844,25 +1981,59 @@ uses no `eval`, and removes the directory on exit — including on failure:
 #    such as /tmp/bcc.out is shared and guessable: on a multi-user machine another user can
 #    pre-place a symbolic link there, and the redirection in step 3 would then truncate whatever
 #    that link points at, with your privileges. The umask protects the files created inside the
-#    directory, and the trap removes the whole thing however the shell exits, interrupt included.
+#    directory.
 umask 077
 work="$(mktemp -d)" || exit 1
-trap 'rm -rf -- "$work"' EXIT INT TERM
+
+# 0a. Cleanup on EXIT, and on a signal clean up and then actually DIE.
+#     A handler installed on INT or TERM alongside EXIT is a trap for the author, not just the
+#     reader: the handler runs, returns, and the shell RESUMES at the next command -- now with the
+#     scratch directory already deleted, so every later redirection writes into a path that no
+#     longer exists and the script keeps working after you asked it to stop. Cleanup therefore sits
+#     on EXIT alone, and each signal handler cleans up, restores the default disposition, and
+#     re-raises the same signal at this shell, so the script dies from it and the caller sees the
+#     conventional 128 + signal status instead of a normal exit.
+cleanup() { if [ -n "${work:-}" ]; then rm -rf -- "$work"; fi; }
+trap cleanup EXIT
+trap 'cleanup; trap - HUP;  kill -HUP  $$' HUP
+trap 'cleanup; trap - INT;  kill -INT  $$' INT
+trap 'cleanup; trap - TERM; kill -TERM $$' TERM
 printf 'scratch directory: %s\n' "$work"
+
+# 0b. Bound every compile and every run, exactly as the harness bounds every cell.
+#     A timeout IS one of the divergence classes this suite records -- a program that finishes
+#     promptly under one compiler and never finishes under another -- so an unbounded reproduction
+#     of that very divergence hangs your shell instead of reporting it. `timeout` reports 124 when
+#     the bound fires; the plain spelling is used because -k reports 125, which collides with the
+#     status range a cell may legitimately produce. Where no timeout utility exists the script says
+#     so and runs unbounded, because a reproduction you must interrupt is a poor outcome and a
+#     silently skipped one is a worse one.
+budget="${BCC_CONFORMANCE_TIMEOUT_SECS:-30}"
+if command -v timeout > /dev/null 2>&1; then
+  bound() { timeout "$budget" "$@"; }
+else
+  printf 'no timeout utility found; this reproduction runs unbounded\n' >&2
+  bound() { "$@"; }
+fi
 
 src="tests/conformance/01_integer_conversions/004_narrowing_conversions.c"
 rec="tests/conformance/01_integer_conversions/004_narrowing_conversions.expected"
 
 # 1. Build with the compiler under test. --target is a bcc-only selector.
-./target/debug/bcc --target aarch64-linux-gnu -O2 -static "$src" -o "$work/bcc.out" || exit 1
+bound ./target/debug/bcc --target aarch64-linux-gnu -O2 -static "$src" -o "$work/bcc.out" || exit 1
 
 # 2. Build with the matching reference cross driver, which receives no target flag. The -13 suffix is
 #    the gnu17 driver: no -std flag is passed, so the driver's own default mode selects the language.
-aarch64-linux-gnu-gcc-13 -O2 -static "$src" -o "$work/ref.out" || exit 1
+bound aarch64-linux-gnu-gcc-13 -O2 -static "$src" -o "$work/ref.out" || exit 1
 
 # 3. Run both under the target's runner, capturing stdout and exit status separately.
-qemu-aarch64 "$work/bcc.out" > "$work/bcc.stdout"; bcc_exit=$?
-qemu-aarch64 "$work/ref.out" > "$work/ref.stdout"; ref_exit=$?
+bound qemu-aarch64 "$work/bcc.out" > "$work/bcc.stdout"; bcc_exit=$?
+bound qemu-aarch64 "$work/ref.out" > "$work/ref.stdout"; ref_exit=$?
+
+# 3a. Name a fired bound before comparing, so 124 is never read as a program's own exit status.
+if [ "$bcc_exit" -eq 124 ] || [ "$ref_exit" -eq 124 ]; then
+  printf 'a run reached the %ss bound (status 124): treat this as a timeout, not an exit\n' "$budget"
+fi
 
 # 4. Oracle (a): statuses first, then bytes.
 if [ "$bcc_exit" -ne "$ref_exit" ]; then
@@ -1887,19 +2058,20 @@ deliberate. A retyped golden stream is a second, unverified copy of the expectat
 point of oracle (c) is to compare against the **committed** one.
 
 For the x86-64 cell of the same program, `<runner>` is empty: steps 3 onward invoke `"$work/bcc.out"`
-and `"$work/ref.out"` directly, and the reference driver in step 2 is the native gnu17 one — `gcc-13`
-on the host recorded above, **not** the unversioned `gcc`, which is a later major version defaulting
-to a later language mode.
+and `"$work/ref.out"` directly. `$REF_CC_<TRIPLE>` in step 2 resolves by one rule, whatever the
+target: **the native gnu17 driver for x86-64, and the matching cross driver for every other target.**
+Natively that driver is `gcc-13` — the host binary recorded above, or whatever `$BCC_REF_CC` names —
+and it is emphatically **not** the unversioned `gcc`, which on this host is a later major version
+defaulting to a later language mode; since no `-std` flag is ever passed, the driver's own default
+decides the language, so the two are not interchangeable. The `--target` flag in step 1 stays exactly
+as it is: it is a `bcc`-only selector, passed on the `bcc` side of every cell, native included, and it
+never appears on the reference side.
 
 Every path above is quoted, so a directory name containing a space or a shell metacharacter is
 passed through as one argument rather than being split, and `cmp --` cannot mistake a name beginning
 with a hyphen for an option. These are the same precautions the generated `commands.sh` takes,
 described at the end of this section; reproducing a cell by hand should not be less safe than
 reproducing it with the script.
-
-For the x86-64 cell of the same program, `<runner>` is empty, so step 3 invokes `"$work/bcc.out"` and
-`"$work/ref.out"` directly, and `$REF_CC_<TRIPLE>` in step 2 is the native `gcc`. The `--target` flag
-in step 1 stays: it is passed on the `bcc` side of every cell, native included.
 
 For oracle (b), build the same program for two targets at the same level into two paths beneath
 `"$work"`, run each under its own runner, assert the two statuses match, and only then compare the
@@ -1927,8 +2099,8 @@ tests/conformance/
 ├── EXPECTED_DIVERGENCES.md          register of every expected-divergence marker
 ├── FINDINGS.md                      PLANNED — register of every finding
 ├── 01_integer_conversions/          10 programs: <NNN_name>.c + <NNN_name>.expected
-├── 02_constant_expressions/         PLANNED —  8 programs
-├── 03_initializers/                 PLANNED — 11 programs
+├── 02_constant_expressions/          8 programs
+├── 03_initializers/                 11 programs
 ├── 04_bitfields/                     7 programs
 ├── 05_pointers/                     10 programs
 ├── 06_control_flow/                 10 programs
@@ -1945,7 +2117,7 @@ tests/conformance/
 │       └── probe_header.h           the suite's ONLY fixture
 ├── tools/                           PLANNED
 │   └── regenerate_expected.sh       maintenance-only; never invoked by cargo test
-└── findings/                        committed; holds only .gitkeep so far
+└── findings/                        committed; on this branch it holds only .gitkeep
     └── F-<digest>-<cell-slug>-<oracle>-<class>/   PLANNED — one curated, committed finding
         ├── reproducer.c
         ├── reproducer.expected
@@ -2010,25 +2182,32 @@ wrong answer from quietly becoming the new expectation.
 
 It is **not present on this branch**, so it is named rather than linked. The guarantee it supports
 does not depend on it, though — `manifest.rs` has no writer, so no test run can rewrite a record
-whether the script exists or not. What is missing today is only the *convenience* of regenerating a
+whether the script exists or not. What is missing on this branch is only the *convenience* of regenerating a
 record mechanically; the *protection* is already in place.
 
 ### The transient-versus-curated split
 
 **Preserve this split.** It is what keeps an in-progress run from polluting a committed deliverable.
 
-**Committed and tracked — this folder.** Present today:
+**Committed and tracked — this folder.** Present on this branch:
 
-- 92 programs across eleven area directories, and 75 expectation records; the 17 programs of
-  `02_constant_expressions` and `03_initializers` still awaiting a record are named in the per-area
-  table above;
-- `support/`;
+- 92 programs across eleven area directories, and **92 expectation records — a complete 1:1 pairing,
+  with no program awaiting a record and no record without a program** — and every one of the eleven
+  areas carries its full planned program count. Every one of the 92 records parses under
+  `manifest.rs`, and every `expected_stdout` was derived from measurement rather than written by hand;
+- `support/`, holding the suite's only fixture;
+- `findings/`, which on this branch holds only `.gitkeep` — the directory is committed so that the
+  first curated finding has a tracked home, and its emptiness is the accurate statement that none has
+  been curated, not a placeholder for one;
 - two Markdown files: this contract and [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md).
 
 Planned, and not yet present — named as plain text for the reason given under the layout tree:
 
-- the remaining 35 programs and records, across the five unlanded areas, bringing the corpus to 108;
-- `tools/` and `findings/`;
+- the remaining **16** programs and their records, across the **three** areas still to land
+  (`12_preprocessor` 6, `13_floating_point` 4, `14_abi_calling_convention` 6), bringing the corpus
+  to 108 programs and 108 records;
+- `tools/`, and therefore `tools/regenerate_expected.sh`, together with every curated finding
+  directory beneath `findings/`;
 - `FINDINGS.md`.
 
 **Transient and git-ignored — elsewhere entirely, beneath the build directory:**
@@ -2037,6 +2216,7 @@ Planned, and not yet present — named as plain text for the reason given under 
 | --- | --- |
 | `target/conformance-work/` | Per-cell workspaces. **Retained** whenever the cell produced a `FAIL`, an `XPASS` or a `FINDING` outcome, and retained for **every** cell when `BCC_CONFORMANCE_KEEP_WORK` is set; **removed** otherwise, which means a cell whose outcomes were all `PASS`, `XFAIL` or `UNAVAILABLE`. A retained directory leaves behind exactly the artifacts needed to investigate it, and the run prints its path. A timeout is not a separate rule: it reaches the retained set by way of the `FAIL` or `FINDING` verdict it produces. There is deliberately no destructor that deletes, so a panicking cell cannot erase its own evidence |
 | `target/conformance-report/run.txt` | Which run produced the reports in this directory: its run token, its configuration fingerprint and the four retention ceilings |
+| `target/conformance-report/.run-owner` | Which run owns this directory, so a second concurrent one is refused. Harness bookkeeping rather than a deliverable, listed so this table and `report.rs`'s own artifact table name the same six report-root paths |
 | `target/conformance-report/areas/<area>.md` | Per-area human-readable report |
 | `target/conformance-report/areas/<area>.tsv` | Per-area machine-readable report — each area writes only its own file, so there is no contention under parallel execution. Its **first line** is the generation preamble described below; the column header is line two |
 | `target/conformance-report/summary.md` | The deliverable summary |
@@ -2123,9 +2303,12 @@ What the fingerprint still does, and what it is carried for, is unchanged: diffe
 policy, the budget or any tool and the digest differs, so **a reduced run's numbers can never be
 mistaken for a full run's.**
 
-The process token is written in exactly three places and no others: `run.txt`, a finding's
-`environment.txt`, and the `token=` field named above. It appears in no rendered table, in no summary
-field and in no diagnostic, which is what keeps the area `.md` free of it.
+The process token is physically written in exactly three places and no others, and one of them is the
+run manifest rather than a rendered report: the `run_token` line of `run.txt`, the `token=` field of
+an area `.tsv`'s generation preamble named above, and the `run_token` line of a finding's
+`environment.txt`. Only the second and third reach an artifact this suite renders. It appears in no
+rendered table, in no summary field and in no diagnostic, which is what keeps the area `.md` free of
+it. `conformance_harness/mod.rs` enumerates the same three writes beside `RunGeneration::token`.
 
 One qualification, stated because it is real rather than hidden: the byte counts in
 [`## Retained evidence`](#retention-budgets) reflect the order in which concurrently failing cells
@@ -2596,10 +2779,13 @@ checkable.
 
 **Corpus-authoring policy** is what keeps the *programs* contained. Every input is a literal in the
 program source: **no corpus program opens a socket, calls `fopen`, or reads `argv` or `getenv`**.
-That is a property of the 108 sources, verified by reading them, not something the harness enforces
-at run time. It is why the whole folder has **exactly one** fixture file, and why the determinism
-rules above are what they are — a program that read the clock, the environment or an external file
-would not be reproducible, which would make byte-exact comparison meaningless.
+That is a property established by **reading the sources**, not something the harness enforces at run
+time — so it is claimed here for exactly the **92 sources committed on this branch**, which are the
+ones that could be read. It is a standing obligation on the remaining 16, to be verified the same way
+when their three areas land, and not a claim already made about them. It is why the whole folder has
+**exactly one** fixture file, and why the determinism rules above are what they are — a program that
+read the clock, the environment or an external file would not be reproducible, which would make
+byte-exact comparison meaningless.
 
 **Path discipline** is what keeps the *harness* contained. Every path the harness constructs is
 resolved and re-checked against a root beneath the Cargo build directory before it is written: each

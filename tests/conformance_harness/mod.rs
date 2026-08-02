@@ -508,8 +508,9 @@ pub const UB_GATE_DEFAULT: &[&str] = UB_AUDIT_GATE_DEFAULT;
 ///
 /// - `-pedantic` — for the supported-extension area, because an extension is non-standard by
 ///   definition and this flag exists precisely to reject one.
-/// - `-Wconversion`, `-Wsign-conversion` — for the deliberate narrowing-conversion programs,
-///   because there a narrowing conversion is the behaviour under test rather than a mistake.
+/// - `-Wconversion`, `-Wsign-conversion` — for the deliberate narrowing-conversion program,
+///   because there a narrowing conversion is the behaviour under test rather than a mistake. The
+///   corpus contains exactly one such program, `01_integer_conversions/004_narrowing_conversions`.
 ///
 /// Every other member is non-negotiable. Because a deviation may only REMOVE a member of the
 /// default gate, no compiler option outside the gate can be introduced through it — neither a
@@ -2596,13 +2597,21 @@ pub fn digest_hex(components: &[&str]) -> String {
 //   makes it useful for claiming a one-shot action and for naming a temporary file no concurrent
 //   writer can also choose. It is deliberately **never** rendered into a report's Markdown or into
 //   any field of either summary: an area report's Markdown is documented as byte-identical for
-//   identical inputs and a token would break that on every run. It appears in exactly two places
-//   outside those artifacts: the `token=` field of an area report's generation preamble, which is a
-//   comment line whose only consumer is the machine check that refuses a report an earlier run of an
-//   identical configuration left behind; and the `run_token` line of a finding's `environment.txt`,
-//   so a maintainer holding a copied or archived finding can tell which run produced it. Both are
-//   argued where they are written, in `report.rs`'s generation-identity section and in
-//   `findings.rs`'s environment renderer.
+//   identical inputs and a token would break that on every run. It is physically written in exactly
+//   three places, one of which is a run manifest rather than a rendered report:
+//
+//   1. the `run_token` line of `run.txt`, the run manifest `sandbox.rs` writes beside the reports,
+//      which is what tells a reader whose reports these are — argued at
+//      [`sandbox::RUN_MANIFEST_NAME`];
+//   2. the `token=` field of an area report's generation preamble, a comment line whose only
+//      consumer is the machine check that refuses a report an earlier run of an identical
+//      configuration left behind — argued in `report.rs`'s generation-identity section;
+//   3. the `run_token` line of a finding's `environment.txt`, so a maintainer holding a copied or
+//      archived finding can tell which run produced it — argued in `findings.rs`'s environment
+//      renderer.
+//
+//   Items 2 and 3 are the only ones that reach an artifact this suite *renders*; item 1 is the
+//   manifest that names the run itself, which is why it carries the token unconditionally.
 // - [`RunGeneration::configuration`] identifies the *configuration* the run was performed under. It
 //   is a pure function of that configuration, so it differs the moment one run was reduced, filtered
 //   or pointed at another compiler, which is exactly what distinguishes a full run's numbers from a

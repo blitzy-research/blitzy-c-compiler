@@ -14,128 +14,63 @@
  * initializer of an object with static storage duration.
  *
  * Every constant expression here is a genuine expression rather than a bare
- * literal, so the constant evaluator is actually asked to compute something,
- * and every value it fixes is printed.  A required-constant-expression context
- * is exactly where a constant evaluator's edge cases surface, which is the
- * repository's own open risk -- "C11 corner case non-compliance ... edge cases
- * in complex declarators and type conversions may remain -- Open, requires
- * targeted testing" (docs/project-guide.md line 248) -- and its remaining-work
- * item "C11 Standard Corner Case Compliance Testing" (line 111).  No existing
- * suite compares the run-time observable results of these contexts against an
- * independent compiler.
+ * literal, and every value it fixes is printed twice: once as folded, once from a
+ * run-time computation over volatile operands, so a divergence localizes to the
+ * constant evaluator or to the code generator rather than to "one of the two".
+ * Each volatile object is read exactly once into a plain local and the arithmetic
+ * is done on the locals, which keeps every full expression to a single side effect
+ * and every printf argument free of them, so no printed value can depend on an
+ * unspecified evaluation order.  The two switch dispatch lines are the exception
+ * worth naming: each passes a constant-argument call and a volatile-argument call
+ * to the same pure function, so exactly one argument has a side effect and the
+ * other cannot be affected by it in either order.  A bound is twinned once more by
+ * a volatile counter incremented per iteration, giving a run-time count of the
+ * elements the bound admitted by a route no optimizer can fold.
  *
- * THE TWO-VARIANT RULE.  Every value a constant context fixes is also produced
- * by a run-time computation over volatile-qualified operands and printed as a
- * twin line, so a divergence localizes to the constant evaluator or to the code
- * generator rather than to "one of the two".  The mechanism is not theoretical:
- * `volatile int x = 7; return x * 6;` emits a genuine runtime multiply at -O2,
- * whereas the non-volatile form folds to a single immediate move.  Because -O0
- * runs no passes, -O1 adds constant folding and -O2 adds algebraic
- * simplification iterated to a fixed point (docs/technical-specifications.md
- * line 535), the folded variant exercises the semantic evaluator at -O0 and the
- * folder above it, while the volatile twin asks the backend to compute at every
- * level.  Without the twin, optimization would substitute the folder's answer
- * for the backend's and a code-generation defect would escape detection.
+ * No header is named and printf is hand-declared.  bcc ships no stdio.h: its
+ * bundled set is the nine required freestanding headers plus a bonus stdatomic.h,
+ * ten files in all (docs/project-guide.md line 212), so naming stdio.h would fail
+ * against bcc while succeeding against the reference compiler.  _Static_assert is
+ * a C11 keyword and needs no header either.
  *
- * The runtime twins follow one deliberate pattern: each volatile object is read
- * exactly once into a plain local, and the arithmetic is then performed on the
- * locals.  The volatile read is the optimization barrier -- its result is opaque
- * to the compiler, so nothing computed from it can be folded -- and the pattern
- * keeps every full expression to a single side effect and leaves every printf
- * argument free of side effects altogether, so no printed value can depend on
- * an unspecified order of evaluation.  The two switch dispatch lines are the
- * one place worth naming explicitly: their two arguments are a
- * constant-argument call and a volatile-argument call to the same pure
- * function, so exactly one argument has a side effect (the volatile read) and
- * the other cannot be affected by it in either evaluation order.
- *
- * A bound is also twinned by a volatile *counter*: the loop that fills an array
- * increments a volatile counter once per iteration, so the increments may not be
- * collapsed and the accumulated total is a genuine run-time count of how many
- * elements the bound actually admitted -- the same number the folded
- * element-count ratio claims, arrived at by a route the optimizer cannot fold.
- *
- * NO HEADER IS INCLUDED and printf is hand-declared.  bcc bundles only nine
- * freestanding headers -- stddef.h, stdint.h, stdarg.h, stdbool.h, limits.h,
- * float.h, stdalign.h, stdnoreturn.h and iso646.h -- and ships no stdio.h
- * (docs/technical-specifications.md lines 202-214), so naming one would fail
- * against bcc while succeeding against the reference compiler: a spurious
- * divergence caused by the test rather than by the compiler.  _Static_assert is
- * a C11 keyword and needs no header either (line 497), and stdalign.h supplies
- * only the lowercase alignas/alignof macros (line 212).  Area 02 is not one of
- * the two areas sanctioned to include a header, and it needs no exception.
- *
- * STRICTLY CONFORMING C11.  The suite's default warning gate is
- * -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror and
- * area 02 sanctions no deviation from it, so nothing here is a GCC extension:
- * no statement expression, no typeof, no computed goto, no __attribute__, no
- * __builtin_*, no inline assembly, no __extension__, no __int128, no
- * zero-length array and no binary 0b literal.  Every _Static_assert carries its
- * message string, because the message-less form is C23 and -pedantic rejects
- * it.  No constant comma expression appears anywhere either: a comma expression
- * whose left operand has no side effect is rejected by -Werror=unused-value,
- * and folding through the comma operator is the subject of
+ * Two consequences of the default warning gate shape the code.  Every
+ * _Static_assert carries its message string, because the message-less form is C23
+ * and -pedantic rejects it.  No constant comma expression appears anywhere: a
+ * comma expression whose left operand has no side effect is rejected by
+ * -Werror=unused-value, and folding through the comma operator is the subject of
  * 006_conditional_and_comma_folding.c, which supplies side-effecting operands.
  *
- * DETERMINISM.  One line per semantic property claimed, in fixed order.  Only
- * %d and %lld appear, each matched exactly to its argument type, because GCC
- * treats the hand-declared printf as a builtin and applies -Wformat to it.  No
- * address or pointer value is printed; no plain-char value is printed, since
- * plain char is signed on x86-64 and i686 but unsigned on AArch64 and RISC-V
- * 64; no plain long is printed, since sizeof(long) is 4 on i686 and 8 on the
- * other three targets (docs/technical-specifications.md lines 457-462).  Array
- * bounds are printed only as element-count ratios, which are target-invariant,
- * never as a sizeof in its own right.  Wide arithmetic uses long long with LL
- * literals and %lld, which is 64 bits on every target.  There is no timestamp,
- * no randomness, no uninitialized read, no locale-dependent formatting and no
- * data-dependent iteration order.
+ * One target assumption is relied upon: the sparse switch carries the label
+ * (int)sizeof(int) * 1000, which is 4000 because int is four bytes on all four
+ * supported targets.  It is deliberately NOT wrapped in a _Static_assert -- a
+ * failed static assertion would refuse the translation unit and cost every other
+ * assertion in the cell, whereas leaving it to the dispatch means a target with a
+ * different int width shows up as exactly one differing line, sparse_sel4000,
+ * with the rest still compared.
  *
- * One target assumption is relied upon and is worth stating: the sparse switch
- * carries the label (int)sizeof(int) * 1000, which is 4000 because int is four
- * bytes on all four supported targets.  It is deliberately NOT wrapped in a
- * _Static_assert.  A failed static assertion would refuse the translation unit
- * and cost every other assertion in the cell; leaving it to the dispatch means
- * a target where int were some other width would show up as exactly one
- * differing line -- sparse_sel4000 -- with the other 53 still compared.
+ * sizeof(struct bits) is deliberately not printed: a total size is a claim about
+ * allocation units and padding, which 04_bitfields/001_layout_and_size.c owns,
+ * whereas a bitfield WIDTH -- this program's subject -- is observable through the
+ * largest and smallest value each field holds, both of which are written and read
+ * back.  The exclusion is narrow: no declared width goes untested.
  *
- * WHAT sizeof(struct bits) WOULD ADD, AND WHY IT IS NOT PRINTED.  The width of
- * a bitfield is what this program puts under test, and a width is observable
- * through the values the field holds: each field here is written with both the
- * largest and the smallest value it can represent, and read back.  A struct's
- * total size is a different claim -- about allocation units and padding -- and
- * 04_bitfields/001_layout_and_size.c already owns it, printing sizeof and
- * _Alignof for five bitfield structs.  Printing it here would duplicate that
- * coverage while adding an implementation-defined layout property to a program
- * whose subject is constant evaluation.  The omission is therefore a decision
- * rather than an oversight, and it is narrow: no declared width goes untested.
- *
- * HERMETIC.  Every input is a literal in this file.  Nothing is opened, no
- * environment variable and no command line is consulted, no clock and no
- * randomness is read, and printf is the only external symbol, so every cell is
- * reproducible from this source and its expectation record alone.
- *
- * UNDEFINED-BEHAVIOUR FREEDOM, which is what makes a divergence mean anything
- * at all: every array index is provably inside its bound, including the last
- * element of every array; every bitfield store is inside the field's
- * representable range, asserted statically below, so no implementation-defined
- * truncation occurs; every switch selector is either matched by a label or
- * deliberately routed to default; every shift count is a small non-negative
- * constant far inside the width of its promoted operand; no signed computation
- * approaches INT_MAX or the long long maximum; no pointer is formed at all, so
- * no aliasing violation and no one-past-end question arises; no object is
- * modified twice between sequence points; no argument beyond the one noted
- * above has a side effect; and nothing depends on padding bytes or on the
- * addresses of unrelated objects.
+ * Freedom from undefined behaviour, which is what makes a divergence mean anything
+ * at all: every array index is provably inside its bound; every bitfield store is
+ * inside the field's representable range, asserted statically below; every switch
+ * selector is either matched by a label or deliberately routed to default; every
+ * shift count is a small non-negative constant far inside the width of its
+ * promoted operand; no signed computation approaches INT_MAX or the long long
+ * maximum; no pointer is formed at all; no object is modified twice between
+ * sequence points; and nothing depends on padding bytes or on the addresses of
+ * unrelated objects.
  */
 int printf(const char *, ...);
 
-/* ------------------------------------------------------------------------- *
- * The constant expressions under test, named once and reused, so that the
- * same expression supplies an array bound, a bitfield width, a case label, an
- * enumerator initializer and a static initializer.  Reuse is the point: it is
- * what makes a divergence between two contexts attributable to the context
- * rather than to two differently written expressions.
- * ------------------------------------------------------------------------- */
+/* The constant expressions under test, named once and reused so that one
+ * expression supplies a bound, a width, a label, an enumerator and a static
+ * initializer.  Reuse is the point: it makes a divergence between two contexts
+ * attributable to the context rather than to two differently written
+ * expressions. */
 #define WIDTH_BASE     (2 + 1)                             /*  3 */
 #define WIDTH_SIGNED   (WIDTH_BASE + 1)                    /*  4 */
 #define WIDTH_UNSIGNED (2 + 3)                             /*  5 */
@@ -155,12 +90,9 @@ int printf(const char *, ...);
  * -Wconversion quiet without weakening either. */
 #define SEL_SIZEOF ((int)sizeof(int) * 1000)                /* 4000 */
 
-/* Context 4: enumerator initializers.  Plain arithmetic, a value derived from
- * the preceding enumerator, a bitwise fold, a negative value, a value derived
- * from that negative one, a subtraction that feeds an array bound below, and a
- * shift whose count comes from a macro.  Every value is inside int range, so
- * the enumeration's underlying type cannot vary across targets in a way any
- * printed value could observe. */
+/* Context 4: enumerator initializers.  Every value is inside int range, so the
+ * enumeration's underlying type cannot vary across targets in a way any printed
+ * value could observe. */
 enum ctx {
     CTX_BASE     = 2 + 3,                   /*   5 */
     CTX_DERIVED  = CTX_BASE * 4,            /*  20 */
@@ -171,13 +103,11 @@ enum ctx {
     CTX_SHIFTED  = 1 << (WIDTH_BASE + 1)    /*  16 */
 };
 
-/* Context 3: bitfield widths, every one of them a constant expression rather
- * than a literal.  The base types are explicitly signed and unsigned, never
- * plain int, because a bitfield declared on unqualified int has
- * implementation-defined signedness and this program prints its fields' values.
- * The zero-width unnamed member is the standard separator: it ends the current
- * allocation unit, so t begins a new one.  No total size is printed -- see the
- * header block -- so no padding bit is ever observed. */
+/* Context 3: bitfield widths, every one a constant expression rather than a
+ * literal.  The base types are explicitly signed and unsigned, never plain int,
+ * because a bitfield declared on unqualified int has implementation-defined
+ * signedness and this program prints its fields' values.  The zero-width unnamed
+ * member is the standard separator, so t begins a new allocation unit. */
 struct bits {
     signed int   s : WIDTH_SIGNED;    /* 4 bits: -8 .. 7 */
     unsigned int u : WIDTH_UNSIGNED;  /* 5 bits:  0 .. 31 */
@@ -217,12 +147,10 @@ static struct bits edge_high_bits = {  7, 31u, 7u };
  * uninitialized is ever read even before the first store. */
 static volatile struct bits live_bits;
 
-/* Volatile operand sources.  Each is read exactly once into a plain local and
- * the arithmetic is done on the copy, which is opaque to the optimizer.  The
- * signed sources feed expressions whose value range is provably inside the
- * destination field, and the unsigned sources are masked to their destination
- * field's exact width, which is what makes every store value-preserving for the
- * strict conversion warnings without weakening the test. */
+/* Volatile operand sources.  Signed sources feed expressions whose range is
+ * provably inside the destination field, and unsigned sources are masked to the
+ * field's exact width, which keeps every store value-preserving for the strict
+ * conversion warnings without weakening the test. */
 static volatile int          v_bits_signed = 6;    /* -(x & 7)     -> -6 */
 static volatile int          v_bits_zero   = 0;    /* selects the -8 arm  */
 static volatile int          v_bits_seven  = 7;    /* (x & 7)      ->  7 */
@@ -296,9 +224,14 @@ _Static_assert(31 <= (1 << WIDTH_UNSIGNED) - 1 && 7 <= (1 << WIDTH_TAIL) - 1,
 
 /* ------------------------------------------------------------------------- *
  * Context 2: case labels.  Two switches, deliberately with different label
- * densities, because density is what selects the lowering strategy in the
- * backend: a dense set is normally lowered to an indexed jump, a sparse set to
- * a comparison tree.  Every label is a constant expression and every label
+ * densities, because density is the property a backend typically consults when
+ * it chooses how to dispatch -- an indexed jump for a dense set, a comparison
+ * chain or tree for a sparse one.  Which of those a compiler picks is at its
+ * discretion and is NOT what is asserted here: this suite's oracle compares
+ * observable behaviour, so the claim under test is that each selector value
+ * selects its own label and yields its own result, whatever code shape the
+ * compiler emits and however that shape differs between targets or between
+ * optimization levels.  Every label is a constant expression and every label
  * value is distinct, so no duplicate-label question arises.  Each function
  * returns a value unique to the label it matched, so a mis-dispatch is visible
  * as a wrong number rather than as an absence.
@@ -307,14 +240,16 @@ _Static_assert(31 <= (1 << WIDTH_UNSIGNED) - 1 && 7 <= (1 << WIDTH_TAIL) - 1,
 /* Dense: six consecutive selector values, 0 through 5, none of them written as
  * a bare literal.
  *
- * The returned values are deliberately NOT monotonic in the selector.  This was
- * measured rather than guessed: with the returns in ascending order the whole
- * switch is recognised as `k + 10` for k in range and lowered to a range check
- * and an add at -O2, so no indexed dispatch survives and the dense lowering path
- * this function exists to reach is never taken.  A shuffled result set has no
- * arithmetic relation to the selector, so the dense label set must be lowered as
- * a table at every optimization level -- which is the whole point of pairing it
- * with the sparse set below. */
+ * The returned values are deliberately NOT monotonic in the selector, and that
+ * choice was measured rather than guessed: with the returns in ascending order
+ * the whole switch is recognised as `k + 10` for k in range and collapses to a
+ * range check and an add at -O2, so the dispatch this pairing exists to reach
+ * disappears into arithmetic.  A shuffled result set has no arithmetic relation
+ * to the selector, so a compiler that wants to avoid a per-label comparison has
+ * to consult the six results individually.  That keeps the dense case a genuinely
+ * different dispatch problem from the sparse case below -- which is the whole
+ * point of pairing them -- without this file requiring, or being able to
+ * observe, any particular lowering. */
 static int dense_pick(int k)
 {
     switch (k) {
@@ -330,8 +265,8 @@ static int dense_pick(int k)
 
 /* Sparse: six selector values spread from -5 to 4000, drawn from a negation, a
  * pair of bitfield-width macros, arithmetic, an enumerator, a shift, and
- * sizeof.  The gaps are what make this a different lowering problem from
- * dense_pick above. */
+ * sizeof.  The gaps are what make this a different dispatch problem from
+ * dense_pick above, whichever shape either one is lowered to. */
 static int sparse_pick(int k)
 {
     switch (k) {
@@ -411,13 +346,12 @@ int main(void)
     printf("run_bound_wide=%d\n", (int)v_walk_wide);
     printf("run_bound_spanned=%d\n", (int)v_walk_spanned);
 
-    /* The wide twin.  Division is deliberately performed by repeated addition
-     * and comparison in 64-bit arithmetic: every backend implements those
-     * directly, so this twin measures the code generator rather than the
-     * presence of a compiler support routine for 64-bit division, which is not
-     * this program's subject.  Eight additions of 2^30 reach exactly 2^33, so
-     * the quotient is 8 and the accumulated dividend is 8589934592, and neither
-     * value comes anywhere near the long long maximum. */
+    /* The wide twin.  Division is deliberately performed by repeated addition and
+     * comparison rather than by the division operator, so the twin does not
+     * depend on a 64-bit division support routine being present -- which is not
+     * this program's subject.  Eight additions of 2^30 reach exactly 2^33, so the
+     * quotient is 8 and the accumulated dividend is 8589934592, neither of which
+     * approaches the long long maximum. */
     {
         long long num = v_wide_num;
         long long den = v_wide_den;
@@ -525,16 +459,10 @@ int main(void)
 
         /* The field's minimum is selected at run time between two literals that
          * both sit inside the declared width, rather than computed as
-         * "(src_s & 7) - 8".  Both forms store -8 and both are opaque to the
-         * optimizer, but the subtraction form was measured to provoke
-         * "conversion from int to signed char:4 may change value" once
-         * instrumentation is added, because the instrumented form loses the
-         * value range the plain form carries through the mask and the subtract.
-         * The two gates are separate invocations and the harness refuses to mix
-         * them, so the subtraction form would have passed; the selection form is
-         * preferred anyway because it is clean under every combination and it
-         * matches the idiom the runtime signed-bitfield stores elsewhere in the
-         * corpus already use.  The condition derives from the volatile read
+         * "(src_s & 7) - 8".  Selecting between in-range literals is clean under
+         * every warning-gate combination, whereas an arithmetic form has to carry
+         * its value range through a mask and a subtraction for the conversion
+         * warnings to stay quiet.  The condition derives from the volatile read
          * taken above, so the store is still a genuine run-time insert into a
          * volatile bitfield and the minimum is still the value written. */
         live_bits.s = ((src_s & 7) != 0) ? -1 : -8;   /* both in range, -8 */
@@ -604,4 +532,3 @@ int main(void)
     }
     return 0;
 }
-

@@ -67,6 +67,18 @@ unreachable here.  Plain long is never declared and never printed, so the i686 d
 sizeof(long) and sizeof(void *), 4 there against 8 on the other three, is unreachable as well;
 every wide value uses long long and is printed with %lld.  No address or pointer value is
 printed anywhere.
+THE EXECUTION CHARACTER SET IS A SEPARATE IMPLEMENTATION-DEFINED PROPERTY FROM CHAR SIGNEDNESS,
+AND IT IS NOT ENGAGED HERE.  The paragraph above settles signedness only.  C11 5.2.1 leaves the
+members of the execution character set and their codes implementation-defined as well, so a
+program that printed a character's numeric code, or rendered a literal as bytes, would owe an
+accounting of every code it observed.  This one owes none: it contains no character constant at
+all -- checked mechanically, by stripping comments and string literals and finding zero -- and it
+derives no printed VALUE from a character.  Its only string literals are printf format strings,
+which contribute fixed label text that is byte-identical in all twelve cells of the matrix and in
+the golden above.  There is therefore no code to pin with a _Static_assert and nothing to narrow.
+That is what distinguishes this program from 004_sizeof_alignof.c and
+007_string_literal_constants.c in the same area, both of which do print character codes and both
+of which pin every code they print for that reason.
 What would legitimately break that assumption, and how it must then be handled: a target on
 which sizeof(int), sizeof(unsigned int) or sizeof(long long) differed would still be
 conforming, so the resulting difference would be an implementation-defined divergence rather

@@ -12,79 +12,65 @@
  * expressions, and they too have a type the standard fixes (int, not char).
  * This program puts each of those properties on a line of its own.
  *
- * WHY EVERY PROPERTY GETS ITS OWN LINE.  A single aggregate value would report
- * only that something disagreed.  One line per property means a single divergent
- * line names the construct that produced it, which is what makes a finding
- * minimizable rather than merely alarming.
- *
- * THE TWO-VARIANT RULE.  Every computed value below is printed twice: once from
- * a constant expression the folder can evaluate at translation time (fold_*),
- * and once through an operand derived from a volatile object, which the compiler
- * must re-read and therefore cannot substitute (runtime_*).  A third line
- * asserts the two agree.  Without the runtime twin, optimization would quietly
- * answer with the constant folder's result and a code-generation defect would
- * never be asked to appear: verified at instruction level during design, where
- * `volatile int x = 7; return x * 6;` emits a genuine multiply at -O2 while the
- * non-volatile form collapses to a single immediate move.
+ * Every computed value is printed twice -- once from a constant expression the
+ * folder can evaluate at translation time (fold_*), once through an operand derived
+ * from a volatile object the compiler must re-read (runtime_*) -- with a third line
+ * asserting the two agree.
  *
  * The one construct with no run-time counterpart is sizeof itself, which every
- * conforming implementation evaluates at translation time for a non-variable
- * type.  Its twin is therefore the walked length: every fold_size_ line below is
- * matched by a fold_len_ / runtime_len_ / len_agree_ triple over the same
- * object, where the folded length is sizeof minus one and the runtime length is
- * a bounded walk to the terminator.  Exactly one object is exempt -- the array
- * that deliberately carries no terminator -- and its exemption is stated at its
- * declaration, with its reason, rather than left as a silent gap.
+ * conforming implementation evaluates at translation time for a non-variable type.
+ * Its twin is therefore the walked length: every fold_size_ line is matched by a
+ * fold_len_ / runtime_len_ / len_agree_ triple over the same object, the folded
+ * length being sizeof minus one and the runtime length a bounded walk to the
+ * terminator.  Exactly one object is exempt -- the array that deliberately carries
+ * no terminator -- and its exemption is stated at its declaration, with its reason.
  *
- * PLAIN-char SIGNEDNESS NORMALIZATION.  Plain char is signed on x86-64 and i686
- * and unsigned on AArch64 and RISC-V 64.  Every character this program handles
- * lies inside the 0x00-0x7F range, so its numeric value is identical under
- * either choice; on top of that, every numeric print goes through an explicit
- * (int)(unsigned char) conversion, so no signedness-dependent value can reach
- * stdout even by accident.  Characters themselves are printed with %c, whose
- * argument is promoted to int and whose output is the byte either way.
+ * Two normalizations keep the four backends comparable.  Every character handled
+ * here lies inside 0x00-0x7F, so its numeric value is identical whether plain char
+ * is signed or unsigned, and every numeric print additionally goes through an
+ * explicit (int)(unsigned char) conversion.  Every size is cast to int before it is
+ * printed, because sizeof yields size_t, and sizeof is only ever applied to a
+ * literal or an array, never to one of the pointers declared below, which would
+ * print a target-dependent width and manufacture a divergence out of nothing.
  *
- * WIDTH NORMALIZATION.  sizeof yields size_t, which is 4 bytes on i686 and 8 on
- * the other three targets, so every size is cast to int before it is printed.
- * For the same reason sizeof is only ever applied to a literal or to an array,
- * never to one of the pointers declared below -- sizeof a pointer would print a
- * target-dependent width and manufacture a divergence out of nothing.
+ * EXECUTION-CHARACTER-SET ACCOUNTING, which is a SEPARATE property from signedness
+ * and is not settled by the conversion above.  This program observes fifteen
+ * letters, three digits and six escape sequences -- some as numeric codes on a %d
+ * line, some as bytes rendered through %c or %s across six whole-literal renderings
+ * -- so the execution character set is genuinely part of its observable behaviour
+ * and C11 5.2.1 leaves that set implementation-defined.  Every code the program
+ * prints or renders is therefore pinned by a _Static_assert in the compile-time
+ * block below, so an implementation whose character set differed would fail to
+ * TRANSLATE rather than print different bytes that an oracle would attribute to the
+ * compiler under test.  The two numeric escapes are exempt because C11 6.4.4.4p7
+ * fixes them by value rather than by character set; the six simple escapes are not,
+ * because 6.4.4.4p4 leaves those implementation-defined, and they are pinned.
  *
- * A NOTE ON POINTER-ARITHMETIC SPELLING.  C11 6.5.2.1p2 defines E1[E2] as
- * identical to (*((E1)+(E2))), so subscripting a literal already exercises
- * pointer arithmetic on it.  The explicit *(p + n) form is exercised as well,
- * but through a named pointer and through a decayed array rather than written
- * directly on a literal, because both reference compilers this suite supports
- * must accept the program unchanged: one of them diagnoses `"literal" + n` by
- * default as a suspected concatenation mistake, and the audit gate's -Werror
- * would turn that suggestion into a failure.  Nothing is given up -- the same
- * access is exercised three ways instead of one -- and nothing is silenced: no
- * pragma, no dropped warning flag, no gate deviation.  Area 02 sanctions none.
+ * A NOTE ON POINTER-ARITHMETIC SPELLING.  C11 6.5.2.1p2 defines E1[E2] as identical
+ * to (*((E1)+(E2))), so subscripting a literal already exercises pointer arithmetic
+ * on it.  The explicit *(p + n) form is exercised as well, but through a named
+ * pointer and a decayed array rather than written directly on a literal, because
+ * both reference compilers this suite supports must accept the program unchanged and
+ * one of them diagnoses `"literal" + n` by default as a suspected concatenation
+ * mistake, which -Werror would turn into a failure.  Nothing is given up -- the same
+ * access is exercised three ways -- and nothing is silenced: no pragma, no dropped
+ * flag, no gate deviation.
  *
- * UNDEFINED-BEHAVIOUR FREEDOM, which is what makes a divergence here mean
- * anything at all.  No string literal is ever written through; every literal is
- * reached only as const.  Where a mutable array is needed it is a separate
- * object filled from a literal element by element.  Every subscript is provably
- * within bounds, including the terminator index of a six-character literal,
- * whose array has seven elements; no one-past-end pointer is ever dereferenced.
- * The one array that deliberately lacks a terminator is never printed with %s
- * and never walked -- only its four known elements are read.  There is no
- * signed overflow, no shift, no aliasing violation, no read of uninitialized
- * storage, no object modified twice between sequence points, and no dependence
- * on padding bytes or on the addresses of unrelated objects.  In particular the
- * addresses of two literals are never compared: whether identical literals
- * share storage is unspecified, and this program may not depend on it.  Each
- * volatile object is read exactly once, into a local, in a statement of its
- * own, so no call ever receives more than one side-effecting argument and no
- * printed value depends on the order in which arguments are evaluated.
+ * Freedom from undefined behaviour.  No string literal is ever written through;
+ * where a mutable array is needed it is a separate object filled element by element.
+ * Every subscript is provably within bounds and no one-past-end pointer is
+ * dereferenced.  The array that deliberately lacks a terminator is never printed
+ * with %s and never walked -- only its four known elements are read.  The addresses
+ * of two literals are never compared, because whether identical literals share
+ * storage is unspecified.  Each volatile object is read exactly once, into a local,
+ * in a statement of its own, so no call receives more than one side-effecting
+ * argument.
  *
- * NO HEADER IS INCLUDED.  The compiler under test ships nine freestanding
- * headers and no stdio.h, so an include would fail on one side of the oracle
- * while succeeding on the other -- a divergence caused by the test rather than
- * by the compiler.  string.h is absent from that set entirely, so strlen is
- * unavailable and lengths are computed here by a bounded walk.  Only ordinary
- * narrow literals appear: the wide and Unicode forms belong to area 11, which is
- * where their support is investigated.  The source is pure US-ASCII.
+ * No header is named: bcc ships no stdio.h, its bundled set being the nine required
+ * freestanding headers plus a bonus stdatomic.h, ten files in all
+ * (docs/project-guide.md line 212).  string.h is absent from that set, so strlen is
+ * unavailable and lengths are computed here by a bounded walk.  Only ordinary narrow
+ * literals appear; the wide and Unicode forms belong to area 11.
  */
 
 int printf(const char *, ...);
@@ -118,6 +104,57 @@ _Static_assert('\x41' == 'A',
                "the hexadecimal escape 41 denotes the same value as the letter A");
 _Static_assert('0' + 9 == '9',
                "the decimal digits are contiguous and increasing");
+
+/* THE REST OF THE EXECUTION CHARACTER SET THIS PROGRAM PRINTS, PINNED.
+ *
+ * The five assertions above pin only the codes they name.  This program prints a
+ * great deal more of the character set than that: bound_table dumps the numeric
+ * codes of a through h, exact_fit dumps all four of its elements t, e, x and t,
+ * fold_index_values prints a, d and f, fold_char_digit_nine prints the code of
+ * the digit 9, six lines render
+ * whole literals with %s (text, onetwo, abcd, onetwothree, gamma and the escape
+ * rendering), four further observations render characters with %c and eight
+ * escape codes are printed as numbers -- each of those twelve appearing twice,
+ * once folded and once recomputed at run time.  Every
+ * one of those is an implementation-defined value: C11 5.2.1 leaves the members
+ * and the codes of the execution character set implementation-defined, and the
+ * (int)(unsigned char) conversion applied throughout normalizes plain char's
+ * SIGNEDNESS, which is a different property entirely and says nothing about which
+ * code a letter carries.
+ *
+ * Two of the nine escape spellings this program handles need no assertion.  C11
+ * 6.4.4.4p7 fixes the value of an octal-escape or hexadecimal-escape character
+ * constant NUMERICALLY -- the escape denotes the value the digits spell, whatever
+ * the character set -- so \101 and \x41 are 65 by the standard rather than by the
+ * environment, and the two assertions above exist to relate them to the letter A,
+ * not to establish their codes.  The remaining seven escapes are a different
+ * matter: 6.4.4.4p4 makes every SIMPLE escape sequence denote a member of the
+ * execution character set
+ * whose value is implementation-defined, so \t, \\, \", \', \n, \r and \? all
+ * need pinning, and the pin for \t is above.  \? is pinned because it is one of
+ * the six bytes the escape rendering writes out; it stands in the horizontal
+ * tab's place there for the reason recorded at that array's declaration.
+ *
+ * The pins below are grouped into three assertions -- letters, digits, escapes --
+ * rather than spelled one per code, so the accounting reads as three facts rather
+ * than twenty-three.  An implementation whose execution
+ * character set differed FAILS TO TRANSLATE with a named diagnostic, rather than
+ * printing different numbers and different rendered bytes for oracle (a) to
+ * charge to the compiler under test.  All four supported targets were measured to
+ * use the same ASCII-family basic execution character set, so the condition holds
+ * on every enabled cell; a future target that disagreed would announce itself at
+ * the build, which is where an environment difference belongs.  The record's
+ * impl_defined_notes carries the same accounting in prose. */
+_Static_assert('a' == 97 && 'b' == 98 && 'c' == 99 && 'd' == 100 && 'e' == 101
+                   && 'f' == 102 && 'g' == 103 && 'h' == 104 && 'm' == 109
+                   && 'n' == 110 && 'o' == 111 && 'r' == 114 && 't' == 116
+                   && 'w' == 119 && 'x' == 120,
+               "every letter this program prints or renders sits at its ASCII code");
+_Static_assert('0' == 48 && '7' == 55 && '9' == 57,
+               "the decimal digits this program prints sit at their ASCII codes");
+_Static_assert('\\' == 92 && '\"' == 34 && '\'' == 39 && '\n' == 10 && '\r' == 13
+                   && '\?' == 63,
+               "the six remaining simple escapes sit at their ASCII codes");
 
 /* ------------------------------------------------------------------------- *
  * Literals reached through named pointers.
@@ -170,10 +207,41 @@ ma";
    escape 101 and the hexadecimal escape 41 -- the last two both denoting A. */
 static const unsigned char escape_bytes[] = "\t\\\"\'\n\r\101\x41";
 
-/* The same escapes without the two that would move the output cursor, so the
-   rendered form can occupy a line of its own without disturbing the line
-   structure a byte-exact comparison depends on. */
-static const char escape_render[] = "\t\\\"\'\101\x41";
+/* The escapes that can be RENDERED, as opposed to only counted.  Every byte here
+   is a graphic character, and that is a hard requirement of the expectation record
+   rather than a matter of taste.  The golden output is carried in the record's
+   expected_stdout field, and a field value is written verbatim into a report row,
+   into a tab-separated summary column and into a findings manifest, so a raw
+   control byte there would forge a column boundary or erase the line that carries
+   it, making the record say something other than what was measured -- a forged
+   column in the summary can go as far as relabelling a verdict.  The record
+   format therefore admits no control character but the line feed that joins its
+   own lines, and the harness refuses a record containing one.  So a program whose
+   stdout carried a tab could not have a conforming record at all -- and this was
+   the one program in the corpus that did, which is precisely why its record was
+   the one that could not be written.
+   The three escapes that would produce a control byte -- horizontal tab, newline
+   and carriage return -- are consequently covered by escape_bytes above, whose
+   elements are printed as NUMBERS, and the question-mark escape stands in the
+   tab's place here so that this array still holds six escape-produced bytes and
+   its size and length lines are unaffected.  Excluding the newline and the
+   carriage return is obvious: either would move the output cursor and destroy the
+   line structure a byte-exact comparison depends on.
+   Nothing is given up by the exclusion.  The tab is still fully under test,
+   four times over: its numeric code is printed from escape_bytes[0] folded and
+   again through a volatile-derived index, printed again as fold_char_tab and
+   runtime_char_tab, and pinned at translation time by _Static_assert('\t' == 9)
+   above.  Only the RENDERING of a control byte is dropped, and that is the part
+   of the job that belongs to something else: converting the escape to byte 9 is
+   the COMPILER's work and stays asserted, whereas writing byte 9 out to a stream
+   exercises the library rather than the compiler.  The same convention is
+   followed by 11_literals_and_strings/001_character_escapes.c, which owns escape
+   coverage in breadth and prints every escape it handles as a number and never
+   as a byte.
+   Contents in order: the question-mark escape, backslash, double quote, single
+   quote, the octal escape 101 and the hexadecimal escape 41 -- the last two both
+   denoting A. */
+static const char escape_render[] = "\?\\\"\'\101\x41";
 
 /* A literal used as a constant lookup table -- the classic case where a
    constant index folds to an immediate and a computed one does not. */

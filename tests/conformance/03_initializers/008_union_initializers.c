@@ -6,27 +6,19 @@
  * an array, including a nested element designator; a union nested inside a struct
  * with scalar members on either side of it; and an array of unions whose elements
  * mix designated and positional initializers.  Forms 1, 3 and 7 are then repeated
- * at automatic storage duration, because a static initializer is emitted into a
- * data section while an automatic one is performed by generated code, and the two
- * paths can diverge independently.
+ * at automatic storage duration, because a static initializer is settled before
+ * program startup while an automatic one is performed on entry to the block, and
+ * the two paths can diverge independently.
  *
  * That pairing, rather than a volatile-operand variant, is what makes this program
- * discriminate across optimization levels, and it was verified at instruction
- * level rather than assumed.  At -O0 all eleven static objects receive real data
- * images: g_pun as one four-byte word holding 16909060, g_desig_b as four
- * one-byte values 1, 2, 3 and 4, g_desig_b_pt as one byte 9 followed by three zero
- * bytes, g_arr_desig as eight zero bytes followed by the word 33, and g_holder as
- * the three words 41, 42 and 43 in that order; and the three automatic twins are
- * initialized by stores into the frame.  At -O2 not one static object survives:
- * every value is folded into an immediate operand of the call that prints it.  So
- * -O0 exercises the initializer-emission path and -O2 the constant-folding path
- * over the same declarations, and both must produce the recorded bytes.  A
- * volatile operand would add nothing here, because the subject is what an
- * initializer produces rather than what an operator computes.
+ * discriminate across optimization levels: the same declarations are compiled at
+ * every level and the values read back may not change, whatever the implementation
+ * transforms either path into.  A volatile operand would add nothing here, because
+ * the subject is what an initializer produces rather than what an operator
+ * computes.
  *
- * Every member and element is read back and printed on its own line, including
- * the elements an initializer leaves implicitly zero, so a single divergent line
- * localizes the defect to one initializer form rather than to "one of them".
+ * Every member and element is read back on its own line, including the elements an
+ * initializer leaves implicitly zero.
  *
  * Every union except g_pun is read through exactly the member its initializer
  * stored, so no padding byte is ever observed and no object representation is
@@ -44,39 +36,28 @@
  * in this feature area that observes an object representation, which makes it a
  * direct cross-backend check on union member layout.
  *
- * Widths are normalized.  Only int, unsigned and unsigned char appear; they are
- * printed with %d and %u alone, and every unsigned char is cast to int first.  No
- * wider integer type, no type whose width varies by target and no floating type
- * is used anywhere, and no address or pointer value is printed, so nothing here
- * depends on the pointer width difference on i686.  Naming those excluded types
- * in this comment is avoided deliberately, so that the portability audit grep
- * recorded for this program reports a hit only for a genuine use.
- *
- * b is declared unsigned char explicitly rather than plain char, so the measured
- * plain-char signedness split - signed on x86-64 and i686, unsigned on AArch64 and
- * RISC-V 64 - cannot reach any printed byte.  The three printed sizes follow only
- * from sizeof(int) == 4 with 4-byte alignment and sizeof(unsigned char) == 1:
- * sizeof(union mixed) is max(4, 8, 4) == 8 because struct pair is two ints, and
- * sizeof(union witharr) is max(4, 12) == 12.  All of that holds on all four
- * targets, and each of the three was measured on each of them.
+ * Only int, unsigned and unsigned char appear, printed with %d and %u alone and
+ * every unsigned char cast to int first, so no target-varying width reaches the
+ * output.  b is declared unsigned char explicitly rather than plain char, so
+ * plain-char's implementation-defined signedness cannot reach any printed byte.
+ * The three printed sizes follow only from sizeof(int) == 4 with 4-byte alignment
+ * and sizeof(unsigned char) == 1: sizeof(union mixed) is max(4, 8, 4) == 8 because
+ * struct pair is two ints, and sizeof(union witharr) is max(4, 12) == 12.
  *
  * Undefined-behaviour freedom.  No arithmetic is performed beyond the loop
- * counters, so there is no signed overflow and no shift of any kind.  Every
- * subscript is strictly in bounds: i < 4 indexes b[4] and i < 3 indexes a[3], so
- * no one-past-end pointer is even formed, let alone dereferenced.  No pointer is
- * cast - the reinterpretation in g_pun goes through a union member access, which
- * is the sanctioned mechanism, and not through a cast, which would be an aliasing
- * violation.  No object is modified after its initialization, so nothing is
- * modified twice between sequence points, and each call passes at most one
- * side-effecting argument.  Every member or element an initializer does not name
- * is implicitly zero by C11 6.7.9p19 and p21, so no uninitialized storage is read
- * anywhere - which is what makes the zero lines assertions rather than accidents.
+ * counters, so there is no overflow and no shift of any kind, and every subscript
+ * is strictly in bounds: i < 4 indexes b[4] and i < 3 indexes a[3], so no
+ * one-past-end pointer is even formed.  No pointer is cast - the reinterpretation
+ * in g_pun goes through a union member access, which is the sanctioned mechanism,
+ * and not through a cast, which would be an aliasing violation.  No object is
+ * modified after its initialization.  Every member or element an initializer does
+ * not name is implicitly zero by C11 6.7.9p19 and p21, so no uninitialized storage
+ * is read anywhere - which is what makes the zero lines assertions rather than
+ * accidents.
  *
- * No header is included and no preprocessor directive appears at all: bcc ships
- * no stdio.h, so an include would fail against bcc while succeeding against the
- * reference compiler - a spurious divergence caused by the test rather than by
- * the compiler.  Output is fully deterministic: fixed iteration order, no
- * address, no timestamp, no randomness and no locale-dependent formatting. */
+ * No header is included and no preprocessor directive appears at all: bcc ships no
+ * stdio.h, its bundled set being the nine required freestanding headers plus a bonus
+ * stdatomic.h, ten files in all (docs/project-guide.md line 212). */
 
 int printf(const char *, ...);
 

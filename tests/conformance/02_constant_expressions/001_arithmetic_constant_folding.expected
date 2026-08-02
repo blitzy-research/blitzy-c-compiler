@@ -1,0 +1,252 @@
+# Expectation record for 02_constant_expressions/001_arithmetic_constant_folding.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_arithmetic_constant_folding
+area               = 02_constant_expressions
+description        = Constant arithmetic folded at compile time, each property paired line-for-line with a volatile-operand runtime twin the backend must compute instead of reading the folder's answer
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined behaviour and depends on no unspecified behaviour, which is the
+precondition that makes both differential oracles sound rather than a stylistic preference:
+undefined behaviour would license either compiler to do anything at all, so a divergence between
+them would prove nothing about either one. The paragraphs below are the written argument required of
+every program in this suite; the warning gate and the sanitizer gate are its machine half.
+NO ARITHMETIC CAN OVERFLOW. Every operand is a small literal or a volatile object initialized from
+one, and every folded value and its runtime twin are the small numbers printed in the golden above.
+The widest int result printed is 4095 and the widest int intermediate is 1152. The wide arithmetic is
+performed in long long throughout, built from LL-suffixed literals: the largest product is
+100000 * 100000 == 10000000000, the largest sum is 1234567890123 + 876543210987 == 2111111101110, and
+the largest shift result is 1LL << 40 == 1099511627776. The standard fixes long long at a minimum of
+64 bits, so all three are orders of magnitude inside its range on every enabled target -- including
+the 32-bit one -- and neither the folded nor the runtime form can overflow. Plain long is never used,
+which also removes the width difference recorded under implementation-defined notes. The negation,
+subtraction and unary-minus lines are applied to operands whose magnitude is far from the minimum of
+their type, so no negation is undefined, and no signed addition, subtraction or multiplication
+approaches INT_MAX, INT_MIN or the long long limits, so the one genuinely undefined arithmetic case
+in C cannot arise.
+NO DIVISION IS UNDEFINED. Every divisor is a non-zero literal, or a volatile object initialized from
+a non-zero literal and never modified afterwards -- 7, 4, 2, 1 and 7LL -- so no divisor can be zero.
+The one remaining undefined division, the most negative value divided by -1, is never formed: no
+division or remainder in this file has INT_MIN or LLONG_MIN as its left operand. The remainder
+operator's operands are the same values as the division's. Where a signed dividend or divisor is
+negative, the result depends only on truncation toward zero and on the remainder taking the sign of
+the dividend, both of which C11 6.5.5p6 fixes and both of which were measured identical on all four
+targets.
+EVERY SHIFT IS IN RANGE. Each shift count is a non-negative constant, or a volatile object
+initialized from one in its own declaration and never modified: 10, 3 and 4 against 32-bit int left
+operands, and 40 against a 64-bit long long left operand, each strictly below the width of its
+promoted left operand. Only non-negative values are left-shifted, which forecloses the undefined
+signed left-shift case and means no left shift discards a sign bit. Exactly one negative value
+appears in a shift, -1024, and it appears only as the left operand of a RIGHT shift, which C11
+6.5.7p5 makes implementation-defined rather than undefined; the impl_defined_notes below account for
+it.
+NO STORAGE IS READ UNINITIALIZED and no object is modified twice between sequence points. Every
+object in the program is initialized in its own declaration and none is assigned to afterwards, so
+there is no second modification anywhere to sequence against a first, and no expression modifies an
+object whose prior value is read for a purpose other than computing the value to be stored. Each
+volatile object is read at most once per full expression, so the number and order of the volatile
+accesses is fixed, no printf call receives more than one argument capable of an effect, and no
+printed value can depend on the unspecified order in which a call's arguments are evaluated.
+THERE ARE NO POINTERS IN THIS PROGRAM AT ALL. No object address is taken, no array is declared and
+no aggregate is declared, so there is no aliasing rule to break, no one-past-the-end question to
+answer, no object representation to inspect, no padding byte to observe and no dependence on the
+relative addresses of unrelated objects.
+OUTPUT IS FULLY DETERMINISTIC: no address, no timestamp, no randomness, no locale-dependent
+formatting, literal loop bounds throughout, and main returns 0, inside the 0-125 range the suite
+requires so that no exit status is truncated by the operating system. Every input is a literal in
+this file, so every cell is reproducible from this source and this record alone.
+NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, printf, is declared by
+hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
+bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so a directive
+naming that header would fail on the bcc side of oracle (a) while succeeding on the reference side --
+a spurious divergence caused by the test rather than by the compiler under test. Nothing in the file
+is a GCC extension, so no include exception and no gate deviation is available to area 02 and none is
+needed; the corpus has exactly two header exceptions, area 07's stdarg.h and the dedicated
+bundled-header probe in area 12.
+THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
+is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers,
+and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
+-fno-sanitize-recover=all. Both gates are reference-compiler-only and are never applied to bcc, so
+requirement 3's shared-flag discipline is untouched.
+END
+impl_defined_notes <<END
+This record narrows nothing. All four targets, all three optimization levels and all three
+oracles are enabled, and no expected-divergence marker is attached. These notes exist to
+record how that was achieved, because a program in this area could easily have had to narrow:
+constant evaluation reaches straight into the type system, which is where the four supported
+targets differ.
+THE TWO-VARIANT RULE AND WHY BOTH HALVES ARE NEEDED. Every property is printed twice: once
+from a constant expression, so the answer comes from the constant evaluator, and once from
+volatile-qualified operands, which no implementation may read at translation time, so that
+answer comes from the code generator. Every fold_ line is printed immediately above the runtime_
+line that recomputes the same value, and their equality is the two-variant assertion this
+program exists to make. The mechanism was verified at instruction level rather than assumed:
+volatile int x = 7; return x * 6; emits a genuine runtime multiply at -O2 where the non-volatile
+form collapses to a single immediate move. Without the runtime half, optimization substitutes
+the folder's answer for the backend's and a code-generation defect escapes detection entirely
+while the suite still reports a pass. With it, a divergent fold_ line accuses the constant
+evaluator, a divergent runtime_ line accuses the backend, and a pair that disagrees with itself
+accuses one of the two.
+WIDTH NORMALIZATION. sizeof(long) and sizeof(void *) were MEASURED at 4 bytes on i686 and 8
+bytes on x86-64, AArch64 and RISC-V 64 (docs/technical-specifications.md target table, lines
+457-462), so no plain long, no size_t, no ptrdiff_t and no pointer value is printed anywhere.
+Where the program computes a value too wide for int, that value is written in long long with
+LL-suffixed literals and printed with %lld, which is 64 bits on every enabled target; every
+other integer reaches stdout through %d, with an explicit cast wherever the expression's own
+type is wider or unsigned. Those two conversions are the entire format vocabulary of the
+program, no sizeof result is printed, and no floating value reaches a format string, so no width
+that differs between the ILP32 backend and the three LP64 backends can influence a byte of
+stdout.
+PLAIN-char SIGNEDNESS. Plain char was MEASURED as signed on x86-64 and i686 and unsigned on
+AArch64 and RISC-V 64. No plain-char value is printed and no printed line depends on that
+choice, so a divergence that is not a compiler defect cannot arise from it here.
+RIGHT SHIFT OF A NEGATIVE VALUE IS THE ONE IMPLEMENTATION-DEFINED PROPERTY THIS PROGRAM
+OBSERVES, AND IT IS OBSERVED DELIBERATELY. C11 6.5.7p5 leaves the result of E1 >> E2
+implementation-defined when E1 has a signed type and a negative value, so fold_shr_negative
+and runtime_shr_negative print a value the standard does not fix. All four supported targets
+were MEASURED to perform an ARITHMETIC (sign-propagating) shift with the four reference drivers
+oracle (a) uses, so both lines read -64 on every cell of the matrix rather than a large positive
+value, and the property is therefore safe for cross-backend comparison as it stands. It is kept
+in the comparison rather than removed because a right shift of a negative value is exactly where
+a backend's choice between an arithmetic and a logical shift instruction becomes observable, and
+that choice is a code-generation decision this suite exists to check. A left shift of a negative
+value, which would be undefined rather than implementation-defined, is never formed anywhere in
+the program.
+WHAT WOULD LEGITIMATELY BREAK THAT, AND HOW IT MUST THEN BE HANDLED. A conforming target on
+which the right shift of a negative value were logical, or on which int or long long had a
+different width, would produce a different value here without being defective. That would be an
+implementation-defined divergence rather than a compiler defect, and the correct response would
+be to narrow this record's target list and record the reason in this field -- never to charge a
+defect against a backend that did nothing wrong, and never to delete the shift or the wide
+arithmetic, which requirement 2 asks this program to cover and whose removal would remove
+coverage of the one arithmetic operator whose signed behaviour the standard declines to fix.
+SIGNED DIVISION AND REMAINDER NEED NO ACCOUNTING. C99 onwards fixes integer division as
+truncation toward zero and the remainder as taking the dividend's sign (C11 6.5.5p6), so
+fold_div, fold_mod, fold_ll_div, fold_ll_mod and their twins are determined by the standard
+rather than by the implementation, fixing fold_div=14, fold_mod=2, fold_ll_div=1428571428 and
+fold_ll_mod=4. Both properties were nonetheless MEASURED identical on all four targets before
+this record was written.
+SIGNED INTEGER REPRESENTATION was measured as two's complement on all four targets, but nothing
+in this program depends on it: no value is produced by overflow, no bit pattern is inspected,
+and no negative value is reinterpreted through another type.
+EXECUTION CHARACTER SET: NOT ENGAGED, VERIFIED RATHER THAN ASSERTED. C11 5.2.1 leaves the
+members of the execution character set and their codes implementation-defined, so a program
+that printed a character's numeric code, or rendered a literal as bytes, would owe an
+accounting here. This one owes none: it contains no character constant at all -- checked
+mechanically, by stripping comments and string literals and finding zero -- and derives no
+printed VALUE from a character. Its only string literals are printf format strings and, where
+it declares any, _Static_assert messages -- the messages consumed by the compiler and never
+emitted, the format strings contributing only fixed label text that is byte-identical in all
+twelve cells of the matrix and in the golden above. There is therefore no code to pin and
+nothing to narrow. That is precisely what distinguishes this program from 004_sizeof_alignof.c
+and 007_string_literal_constants.c in the same area, both of which do print character codes and
+both of which pin every code they print with a _Static_assert for that reason.
+HERMETIC AND DETERMINISTIC. Every input is a literal in the source: nothing is read from the
+clock, the environment, the command line, a file or a socket, and nothing is written anywhere.
+Output is one line per semantic property claimed, in a fixed order, so a single divergent line
+names the construct that produced it. No address or pointer value is printed, there is no
+randomness, no locale-dependent formatting and no data-dependent iteration order, and the
+program returns 0 -- well inside the 0-125 range the suite requires so that no exit status is
+truncated by the operating system.
+MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at
+-O0, -O1 and -O2 -- twelve configurations -- and every one produced these 82 lines
+byte-identically with exit status 0, which is why cross-backend comparison is sound, oracle (b)
+is enabled with no narrowing, and oracle (c) can hold these bytes as the golden record.
+END
+expected_stdout    <<END
+fold_add=13
+runtime_add=13
+fold_sub=5
+runtime_sub=5
+fold_mul=42
+runtime_mul=42
+fold_div=14
+runtime_div=14
+fold_mod=2
+runtime_mod=2
+fold_nested=25
+runtime_nested=25
+fold_precedence=12
+runtime_precedence=12
+fold_precedence_paren=12
+runtime_precedence_paren=12
+fold_assoc_sub=50
+runtime_assoc_sub=50
+fold_assoc_div=8
+runtime_assoc_div=8
+fold_neg=-42
+runtime_neg=-42
+fold_complement=-1024
+runtime_complement=-1024
+fold_and=240
+runtime_and=240
+fold_or=4095
+runtime_or=4095
+fold_xor=3855
+runtime_xor=3855
+fold_shl=1024
+runtime_shl=1024
+fold_shr=128
+runtime_shr=128
+fold_shift=1152
+runtime_shift=1152
+fold_shr_negative=-64
+runtime_shr_negative=-64
+fold_ll=10000000000
+runtime_ll=10000000000
+fold_ll_add=2111111101110
+runtime_ll_add=2111111101110
+fold_ll_shift=1099511627776
+runtime_ll_shift=1099511627776
+fold_ll_div=1428571428
+runtime_ll_div=1428571428
+fold_ll_mod=4
+runtime_ll_mod=4
+fold_identity_add_zero=1337
+runtime_identity_add_zero=1337
+fold_identity_mul_one=1337
+runtime_identity_mul_one=1337
+fold_identity_mul_two=2674
+runtime_identity_mul_two=2674
+fold_identity_self_sub=0
+runtime_identity_self_sub=0
+fold_identity_div_one=1337
+runtime_identity_div_one=1337
+fold_cmp_lt=1
+runtime_cmp_lt=1
+fold_cmp_gt=0
+runtime_cmp_gt=0
+fold_cmp_le=1
+runtime_cmp_le=1
+fold_cmp_ge=0
+runtime_cmp_ge=0
+fold_cmp_eq=1
+runtime_cmp_eq=1
+fold_cmp_ne=0
+runtime_cmp_ne=0
+fold_logic_and=1
+runtime_logic_and=1
+fold_logic_or=1
+runtime_logic_or=1
+fold_logic_not=1
+runtime_logic_not=1
+fold_logic_mixed=1
+runtime_logic_mixed=1
+fold_enum_constant=42
+runtime_enum_constant=42
+fold_named_constant=1337
+runtime_named_constant=1337
+END

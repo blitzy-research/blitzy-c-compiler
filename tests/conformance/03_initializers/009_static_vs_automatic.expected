@@ -1,0 +1,179 @@
+# Expectation record for 03_initializers/009_static_vs_automatic.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 009_static_vs_automatic
+area               = 03_initializers
+description        = Storage duration deciding how often an initializer runs: three shape-matched pairs of function-scope static and automatic objects observed across three calls before and after an identical mutation, plus file-scope objects covering data, read-only and zero-initialized BSS placement
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined and no unspecified behaviour, which is the precondition that
+makes both differential oracles sound: undefined behaviour would license either compiler to do
+anything at all, so a divergence over it would prove nothing about either one.
+Every accumulated value is tiny, and that is what keeps the one arithmetic-carrying program in this
+area free of signed overflow: s_counter peaks at 130, the s_arr elements at 301, 302 and 303, the
+s_st members at 10 and 11, and g_static_scalar at 1005. INT_MAX is at least 2147483647 on every
+conforming target, so no sum here can approach it. The loop counters are bounded by the literals 3,
+4 and 3, and the round counter by 3, and per_call is invoked a fixed three times with literal round
+numbers. There is no shift, no division, no remainder and no cast anywhere in the program.
+No object is modified twice between two sequence points. Each compound assignment is its own full
+expression -- never embedded in a call argument -- and every printf argument is a plain read of an
+object no argument of the same call modifies, so the unspecified order in which a function call's
+arguments are evaluated cannot be observed even though several arguments are read per call.
+NO UNINITIALIZED STORAGE IS READ. Every function-scope and file-scope object with an initializer is
+fully initialized by it, and g_static_bss, which has no initializer, has STATIC storage duration, so
+C11 6.7.9p10 defines its elements as zero rather than indeterminate -- a definite value, and itself
+one of the properties under test. The three function-scope statics are initialized once before the
+program begins rather than on each entry, which is exactly the distinction under test, and the three
+automatic objects are initialized on every entry to the block, so each is readable from its first
+read onward in every round.
+Every subscript stays strictly inside its array bound, and each bound is a literal equal to the
+declared extent: s_arr and a_arr are int[3] read at 0 through 2, g_static_arr is int[4] read at 0
+through 3, and g_static_const and g_static_bss are int[3] read at 0 through 2. No pointer is formed
+anywhere in the program apart from printf's format argument, so no one-past-the-end pointer exists to
+be dereferenced, no pointer arithmetic can leave an object, no address is taken and none is printed.
+There is no aliasing violation: every value is read and written through an lvalue of its own declared
+type, which is int in every case, reached by member selection and subscripting. g_static_const is
+declared const and is only ever READ -- never written, and never reached through a non-const lvalue
+-- so no attempt to modify an object defined with a const-qualified type occurs. g_static_scalar is
+not const and is mutated once after the call loop, which is what demonstrates that a data-section
+object is writable. No object representation is inspected, no union appears, and no struct is copied
+or printed whole, so no padding byte is ever observed and nothing depends on the relative addresses
+of unrelated objects.
+Each printf conversion specifier is %d and each corresponding argument has type int after the default
+argument promotions, so no variadic argument is read at the wrong width.
+main returns 0, inside the 0-125 range the suite requires so that no exit status is truncated by the
+operating system. Every input is a literal in this file: nothing is read from the environment, the
+clock, the file system or the network, and iteration and call order are fixed by literal bounds, so
+every cell is reproducible from this source and this record alone.
+No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
+bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no standard
+I/O header (docs/project-guide.md line 212), so naming one would fail on the bcc side of oracle (a)
+while succeeding on the reference side -- a spurious divergence caused by the test rather than by a
+compiler. This area is granted no header exception; the corpus has exactly two, area 07's stdarg.h
+and the dedicated bundled-header probe in area 12.
+This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
+under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
+-Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under the
+sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
+END
+impl_defined_notes <<END
+This record narrows nothing: all four targets, all three optimization levels and all three
+oracles are enabled, no expected-divergence marker is carried, and no `ub_audit_flags` key appears
+because the program passes the suite's full default warning gate unmodified.
+THE STATIC/AUTOMATIC PAIRING IS THE WHOLE SUBJECT, so what each half must print is stated exactly.
+per_call() is invoked three times over three pairs matched by shape and by initializer --
+s_counter/a_counter, s_arr/a_arr, s_st/a_st -- printing all six before mutating them, applying the
+SAME mutation to both halves of every pair, then printing again. Because nothing but storage
+duration differs between the halves, any difference in the printed sequence is attributable to
+storage duration alone. A static-duration initializer is materialized ONCE, before the program
+begins; an automatic-duration initializer is materialized on EVERY entry to its block by code the
+backend emits. The static halves therefore ADVANCE across rounds: s_counter reads 100, 110, 120 on
+entry and 110, 120, 130 after; s_arr reads 1,2,3 then 101,102,103 then 201,202,203 on entry; s_st
+reads { 7,8 } then { 8,9 } then { 9,10 } on entry and { 10,11 } after the last round. The automatic
+halves are re-initialized on every entry, so their pre-mutation values are IDENTICAL every round:
+a_counter is always 100, a_arr always 1,2,3, a_st always { 7,8 }, and after the mutation always
+110, 101/102/103 and { 8,9 }. Round 1 is where the halves legitimately coincide, which is itself the
+evidence that both were initialized correctly; rounds 2 and 3 carry the diagnostic weight. A
+compiler that re-ran a function-scope static initializer on every call would print s_counter=100
+three times; one that failed to re-initialize an automatic object would print a_counter=110 on entry
+to round 2. Either is visible on a single line.
+BOTH MEMBERS OF EVERY PAIR ARE OBSERVED. The post-mutation line prints s_st.p, s_st.q, a_st.p and
+a_st.q, matching the pre-mutation line member for member. Printing only .p would leave the two .q
+mutations unobserved, and a backend that dropped the increment of a struct's second member, or
+mutated the wrong member, would then produce byte-identical output and escape every oracle. With
+.q observed, s_st.q must advance 8, 9, 10 on entry and 9, 10, 11 after, while a_st.q reads 8 on
+entry and 9 after in every round. The peaks the last round records are therefore fixed and checkable
+individually: the block-scope static counter ends at 130, the static array at 301, 302 and 303, the
+static struct at 10 in its first member and 11 in its second, and the file-scope scalar at 1005.
+FILE SCOPE COVERS SECTION PLACEMENT, AND ONLY ITS OBSERVABLE CONSEQUENCES. An initialized scalar,
+array and struct reach .data, a const array typically .rodata, and an array with no initializer at
+all has static storage duration and is guaranteed zero from BSS rather than from any emitted store.
+g_static_scalar is mutated after the call loop and re-read, showing that a .data object is writable,
+while g_static_const is only ever read. No address is printed, so which SECTION the compiler chooses
+is deliberately left free: the program asserts the observable CONSEQUENCES of placement -- that an
+initialized object reads back its initializer, that a const array reads back its initializer, that an
+uninitialized static array reads back zero, and that a non-const initialized object is writable --
+and never the section name, so a compiler that places g_static_const in a writable section, or that
+emits explicit zero bytes for g_static_bss rather than reserving BSS, is not thereby divergent.
+NO OPERAND IS QUALIFIED VOLATILE ANYWHERE, BY DESIGN rather than by omission. A function-scope static
+is a prime inlining and constant-propagation target, so identical output at -O0, -O1 and -O2 is a
+genuine semantic-preservation check that forcing every access back to memory would SUPPRESS rather
+than prove. The static/automatic pairing is itself this program's two-variant structure, and this is
+the one program in the area whose optimization sweep tests the optimizer directly rather than the
+initializer-emission path, which is why the sweep covers all three levels.
+WIDTH NORMALIZATION. Only int and %d are used, so the MEASURED i686 differences -- a four-byte long
+and pointer against eight bytes on x86-64, AArch64 and RISC-V 64
+(docs/technical-specifications.md target table, lines 457-462) -- cannot be observed. No sizeof or
+_Alignof result is printed and no floating value reaches a format string.
+PLAIN-CHAR SIGNEDNESS AND PADDING. No character data is printed, so the MEASURED plain-char
+signedness split -- signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64 -- is irrelevant,
+and no struct representation is printed, so padding does not matter.
+EXECUTION CHARACTER SET. Nothing character-valued is printed, so C11 5.2.1 leaves nothing here to
+the implementation.
+MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
+-O1 and -O2 -- twelve configurations -- and every one produced these 44 lines byte-identically with
+exit status 0, which is why oracle (b) compares this program's targets against each other without
+any narrowing and why oracle (c) can hold these bytes as the golden record. Every element and member
+is read back individually and every in-function line carries its round number, so a single wrong
+slot localizes to one initializer form in one invocation rather than to the program as a whole.
+END
+expected_stdout    <<END
+g_static_scalar=1000
+g_static_arr[0]=11
+g_static_arr[1]=12
+g_static_arr[2]=13
+g_static_arr[3]=14
+g_static_st.p=21
+g_static_st.q=22
+g_static_const[0]=31
+g_static_const[1]=32
+g_static_const[2]=33
+g_static_bss[0]=0
+g_static_bss[1]=0
+g_static_bss[2]=0
+round=1 s_counter=100 a_counter=100
+round=1 s_arr[0]=1 a_arr[0]=1
+round=1 s_arr[1]=2 a_arr[1]=2
+round=1 s_arr[2]=3 a_arr[2]=3
+round=1 s_st.p=7 s_st.q=8 a_st.p=7 a_st.q=8
+round=1 after s_counter=110 a_counter=110
+round=1 after s_arr[0]=101 a_arr[0]=101
+round=1 after s_arr[1]=102 a_arr[1]=102
+round=1 after s_arr[2]=103 a_arr[2]=103
+round=1 after s_st.p=8 s_st.q=9 a_st.p=8 a_st.q=9
+round=2 s_counter=110 a_counter=100
+round=2 s_arr[0]=101 a_arr[0]=1
+round=2 s_arr[1]=102 a_arr[1]=2
+round=2 s_arr[2]=103 a_arr[2]=3
+round=2 s_st.p=8 s_st.q=9 a_st.p=7 a_st.q=8
+round=2 after s_counter=120 a_counter=110
+round=2 after s_arr[0]=201 a_arr[0]=101
+round=2 after s_arr[1]=202 a_arr[1]=102
+round=2 after s_arr[2]=203 a_arr[2]=103
+round=2 after s_st.p=9 s_st.q=10 a_st.p=8 a_st.q=9
+round=3 s_counter=120 a_counter=100
+round=3 s_arr[0]=201 a_arr[0]=1
+round=3 s_arr[1]=202 a_arr[1]=2
+round=3 s_arr[2]=203 a_arr[2]=3
+round=3 s_st.p=9 s_st.q=10 a_st.p=7 a_st.q=8
+round=3 after s_counter=130 a_counter=110
+round=3 after s_arr[0]=301 a_arr[0]=101
+round=3 after s_arr[1]=302 a_arr[1]=102
+round=3 after s_arr[2]=303 a_arr[2]=103
+round=3 after s_st.p=10 s_st.q=11 a_st.p=8 a_st.q=9
+g_static_scalar_after=1005
+END

@@ -18,17 +18,20 @@
 //!
 //! # Artifacts
 //!
-//! | Path | Content |
-//! |---|---|
-//! | `target/conformance-report/summary.md` | Human-readable deliverable summary |
-//! | `target/conformance-report/summary.tsv` | The same data, machine-readable for aggregation |
-//! | `target/conformance-report/areas/<area>.md` | Per-area human-readable report |
-//! | `target/conformance-report/areas/<area>.tsv` | Per-area machine-readable report |
-//! | `target/conformance-report/.run-owner` | Which run owns this directory, so a second one is refused |
+//! | Path | Content | Written by |
+//! |---|---|---|
+//! | `target/conformance-report/summary.md` | Human-readable deliverable summary | this module |
+//! | `target/conformance-report/summary.tsv` | The same data, machine-readable for aggregation | this module |
+//! | `target/conformance-report/areas/<area>.md` | Per-area human-readable report | this module |
+//! | `target/conformance-report/areas/<area>.tsv` | Per-area machine-readable report | this module |
+//! | `target/conformance-report/.run-owner` | Which run owns this directory, so a second one is refused | this module |
+//! | `target/conformance-report/run.txt` | The run manifest: which run produced the reports beside it, under what configuration, and the retention ceilings | `sandbox.rs`, named by [`super::sandbox::RUN_MANIFEST_NAME`] |
 //!
-//! Those four paths are a contract shared with the suite driver, with the build directory's
+//! Those six paths are a contract shared with the suite driver, with the build directory's
 //! ignore rules and with the continuous-integration job that uploads them, so they are named by
-//! the constants and helpers below rather than spelled at a call site. Everything is written
+//! the constants and helpers below rather than spelled at a call site. The run manifest is listed
+//! because it lands in the same directory and is uploaded with the rest, even though the module
+//! that establishes the run's identity is the one that writes it. Everything is written
 //! beneath [`report_root`] and nothing is written anywhere else — in particular nothing is ever
 //! written under the corpus root, whose two registers
 //! (`tests/conformance/EXPECTED_DIVERGENCES.md`, `tests/conformance/FINDINGS.md`) and curated
@@ -395,27 +398,32 @@ const TSV_SEPARATOR: char = '\t';
 // recognised as predating the stamp on the very first read rather than after fourteen rows have been
 // counted.
 //
-// # The one place a process token is written, and why it is here
+// # The one report artifact a process token reaches, and why it reaches this one
 //
 // This module's determinism rule is that identical inputs produce byte-identical area-report
 // Markdown, and a per-process token breaks that for whatever carries it. It is carried here anyway,
-// in exactly one
-// field of exactly one line, because the alternative is worse: without it, a report left behind by an
-// earlier run of the *same configuration over the same corpus* is byte-for-byte a report this run
-// could have written, and the identity check that exists to refuse it cannot. Clearing the report
-// directory at the start of a run is the primary defence and it is not sufficient on its own — a
-// purge that cannot remove an entry reports the failure and the file survives it, which is exactly
-// the case this check is the last line against.
+// in exactly one field of exactly one line, because the alternative is worse: without it, a report
+// left behind by an earlier run of the *same configuration over the same corpus* is byte-for-byte a
+// report this run could have written, and the identity check that exists to refuse it cannot.
+// Clearing the report directory at the start of a run is the primary defence and it is not
+// sufficient on its own — a purge that cannot remove an entry reports the failure and the file
+// survives it, which is exactly the case this check is the last line against.
 //
 // The exception is kept as narrow as it can be:
 //
-//   * the token appears **only** in the `token=` field of an area report's generation preamble, which
-//     is a comment line whose sole consumer is the aggregation check it serves;
+//   * of the artifacts this module renders, the token reaches **only** the `token=` field of an area
+//     report's generation preamble, which is a comment line whose sole consumer is the aggregation
+//     check it serves;
 //   * it appears in **no** rendered Markdown, in **no** summary field of either half, and in **no**
 //     diagnostic — a token-only mismatch is described in words rather than by quoting either token —
 //     so the area Markdown a maintainer diffs between runs stays byte-identical for identical inputs;
 //   * `run` and `config` are unchanged and still derived from configuration alone, so a *differently*
 //     configured file is still recognised by a deterministic value and can still be explained.
+//
+// Two writes outside this module complete the contract, and they are not rendered reports: the
+// `run_token` line of the `run.txt` run manifest `sandbox.rs` places beside these reports, and the
+// `run_token` line of a finding's `environment.txt`. Those three physical writes are the whole set;
+// [`super::RunGeneration::token`] enumerates them in one place.
 //
 // The token is not the only value that differs between two identically configured runs — the session
 // signature does too, because the environment fingerprint it is derived from records the per-run

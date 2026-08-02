@@ -62,9 +62,10 @@ compiling it with exactly that gate on the reference compiler, so this record de
 no deviation and omits the ub_audit_flags key, which is how a record whose program needs
 the whole gate says so. Area 07 sanctions no deviation in any case: the only authorized
 removals are -pedantic, for the supported-extension area where the subject is
-non-standard by definition, and the conversion diagnostics, for the deliberate
-narrowing programs where a narrowing conversion is the behaviour under test. Neither
-removal applies to a variadic program.
+non-standard by definition, and the conversion diagnostics, for the corpus's one
+deliberate narrowing-conversion program, 01_integer_conversions/004_narrowing_conversions,
+where a narrowing conversion is the behaviour under test. Neither removal applies to a
+variadic program.
 END
 impl_defined_notes <<END
 Width normalization: the types long and unsigned long are never used, because sizeof(long)

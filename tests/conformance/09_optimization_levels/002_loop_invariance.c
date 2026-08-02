@@ -6,9 +6,15 @@ int printf(const char *, ...);
 
 int main(void)
 {
-    /* Bounds and factors come from volatile storage so no loop can be folded
-       away into a constant.  All bounds are small and every accumulator stays
-       far inside the int range, so no signed overflow is possible. */
+    /* Most bounds and factors come from volatile storage, so those loops cannot
+       be reduced to a constant by folding alone and the runtime path stays under
+       test at every optimization level.  The `once` do-while below is the one
+       deliberate exception: its controlling expression is the literal-false
+       i < 0, which is the single-iteration boundary it exists to check, and it
+       may legitimately fold straight to its result.  No loop here is required to
+       survive translation -- only the printed values are compared.  All bounds
+       are small and every accumulator stays far inside the int range, so no
+       signed overflow is possible. */
     volatile int v_n = 10;
     volatile int v_k = 3;
     volatile int v_m = 7;

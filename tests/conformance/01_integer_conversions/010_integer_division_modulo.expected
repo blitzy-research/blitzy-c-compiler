@@ -20,8 +20,14 @@ oracle_c           = enabled
 ub_notes           <<END
 No divisor is ever zero, and the one undefined signed case - the most negative value
 divided by minus one - is deliberately never formed.  Division truncates toward zero and
-the remainder takes the sign of the dividend; both were measured identical on all four
-targets.  Every property is computed twice, once from literal constants and once from
+the remainder takes the sign of the dividend, and neither is an implementation-defined
+choice: C11 6.5.5p6 makes / yield the algebraic quotient with any fractional part
+discarded and requires (a / b) * b + a % b to equal a wherever the quotient is
+representable, from which the remainder's sign follows.  Both were separately confirmed
+identical on all four targets, which confirms conformance rather than establishing
+agreement, so no target restriction applies and a disagreement here would be a
+conformance defect to report rather than a permitted difference to mark.
+Every property is computed twice, once from literal constants and once from
 volatile-qualified storage, so the constant folder's answer cannot stand in for the
 one the backend computes at run time.
 No header is included and printf is declared by hand, so nothing here depends on a

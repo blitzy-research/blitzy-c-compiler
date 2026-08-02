@@ -273,7 +273,7 @@ docs/project-guide.md, the open risk register entry that this limitation belongs
   second account of the same authority. A paraphrase in the §4 summary row is still a defect no run
   will catch for you, because that row is prose the audit does not compare.
 
-In practice the only two files that qualify as a basis today are
+In practice the only two files on this branch that qualify as a basis are
 [`docs/technical-specifications.md`](../../docs/technical-specifications.md) and
 [`docs/project-guide.md`](../../docs/project-guide.md); §7 lists the specific sections of each that
 are legitimately citable.
@@ -362,7 +362,7 @@ switches an oracle off for a program that carries a marker scoped to that oracle
 be retired in the same edit (§3.2) — otherwise the record no longer parses and the whole suite
 stops, which is the harness declining to let a never-consultable marker look healthy.
 
-## 4. Divergences analysed, and why none carries a marker today
+## 4. Divergences analysed, and why none carries a marker on this branch
 
 **No marker is active.** No `.expected` record in the corpus carries an `expected_divergence.*`
 block, so this register lists **no identifier at all** — the reverse direction of the audit in §1.1
@@ -374,7 +374,7 @@ forbids. Three candidates are analysed below; each names the documentation that 
 why its program is written and run rather than dropped, and records the exact conditions under which
 a marker could legitimately be minted later.
 
-| § | Candidate | Program | Status today | Verdict if it diverges today |
+| § | Candidate | Program | Status on this branch | Verdict if it diverges |
 |---|---|---|---|---|
 | 4.1 | GCC case ranges | `08_gcc_extensions/004_case_ranges.c` — committed | Analysed; **no marker** | `FINDING` |
 | 4.2 | `long double` across the backends | `13_floating_point/004_long_double_target_restricted.c` — **not yet committed** | Analysed; oracle (b) to be excluded by the record's own recorded reason, **not** by a marker | `XFAIL` on oracle (b), citing that recorded reason; `FINDING` on oracle (a) or (c) |
@@ -444,9 +444,12 @@ Its record **declares** all four targets and all three optimization levels — s
 written to exercise the construct in five distinct shapes: contiguous positive buckets, a
 negative-valued range, a character-class range, a single-value range (`case 5 ... 5:`), and a range
 group that deliberately falls through. Each switch is driven once from a constant and once from
-`volatile` storage, so that constant folding cannot stand in for the backend's own lowering. No
-run of these cells has been recorded yet on this branch, which carries the corpus but not the
-package; the verdict rule above is what will apply the first time they execute.
+`volatile` storage, so that constant folding cannot stand in for the backend's own lowering. **No
+verdict about `bcc` has been recorded for these cells.** This branch carries the corpus but not the
+package, and the one run performed here — described under §8.2 — used a *surrogate* compiler under
+test rather than `bcc`, so its twelve agreeing cells for this program say only that the surrogate
+matched the reference compiler, which is what a pass-through surrogate does by construction. The
+verdict rule above is what will apply the first time `bcc` itself compiles them.
 
 **Note on the warning gate.** The record deviates from the default undefined-behaviour audit gate by
 dropping `-pedantic`, with the reason recorded in its own `impl_defined_notes`: the subject under
@@ -758,12 +761,32 @@ adding a marker for a difference that was never expected in the first place.
 |---|---|
 | Bitfield layout, size, alignment and exact byte image | Identical, including a straddling 3-bit / 5-bit / 9-bit sequence and the byte image it produces |
 | Right shift of a negative signed value | Arithmetic (sign-propagating) everywhere |
-| Integer division and remainder signs | Division truncates toward zero; the remainder takes the sign of the dividend |
+| Integer division and remainder signs | Division truncates toward zero; the remainder takes the sign of the dividend — **fixed by C11 6.5.5p6**, so the survey confirms conformance rather than establishing agreement |
 | Byte order | Little-endian everywhere, as the target table records |
 | Escape sequences and hexadecimal / octal formatting | Byte-identical output |
 | Character-literal values | Identical |
 | Variadic argument passing, integer **and** `double` | Byte-identical at all three optimization levels |
 | `sizeof(enum E) == sizeof(int)` for an enumeration whose values fit in `int` | True on all four, `sizeof` four bytes, at all three optimization levels — twelve configurations measured, all agreeing |
+
+**Two provenances, deliberately distinguished.** One row in the table above is not an
+implementation-defined property at all, and treating it as one would misdescribe what a future
+disagreement means. **Integer division and remainder** are fixed by the standard: C11 6.5.5p6 makes
+`/` yield the algebraic quotient with any fractional part discarded — truncation toward zero — and
+requires `(a / b) * b + a % b` to equal `a` wherever the quotient is representable, from which the
+remainder's taking the sign of the dividend follows. Agreement across the four targets was therefore
+never in question, and the measurement establishes nothing about the language; it confirms only that
+no driver in this environment departs from what C11 already requires. Every other row is genuinely
+implementation-defined or unspecified — right shift of a negative signed value is
+implementation-defined under C11 6.5.7p5, byte order, bitfield layout and the argument-passing
+details are not fixed by the standard at all — and there the measurement is the only thing that
+establishes agreement, which is exactly why it was taken.
+
+The distinction is operational, not pedantic, because it changes the correct response to a future
+disagreement. On the standard-fixed row a disagreement is a **conformance defect** and therefore a
+finding: it is never a candidate for a marker, and §5.4's narrow-the-target-list remedy must not be
+applied to it, because narrowing would conceal a defect rather than record a permitted difference. On
+an implementation-defined row a disagreement may be a conforming difference, and there §5.4's rule
+governs — narrow that program's target list and mint a marker citing the relevant subsection.
 
 **End-to-end validation of the oracle contract.** One program compiled for all four targets at
 `{-O0, -O1, -O2}` — twelve configurations — produced **byte-identical stdout in every one**. The
@@ -855,7 +878,7 @@ text of any rule added later.
 | Constraint | What it requires | Consequence here |
 |---|---|---|
 | **C1 — no compiler source change** | `src/**`, `include/**`, `build.rs`, `Cargo.toml` and `Cargo.lock` are read-only reference material. | Nothing in this suite modifies any of them. **This directory contains no `.rs` file at any depth** — that is precisely what keeps Cargo blind to it, so it is never a build target and the package manifest needs no change at all. |
-| **C2 — no existing test weakened** | No existing test may be deleted, skipped, weakened or relaxed; no `#[ignore]` attribute may be added or removed. | No marker in this register changes an existing test, and the suite declares no ignored test and no harness test function of its own, so it can move neither the repository's test count nor its ignored count — which is the part that is mechanical here. The count itself, **exactly 13 ignored**, is a whole-repository property no integration test can read, so it is measured by the health gate (`cargo test 2>&1 | grep "test result"`) once this suite and the compiler are on one branch. |
+| **C2 — no existing test weakened** | No existing test may be deleted, skipped, weakened or relaxed; no `#[ignore]` attribute may be added or removed. | No marker in this register changes an existing test, and the suite declares no ignored test and no harness test function of its own, so it can move neither the repository's test count nor its ignored count — which is the part that is mechanical here. The count itself, **exactly 13 ignored**, is a whole-repository property no integration test can read, so it is measured by the health gate (`cargo test 2>&1 \| grep "test result"`) once this suite and the compiler are on one branch. |
 | **C3 — never exclude a feature because it is difficult** | If a feature cannot be tested, say so explicitly and explain why, rather than dropping it. | **Every entry in §4 exists because of C3.** Case ranges (§4.1) are absent from every documented inventory and are tested anyway, with **no** marker minted on that omission; the wide and Unicode literal prefixes (§4.3) are likewise unenumerated and likewise fully tested; and `long double` (§4.2) has three different representations across four targets and is analysed here so that it is written rather than dropped when the floating-point area lands. Where a comparison genuinely cannot be made, the exclusion is narrowed to a **single oracle**, the program keeps running under the remaining oracles, and the reason is recorded in the program's own record — never here alone. |
 | **C4 — contained execution** | Generated programs may not reach the network or any path outside the sandbox working directory. | Discharged by two separate mechanisms, and keeping them apart is what makes the claim checkable. **Corpus-authoring policy:** every input is a literal in the program source; no program opens a socket or reads a file, and the whole corpus has exactly **one** fixture file — the header used by the include-path flag probe. **Path discipline:** each cell is launched with its own workspace as its working directory, and the harness confines every path it constructs to roots beneath the build directory. **Environment isolation:** every child is spawned with the environment cleared and a small fixed set installed in its place — a search path restricted to the `PATH` entries that are absolute and not writable by an untrusted account, a fixed C locale, `TZ=UTC`, `TERM=dumb`, the strictest sanitizer options, and the cell's workspace under `HOME`, `TMPDIR`, `TMP` and `TEMP` — so no credential and no behaviour-changing variable reaches a program the suite does not control, and a compiler driver cannot be made to execute a substituted `cc1` or `as` from a directory tool resolution refused. None of the three is an operating-system sandbox: there is no namespace, `chroot`, seccomp filter, landlock profile or network restriction around any child; a tool that hard-codes a temporary path rather than reading `TMPDIR` keeps its own temporaries where it always did; and whether a crash writes a core image outside the workspace is decided by the host's `kernel.core_pattern` and core-size limit rather than by the harness — see `README.md` §"C4 — Contained execution". Untrusted input must be run under an external sandbox. |
 
@@ -877,19 +900,84 @@ patch.
 **Honest measurement.** No coverage figure is published in this file, and none can be: coverage
 instrumentation requires a development dependency, which the rule quoted above forbids absolutely,
 so any figure here would be unverifiable by anyone in this repository. Where the suite's breadth
-must be referenced, it is referenced as an enumerable matrix — and the **final planned target** is
-distinguished from what is **committed today**, because only the second is countable from the file
-set as it stands:
+must be referenced, it is referenced as an enumerable matrix — and three **separate** quantities are
+reported rather than one, because they are genuinely different numbers. The first is the design
+target; the second is counted directly from the file set as it stands; the third is what the suite
+**admits as evidence**, which is not the same as what its cell machinery will run:
 
-| Matrix | Areas | Programs | `bcc` compile-and-run cells | Differential and golden assertions |
-|---|---:|---:|---:|---:|
-| **Final planned target** | 14 | 108 | 1,296 (108 × 4 targets × 3 levels) | ≈ 3,564 across the three oracles |
-| **Committed today** | 11 | 92 | 1,104 (92 × 4 × 3) | ≈ 3,036 across the three oracles |
+| Matrix | Areas | Sources | Records | **Runnable programs** | `bcc` compile-and-run cells | Differential and golden assertions |
+|---|---:|---:|---:|---:|---:|---:|
+| **Final planned target** | 14 | 108 | 108 | 108 | 1,296 (108 × 4 targets × 3 levels) | ≈ 3,564 across the three oracles |
+| **Present on this branch** | 11 | 92 | 92 | **92** | 1,104 **nominal** (92 × 4 × 3) | ≈ 3,036 **nominal** across the three oracles |
+| **Admitted as evidence** | 0 | 0 | 0 | **0** | **0** | **0** |
 
-The committed figure is what a reader can verify right now by counting `tests/conformance/*/*.c`;
-the planned figure is what the suite's design calls for once the three remaining areas land. Quoting
-the planned figure as though it were the present state would be exactly the unverifiable claim the
-paragraph above refuses to make.
+**A runnable program is a source paired with its record, and it is the runnable count — never the
+source count — that every cell figure multiplies.** The three columns are published separately
+because they can disagree: a `.c` file with no sibling record cannot execute at all, since the record
+is where the command templates and the `expect_exit` value live and oracle (c) would have nowhere to
+read a golden from, so such a file contributes **zero** cells while still raising a count of `*.c`
+files. Counting sources alone would therefore over-state the matrix by twelve cells for every
+unpaired program. On this branch the three counts agree at 92 — no unpaired source and no orphan
+record — and that agreement is itself the thing a reader should check rather than assume:
+
+```text
+find tests/conformance -name '*.c'        | wc -l                 # sources  -> 92
+find tests/conformance -name '*.expected' | wc -l                 # records  -> 92
+for f in $(find tests/conformance -name '*.c'); do \
+  [ -f "${f%.c}.expected" ] || echo "$f"; done | wc -l            # unpaired ->  0
+```
+
+**The present row's cell and assertion figures are marked nominal, and the third row is why.** They
+state what those 92 pairs *represent* at four targets and three levels, not what a run can currently
+establish. The admitted row counts the cells whose result the suite accepts as evidence, which is
+equivalently the cells belonging to an area that can *complete*, and it is zero for **every
+individual area** as much as for the whole suite. It is deliberately not a count of cells the
+machinery will attempt — the machinery does run. Two independent mechanisms, both deliberately
+fail-closed, decide it:
+
+1. **The per-program record requirement.** A cell is resolvable only from a program **together with
+   its same-stem `.expected` record**, and a program without one is a hard error rather than a
+   program that runs with defaults, because the record is what supplies the target list, the
+   optimization levels, the command templates, the expected exit status and the golden stdout
+   ([`README.md`](README.md#corpus-discovery)). On this branch that mechanism removes nothing —
+   the pairing is complete at 92 — but it is the reason the source count carries no cell figure of
+   its own.
+2. **Whole-corpus enumeration behind the undefined-behaviour audit.** The audit enumerates the
+   corpus **globally**, across all fourteen declared areas, and three of those directories are not
+   present. The enumeration therefore fails, the audit is recorded as *unperformed*, and that gate
+   **blocks every area** — not only the three that are missing — because a corpus that was never
+   audited cannot make any divergence attributable, which is requirement 1's whole point (the gate
+   and its blocking behaviour are documented in
+   [`README.md`](README.md#the-undefined-behaviour-audit-gate)). An area whose comparisons all agree
+   still does not complete.
+
+Neither mechanism is a defect to be worked around; both are what stops a partial corpus from
+reporting a green matrix. The consequence for this file is simply that **the admitted figure must be
+stated as zero until the corpus is complete**, and quoting the nominal or planned figures as though
+they described what has been established would be exactly the unverifiable claim the paragraph above
+refuses to make.
+
+**Measured, not assumed — and this is why the admitted row is not simply the present row.** The suite
+has been run on this branch, in an out-of-repo scratch package, against a **surrogate** compiler under
+test rather than `bcc`. The cell machinery does run and it reproduces the nominal arithmetic above;
+what it does not do is complete a single one of the fourteen area tests, because the audit gate is
+unmet while three area directories are absent. The suite states the reason in its own words — while
+that gate is unmet, an area's passes *"are not evidence of agreement"* and its divergences *"are not
+evidence of a defect"*. Agreements counted under those conditions are arithmetic that ran, not
+evidence that holds, which is precisely the distinction the third row exists to keep. Two caveats
+travel with any such figure: the compiler under test was a surrogate, so nothing measured there is
+evidence about `bcc`; and the figure is reported only to show that the nominal row is honest
+arithmetic, never as a result.
+
+The planned figure is what the suite's design calls for once the three remaining areas land —
+`12_preprocessor` (6 programs), `13_floating_point` (4) and `14_abi_calling_convention` (6), which
+is exactly the 16 that separate 92 from 108. Quoting the planned figure as though it were the present
+state would be exactly the unverifiable claim the paragraph above refuses to make. `README.md`
+§"The enumerable matrix" carries the same basis in more detail; the two documents are written to be
+checked against each other and against the files. Once those three areas are present, the admitted
+row becomes the planned row and this table collapses to a single line; until then the rows stay
+separate, because collapsing them early is precisely how a source-file count turns into a claim about
+tests that cannot yet conclude.
 
 ### 8.3 Retirement log
 

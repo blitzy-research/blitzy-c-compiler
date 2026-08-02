@@ -3425,13 +3425,13 @@ const REQUIRED_ABSENT: &[RequiredAbsent] = &[
     },
     RequiredAbsent {
         spelling: "-Wconversion",
-        reason: "part of the same audit gate, which the deliberate narrowing programs drop with a \
-                 recorded reason",
+        reason: "part of the same audit gate, which the corpus's one deliberate \
+                 narrowing-conversion program drops with a recorded reason",
     },
     RequiredAbsent {
         spelling: "-Wsign-conversion",
-        reason: "part of the same audit gate, dropped alongside -Wconversion by the narrowing \
-                 programs",
+        reason: "part of the same audit gate, dropped alongside -Wconversion by that same \
+                 narrowing-conversion program",
     },
     RequiredAbsent {
         spelling: "-Wshadow",

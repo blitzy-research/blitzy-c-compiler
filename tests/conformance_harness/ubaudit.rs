@@ -80,8 +80,9 @@
 //!
 //! - The supported-extension area drops `-pedantic`, because an extension is non-standard by
 //!   definition and that flag exists precisely to reject one.
-//! - The deliberate narrowing-conversion programs drop `-Wconversion` and `-Wsign-conversion`,
-//!   because there a narrowing conversion is the behaviour under test rather than a mistake.
+//! - The deliberate narrowing-conversion program drops `-Wconversion` and `-Wsign-conversion`,
+//!   because there a narrowing conversion is the behaviour under test rather than a mistake. The
+//!   corpus contains exactly one such program, `01_integer_conversions/004_narrowing_conversions`.
 //!
 //! Both keep every other member, including `-Werror`. A deviation whose reason is not recorded in
 //! `impl_defined_notes`, naming every flag it drops by that flag's exact spelling, is itself a defect
@@ -177,6 +178,50 @@
 //! [`run_command_captured_with`], using the discovered `timeout` utility when there is one
 //! and a watchdog thread otherwise. The bound matters more here than anywhere else in the suite,
 //! because this is the one gate that *runs* instrumented programs.
+//!
+//! # Bounded diagnostics retention, and why the bytes stay recoverable
+//!
+//! A gate's captured output is the point of the record — a status without the diagnostic that
+//! justifies it is not something anyone can fix a program from — and it is also the one thing here
+//! that would otherwise grow without a ceiling. Each stream is already capped by the execute layer,
+//! but the audit holds **five** of them per program: two for the warning gate, and three for the
+//! sanitizer gate, whose build and run are captured separately so neither overwrites the other. The
+//! report-safe rendering can then expand a stream several-fold, because a byte that is not printable
+//! becomes a visible escape. Across a hundred programs, and then again for the rendered report, an
+//! audit of a toolchain that fails on every program would hold gigabytes of text in memory to say
+//! what a few hundred lines already say.
+//!
+//! Three ceilings, therefore, and not one of them silent:
+//!
+//! - **Per gate result** — at most [`MAX_GATE_DIAGNOSTIC_LINES`] lines and
+//!   [`MAX_GATE_DIAGNOSTIC_BYTES`] rendered bytes, taken from the **head** of the capture, because a
+//!   compiler stops at its first error under `-Werror` and a sanitizer writes its `runtime error:`
+//!   line before its stack trace: the head is the actionable part.
+//! - **Per line** — [`MAX_GATE_DIAGNOSTIC_LINE_BYTES`], so that one pathological line contributes
+//!   its head rather than being dropped whole and leaving a failing gate with no text at all.
+//! - **Per run** — [`RUN_DIAGNOSTIC_BYTES_MAX`] across every gate result together, charged as each
+//!   capture is taken rather than swept afterwards, so the bound holds throughout rather than
+//!   eventually.
+//! - **One buffer for the report** — [`AuditReport::render`] streams every section into a single
+//!   string. The alternative it replaced concatenated five section strings, which held a second
+//!   complete copy of the largest thing in the module at the moment of concatenation.
+//!
+//! A gate that **passed** retains nothing at all, because the failure section is the only place this
+//! module renders captured output and a passing gate never appears in it. That is not merely a saving:
+//! the allowance is charged in corpus order, so a passing program's ordinary standard output could
+//! otherwise crowd out the diagnostic of a gate that failed later in the corpus — the one text an
+//! author actually has to read.
+//!
+//! Every reduction is reported: [`Diagnostics::account`] states what was kept and what was left out,
+//! in both lines and bytes, and the environment section states the run's total whether or not a
+//! ceiling bit — because "no notice appeared" is not evidence that a report is complete.
+//!
+//! What keeps the loss recoverable is that the bytes were never only in memory. Each gate persists
+//! every stream into its own workspace **before** the excerpt is taken, so a bounded result names
+//! files that already exist; and for a gate that passed, whose workspace is discarded, the recorded
+//! command lines reproduce the capture exactly. This is the same discipline
+//! [`sandbox`](super::sandbox) applies to retained files, for the same reason: a record that quietly
+//! said less than it appeared to would be worse than one that said nothing.
 //!
 //! # Report, do not patch
 //!
@@ -275,6 +320,366 @@ const SANITIZER_ARTIFACT_NAME: &str = "sanitized.out";
 const SANITIZER_RUN_STDOUT_NAME: &str = "run.stdout";
 const SANITIZER_RUN_STDERR_NAME: &str = "run.stderr";
 const SANITIZER_RUN_EXIT_NAME: &str = "run.exit";
+
+/// Most lines of captured output one gate result retains in memory.
+///
+/// Four hundred lines is far more than any gate failure needs to be actionable — a strict warning
+/// gate stops the compiler at its first error and a sanitizer writes its diagnosis, its stack trace
+/// and its summary in a few dozen lines — and it is small enough that a hundred programs cannot
+/// accumulate a report nobody can hold. The excerpt is taken from the **head** of the capture for
+/// exactly that reason: the first diagnostic is the one an author acts on, and the later ones are
+/// usually cascades of it.
+pub const MAX_GATE_DIAGNOSTIC_LINES: usize = 400;
+
+/// Most bytes of rendered output one gate result retains in memory.
+///
+/// Bounds the line ceiling from the other side, because a single line can be pathologically long: a
+/// diagnostic quoting a generated declaration, or a stream whose bytes are not text and therefore
+/// expand fourfold when the report-safe rendering escapes each one. Either ceiling alone would leave
+/// the other unguarded.
+pub const MAX_GATE_DIAGNOSTIC_BYTES: usize = 64 * 1024;
+
+/// Most bytes of one captured line the excerpt reproduces.
+///
+/// A diagnostic line a human reads is a few hundred bytes at most — a compiler names a file, a
+/// position and a problem; a sanitizer names a frame — so two kilobytes is generous for the text that
+/// carries the meaning. The cap exists so that a pathological line contributes its **head** rather
+/// than being dropped whole: a single line longer than the per-result ceiling would otherwise leave a
+/// failing gate with no text at all, and the head of `file.c:12:5: error: ...` is exactly the part an
+/// author acts on. Elision is announced on the line itself, following the same convention the
+/// comparator uses for an over-long rendered line.
+pub const MAX_GATE_DIAGNOSTIC_LINE_BYTES: usize = 2 * 1024;
+
+/// Most bytes of rendered output every gate result of one run retains together.
+///
+/// This is the ceiling the review's resource-management finding is really about. The audit holds
+/// five sanitized streams per program — two for the warning gate, three for the sanitizer gate,
+/// whose build and run are captured separately — and each is already capped by the execute layer at
+/// a size the report-safe rendering can then expand several-fold. Across a corpus of a hundred
+/// programs, an audit of a toolchain that fails on every one of them would otherwise hold gigabytes
+/// of text to say what a few hundred lines already say. Four megabytes is more diagnostic text than
+/// any single investigation reads, and it is charged continuously at the moment of retention rather
+/// than swept afterwards, so the bound holds throughout the run rather than eventually.
+pub const RUN_DIAGNOSTIC_BYTES_MAX: usize = 4 * 1024 * 1024;
+
+/// Capacity the rendered report starts with, before the per-program and per-diagnostic allowance.
+///
+/// The fixed sections — the preamble, the environment, the gate table and the coverage figures —
+/// are a little over eight kilobytes together. Sizing for them up front is what keeps
+/// [`AuditReport::render`] to a single buffer that grows a bounded number of times instead of a
+/// chain of concatenations that each held a complete copy of everything before it.
+const REPORT_BASE_BYTES: usize = 16 * 1024;
+
+/// Which ceiling stopped a gate result's diagnostics from being retained in full.
+///
+/// Named rather than reduced to a boolean because the three mean different things to a reader. Two
+/// are properties of this one capture and say the stream was unusually large; the third says the
+/// *run* had already retained its allowance, which is a statement about every program audited
+/// before this one and is the case in which a reader should expect the same notice further down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiagnosticsBound {
+    /// The per-result line ceiling, [`MAX_GATE_DIAGNOSTIC_LINES`].
+    Lines,
+    /// The per-result byte ceiling, [`MAX_GATE_DIAGNOSTIC_BYTES`].
+    Bytes,
+    /// The run-wide byte ceiling, [`RUN_DIAGNOSTIC_BYTES_MAX`], reached by an earlier result.
+    Run,
+}
+
+impl DiagnosticsBound {
+    /// The ceiling and its value, for the one-line account beside the excerpt.
+    ///
+    /// Reads the constants rather than restating their values, so a report can never advertise a
+    /// bound other than the one that was applied.
+    fn describe(self) -> String {
+        match self {
+            DiagnosticsBound::Lines => {
+                format!("the per-result ceiling of {MAX_GATE_DIAGNOSTIC_LINES} line(s)")
+            }
+            DiagnosticsBound::Bytes => {
+                format!("the per-result ceiling of {MAX_GATE_DIAGNOSTIC_BYTES} byte(s)")
+            }
+            DiagnosticsBound::Run => format!(
+                "the run-wide ceiling of {RUN_DIAGNOSTIC_BYTES_MAX} byte(s), already spent by \
+                 earlier gate results"
+            ),
+        }
+    }
+}
+
+/// The run-wide ceiling on retained diagnostics, and what it has cost so far.
+///
+/// Threaded by `&mut` through [`run`] rather than held in a static, for two reasons. The audit is
+/// performed once per run and executes sequentially, so a threaded budget is charged in corpus
+/// order and the resulting report is a pure function of the corpus — the same property the
+/// sequential audit exists to have. And a budget that is passed in can be reasoned about locally: no
+/// caller has to know whether some other test already spent it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticsBudget {
+    /// Rendered bytes retained by every gate result of this run so far.
+    spent: usize,
+    /// Gate results whose captured output was retained in full.
+    complete: usize,
+    /// Gate results reduced to an excerpt by one of the two per-result ceilings.
+    bounded: usize,
+    /// Gate results reduced to an excerpt because the run-wide ceiling was already spent.
+    curtailed: usize,
+}
+
+impl DiagnosticsBudget {
+    /// A fresh budget with nothing spent.
+    fn new() -> DiagnosticsBudget {
+        DiagnosticsBudget {
+            spent: 0,
+            complete: 0,
+            bounded: 0,
+            curtailed: 0,
+        }
+    }
+
+    /// How many rendered bytes the next gate result may retain.
+    ///
+    /// The smaller of what the per-result ceiling allows and what the run has left, so neither
+    /// ceiling can be exceeded by a result that satisfies the other.
+    fn allowance(&self) -> usize {
+        RUN_DIAGNOSTIC_BYTES_MAX
+            .saturating_sub(self.spent)
+            .min(MAX_GATE_DIAGNOSTIC_BYTES)
+    }
+
+    /// Charge one completed capture against the budget and record which bucket it fell into.
+    ///
+    /// A gate that was never invoked is not charged and is not counted: the buckets below add up to
+    /// the number of captures actually taken, which is what makes the reported figure checkable
+    /// against [`AuditReport::invocations_performed`].
+    fn charge(&mut self, retained: usize, bound: Option<DiagnosticsBound>) {
+        self.spent = self.spent.saturating_add(retained);
+        match bound {
+            None => self.complete += 1,
+            Some(DiagnosticsBound::Run) => self.curtailed += 1,
+            Some(DiagnosticsBound::Lines | DiagnosticsBound::Bytes) => self.bounded += 1,
+        }
+    }
+
+    /// One line of accounting for the report's environment section.
+    ///
+    /// Stated whether or not a ceiling bit, because a reader has to be able to tell a report whose
+    /// diagnostics are complete from one whose diagnostics are excerpts, and "no notice appeared"
+    /// is not evidence of the former.
+    fn describe(&self) -> String {
+        format!(
+            "{} of {RUN_DIAGNOSTIC_BYTES_MAX} byte(s) across {} capture(s) kept in full, {} \
+             reduced by a per-result ceiling and {} by the run-wide ceiling; per result at most \
+             {MAX_GATE_DIAGNOSTIC_LINES} line(s) and {MAX_GATE_DIAGNOSTIC_BYTES} byte(s), taken \
+             from the head of the capture, and at most {MAX_GATE_DIAGNOSTIC_LINE_BYTES} byte(s) of \
+             any one line. A gate that PASSED retains nothing, so the whole allowance stays \
+             available to the gate failures whose diagnostics an author acts on; zero captures \
+             means no gate failed rather than a bound that did not work",
+            self.spent, self.complete, self.bounded, self.curtailed
+        )
+    }
+}
+
+/// One gate's captured output: a bounded excerpt, and the account of everything it was taken from.
+///
+/// The excerpt and the accounting are one value on purpose. A truncated diagnostic presented without
+/// its counters is a fragment a reader would take for the whole thing, which is a worse record than
+/// no record at all — the same reason the sandbox refuses to prune a retained file silently.
+///
+/// The counters describe the **capture**, in the decoded text the streams held, while the ceilings
+/// apply to the **excerpt**, in the rendered bytes actually held in memory. The two are deliberately
+/// different quantities: the rendered form is larger than the text it came from whenever a byte had
+/// to be escaped, so bounding memory means bounding the rendered form, and telling a reader what was
+/// left out means counting the captured form. Section headers and elision notices belong to the
+/// excerpt's structure rather than to the capture, so they are charged against the ceilings and are
+/// not counted as captured lines or bytes.
+///
+/// A line the per-line cap shortened counts as **retained**, because it was reached and is partly
+/// shown; the bytes it did not reproduce appear in the omitted byte figure. That keeps the retained
+/// and captured figures one quantity whose difference is exactly what a reader is not being shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnostics {
+    /// The retained text, in labelled sections, each line already made safe to render.
+    excerpt: String,
+    /// Lines the capture held in total, across every section.
+    captured_lines: usize,
+    /// Bytes of decoded text the capture held in total, across every section.
+    captured_bytes: usize,
+    /// Lines of captured text the excerpt reproduces.
+    retained_lines: usize,
+    /// Bytes of captured text the excerpt reproduces.
+    retained_bytes: usize,
+    /// Which ceiling stopped the retention, absent when the capture was retained in full.
+    bound: Option<DiagnosticsBound>,
+    /// Workspace entries holding the exact untruncated bytes, in section order.
+    ///
+    /// Every gate persists each stream into its own workspace *before* the excerpt is taken, so
+    /// these name files that already exist rather than an intention to write them.
+    sources: Vec<String>,
+}
+
+impl Diagnostics {
+    /// The record for a gate whose output is not retained.
+    ///
+    /// Two cases, and both are deliberate. A gate that was **never invoked** — an unavailable driver,
+    /// or a record so defective that the gate it asks for cannot be trusted — captured nothing to
+    /// retain. And a gate that **passed** has nothing to explain: the failure section is the only
+    /// place this module renders captured output, a passing gate never appears in it, and under
+    /// `-Werror` a passing warning gate is provably silent anyway. Retaining a passing gate's stream
+    /// would spend the run's allowance on text no reader can reach, and — because the allowance is
+    /// charged in corpus order — could leave a later *failing* gate unable to show the diagnostic an
+    /// author actually has to act on. The persisted streams are still on disk whenever the workspace
+    /// was kept, so nothing becomes unrecoverable either way.
+    fn none() -> Diagnostics {
+        Diagnostics {
+            excerpt: String::new(),
+            captured_lines: 0,
+            captured_bytes: 0,
+            retained_lines: 0,
+            retained_bytes: 0,
+            bound: None,
+            sources: Vec::new(),
+        }
+    }
+
+    /// Retain what the budget allows of `sections`, and account for all of it.
+    ///
+    /// Each section is a label, the bytes it captured, and the workspace entry those exact bytes were
+    /// persisted into. Empty sections are skipped entirely, so a gate that printed nothing renders as
+    /// silence rather than as a run of empty headings.
+    ///
+    /// One pass, so a stream is decoded once: the counters are advanced for every line, and the
+    /// excerpt is appended to only while no ceiling has bitten. Once one has, the remaining lines are
+    /// still counted — which is what lets the account state how much was left out rather than merely
+    /// that something was.
+    ///
+    /// A line longer than [`MAX_GATE_DIAGNOSTIC_LINE_BYTES`] contributes its head with the elision
+    /// announced on the line itself, rather than being dropped: one such line would otherwise be able
+    /// to exhaust a result's whole allowance and leave a failing gate showing nothing.
+    fn capture(budget: &mut DiagnosticsBudget, sections: &[(&str, &[u8], &str)]) -> Diagnostics {
+        let allowance = budget.allowance();
+        // A shortfall against the per-result ceiling can only come from the run-wide one, so the
+        // comparison below is what distinguishes an unusually large capture from a run that had
+        // already spent its allowance on earlier programs.
+        let byte_bound = if allowance < MAX_GATE_DIAGNOSTIC_BYTES {
+            DiagnosticsBound::Run
+        } else {
+            DiagnosticsBound::Bytes
+        };
+        let mut record = Diagnostics::none();
+        for (label, bytes, source) in sections {
+            if bytes.is_empty() {
+                continue;
+            }
+            record.sources.push(String::from(*source));
+            let text = String::from_utf8_lossy(bytes);
+            let mut header_pending = true;
+            for line in text.trim_end_matches('\n').split('\n') {
+                record.captured_lines += 1;
+                // Counted in the decoded text as the report reproduces it — the content of the line
+                // plus the one line feed that ends it — so the retained and captured figures are the
+                // same quantity and their difference is exactly what a reader is not being shown.
+                // It tracks the persisted stream's size on disk closely rather than exactly: bytes
+                // that were not valid text were replaced when the stream was decoded, and trailing
+                // blank lines are trimmed rather than reproduced.
+                record.captured_bytes += line.len() + 1;
+                if record.bound.is_some() {
+                    continue;
+                }
+                if record.retained_lines >= MAX_GATE_DIAGNOSTIC_LINES {
+                    record.bound = Some(DiagnosticsBound::Lines);
+                    continue;
+                }
+                let (head, elided) = head_of_line(line);
+                let mut addition = String::new();
+                if header_pending {
+                    addition.push_str(&format!("--- {label} ---\n"));
+                }
+                addition.push_str(&sanitize_line(head));
+                if elided {
+                    addition.push_str(&format!(
+                        " [line truncated: the first {} of {} byte(s) are shown]",
+                        head.len(),
+                        line.len()
+                    ));
+                }
+                addition.push('\n');
+                if record.excerpt.len() + addition.len() > allowance {
+                    record.bound = Some(byte_bound);
+                    continue;
+                }
+                record.excerpt.push_str(&addition);
+                header_pending = false;
+                record.retained_lines += 1;
+                // The head, not the whole line: a line the per-line cap elided is reached and
+                // partly shown, so it counts as retained while the bytes it did not reproduce show
+                // up in the omitted figure. That is what keeps the two counters one quantity.
+                record.retained_bytes += head.len() + 1;
+            }
+        }
+        budget.charge(record.excerpt.len(), record.bound);
+        record
+    }
+
+    /// The retained text, in labelled sections, ready to be indented into a report.
+    pub fn excerpt(&self) -> &str {
+        &self.excerpt
+    }
+
+    /// Whether the invocations produced any output at all.
+    ///
+    /// Distinct from an empty excerpt, and the distinction is the point: a gate that printed nothing
+    /// and a gate whose output was withheld to stay inside the run's ceiling must not render the
+    /// same way, because one says the compiler was silent and the other says the report is not
+    /// showing what it said.
+    pub fn captured(&self) -> bool {
+        self.captured_lines > 0
+    }
+
+    /// The one-line account of what was left out and where the exact bytes are, when anything was.
+    ///
+    /// `None` for a capture retained in full, which is the ordinary case and reads as silence.
+    ///
+    /// `workspace` is the gate's retained directory, present exactly when the gate failed or the run
+    /// was asked to keep every workspace. When it is present the omitted bytes are named file by
+    /// file, so recovering them is a matter of opening a path this report states. When it is absent
+    /// the gate passed and its workspace was discarded, so the honest instruction is the command
+    /// lines listed immediately above, which reproduce the capture exactly.
+    pub fn account(&self, workspace: Option<&Path>) -> Option<String> {
+        let bound = self.bound?;
+        let mut text = format!(
+            "[bounded by {}: the {} line(s) / {} byte(s) shown above are the head of a capture of \
+             {} line(s) / {} byte(s), so {} line(s) / {} byte(s) are omitted here]",
+            bound.describe(),
+            self.retained_lines,
+            self.retained_bytes,
+            self.captured_lines,
+            self.captured_bytes,
+            self.captured_lines.saturating_sub(self.retained_lines),
+            self.captured_bytes.saturating_sub(self.retained_bytes),
+        );
+        match workspace {
+            Some(root) if !self.sources.is_empty() => {
+                text.push_str(
+                    " The exact untruncated bytes were written before this excerpt was taken and \
+                     are on disk at: ",
+                );
+                for (index, source) in self.sources.iter().enumerate() {
+                    if index > 0 {
+                        text.push_str(", ");
+                    }
+                    text.push_str(&shown_path(&root.join(source)));
+                }
+                text.push('.');
+            }
+            _ => text.push_str(
+                " This gate's workspace was not retained, so re-run the command line(s) listed \
+                 above to reproduce the capture in full; nothing about it depends on this run.",
+            ),
+        }
+        Some(text)
+    }
+}
 
 /// One of the two gates every program passes through.
 ///
@@ -420,9 +825,11 @@ pub struct GateResult {
     /// Every command line this gate ran, in execution order, shell-quoted so that each can be
     /// pasted into a terminal and reproduce the invocation exactly.
     commands: Vec<String>,
-    /// The verbatim output the invocations produced, in labelled sections, already made safe to
-    /// render line by line. Empty when there was nothing to report.
-    diagnostics: String,
+    /// The output the invocations produced, in labelled sections, already made safe to render line
+    /// by line — bounded, and carrying the account of everything it was taken from. Empty when there
+    /// was nothing to report; see [`Diagnostics`] for why an empty excerpt and an empty capture are
+    /// deliberately distinguishable.
+    diagnostics: Diagnostics,
     /// One line saying what happened and, for a failure, what it means.
     detail: String,
     /// The retained workspace, present exactly when this gate failed and its evidence was kept.
@@ -450,8 +857,8 @@ impl GateResult {
         &self.commands
     }
 
-    /// The verbatim output captured from those commands, in labelled sections.
-    pub fn diagnostics(&self) -> &str {
+    /// The output captured from those commands, in labelled sections, with its retention account.
+    pub fn diagnostics(&self) -> &Diagnostics {
         &self.diagnostics
     }
 
@@ -474,9 +881,8 @@ impl GateResult {
     ///
     /// The same sentence shape and the same sanitization [`conclude`] uses when a gate's own
     /// workspace resists removal, so a reader meets one convention rather than two. Deliberately
-    /// unable to change the status: a tidy-up that did not work is untidy, not a failed gate, and a
-    /// cleanup step that could turn a passing gate into a failing one would report a defect in the
-    /// compiler where there was only a defect in the cleanup.
+    /// unable to change the status, under the invariant `Workspace::discard_advisory` states: a
+    /// tidy-up that did not work is untidy, not a failed gate.
     fn note_cleanup(&mut self, note: &str) {
         self.detail.push_str(". Cleanup note: ");
         self.detail.push_str(&sanitize_line(note));
@@ -488,7 +894,7 @@ impl GateResult {
         status: GateStatus,
         flags: Vec<String>,
         commands: Vec<String>,
-        diagnostics: String,
+        diagnostics: Diagnostics,
         detail: String,
         workspace: Option<PathBuf>,
     ) -> GateResult {
@@ -513,7 +919,7 @@ impl GateResult {
             GateStatus::Unavailable,
             Vec::new(),
             Vec::new(),
-            String::new(),
+            Diagnostics::none(),
             format!(
                 "not applied: {}. Both gates are driven by the native reference compiler, so its \
                  absence leaves this program unaudited. This is reported rather than passed over, \
@@ -541,7 +947,7 @@ impl GateResult {
             GateStatus::Failed,
             Vec::new(),
             Vec::new(),
-            String::new(),
+            Diagnostics::none(),
             format!(
                 "not invoked: the program's expectation record is defective, so the gate it asks \
                  for cannot be trusted — {joined}. Correct the record; the compiler under test is \
@@ -748,6 +1154,12 @@ pub struct AuditReport {
     /// nothing in them for a matrix reduction to narrow — and saying so is what stops a reader from
     /// assuming the audit was reduced too.
     quick: bool,
+    /// What the run's diagnostics retention cost, and how many captures a ceiling reduced.
+    ///
+    /// Carried on the report so the bound is *reported* rather than merely applied. A reader who
+    /// finds an excerpt where a complete diagnostic was expected can settle in one line whether the
+    /// run as a whole was reducing captures or whether this one capture was unusually large.
+    diagnostics: DiagnosticsBudget,
 }
 
 impl AuditReport {
@@ -951,8 +1363,33 @@ impl AuditReport {
     /// which is what lets two runs be compared directly; a duration would make every run differ and
     /// destroy that property for no diagnostic gain. Captured diagnostics are reproduced as they
     /// were captured, so a sanitizer report retains the machine-specific detail a reader needs.
+    ///
+    /// # One buffer, and why that matters here
+    ///
+    /// Every section streams into a single string. The obvious alternative — a section helper per
+    /// part, each returning its own `String`, concatenated at the end — held a second complete copy
+    /// of the report at the moment of concatenation, and the failure section of this particular
+    /// report is made of captured compiler output, so that copy is the largest thing in the module.
+    /// Bounding what is retained per gate result and per run is one half of keeping this report
+    /// affordable; not duplicating it while rendering is the other.
     pub fn render(&self) -> String {
-        let mut out = String::new();
+        // Sized for the fixed sections, the per-program table row and the diagnostics the run
+        // actually retained, so growth is a bounded number of reallocations rather than one per
+        // section. Every term is a figure this report already knows, so the hint costs no work.
+        let mut out = String::with_capacity(
+            REPORT_BASE_BYTES
+                + self.diagnostics.spent.saturating_mul(2)
+                + self.programs.len().saturating_mul(512),
+        );
+        self.render_into(&mut out);
+        out
+    }
+
+    /// Stream the whole report into `out`, appending to whatever it already holds.
+    ///
+    /// The single writer every section shares. Kept separate from [`AuditReport::render`] so the
+    /// buffer is allocated once, in one place, with one capacity hint.
+    fn render_into(&self, out: &mut String) {
         out.push_str("undefined-behaviour freedom audit — requirement 1, machine half\n");
         out.push_str("===============================================================\n\n");
         out.push_str(
@@ -967,13 +1404,14 @@ impl AuditReport {
         if let Some(reason) = &self.unavailable_reason {
             out.push_str("UNAVAILABLE\n");
             out.push_str("-----------\n");
-            out.push_str(&indented_block(reason, "  "));
+            indent_block_into(out, reason, "  ");
             out.push('\n');
         }
         if let Some(filter) = &self.filter {
             out.push_str("PARTIAL RUN\n");
             out.push_str("-----------\n");
-            out.push_str(&indented_block(
+            indent_block_into(
+                out,
                 &format!(
                     "the audit was restricted to {filter} by {VAR_ONLY}, so {} of the {} programs \
                      the corpus contains were not audited. This report is PARTIAL and must not be \
@@ -981,7 +1419,7 @@ impl AuditReport {
                     self.excluded_by_filter, self.discovered
                 ),
                 "  ",
-            ));
+            );
             out.push('\n');
         }
 
@@ -1003,6 +1441,15 @@ impl AuditReport {
             "  per-invocation budget : {} s\n",
             self.budget.as_secs()
         ));
+        // Stated unconditionally, beside the other bound this audit applies. A retention ceiling
+        // that only announced itself when it bit would leave a reader unable to tell a report whose
+        // diagnostics are complete from one whose diagnostics are excerpts, and the difference is
+        // exactly what decides whether the text below can be acted on directly.
+        indent_block_into(
+            out,
+            &format!("diagnostics retention : {}", self.diagnostics.describe()),
+            "  ",
+        );
         out.push_str(&format!(
             "  unavailable policy    : {}\n",
             if self.strict {
@@ -1114,12 +1561,11 @@ impl AuditReport {
             self.verdict_line()
         ));
 
-        out.push_str(&self.render_area_coverage());
-        out.push_str(&self.render_deviations());
-        out.push_str(&self.render_failures());
-        out.push_str(&self.render_unapplied());
-        out.push_str(&self.render_program_table());
-        out
+        self.render_area_coverage_into(out);
+        self.render_deviations_into(out);
+        self.render_failures_into(out);
+        self.render_unapplied_into(out);
+        self.render_program_table_into(out);
     }
 
     /// One row per feature area: the programs it contributes, how many satisfied both gates, how
@@ -1149,13 +1595,13 @@ impl AuditReport {
     ///
     /// Grouped in first-appearance order, which is corpus order, so the table renders identically
     /// on every run of the same corpus.
-    fn render_area_coverage(&self) -> String {
-        let mut out = String::from("per-feature-area coverage\n");
+    fn render_area_coverage_into(&self, out: &mut String) {
+        out.push_str("per-feature-area coverage\n");
         out.push_str("-------------------------\n");
         let programs = self.programs();
         if programs.is_empty() {
             out.push_str("  (no program was audited)\n\n");
-            return out;
+            return;
         }
         let mut areas: Vec<&str> = Vec::new();
         for audit in programs {
@@ -1195,7 +1641,6 @@ impl AuditReport {
             }
         }
         out.push('\n');
-        out
     }
 
     /// One line stating whether the audit passes, and why not when it does not.
@@ -1227,13 +1672,16 @@ impl AuditReport {
     }
 
     /// The recorded deviations, each with the gate it uses, the members it drops and its reason.
-    fn render_deviations(&self) -> String {
+    fn render_deviations_into(&self, out: &mut String) {
         let deviations = self.deviations();
-        let mut out = format!("recorded warning-gate deviations ({})\n", deviations.len());
+        out.push_str(&format!(
+            "recorded warning-gate deviations ({})\n",
+            deviations.len()
+        ));
         out.push_str("-------------------------------------\n");
         if deviations.is_empty() {
             out.push_str("  (none: every audited program passed the full default gate)\n\n");
-            return out;
+            return;
         }
         // The two lists are read from the gate tables rather than restated, for the same reason
         // `gate_flag_line` reads them: a report that names its own flags can advertise a guarantee
@@ -1243,8 +1691,8 @@ impl AuditReport {
             "  A deviation is a removal and never an addition, always retains {}, and is \
              recorded\n  with its reason in the program's own expectation record. Only {} may be \
              dropped at all, and\n  exactly two categories are sanctioned: the supported-extension \
-             area drops {EXTENSION_ONLY_REMOVABLE},\n  and the deliberate narrowing-conversion \
-             programs drop the two conversion diagnostics.\n\n",
+             area drops {EXTENSION_ONLY_REMOVABLE},\n  and the one deliberate \
+             narrowing-conversion program drops the two conversion diagnostics.\n\n",
             comma_separated(&ub_audit_gate_required()),
             comma_separated(UB_AUDIT_GATE_REMOVABLE),
         ));
@@ -1261,7 +1709,7 @@ impl AuditReport {
             match audit.reason() {
                 Some(reason) => {
                     out.push_str("    reason  :\n");
-                    out.push_str(&indented_block(reason, "      "));
+                    indent_block_into(out, reason, "      ");
                 }
                 None => out.push_str(
                     "    reason  : NONE RECORDED — this is itself a defect in the test, and the \
@@ -1270,17 +1718,16 @@ impl AuditReport {
             }
             out.push('\n');
         }
-        out
     }
 
     /// Every failure in full: the program, the gate, the exact commands and the verbatim output.
-    fn render_failures(&self) -> String {
+    fn render_failures_into(&self, out: &mut String) {
         let failures = self.failures();
-        let mut out = format!("gate failures ({})\n", failures.len());
+        out.push_str(&format!("gate failures ({})\n", failures.len()));
         out.push_str("------------------\n");
         if failures.is_empty() {
             out.push_str("  (none)\n\n");
-            return out;
+            return;
         }
         out.push_str(
             "  Each entry is a defect in the TEST PROGRAM or in its expectation record. Fix the \
@@ -1298,7 +1745,7 @@ impl AuditReport {
                 out.push_str(&format!("    record  : {}\n", shown_path(record)));
             }
             out.push_str("    detail  :\n");
-            out.push_str(&indented_block(result.detail(), "      "));
+            indent_block_into(out, result.detail(), "      ");
             if !result.flags().is_empty() {
                 out.push_str(&format!(
                     "    flags   : {}\n",
@@ -1318,15 +1765,25 @@ impl AuditReport {
             if let Some(workspace) = result.workspace() {
                 out.push_str(&format!("    retained: {}\n", shown_path(workspace)));
             }
-            if result.diagnostics().is_empty() {
-                out.push_str("    output  : (empty)\n");
-            } else {
+            // A gate that printed nothing and a gate whose output a ceiling reduced are rendered
+            // differently on purpose: the first is a compiler that was silent, the second is a
+            // report that is not showing everything the compiler said. Conflating them would put a
+            // reader in the one position this section exists to prevent — acting on a fragment in
+            // the belief that it is the whole diagnostic.
+            let diagnostics = result.diagnostics();
+            if diagnostics.captured() {
                 out.push_str("    output  :\n");
-                out.push_str(&indented_block(result.diagnostics(), "      "));
+                if !diagnostics.excerpt().is_empty() {
+                    indent_block_into(out, diagnostics.excerpt(), "      ");
+                }
+                if let Some(account) = diagnostics.account(result.workspace()) {
+                    indent_block_into(out, &account, "      ");
+                }
+            } else {
+                out.push_str("    output  : (empty)\n");
             }
             out.push('\n');
         }
-        out
     }
 
     /// Every gate that could not be applied, named program by program.
@@ -1337,19 +1794,23 @@ impl AuditReport {
     /// here take part in the differential matrix without their precondition having been
     /// established. Saying which ones, rather than only how many, is what makes that gap actionable
     /// instead of merely acknowledged.
-    fn render_unapplied(&self) -> String {
+    fn render_unapplied_into(&self, out: &mut String) {
         let unapplied = self.unapplied();
-        let mut out = format!("gates that could not be applied ({})\n", unapplied.len());
+        out.push_str(&format!(
+            "gates that could not be applied ({})\n",
+            unapplied.len()
+        ));
         out.push_str("------------------------------------\n");
         if unapplied.is_empty() {
             out.push_str("  (none: every gate was applied to every audited program)\n\n");
-            return out;
+            return;
         }
         // Indented by `indented_block` rather than by hand, so every line of the paragraph carries
         // the section's indent and is sanitized on the same terms as the entries below it. The line
         // breaks are explicit because this is a plain-text report read in a terminal, and the helper
         // indents rather than reflows.
-        out.push_str(&indented_block(
+        indent_block_into(
+            out,
             &format!(
                 "Each entry names a program that was NOT audited under the gate given. This is a \
                  gap in\nTHIS MACHINE rather than a defect in the program: the precondition \
@@ -1359,7 +1820,7 @@ impl AuditReport {
                  absent tool means a broken\nworkflow rather than a modest machine.",
             ),
             "  ",
-        ));
+        );
         out.push('\n');
         for (audit, result) in unapplied {
             out.push_str(&format!(
@@ -1370,19 +1831,18 @@ impl AuditReport {
             ));
             out.push_str(&format!("    program : {}\n", shown_path(audit.source())));
             out.push_str("    detail  :\n");
-            out.push_str(&indented_block(result.detail(), "      "));
+            indent_block_into(out, result.detail(), "      ");
             out.push('\n');
         }
-        out
     }
 
     /// One row per program, so the complete outcome is in the report even when nothing failed.
-    fn render_program_table(&self) -> String {
-        let mut out = String::from("per-program results (warning gate, sanitizer gate)\n");
+    fn render_program_table_into(&self, out: &mut String) {
+        out.push_str("per-program results (warning gate, sanitizer gate)\n");
         out.push_str("--------------------------------------------------\n");
         if self.programs().is_empty() {
             out.push_str("  (no program was audited)\n");
-            return out;
+            return;
         }
         for audit in self.programs() {
             out.push_str(&format!(
@@ -1393,7 +1853,6 @@ impl AuditReport {
                 if audit.deviated() { " [deviates]" } else { "" }
             ));
         }
-        out
     }
 }
 
@@ -1427,25 +1886,44 @@ fn sanitize_line(raw: &str) -> String {
     sanitize_text_for_report(&redact_secrets(raw))
 }
 
-/// Multi-line text, each line sanitized and indented, with a trailing newline.
+/// The leading [`MAX_GATE_DIAGNOSTIC_LINE_BYTES`] of `line`, and whether anything was left off.
+///
+/// The cut is moved back to a character boundary, so a multi-byte sequence is never split: the
+/// remainder would render as replacement characters and read as corruption rather than as elision.
+/// Pure, so the same line always yields the same head and the report stays byte-deterministic.
+fn head_of_line(line: &str) -> (&str, bool) {
+    if line.len() <= MAX_GATE_DIAGNOSTIC_LINE_BYTES {
+        return (line, false);
+    }
+    let mut cut = MAX_GATE_DIAGNOSTIC_LINE_BYTES;
+    while cut > 0 && !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    (&line[..cut], true)
+}
+
+/// Append multi-line text to `out`, each line sanitized and indented, with a trailing newline.
 ///
 /// Sanitization is per line rather than over the whole block because the report-safe rendering
 /// escapes the line feed too — it exists for single-line values — so a block passed through it
 /// whole would collapse into one very long line carrying literal `\x0a` sequences.
-fn indented_block(raw: &str, indent: &str) -> String {
-    let mut out = String::new();
+///
+/// Appends into the caller's buffer rather than returning a block of its own. The report's failure
+/// section is made of captured compiler output, and a helper that returned a `String` would allocate
+/// a second copy of every one of those blocks on the way into the report — the same duplication
+/// [`AuditReport::render`] avoids at the section level, avoided here at the block level.
+fn indent_block_into(out: &mut String, raw: &str, indent: &str) {
     let trimmed = raw.trim_end_matches('\n');
     if trimmed.is_empty() {
         out.push_str(indent);
         out.push_str("(empty)\n");
-        return out;
+        return;
     }
     for line in trimmed.split('\n') {
         out.push_str(indent);
         out.push_str(&sanitize_line(line));
         out.push('\n');
     }
-    out
 }
 
 /// Audit every program in the corpus under both gates.
@@ -1478,6 +1956,12 @@ pub fn run(caps: &Capabilities) -> HarnessResult<AuditReport> {
     let discovered = manifest::discover_all()?;
     let filter = config.only();
 
+    // The run's diagnostics ceiling, charged as each capture is taken rather than swept afterwards,
+    // so the bound holds continuously. Threaded through the loop instead of held in a static because
+    // the audit is sequential: charging in corpus order keeps the rendered report a pure function of
+    // the corpus, which is the property the sequential pass exists to give it.
+    let mut diagnostics = DiagnosticsBudget::new();
+
     let mut programs: Vec<ProgramAudit> = Vec::with_capacity(discovered.len());
     let mut matched = 0usize;
     for source in &discovered {
@@ -1488,7 +1972,14 @@ pub fn run(caps: &Capabilities) -> HarnessResult<AuditReport> {
             }
             matched += 1;
         }
-        programs.push(audit_program(caps, source, &area, &program, driver)?);
+        programs.push(audit_program(
+            caps,
+            source,
+            &area,
+            &program,
+            driver,
+            &mut diagnostics,
+        )?);
     }
     // A filter that selected nothing fails the run rather than shrinking it: an audit of zero
     // programs reports success for want of anything to judge, which in continuous integration is
@@ -1516,6 +2007,7 @@ pub fn run(caps: &Capabilities) -> HarnessResult<AuditReport> {
         excluded_by_filter,
         discovered: discovered.len(),
         quick: config.quick_mode(),
+        diagnostics,
     })
 }
 
@@ -1926,6 +2418,7 @@ fn audit_program(
     area: &str,
     program: &str,
     driver: Option<&Path>,
+    diagnostics: &mut DiagnosticsBudget,
 ) -> HarnessResult<ProgramAudit> {
     let loaded = manifest::load_for_source(source);
     let record = loaded
@@ -1953,26 +2446,39 @@ fn audit_program(
         }
         Some(reference) => {
             let warning = if decision.defects.is_empty() {
-                run_warning_gate(caps, reference, area, program, source, &decision.flags)?
+                run_warning_gate(
+                    caps,
+                    reference,
+                    area,
+                    program,
+                    source,
+                    &decision.flags,
+                    diagnostics,
+                )?
             } else {
                 GateResult::record_defect(Gate::Warning, &decision.defects)
             };
-            let sanitizer =
-                run_sanitizer_gate(caps, reference, area, program, source, expect_exit)?;
+            let sanitizer = run_sanitizer_gate(
+                caps,
+                reference,
+                area,
+                program,
+                source,
+                expect_exit,
+                diagnostics,
+            )?;
             (warning, sanitizer)
         }
     };
 
-    // Both gates have concluded, so the grouping directories this program's gate workspaces sat
-    // inside are finished with. Each gate has already discarded or retained its own leaf; what is
-    // left is the `<area>/<program>` scaffolding, which belongs to the program rather than to
-    // either gate and so is tidied here. Attempted only when neither gate is holding a directory:
-    // `GateResult::workspace` is `Some` exactly when something was kept — a failed gate's
-    // evidence, a run asked to retain every workspace, or a leaf whose own removal did not work —
-    // and in every one of those cases the scaffolding must stay so that what was kept remains
-    // reachable. A note comes back only from a genuine obstruction, never from a directory that
-    // still holds evidence, and it is folded into this program's audit detail rather than raised:
-    // cleanup may not colour a gate's verdict.
+    // Both gates have concluded, so the `<area>/<program>` scaffolding their leaf workspaces sat
+    // inside belongs to the program rather than to either gate and is tidied here. Attempted only
+    // when neither gate is holding a directory: `GateResult::workspace` is `Some` exactly when
+    // something was kept — a failed gate's evidence, a run asked to retain every workspace, or a
+    // leaf whose own removal did not work — and in every one of those cases the scaffolding must
+    // stay so that what was kept remains reachable. Any note is folded into this program's audit
+    // detail rather than raised, under the cleanup invariant `sandbox::prune_empty_audit_grouping`
+    // documents.
     if warning.workspace().is_none() && sanitizer.workspace().is_none() {
         if let Some(note) = sandbox::prune_empty_audit_grouping(area, program) {
             sanitizer.note_cleanup(&note);
@@ -2016,6 +2522,7 @@ fn run_warning_gate(
     program: &str,
     source: &Path,
     flags: &[String],
+    budget: &mut DiagnosticsBudget,
 ) -> HarnessResult<GateResult> {
     let gate = Gate::Warning;
     let label = format!("{area}/{program}");
@@ -2046,13 +2553,35 @@ fn run_warning_gate(
     let outcome = spawn_guarded(caps, reference, &argv, &workspace)?;
     let commands = vec![outcome.command_line()];
     record_commands(&workspace, gate, &label, &commands)?;
-    outcome.persist(&workspace, &CaptureNames::reference())?;
+    // Persisted **before** the excerpt is taken, so the recoverability the bounded record promises is
+    // already true when it is promised: the entries named below hold the untruncated bytes whatever
+    // the ceilings then allow into memory.
+    let captures = CaptureNames::reference();
+    outcome.persist(&workspace, &captures)?;
 
-    let diagnostics = diagnostics_of(&[
-        ("reference compiler standard error", outcome.stderr()),
-        ("reference compiler standard output", outcome.stdout()),
-    ]);
+    // Judged first, so the capture below is taken only when the report will actually render it. A
+    // passing gate's output is never shown, and spending the run's allowance on it could leave a
+    // later failing gate without the diagnostic that explains it — see [`Diagnostics::none`].
     let (status, mut detail) = judge_warning_gate(&outcome, &object);
+    let diagnostics = if status.passed() {
+        Diagnostics::none()
+    } else {
+        Diagnostics::capture(
+            budget,
+            &[
+                (
+                    "reference compiler standard error",
+                    outcome.stderr(),
+                    captures.stderr(),
+                ),
+                (
+                    "reference compiler standard output",
+                    outcome.stdout(),
+                    captures.stdout(),
+                ),
+            ],
+        )
+    };
     let flags_used = flags.to_vec();
     let workspace_kept = conclude(workspace, status, &mut detail);
     Ok(GateResult::new(
@@ -2159,6 +2688,7 @@ fn run_sanitizer_gate(
     program: &str,
     source: &Path,
     expect_exit: i32,
+    budget: &mut DiagnosticsBudget,
 ) -> HarnessResult<GateResult> {
     let gate = Gate::Sanitizer;
     let label = format!("{area}/{program}");
@@ -2186,14 +2716,28 @@ fn run_sanitizer_gate(
 
     let build = spawn_guarded(caps, reference, &argv, &workspace)?;
     let mut commands = vec![build.command_line()];
-    build.persist(&workspace, &CaptureNames::reference())?;
+    // As on the warning-gate path: the streams reach disk before any ceiling is consulted, so a
+    // bounded excerpt can name the file holding the bytes it left out.
+    let build_captures = CaptureNames::reference();
+    build.persist(&workspace, &build_captures)?;
 
     if !build.termination().succeeded() || !artifact.is_file() {
         record_commands(&workspace, gate, &label, &commands)?;
-        let diagnostics = diagnostics_of(&[
-            ("instrumented build standard error", build.stderr()),
-            ("instrumented build standard output", build.stdout()),
-        ]);
+        let diagnostics = Diagnostics::capture(
+            budget,
+            &[
+                (
+                    "instrumented build standard error",
+                    build.stderr(),
+                    build_captures.stderr(),
+                ),
+                (
+                    "instrumented build standard output",
+                    build.stdout(),
+                    build_captures.stdout(),
+                ),
+            ],
+        );
         let mut detail = describe_failed_build(&build, &artifact);
         let status = GateStatus::Failed;
         let kept = conclude(workspace, status, &mut detail);
@@ -2220,21 +2764,41 @@ fn run_sanitizer_gate(
     let run = spawn_guarded_artifact(caps, &artifact, &workspace)?;
     commands.push(run.command_line());
     record_commands(&workspace, gate, &label, &commands)?;
-    run.persist(
-        &workspace,
-        &CaptureNames::new(
-            SANITIZER_RUN_STDOUT_NAME,
-            SANITIZER_RUN_STDERR_NAME,
-            SANITIZER_RUN_EXIT_NAME,
-        ),
-    )?;
+    let run_captures = CaptureNames::new(
+        SANITIZER_RUN_STDOUT_NAME,
+        SANITIZER_RUN_STDERR_NAME,
+        SANITIZER_RUN_EXIT_NAME,
+    );
+    run.persist(&workspace, &run_captures)?;
 
-    let diagnostics = diagnostics_of(&[
-        ("instrumented build standard error", build.stderr()),
-        ("instrumented run standard error", run.stderr()),
-        ("instrumented run standard output", run.stdout()),
-    ]);
+    // As on the warning-gate path: judged first, and retained only when a reader will see it. This
+    // is where the saving is real — a passing sanitizer gate captures the program's ordinary standard
+    // output, which every corpus program produces and no section of this report renders.
     let (status, mut detail) = judge_sanitizer_run(&run, expect_exit);
+    let diagnostics = if status.passed() {
+        Diagnostics::none()
+    } else {
+        Diagnostics::capture(
+            budget,
+            &[
+                (
+                    "instrumented build standard error",
+                    build.stderr(),
+                    build_captures.stderr(),
+                ),
+                (
+                    "instrumented run standard error",
+                    run.stderr(),
+                    run_captures.stderr(),
+                ),
+                (
+                    "instrumented run standard output",
+                    run.stdout(),
+                    run_captures.stdout(),
+                ),
+            ],
+        )
+    };
     let kept = conclude(workspace, status, &mut detail);
     Ok(GateResult::new(
         gate,
@@ -2585,28 +3149,6 @@ fn path_text(context: &str, role: &str, path: &Path) -> HarnessResult<String> {
             ),
         )
     })
-}
-
-/// Assemble the labelled, verbatim output sections of a gate.
-///
-/// Empty streams contribute nothing, so a clean gate carries no output section at all and the
-/// report stays readable. Text is decoded lossily and escaped line by line: a diagnostic is
-/// reproduced for a human to read, and no byte of it may act on the terminal that displays it or
-/// forge a row of the report that carries it.
-fn diagnostics_of(sections: &[(&str, &[u8])]) -> String {
-    let mut out = String::new();
-    for (label, bytes) in sections {
-        if bytes.is_empty() {
-            continue;
-        }
-        out.push_str(&format!("--- {label} ---\n"));
-        let text = String::from_utf8_lossy(bytes);
-        for line in text.trim_end_matches('\n').split('\n') {
-            out.push_str(&sanitize_line(line));
-            out.push('\n');
-        }
-    }
-    out
 }
 
 /// Write the gate's exact command lines into its workspace.

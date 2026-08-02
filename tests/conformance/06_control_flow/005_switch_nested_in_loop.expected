@@ -1,3 +1,9 @@
+# Expectation record for 06_control_flow/005_switch_nested_in_loop.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
 program            = 005_switch_nested_in_loop
 area               = 06_control_flow
 description        = break and continue interaction between a switch and its enclosing loop, including a loop nested in a case, a switch in a do-while, and nested switches in nested loops

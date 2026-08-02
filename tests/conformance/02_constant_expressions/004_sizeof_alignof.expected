@@ -1,0 +1,300 @@
+# Expectation record for 02_constant_expressions/004_sizeof_alignof.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 004_sizeof_alignof
+area               = 02_constant_expressions
+description        = sizeof and _Alignof as constant expressions over scalars, pointers, arrays and aggregates, width-normalized around one exact target-keyed pointer-width anchor so that every cross-target-variable quantity is printed as a relation rather than as a number and all four backends stay comparable, with folded and volatile-runtime twins
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined behaviour and depends on no unspecified behaviour, which is the
+precondition both differential oracles rest on rather than a stylistic preference: undefined
+behaviour would license either compiler to do anything at all, so a divergence between them would
+prove nothing about either. The paragraphs below are the written argument required of every program
+in this suite; the warning gate and the sanitizer gate are its machine half.
+SIZEOF DOES NOT EVALUATE ITS OPERAND (C11 6.5.3.4p2), AND THAT IS PROVED RATHER THAN ASSUMED. A
+function is named inside a sizeof operand and a volatile counter records whether it was called; the
+counter is read before and after, and the printed lines show that sizeof(probe()) left probe_calls at
+zero and that calling probe for real afterwards made the counter exactly one. Because the counter is
+volatile the compiler must store to it and must re-read it, so "the call did not happen" is a fact
+about the generated program rather than about the optimizer's mood. Because the operand is
+unevaluated, the volatile objects and the function call that appear inside a sizeof are never
+accessed there, so no side effect is hidden inside an operand that is not evaluated, and naming the
+inactive member of a union inside sizeof is safe for the same reason: the operand is not evaluated,
+so no inactive member is ever read.
+POINTER ARITHMETIC STAYS IN RANGE. arr is walked by a pointer from arr to arr + ARR_ELEMS with the
+loop test walk != stop, so the body runs for indices 0 through 6 of a seven-element array; the
+one-past-the-end pointer stop is FORMED, COMPARED and SUBTRACTED -- which C11 6.5.6p8 permits
+explicitly -- but is never dereferenced. mat is walked over exactly its 3 rows and 5 columns, driven
+by volatile copies of those two extents. The two one-element-per-target arrays declared with a sizeof
+and an _Alignof bound are written only at index sizeof arr - 1, which is in bounds by construction,
+and read only at index 0 and that same last index. Every pointer difference is taken between two
+elements of one and the same array object, which is the only case C11 6.5.6p9 defines: the difference
+&probe_pair[1] - &probe_pair[0] is 1, printed as an int after a cast, so nothing depends on the width
+of ptrdiff_t, and no address is printed anywhere.
+NO STORAGE IS READ UNINITIALIZED. The arrays whose bounds come from sizeof and _Alignof have static
+storage duration and are therefore zero-initialized, so reading their untouched first element is
+defined and prints 0, and their last elements are assigned before they are read. probe_calls is a
+volatile static and therefore starts at a definite zero. Every automatic object is initialized in its
+own declaration or assigned before its first read, and every aggregate that is read back is
+initialized in its own declaration.
+NO ARITHMETIC CAN OVERFLOW OR DIVIDE BY ZERO. Every value is a small byte count, an element count, a
+0/1 relation or a small sum: the largest printed value is 70000, a short-to-int conversion of a value
+stored in an int member, and the largest computed values are mat_sum at 120 and walk_sum at 58. All
+size arithmetic is performed in the unsigned type sizeof yields, where C11 6.2.5p9 defines every
+result modularly, and each such value is narrowed to int by an explicit cast only after it is known
+to be small -- 4, 8, 12, 28, 30 and similar -- so the gate's -Wconversion has nothing to object to.
+In the folded variant each divisor is a sizeof of a complete object type or an _Alignof, both of
+which the standard guarantees are non-zero; in the runtime twin each divisor is a volatile object
+initialized from exactly one of those same quantities in its own declaration and never assigned
+afterwards, so it cannot be zero either, and every one of those operands is unsigned, so no division
+is INT_MIN / -1 and no remainder depends on the sign of its operands. There is no shift anywhere in
+the program.
+THE FLOATING COMPARISONS ARE EXACT BY CONSTRUCTION. 1.5f and 0.5f are exactly representable in binary
+floating point, so inv_obj.f == 1.5f compares two identical values rather than posing a tolerance
+question, and no floating-point value is printed at all.
+TWENTY-ONE _Static_assert DECLARATIONS PIN THE INVARIANTS THIS PROGRAM DEPENDS ON BEFORE IT RUNS --
+the fixed widths of char, short, int, long long, float and double, that long and every pointer
+flavour share one width, that size_t and ptrdiff_t are that width, the string-literal and
+character-constant sizes, the long double ordering laws and the aggregate layout laws -- so a
+mis-folded sizeof is a translation failure rather than a silently wrong number. Every one of them is
+SATISFIED, which is a soundness requirement rather than a preference: both mandated oracles compare
+the observable behaviour of a binary that built, so a deliberately failing assertion would stop both
+compilers and leave nothing to compare.
+EVERY CHARACTER READ BACK IS CONVERTED THROUGH unsigned char BEFORE IT IS PRINTED, so no plain-char
+signedness difference can reach stdout, and no member offset is ever assumed: a member is read by
+name, never through a computed offset, so no padding byte is observed. There is no aliasing violation
+-- the union is read only through the member last written, and every object is accessed through its
+own declared type -- and nothing depends on the relative addresses of unrelated objects.
+SEQUENCING IS EXPLICIT. Each expression reads each volatile object at most once, so no object is
+modified twice between sequence points, the volatile access sequence is fixed, and each volatile
+increment inside probe stands alone in its own statement. No printf call receives more than one
+argument whose evaluation has an effect: every argument is a sizeof, an _Alignof, a comparison of
+those, or a snapshot taken into a plain local beforehand, so nothing depends on the unspecified order
+in which a call's arguments are evaluated.
+NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, printf, is declared by
+hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
+bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so a directive
+naming that header would fail on the bcc side of oracle (a) while succeeding on the reference side --
+a spurious divergence caused by the test rather than by the compiler under test. _Alignof is a C11
+keyword and needs no header, and stddef.h is deliberately not named. Nothing in the file is a GCC
+extension, so no include exception and no gate deviation is available to area 02 and none is needed;
+the corpus has exactly two header exceptions, area 07's stdarg.h and the dedicated bundled-header
+probe in area 12.
+size_t, ptrdiff_t and intptr_t therefore cannot be NAMED in this program at all, and their widths are
+probed without naming them: sizeof yields a size_t, so sizeof(sizeof(int)) is size_t's own width, and
+a pointer difference yields a ptrdiff_t, so sizeof of one is ptrdiff_t's width. That is an advantage
+rather than a workaround -- it measures the widths the compiler actually implements rather than the
+widths a header declares.
+THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
+is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers,
+and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
+-fno-sanitize-recover=all run natively to completion. Both gates are reference-compiler-only and are
+never applied to bcc, so requirement 3's shared-flag discipline is untouched.
+END
+impl_defined_notes <<END
+This record narrows nothing. All four targets, all three optimization levels and all three
+oracles are enabled, and no expected-divergence marker is attached. These notes exist to
+record how that was achieved, because a program in this area could easily have had to narrow:
+constant evaluation reaches straight into the type system, which is where the four supported
+targets differ.
+That is a strong claim for THIS program in particular, because sizeof and _Alignof are the two
+places in the language where a target's ABI becomes an observable integer, so these notes record
+the normalization in detail. The quantities that differ, as MEASURED with the four reference
+drivers oracle (a) uses, are: sizeof(long), sizeof(void *), the width of size_t and the width of
+ptrdiff_t, all 8 bytes on x86-64, AArch64 and RISC-V 64 and 4 bytes on i686; sizeof(long double),
+16, 12, 16 and 16 bytes respectively; _Alignof(long), _Alignof(long long) and _Alignof(double), 8
+on the three 64-bit targets and 4 on i686; and _Alignof(long double), 16, 4, 16 and 16. The
+repository's own target table fixes pointer and long at 8 bytes with ELF64 on x86-64, AArch64 and
+RISC-V 64 and at 4 bytes with ELF32 on i686 (docs/technical-specifications.md target table, lines
+457-462). Note that _Alignof(double) is 4 on i686 because _Alignof reports the ABI alignment the
+i386 System V ABI requires rather than the preferred alignment; the two must not be conflated.
+WHAT THIS PROGRAM DELIBERATELY DOES NOT DO. The easy answer would be to restrict the target list
+to the three 64-bit targets and print the raw numbers. That is forbidden: constraint C3 says no
+feature is excluded because it is difficult, and dropping i686 would remove three of this
+program's twelve cells -- and with them the only ILP32 backend, which is the only target on
+which any of the widths tabulated above actually differs, so it is exactly where a width defect
+could hide with nothing left to notice it. All four targets are kept and the program normalizes
+instead.
+THE NORMALIZATION RULEBOOK, in the order it is applied. (1) A quantity measured identical on all
+four targets is printed RAW, as a value rather than as a predicate, so a target that disagreed
+shows up as a divergence on that one line instead of being quietly accepted by a predicate that
+held for the wrong reason: sizeof char, short, int, long long, float and double are 1, 2, 4, 8, 4
+and 8, _Alignof char, short, int and float are 1, 2, 4 and 4, sizeof and _Alignof of _Bool and of
+the enumerated type are 1 and 4 with alignment 1 and 4, sizeof(struct invariant) is 12 with
+alignment 4, sizeof(union invariant_union) is 8 with alignment 4, sizeof arr is 28, sizeof mat is
+30, and the sizeof-derived array bounds and enumerator are all 4. (2) A quantity that differs by
+target is printed only as a RELATION between two such quantities, which yields the same 0 or 1
+everywhere -- sizeof(long), sizeof(void *), sizeof(char *), sizeof(int *),
+sizeof(void (*)(void)), sizeof(sizeof(int)) and the pointer-difference width all appear inside
+comparisons that read 1 on every target, and the width-bearing aggregate is never printed as a
+size but only as sizeof(struct widthful) == 3 * sizeof(void *), which holds at both widths. (3)
+Relations alone are NOT sufficient, and this is the trap worth stating plainly: a relation is
+satisfied by two values that are wrong in the same direction, so sizeof(long) == sizeof(void *)
+prints 1 even if both were 2. The whole pointer-width family is therefore anchored to ONE exact,
+target-keyed equality -- ptr_width_exact -- and every other member is tied to that anchor by a
+relation, so a single number per target pins the entire family exactly: long, char *, int *, a
+function pointer, a pointer to array, a pointer to pointer, size_t, ptrdiff_t and the alignment
+of all of them. (4) A permissive bound is never used where an exact answer exists: a range such as
+4 <= x <= 8 accepts 5, 6 and 7 and accepts the wrong choice between 4 and 8, so a real
+code-generation defect would still print 1 and both the reference oracle and the golden record
+would agree with it.
+(5) long double IS THE ONE TYPE GIVEN BOUNDS RATHER THAN AN EXACT PIN, because no exact answer is
+available to assert. Its representation is implementation-defined -- 16 bytes on x86-64 and 12 on
+i686 for the same x87 80-bit format differently padded, 16 on AArch64 and RISC-V 64 for IEEE
+binary128 -- and C11 permits an implementation to give long double exactly double's
+representation. Its raw size is therefore never printed. What is printed instead are the three
+facts that hold everywhere: it is at least as wide as double, at least as strictly aligned as
+double, and its size is a whole multiple of its alignment. The type is therefore exercised here
+rather than dropped for being awkward. Cross-backend VALUE equality for long double is the
+subject of 13_floating_point/004_long_double_target_restricted.c, where it is a recorded exclusion
+carrying marker XD-TYPE-LONGDOUBLE-001; here nothing is excluded, because nothing
+representation-dependent is printed.
+THE TARGET-KEYED ANCHOR IS KEYED TO THE ARCHITECTURE, NOT TO A WIDTH MACRO, and the difference
+matters. The architecture is a categorical fact the harness fixes when it selects the cell's
+target, whereas a width macro such as __SIZEOF_POINTER__ is a numeric claim by the compiler
+under test, and checking that claim against itself would be circular. The #else arm is a HARD
+STOP -- an #error naming the four architecture macros it looked for -- rather than a fallback: a
+compiler that predefines none of them cannot be given an exact expectation, and quietly falling
+back to a permissive one would turn rule 4 into a comment, so a fifth target cannot silently be
+judged against another target's width. A refusal to compile is reported with a named message and
+is reproducible from this record's own command template; a silently weakened test is not reported
+at all.
+TWO AGGREGATE SIZES ARE PRINTED RAW, and their shapes were chosen so that they could be.
+struct invariant is char, short, int, float and sizes at 12 bytes with alignment 4 on all four
+targets; the union sizes at 8 with alignment 4. Both were measured on every target before the
+raw values were written here. An aggregate whose padding depended on the alignment of double or
+long long would have sized differently on i686, where those alignments are 4 rather than 8, and
+is deliberately absent.
+WIDTH NORMALIZATION IN THE OUTPUT ITSELF. Every printed value is an int printed with %d, so each
+sizeof and _Alignof result is cast to int before it reaches the variadic call and no size_t is
+ever passed; where the program computes a value too wide for int, that value is written in long
+long with LL-suffixed literals and printed with %lld, which is 64 bits on every enabled target.
+No plain long, no size_t, no ptrdiff_t, no floating-point value and no pointer value is printed
+anywhere.
+PLAIN-char SIGNEDNESS. Plain char was MEASURED as signed on x86-64 and i686 and unsigned on
+AArch64 and RISC-V 64. Every character read-back is cast through unsigned char first, so no
+plain-char value is printed as a signed value and no printed line depends on that choice.
+THE EXECUTION CHARACTER SET IS A SEPARATE IMPLEMENTATION-DEFINED PROPERTY FROM CHAR SIGNEDNESS,
+AND IT IS PINNED RATHER THAN ASSUMED. Four printed lines carry a character's numeric code:
+struct_invariant_readback prints 120 for 'x', structp_readback prints 121 for 'y',
+nested_readback prints 84 for 'T', and ptrtab_first_chars prints 97, 98, 99 and 100 for the
+initials of the four string-table entries. Those codes exist because a read-back has to print
+something, and a character member is the narrowest way to prove that the byte an initializer
+placed at a computed offset is the byte that comes back out. The (int)(unsigned char) conversion
+applied to each removes plain char's SIGNEDNESS and does nothing whatever about the character
+set: C11 5.2.1 leaves the members of the execution character set and their codes
+implementation-defined, so 'x' is 120 on an ASCII-family implementation and could be something
+else on one that is not.
+The source therefore pins every one of them, and the two letters that appear only in
+initializers as well, with _Static_assert declarations for 'x' == 120, 'y' == 121, 'z' == 122,
+'w' == 119, 'T' == 84 and 'a' == 97 && 'b' == 98 && 'c' == 99 && 'd' == 100. All four enabled
+targets were measured to use the same ASCII-family basic execution character set, so every
+condition holds on every cell of this matrix. The assertions are what keep the oracles honest:
+on an implementation whose character set differed, the cell would FAIL TO TRANSLATE naming the
+reason -- accusing the environment, which is where the difference actually lives -- instead of
+printing different numbers that oracle (a) or oracle (b) would charge to the compiler under
+test. A future target that disagreed would announce itself at the build, and the correct
+response would be to narrow this record's target list with the reason recorded here, never to
+delete the assertions or the read-backs they protect.
+WHAT WOULD LEGITIMATELY BREAK THIS, AND HOW IT MUST THEN BE HANDLED. A conforming target on which
+long were not pointer-width, or on which size_t or ptrdiff_t differed from pointer width, or on
+which int were not 4 bytes, would turn one of the relation lines from 1 into 0, or change a raw
+value, without being defective. That would be an implementation-defined divergence rather than a
+compiler defect, and it must then be recorded as an expected divergence with this record's target
+list narrowed and the reason stated in this field -- never left to surface as a finding against a
+backend that did nothing wrong, and never resolved by deleting the relation, which is precisely
+the coverage requirement 2 asks this program to provide.
+THE EXACT PER-TARGET WIDTHS AND ALIGNMENTS THIS PROGRAM DECLINES TO PIN ARE NOT LEFT UNTESTED.
+10_declarations_and_types/007_alignof_alignas.c pins them exactly, selecting the expectation from
+the architecture predefined macro. The division of labour is deliberate, so that neither program
+needs a restricted target list.
+HERMETIC AND DETERMINISTIC. Every input is a literal in the source: nothing is read from the
+clock, the environment, the command line, a file or a socket, and nothing is written anywhere.
+Output is one line per semantic property claimed, in a fixed order, so a single divergent line
+names the construct that produced it. No address or pointer value is printed, there is no
+randomness, no locale-dependent formatting and no data-dependent iteration order, and the
+program returns 0 -- well inside the 0-125 range the suite requires so that no exit status is
+truncated by the operating system.
+MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at
+-O0, -O1 and -O2 -- twelve configurations -- and every one produced these 63 lines
+byte-identically with exit status 0, which is why cross-backend comparison is sound, oracle (b)
+is enabled with no narrowing, and oracle (c) can hold these bytes as the golden record.
+END
+expected_stdout    <<END
+sizeof_char_short_int_llong=1 2 4 8
+sizeof_float_double=4 8
+sizeof_bool_enum=1 4
+alignof_char_short_int_float=1 2 4 4
+alignof_bool_enum=1 4
+ptr_width_exact=1
+ptr_family_is_ptr_width=1 1 1 1 1 1
+stddef_widths_are_ptr_width=1 1 1
+alignof_ptr_is_ptr_width=1
+alignof_wide_is_ptr_align=1 1 1
+size_ladder=1 1 1 1 1 1
+align_le_size_scalars=1 1 1 1 1 1 1 1 1
+align_le_size_aggregates=1 1 1 1 1
+ldouble_ge_double=1
+alignof_ldouble_ge_alignof_double=1
+ldouble_size_multiple_of_align=1
+sizeof_struct_invariant=12
+alignof_struct_invariant=4
+sizeof_union_invariant=8
+alignof_union_invariant=4
+union_ge_largest_member=1
+union_align_ge_alignof_int=1
+union_readback=1
+struct_invariant_readback=120 300 70000 1
+structp_size_multiple_of_align=1
+structp_size_ge_ptr_size=1
+structp_align_is_ptr_align=1
+structp_size_is_three_ptr_widths=1
+structp_readback=121 1
+nested_size_multiple_of_align=1
+nested_align_is_widest_member_align=1
+nested_size_ge_member_sum=1
+nested_readback=9 84
+struct_array_size_is_count_times_elem=1
+constexpr_contexts=4 4 4
+constexpr_bound_readback=0 0 5 6
+array_type_laws=1 1
+arr_elems=7
+arr_size=28
+arr_size_is_count_times_elem=1
+mat_rows_cols_cells=3 5 15
+mat_size=30
+mat_size_laws=1 1
+mat_sum=120
+ptrtab_first_chars=97 98 99 100
+ptrtab_elems=4
+ptrtab_size_is_count_times_ptr=1
+sizeof_string_literal=4
+sizeof_string_concat=7
+sizeof_expression_is_int=1 1 1 1
+sizeof_operand_not_evaluated=1
+probe_calls_after_real_call=1
+probe_return_value=1
+elems folded=7 runtime=7 equal=1
+cells folded=15 runtime=15 equal=1
+rows folded=3 runtime=3 equal=1
+ratio folded=2 runtime=2 equal=1
+alignlaw folded=1 runtime=1 equal=1
+walk folded=7 runtime=7 equal=1
+walk_sum=58
+span_elems=7
+pair_difference=1
+two_variant_all_equal=1
+END

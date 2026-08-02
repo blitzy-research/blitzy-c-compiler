@@ -6,10 +6,12 @@
  * instead.
  *
  * Every bitfield below is declared on an explicit unsigned int or signed int base
- * type.  A field declared on unqualified int has implementation-defined signedness,
- * and the explicit type also fixes the allocation unit at four bytes on all four
- * targets, so every size, alignment and byte image printed here is target-invariant
- * by derivation rather than by coincidence.
+ * type, because a field declared on unqualified int has implementation-defined
+ * signedness and using it would manufacture a divergence that says nothing about
+ * code generation.  Fixing the signedness is all the base type fixes: the size,
+ * alignment and byte images printed here are measured expectations for the four
+ * ABIs under test, not values the standard or the base type guarantees -- see the
+ * note above struct packed3.
  *
  * A byte image is printed only for a struct whose every bit belongs to a named
  * field.  Zero-filling an overlay before storing into it buys freedom from reading
@@ -133,8 +135,20 @@ int main(void)
     ic.f.a = 1u; ic.f.b = 12345u; ic.f.c = 101u; ic.f.d = 678u;
     printf("covered32_readback a=%u b=%u c=%u d=%u\n",
            (unsigned)ic.f.a, (unsigned)ic.f.b, (unsigned)ic.f.c, (unsigned)ic.f.d);
-    /* Derived image: the unit holds 1 | (12345 << 1) | (101 << 15) | (678 << 22)
-     * = 0xa9b2e073, which little-endian byte order prints as 73 e0 b2 a9. */
+    /* MEASURED image, not a derived one.  73 e0 b2 a9 is what all four targets were
+     * observed to produce, and the whole point of printing it is that nothing in the
+     * standard predicts it.  C11 6.7.2.1p11 makes the order in which bitfields are
+     * allocated within a storage unit implementation-defined, and 6.7.2.1p12 does the
+     * same for whether a field may straddle a unit boundary, so no amount of reasoning
+     * from field widths and byte order can produce this row: each supported target's
+     * psABI fixes it, and the four psABIs happen to agree here.  The bytes correspond
+     * to allocating a at the least-significant end of the unit and each later field
+     * above the previous one -- 1 | (12345 << 1) | (101 << 15) | (678 << 22), reading
+     * back as 0xa9b2e073 -- and that correspondence is a description of the observed
+     * layout, not a prediction of it.  A target whose psABI allocated from the most
+     * significant end would print a different, equally conforming row; that would be an
+     * implementation-defined divergence to record with a narrowed target list, never a
+     * defect in a backend that did nothing wrong. */
     printf("covered32_image");
     for (k = 0; k < (unsigned)sizeof ic.bytes; ++k) { printf(" %02x", (unsigned)ic.bytes[k]); }
     printf("\n");

@@ -1303,25 +1303,16 @@ impl Workspace {
     /// directory is left exactly as the cell finished with it.
     ///
     /// Only the directory this workspace owns is removed, never a parent it merely sits inside.
-    /// A cell workspace has no shared parent but the work root, and the grouping directories of
-    /// the audit workspaces are shared by design, so pruning an emptied one from *here* would race
-    /// a sibling being created on another thread: the sibling's directory could vanish between its
-    /// creation and its first write. Keeping this method's reach to one directory is what makes it
-    /// safe to call from anywhere, at any time, without knowing what else is running.
-    ///
-    /// The empty grouping directories that follow from that are tidied separately, by
-    /// [`prune_empty_audit_grouping`], which the audit calls once a program has finished with all
-    /// of its gates. That call site is the only one in the suite where a shared parent is provably
-    /// idle — the audit is sequential and runs once per process — which is precisely why the
-    /// tidy-up lives there and not in this method.
+    /// Keeping this method's reach to one directory is what makes it safe to call from anywhere, at
+    /// any time, without knowing what else is running. The empty grouping directories that follow
+    /// from that are tidied separately by [`prune_empty_audit_grouping`], whose documentation
+    /// carries the full argument for why pruning a shared parent is safe there and not here.
     ///
     /// # Errors
     ///
     /// Returns an error naming the path and the cause if the directory cannot be removed. A
-    /// caller on a success path should prefer [`Workspace::discard_advisory`]: a directory that
-    /// resists removal is untidy, but turning that into a failure would report a defect in the
-    /// compiler where there was only a defect in the cleanup, which is the one thing a cleanup
-    /// step must never do.
+    /// caller on a success path should prefer [`Workspace::discard_advisory`], which keeps the
+    /// invariant that cleanup never colours a verdict.
     pub fn discard(self) -> HarnessResult<()> {
         if self.keep_on_success {
             return Ok(());
@@ -1811,11 +1802,10 @@ pub fn audit_workspace(
 /// compiler was absent. Those are not faults and say nothing.
 ///
 /// A note otherwise, for a caller to fold into the program's own audit detail. This is cleanup, so
-/// it may never fail a run or colour a verdict — the same rule [`Workspace::discard_advisory`]
-/// follows, and for the same reason: reporting a defect in the compiler where there was only a
-/// defect in the cleanup is the one thing a cleanup step must never do. The note is not routed to
-/// the retention-pruning accounting, which exists to disclose evidence that had to be *dropped* to
-/// stay inside the run's budget; nothing is dropped here, because nothing was there.
+/// it may never fail a run or colour a verdict, under the same invariant
+/// [`Workspace::discard_advisory`] states. The note is not routed to the retention-pruning
+/// accounting, which exists to disclose evidence that had to be *dropped* to stay inside the run's
+/// budget; nothing is dropped here, because nothing was there.
 pub fn prune_empty_audit_grouping(area: &str, program: &str) -> Option<String> {
     let context = format!(
         "tidying the emptied audit grouping directories of {}/{}",

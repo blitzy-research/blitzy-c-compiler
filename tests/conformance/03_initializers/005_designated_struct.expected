@@ -1,0 +1,185 @@
+# Expectation record for 03_initializers/005_designated_struct.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 005_designated_struct
+area               = 03_initializers
+description        = Designated struct member initializers: declaration order and reversed order, omitted members, a designator reaching through a member into a submember, a positional value resuming after a member designator, and designators descending into an element of an array member -- seven forms at static duration and four again at automatic duration, every member read back individually
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined and no unspecified behaviour, which is the precondition that
+makes both differential oracles sound: undefined behaviour would license either compiler to do
+anything at all, so a divergence over it would prove nothing about either one.
+No uninitialized storage is ever read, which is the first thing to check in a program that prints
+members its initializers never mention. A member or element left unmentioned by a brace-enclosed
+initializer is initialized as an object of static storage duration would be -- that is, to zero --
+for automatic and static duration alike (C11 6.7.9p19 and p21), so every member printed here has a
+determinate value and the zero lines are assertions rather than accidents. That applies to
+g_omitted's whole nested member, to g_nested_mem's sibling submember and trailing scalar, to
+g_then_pos's tag, to the three untouched elements of g_arr_elem.a, and to the automatic-duration
+twins l_omitted and l_arr_elem exactly as it does to the statics, because an object with any
+initializer is fully initialized.
+Every designator names a member that exists in the type it designates, and every array-element
+designator names an index strictly inside that member's declared bounds. No designator in this
+program designates the same subobject twice, so the last-designator-wins resolution is never relied
+on. Every initializer expression is an integer constant expression with no side effects, so C11
+6.7.9p23 -- which leaves the order of an initializer list's evaluations indeterminately sequenced
+and therefore the order of their side effects unspecified -- has nothing to act on, and the
+program's meaning does not depend on the order the list is processed in. Reordering designators
+changes only which member each value reaches, not the order in which any side effect occurs,
+because there are none.
+No arithmetic is performed on any initialized value, so no signed overflow is possible; the only
+arithmetic in the file is the loop counter's increment over the range 0 through 3. Nothing is
+shifted, divided or remaindered. Nothing is modified after its initialization, so no object is
+modified twice between two sequence points.
+Every subscript is the loop counter strictly less than 4 indexing an int[4] array member, so no
+out-of-bounds access occurs and no one-past-the-end pointer is formed. There is no pointer cast, no
+pointer arithmetic and no pointer of any kind in the program apart from printf's format argument;
+no address is taken and none is printed.
+There is no aliasing violation: every object is read only through an lvalue of its own declared
+type, which is int in every case, reached by member selection and subscripting. No object
+representation is examined, no object is printed, copied or reinterpreted as bytes, and no cast
+appears anywhere in the file, so no padding byte is observed and nothing depends on the relative
+addresses of unrelated objects.
+Every initializer value is a small positive int, the largest being 104, so each is representable in
+int on every target the suite supports and no implicit conversion changes a value.
+Every printf call receives arguments free of side effects -- a loop counter and one int member -- so
+the unspecified order in which a function call's arguments are evaluated cannot affect the output.
+%d is the only conversion specifier in the file and every corresponding argument has type int after
+the default argument promotions, so no variadic argument is read at the wrong width.
+main returns a constant 0, inside the 0-125 range the suite requires so that no exit status is
+truncated by the operating system. Every input is a literal in this file: nothing is read from the
+environment, the clock, the file system or the network, and iteration order is fixed by literal
+bounds, so every cell is reproducible from this source and this record alone.
+No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
+bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no standard
+I/O header (docs/project-guide.md line 212), so naming one would fail on the bcc side of oracle (a)
+while succeeding on the reference side -- a spurious divergence caused by the test rather than by a
+compiler. This area is granted no header exception; the corpus has exactly two, area 07's stdarg.h
+and the dedicated bundled-header probe in area 12.
+This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
+under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
+-Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under the
+sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
+END
+impl_defined_notes <<END
+This record narrows nothing: all four targets, all three optimization levels and all three
+oracles are enabled, no expected-divergence marker is carried, and no implementation-defined
+value reaches this program's output. No `ub_audit_flags` key appears because the program passes
+the suite's full default warning gate unmodified.
+WHY OMITTING MEMBERS IS GATE-CLEAN HERE AND THIS RECORD NEEDS NO DEVIATION. -Wextra enables
+-Wmissing-field-initializers and -Werror promotes it, but in C that diagnostic does not fire for a
+designated initializer, only for a positional partial one such as a lone leading value. Every
+initializer in this program is designated, so leaving members unmentioned is both legal and quiet.
+None of them may be rewritten in positional form: doing so would trade the construct under test
+for a diagnostic. The positional partial spelling is covered separately, in
+003_partial_zero_fill.c, where it carries the scoped pragma that spelling requires.
+STATIC AND AUTOMATIC DURATION ARE THE TWO VARIANTS HERE, and no operand in this program is
+volatile -- deliberately, rather than as an omission of the suite's two-variant discipline. An
+initializer for an object of static storage duration is a constant expression evaluated at
+translation time and materialized into a data or BSS image, so it exercises the path that computes
+an initial image; the same initializer at automatic storage duration is performed by emitted
+instructions on entry to the block, so it exercises the path that generates stores. The g_ objects
+take the first path and the l_ objects the second. With optimization off the statics appear as
+data-section bytes while the twins appear as a run of stores into the frame, and at a higher level
+either path may be folded into immediate operands, which is what makes all three optimization
+levels informative; a compiler can implement one correctly and the other incorrectly, so both are
+compiled at all three levels and their answers are printed separately. A volatile aggregate would
+change the accesses under test rather than force the initializer to be performed at run time, which
+the storage duration already does, and the subject here is what an initializer produces rather than
+what an operator computes.
+WIDTH NORMALIZATION. Every member of every structure is an int and %d is the only conversion
+specifier in the file, so nothing whose width varies by target is declared, computed or printed. No
+long, size_t, ptrdiff_t, intptr_t, float or double appears, no length modifier is used, no sizeof or
+_Alignof result is printed and no address is printed, so the MEASURED i686 difference -- a four-byte
+long and pointer against eight bytes on x86-64, AArch64 and RISC-V 64
+(docs/technical-specifications.md target table, lines 457-462) -- cannot surface, and no layout
+choice the ABI is free to make is observable. Only the values the designators place, and the zeros
+the standard guarantees between them, are.
+PLAIN-CHAR SIGNEDNESS. No character data appears at all, so the MEASURED split -- signed on x86-64
+and i686, unsigned on AArch64 and RISC-V 64 -- is irrelevant here.
+PADDING. Members are read individually by name and no object is ever printed, copied or
+reinterpreted as bytes, so padding, whose contents the standard leaves unspecified, is never
+observed.
+EXECUTION CHARACTER SET. Nothing character-valued is printed, so C11 5.2.1 leaves nothing here to
+the implementation.
+WHERE THE GOLDEN BYTES CARRY THE MOST INFORMATION. The sharpest case in the program is g_then_pos:
+after the member designator .in the current object advances to the member FOLLOWING in, so the bare
+44 lands in trailer while tag -- which precedes the designated member and is never mentioned --
+stays at its implicit zero. A compiler that restarted at the first member, or that advanced by the
+wrong number of members, produces a visibly different four-line group rather than a subtly wrong
+single value. The struct that carries a nested struct member places it BETWEEN two scalars for the
+same reason, so a layout or traversal error shifts a value that is printed rather than hiding in a
+slot nobody reads.
+MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
+-O1 and -O2 -- twelve configurations -- and every one produced these 50 lines byte-identically with
+exit status 0, which is why oracle (b) compares this program's targets against each other without
+any narrowing and why oracle (c) can hold these bytes as the golden record. The output is 50 fixed
+key=value lines in a fixed order, one per member observed, so a single divergent line localizes to a
+single member of a single initializer form rather than to the program as a whole.
+END
+expected_stdout    <<END
+g_in_order.tag=1
+g_in_order.in.p=2
+g_in_order.in.q=3
+g_in_order.trailer=4
+g_reordered.tag=11
+g_reordered.in.p=12
+g_reordered.in.q=13
+g_reordered.trailer=14
+g_omitted.tag=21
+g_omitted.in.p=0
+g_omitted.in.q=0
+g_omitted.trailer=24
+g_nested_mem.tag=31
+g_nested_mem.in.p=0
+g_nested_mem.in.q=33
+g_nested_mem.trailer=0
+g_then_pos.tag=0
+g_then_pos.in.p=42
+g_then_pos.in.q=43
+g_then_pos.trailer=44
+g_arr_elem.tag=51
+g_arr_elem.a[0]=0
+g_arr_elem.a[1]=0
+g_arr_elem.a[2]=55
+g_arr_elem.a[3]=0
+g_arr_elem.trailer=0
+g_arr_whole.tag=61
+g_arr_whole.a[0]=62
+g_arr_whole.a[1]=63
+g_arr_whole.a[2]=64
+g_arr_whole.a[3]=65
+g_arr_whole.trailer=66
+l_in_order.tag=71
+l_in_order.in.p=72
+l_in_order.in.q=73
+l_in_order.trailer=74
+l_reordered.tag=81
+l_reordered.in.p=82
+l_reordered.in.q=83
+l_reordered.trailer=84
+l_omitted.tag=0
+l_omitted.in.p=92
+l_omitted.in.q=0
+l_omitted.trailer=0
+l_arr_elem.tag=0
+l_arr_elem.a[0]=101
+l_arr_elem.a[1]=0
+l_arr_elem.a[2]=0
+l_arr_elem.a[3]=104
+l_arr_elem.trailer=0
+END

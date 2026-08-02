@@ -64,9 +64,11 @@ Plain char is not used.  Plain char signedness was measured to differ across the
 No value whose width varies by target is printed.  sizeof(long) and sizeof(void *) differ on
 i686 (4) from the other three targets (8), so neither is printed, and no pointer value or
 address appears in the output.  Every bitfield is declared on an int base type, and int is four
-bytes on all four targets, so every printed size and alignment is target-invariant by derivation:
-the inner struct is four bytes, the outer struct is twenty, the tagged struct is twelve, and both
-unions are four.  Every bitfield read is cast explicitly to unsigned int or int before it is
+bytes on all four targets, which removes one variable; the allocation unit a bitfield sequence
+occupies is still implementation-defined, so the printed sizes and alignments are measured
+expectations for the four ABIs under test -- the inner struct four bytes, the outer struct
+twenty, the tagged struct twelve and both unions four -- rather than values derived from the
+base type.  Every bitfield read is cast explicitly to unsigned int or int before it is
 passed to printf, and the one non-bitfield value printed, the whole-word view of the first
 union, is already an unsigned int of a width the format specifier matches on every target.
 

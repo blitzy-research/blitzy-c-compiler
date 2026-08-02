@@ -2,13 +2,11 @@
  * scalars and over aggregates, width-normalized so that all four backends stay
  * comparable.
  *
- * THE HAZARD THIS PROGRAM IS BUILT AROUND
- *
- * sizeof and _Alignof are the two places in the language where a target's ABI
- * becomes an observable integer, so a program that prints them naively prints
- * different bytes on different targets and destroys the four-way comparison it
- * exists to perform.  The quantities that differ, as measured with the four
- * reference drivers oracle (a) uses:
+ * THE HAZARD THIS PROGRAM IS BUILT AROUND.  sizeof and _Alignof are the two
+ * places in the language where a target's ABI becomes an observable integer, so a
+ * program that prints them naively prints different bytes on different targets and
+ * destroys the four-way comparison it exists to perform.  The quantities that
+ * differ, as measured with the four reference drivers oracle (a) uses:
  *
  *     quantity                x86_64   i686   aarch64   riscv64
  *     sizeof(long)                 8      4         8         8
@@ -21,123 +19,93 @@
  *     _Alignof(double)             8      4         8         8
  *     _Alignof(long double)       16      4        16        16
  *
- * The first four rows are not incidental.  The repository's own target table
- * (docs/technical-specifications.md lines 457-462) fixes pointer and long at 8
- * bytes with ELF64 on x86-64, AArch64 and RISC-V 64, and at 4 bytes with ELF32
- * on i686.  i686 is the only ILP32 backend, which is exactly why it has to stay
- * in the comparison.  Note also that _Alignof(double) is 4 on i686: _Alignof
- * reports the ABI alignment the i386 System V ABI requires, not the preferred
- * alignment, so the two must not be conflated.
+ * The first four rows are not incidental: the repository's target table fixes
+ * pointer and long at 8 bytes with ELF64 on x86-64, AArch64 and RISC-V 64, and at
+ * 4 bytes with ELF32 on i686 (docs/technical-specifications.md lines 457-462).
+ * i686 is the only ILP32 backend, which is exactly why it has to stay in the
+ * comparison.  Note also that _Alignof(double) is 4 on i686, because _Alignof
+ * reports the alignment the i386 System V ABI requires rather than a preferred
+ * one; the two must not be conflated.
  *
- * WHAT THIS PROGRAM DELIBERATELY DOES NOT DO
+ * Restricting this program to the three 64-bit targets and printing raw numbers
+ * would be the easy answer, and it is forbidden: constraint C3 excludes no feature
+ * for difficulty, and dropping i686 would remove three of this program's twelve
+ * cells and with them the only ILP32 backend -- the only target on which any of the
+ * widths tabulated above actually differs, so exactly where a width defect could
+ * hide with nothing left to notice it.  All four targets, all three optimization
+ * levels and all three oracles are therefore kept, with no expected-divergence
+ * marker, and the output is normalized instead.
  *
- * The easy answer would be to restrict this program's target list to the three
- * 64-bit targets and print the raw numbers.  That is forbidden.  Constraint C3
- * says no feature is excluded because it is difficult, and dropping i686 would
- * remove twelve cells and the only 32-bit backend from the comparison -- exactly
- * where a width defect is most likely to hide.  This program therefore keeps all
- * four targets, all three optimization levels and all three oracles, carries no
- * expected-divergence marker, and normalizes instead.
+ * HOW THE OUTPUT IS NORMALIZED.  A quantity identical on all four targets is
+ * printed RAW rather than as a predicate, so a target that disagreed diverges on
+ * that line instead of being accepted by a predicate that held for the wrong
+ * reason; every raw value below was measured on all four targets first.  A quantity
+ * that differs by target is printed only as a RELATION, which yields the same 0 or
+ * 1 everywhere.  Relations alone would not be sufficient, and this is the trap
+ * worth stating plainly: a relation is satisfied by two values wrong in the same
+ * direction, so sizeof(long) == sizeof(void *) prints 1 even if both were 2.  The
+ * pointer-width family is therefore anchored to ONE exact, target-keyed equality --
+ * ptr_width_exact -- with every other member tied to that anchor by a relation, so
+ * one number per target pins the family exactly.  A permissive bound is never used
+ * where an exact answer exists, because a range such as "4 <= x <= 8" accepts 5, 6
+ * and 7 and accepts the wrong choice between 4 and 8.
  *
- * THE NORMALIZATION RULEBOOK APPLIED HERE
- *
- * 1. A quantity identical on all four targets is printed RAW, as a value rather
- *    than as a predicate, so a target that disagreed shows up as a divergence on
- *    that one line rather than being quietly accepted by a predicate that held
- *    for the wrong reason.  Every raw value below was measured on all four
- *    targets before it was written here.
- *
- * 2. A quantity that differs by target is printed only as a RELATION between two
- *    such quantities, which yields the same 0 or 1 everywhere.
- *
- * 3. Relations alone are not sufficient, and this is the trap worth stating
- *    plainly: a relation is satisfied by two values that are wrong in the same
- *    direction, so sizeof(long) == sizeof(void *) prints 1 even if both were 2.
- *    The whole pointer-width family is therefore anchored to ONE exact,
- *    target-keyed equality -- ptr_width_exact -- and every other member of the
- *    family is tied to that anchor by a relation.  One number per target then
- *    pins the entire family exactly: long, char *, int *, a function pointer, a
- *    pointer to array, a pointer to pointer, size_t, ptrdiff_t, and the
- *    alignment of all of them.
- *
- * 4. A permissive bound is never used where an exact answer exists.  A range
- *    such as "4 <= x <= 8" accepts 5, 6 and 7, and accepts the wrong choice
- *    between 4 and 8, so a real code-generation defect would still print 1 and
- *    both the reference oracle and the golden record would agree with it.
- *
- * 5. long double is the one type given bounds rather than an exact pin, because
- *    no exact answer is available to assert.  Its representation is
- *    implementation-defined -- 16 bytes on x86-64 and 12 on i686 for the same
- *    x87 80-bit format differently padded, 16 on AArch64 and RISC-V 64 for IEEE
- *    binary128 -- and C11 permits an implementation to give long double exactly
- *    double's representation.  Its raw size is therefore never printed.  What is
- *    printed instead are the three facts that do hold everywhere: it is at least
- *    as wide as double, at least as strictly aligned as double, and its size is
- *    a whole multiple of its alignment.  Cross-backend VALUE equality for long
- *    double is the subject of 13_floating_point/004_long_double_target_restricted.c,
- *    where it is a recorded exclusion; here nothing is excluded, because nothing
- *    representation-dependent is printed.
- *
- * THE TWO-VARIANT RULE
+ * long double is the one type given bounds rather than an exact pin, because no
+ * exact answer is available to assert: its representation is implementation-defined
+ * -- 16 bytes on x86-64 and 12 on i686 for the same x87 80-bit format differently
+ * padded, 16 on AArch64 and RISC-V 64 for IEEE binary128 -- and C11 permits it to
+ * have exactly double's representation.  Its raw size is never printed; what is
+ * printed are the three facts that hold everywhere: it is at least as wide as
+ * double, at least as strictly aligned as double, and its size is a whole multiple
+ * of its alignment.  Cross-backend VALUE equality for long double belongs to
+ * 13_floating_point/004_long_double_target_restricted.c, where it is a recorded
+ * exclusion; nothing is excluded here, because nothing representation-dependent is
+ * printed.
  *
  * sizeof and _Alignof are always compile-time constants, so every derived
- * arithmetic result is computed twice: once from constant operands, where the
- * constant evaluator produces the answer, and once from the same quantities
- * parked in volatile objects, which must be re-read from memory so the backend
- * has to emit the division, the remainder and the pointer scaling itself.
- * Verified at instruction level with the reference compiler: at -O2 the volatile
- * forms leave five division instructions in main on x86-64 and on AArch64 and
- * four on RISC-V 64, while the folded forms leave none.  Without the runtime
- * half, optimization would substitute the constant evaluator's answer for the
- * backend's and a code-generation defect would escape detection entirely.
+ * arithmetic result is computed twice: once from constant operands, and once from
+ * the same quantities parked in volatile objects, which must be re-read from memory
+ * so the backend has to emit the division, the remainder and the pointer scaling
+ * itself.
  *
- * DETERMINISM AND UNDEFINED-BEHAVIOUR FREEDOM
+ * No header is named and printf is hand-declared.  bcc ships no stdio.h: its
+ * bundled set is the nine required freestanding headers plus a bonus stdatomic.h,
+ * ten files in all (docs/project-guide.md line 212).  _Alignof is a C11 keyword and
+ * needs none; stdalign.h would only supply the lowercase alignof macro.  stddef.h
+ * and stdint.h are absent too, so size_t, ptrdiff_t and intptr_t cannot be named
+ * here at all -- their widths are probed without naming them, since sizeof yields a
+ * size_t (making sizeof(sizeof(int)) size_t's own width) and a pointer difference
+ * yields a ptrdiff_t.
  *
- * No address, no pointer value, no plain long and no plain-char
- * signedness-dependent value is printed: every character read back is converted
- * through unsigned char first, and pointer facts appear only as differences and
- * comparisons.  There is no signed overflow, no shift, no aliasing violation, no
- * read of uninitialized storage, and no dependence on padding bytes -- padding
- * is never read and no member offset is ever assumed.  The one-past-end pointer
- * that bounds the array walk is formed but never dereferenced.  Each expression
- * reads each volatile object at most once, so no object is modified twice
- * between sequence points and no call takes more than one side-effecting
- * argument.  Every input is a literal in this file: nothing is read from the
- * environment, the clock, a file or a socket.
+ * Nothing implementation-defined reaches stdout: no address, no pointer value, no
+ * plain long and no plain-char signedness-dependent value is printed, every
+ * character read back is converted through unsigned char first, and pointer facts
+ * appear only as differences and comparisons.  The four lines that do print a
+ * character's numeric CODE are a separate matter, because the unsigned char cast
+ * settles signedness and says nothing about the execution character set: every such
+ * code is pinned by a _Static_assert further down this file, so an implementation
+ * whose character set disagreed would fail to translate rather than print a
+ * different number for oracle (a) to charge to the compiler under test.
  *
- * HEADERS
- *
- * None, deliberately.  printf is hand-declared because bcc ships no stdio.h, so
- * an include would fail on the compiler under test while succeeding on the
- * reference compiler -- a divergence caused by the test rather than by the
- * compiler.  _Alignof needs no header either: it is a C11 keyword.  stdalign.h
- * is not included, because it only supplies the lowercase alignof macro, and
- * neither is stddef.h nor stdint.h, so size_t, ptrdiff_t and intptr_t cannot be
- * named here at all.  Their widths are probed without naming them: sizeof yields
- * a size_t, so sizeof(sizeof(int)) is size_t's own width, and a pointer
- * difference yields a ptrdiff_t, so sizeof(&probe_pair[1] - &probe_pair[0]) is
- * ptrdiff_t's width.
+ * Freedom from undefined behaviour: no signed overflow, no shift, no aliasing
+ * violation, no read of uninitialized storage, and no dependence on padding bytes,
+ * which are never read and whose offsets are never assumed.  The one-past-end
+ * pointer bounding the array walk is formed but never dereferenced.  Each
+ * expression reads each volatile object at most once, so nothing is modified twice
+ * between sequence points and no call takes more than one side-effecting argument.
  */
 
 int printf(const char *, ...);
 
-/* The single target-keyed number this program needs.
+/* The single target-keyed number this program needs, keyed to the ARCHITECTURE
+ * rather than to a width macro such as __SIZEOF_POINTER__ on purpose: the
+ * architecture is a categorical fact the harness fixes when it selects the cell's
+ * target, whereas a width macro is a numeric claim by the compiler under test, and
+ * checking that claim against itself would be circular.
  *
- * It is keyed to the ARCHITECTURE rather than to a width macro such as
- * __SIZEOF_POINTER__ on purpose: the architecture is a categorical fact the
- * harness fixes when it selects the cell's target, whereas a width macro is a
- * numeric claim by the compiler under test, and checking that claim against
- * itself would be circular.  The same choice, for the same reason, is made by
- * 10_declarations_and_types/007_alignof_alignas.c and by
- * 08_gcc_extensions/008_inline_asm_per_target.c.
- *
- * The #else is a hard stop rather than a fallback.  A compiler that predefines
- * none of these architecture macros cannot be given an exact expectation, and
- * quietly falling back to a permissive one would turn rule 4 above into a
- * comment.  A refusal to compile is reported with the message below and is
- * reproducible from the record's own command template; a silently weakened test
- * is not reported at all.
- */
+ * The #else is a hard stop rather than a fallback: a compiler predefining none of
+ * these macros cannot be given an exact expectation, and quietly falling back to a
+ * permissive one would turn rule 4 above into a comment. */
 #if defined(__x86_64__) || defined(__amd64__)
 #define EXPECTED_PTR_WIDTH 8u
 #elif defined(__i386__) || defined(__i386)
@@ -298,6 +266,44 @@ _Static_assert(sizeof(struct invariant) % _Alignof(struct invariant) == 0u,
                "an aggregate size is a whole multiple of its alignment");
 _Static_assert(sizeof(struct widthful) % _Alignof(struct widthful) == 0u,
                "the layout law holds for the width-bearing aggregate too");
+
+/* THE EXECUTION CHARACTER SET, PINNED RATHER THAN ASSUMED.
+ *
+ * Four of the printed lines carry a character's numeric code: the member
+ * read-backs print inv_obj.c, wide_obj.c and nest_obj.trailer, and
+ * ptrtab_first_chars prints the first byte of each string-table entry.  Those
+ * codes exist because a read-back has to print SOMETHING, and a character
+ * member is the narrowest way to prove that the byte the initializer placed at
+ * a computed offset is the byte that comes back out.  Casting through unsigned
+ * char removes plain char's implementation-defined SIGNEDNESS, which was
+ * measured to differ between the targets, but it does nothing whatever about
+ * the execution character set: C11 5.2.1 leaves the members and codes of that
+ * set implementation-defined, so 'x' is 120 on an ASCII-family implementation
+ * and something else on one that is not.
+ *
+ * The assertions below convert that from an unstated assumption into a
+ * translation-time requirement.  Every character whose code this program prints
+ * is pinned here, together with the two that appear only in initializers, so an
+ * implementation whose execution character set differs FAILS TO TRANSLATE with a
+ * named diagnostic instead of quietly printing different numbers that oracle (a)
+ * or oracle (b) would then charge to the compiler under test.  A build failure
+ * accuses the environment, which is where the difference actually lives; a
+ * silent numeric change accuses the wrong party.
+ *
+ * These are the correct instrument for this job precisely BECAUSE they are
+ * target-parametric in the same way the rest of the file's assertions are: all
+ * four supported targets were measured to use the same ASCII-family basic
+ * execution character set, so the condition holds on every enabled cell today,
+ * and a future target that disagreed would announce itself at the build rather
+ * than through a divergence report.  The record's impl_defined_notes carries the
+ * same accounting in prose. */
+_Static_assert('x' == 120, "the execution character set places x at 120 (ASCII)");
+_Static_assert('y' == 121, "the execution character set places y at 121 (ASCII)");
+_Static_assert('z' == 122, "the execution character set places z at 122 (ASCII)");
+_Static_assert('w' == 119, "the execution character set places w at 119 (ASCII)");
+_Static_assert('T' == 84, "the execution character set places T at 84 (ASCII)");
+_Static_assert('a' == 97 && 'b' == 98 && 'c' == 99 && 'd' == 100,
+               "the four string-table initials sit at their ASCII codes");
 
 int main(void)
 {
@@ -621,4 +627,3 @@ int main(void)
     printf("two_variant_all_equal=%d\n", all_equal);
     return 0;
 }
-

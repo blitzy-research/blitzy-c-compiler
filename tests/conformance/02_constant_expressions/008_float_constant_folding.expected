@@ -1,0 +1,238 @@
+# Expectation record for 02_constant_expressions/008_float_constant_folding.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 008_float_constant_folding
+area               = 02_constant_expressions
+description        = Floating constant folding over exactly representable dyadic rationals at fixed print precision -- arithmetic, grouping, comparison, truncation and int/float conversion -- each computation instantiated once folded and once over volatile operands
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined behaviour and depends on no unspecified behaviour, which is the
+precondition both differential oracles rest on rather than a stylistic preference: undefined
+behaviour would license either compiler to do anything at all, so a divergence between them would
+prove nothing about either. The paragraphs below are the written argument required of every program
+in this suite; the warning gate and the sanitizer gate are its machine half.
+EVERY FLOATING VALUE IN THE PROGRAM IS A DYADIC RATIONAL exactly representable in binary floating
+point -- the operands are 0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.25, 3.0, 3.5, 3.75, 4.0, 7.0 and
+8.0 and their negations, in single and double precision -- and every result is one too: the sums,
+differences, products and quotients are 0.75, 2.25, 3.0, 0.125, 3.5, 0.875, 1.75, 2.5, 5.5, 7.0 and
+-0.75. No result needs rounding in either binary32 or binary64, which is what makes the equality
+comparisons here exact questions rather than tolerance questions, and what lets a float result be
+widened to double and compared with the double result of the same expression.
+NO DIVISOR IS ZERO. Every divisor is a small non-zero dyadic rational -- 2.0, 4.0, 8.0 or 2.0f --
+written as a literal or held in a volatile object initialized from one and never modified afterwards.
+NO OPERATION OVERFLOWS TO INFINITY AND NONE PRODUCES A NaN. The largest magnitude anywhere is 8.0
+against a minimum representable range of at least 1e37 and the smallest is 0.125, so there is no
+overflow, no underflow and no invalid operation, and every result is exact. Neither an infinity nor a
+NaN is produced, compared or printed anywhere in the program, so no unordered comparison arises and
+no identity assumption about either is made or needed.
+EVERY FLOATING-TO-INTEGER CONVERSION IS WELL INSIDE int's RANGE BY CONSTRUCTION, which forecloses the
+one undefined case specific to this program: C11 makes the conversion undefined when the truncated
+value cannot be represented in the destination. The truncations are (int)3.75 and (int)-3.75, giving
+3 and -3, and the round-trip is (int)((double)7 / 2.0 * 2.0), giving exactly 7 because every
+intermediate is exactly representable; each conversion is written with an explicit (int) cast so it
+is stated in the source rather than inferred. The int-to-floating conversions of 5, 7 and 9 are exact
+in both precisions.
+NO SIGNED INTEGER OVERFLOW IS POSSIBLE: the only integers in the program are the small conversion
+inputs 5, 7 and 9, the truncation results, and the 0/1 results of comparisons. No shift, no remainder
+and no integer division appears at all.
+NO FLOATING VALUE IS TYPE-PUNNED. Nothing is reinterpreted through a pointer or a union, so nothing
+depends on representation, on byte order or on padding, and no aliasing rule can be broken. There is
+no pointer arithmetic and no array subscript anywhere in the file, no address is taken, and nothing
+depends on the relative addresses of unrelated objects.
+EVERY VOLATILE OBJECT IS INITIALIZED AT ITS DECLARATION, every folded local is initialized from a
+constant expression and every runtime local is initialized from volatile reads before it is used, so
+no storage is read uninitialized. No object is modified anywhere after its initialization, so nothing
+is modified twice between two sequence points.
+EVERY MACRO PARAMETER APPEARS EXACTLY ONCE IN ITS BODY, and the macros expand to fully parenthesized
+expressions, so no operand is evaluated twice and no volatile object is read twice within a single
+expression. Where a computation needs the same value in two places, two DISTINCT volatile objects
+supply it rather than one object read twice. Every result is stored in its own named variable and
+only those variables are passed to printf, so no call receives a side-effecting argument and no
+argument-evaluation order is ever observable.
+EVERY VALUE PASSED TO printf FOR A FLOATING CONVERSION IS A double: the float results are widened by
+an explicit (double) cast, which states in the source the default argument promotion a variadic call
+would apply anyway.
+NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, printf, is declared by
+hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
+bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so a directive
+naming that header would fail on the bcc side of oracle (a) while succeeding on the reference side --
+a spurious divergence caused by the test rather than by the compiler under test. Nothing in the file
+is a GCC extension, so no include exception and no gate deviation is available to area 02 and none is
+needed; the corpus has exactly two header exceptions, area 07's stdarg.h and the dedicated
+bundled-header probe in area 12. No math function is called either, so the program links against
+libc alone under -static, which is the one linkage mode both compilers spell identically.
+THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
+is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers
+-- which is what the explicit (double) and (int) casts are for -- and it builds and runs clean under
+the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all run natively to completion.
+Both gates are reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag
+discipline is untouched.
+END
+impl_defined_notes <<END
+This record narrows nothing. All four targets, all three optimization levels and all three
+oracles are enabled, and no expected-divergence marker is attached. These notes exist to
+record how that was achieved, because a program in this area could easily have had to narrow:
+constant evaluation reaches straight into the type system, which is where the four supported
+targets differ, and floating-point determinism rests on three deliberate choices, each verified
+by measurement rather than assumed.
+THE AREA RULE THAT ORGANISES THE WHOLE FILE: print at fixed precision with margin, and make no
+NaN or infinity identity assumption. FIRST, THE VALUES. Every floating value in this program,
+operand and result alike, is a DYADIC RATIONAL -- a finite sum of powers of two -- so each is
+exactly representable in binary32 and binary64 alike and every operation is exact, and no
+target's rounding mode, evaluation order or excess-precision behaviour can change a printed
+digit. A value such as 0.1 would be inexact, and its printed digits could then legitimately
+differ between an x87 double-extended intermediate and an IEEE binary64 one. SECOND, THE
+PRECISION. Every value is printed with an explicit precision, %.6f or %.9f for the two division
+results, short enough that no rounding decision is ever at stake: that is fixed precision with
+margin rather than a shortest-round-trip rendering, and the margin matters because a rendering
+that printed as many digits as it needed would expose an intermediate that happened to carry
+extra precision. THIRD, THE TYPES. Only float and double are used -- IEEE binary32 and binary64
+on all four supported targets -- and the widest floating type is deliberately absent.
+FLT_EVAL_METHOD IS THE IMPLEMENTATION-DEFINED PROPERTY THIS PROGRAM HAD TO DEFEAT, AND IT IS
+DEFEATED BY CONSTRUCTION RATHER THAN BY A RESTRICTION. i686 evaluates floating expressions in
+x87 extended precision -- FLT_EVAL_METHOD 2 -- while x86-64, AArch64 and RISC-V 64 do not, so a
+program that printed a value whose last digits depended on intermediate precision would diverge
+on i686 through no fault of the compiler, and would have to narrow its target list or carry an
+expected-divergence marker. Excess precision cannot perturb a value that is already exact in
+every format involved, which is exactly what choosing dyadic rationals guarantees. So all twelve
+cells stay byte-comparable, no target is dropped, no oracle is disabled and this record carries
+no marker. The alternative -- restricting to the three targets with FLT_EVAL_METHOD 0 -- would
+have removed the only ILP32 backend and the only x87 evaluation model from the comparison, which
+is where a floating-point code-generation defect is most likely to hide.
+long double IS NEVER USED, NEVER COMPUTED WITH AND NEVER PRINTED. Its representation was MEASURED
+at 16, 12, 16 and 16 bytes across x86-64, i686, AArch64 and RISC-V 64 -- x87 80-bit against IEEE
+binary128 -- so it is the one floating type whose value-level cross-backend comparison is not
+sound, and a printed value of that type could not be compared across backends at all. That
+comparison is owned by 13_floating_point/004_long_double_target_restricted.c, which carries the
+recorded exclusion and marker XD-TYPE-LONGDOUBLE-001, so nothing is lost by keeping the type out
+of a program whose subject is the constant folder. Also deliberately elsewhere, so this program
+does not duplicate them: general float and int conversion boundaries (13_floating_point/002),
+finite ordering breadth (13_floating_point/003), sizeof and _Alignof facts (004_sizeof_alignof.c
+in this area), and the f suffix's typing effect observed through _Generic
+(005_integer_constant_suffixes.c in this area) -- here the f suffix appears only as part of a
+computed value. NaN and infinity behaviour is owned by nobody: the area rule forecloses it
+deliberately, so neither is ever produced.
+WIDTH NORMALIZATION. sizeof(long) and sizeof(void *) were MEASURED at 4 bytes on i686 and 8
+bytes on x86-64, AArch64 and RISC-V 64 (docs/technical-specifications.md target table, lines
+457-462), so no plain long, no size_t, no ptrdiff_t, no sizeof result and no pointer value is
+printed anywhere. The format vocabulary is deliberately minimal and is exactly %d for integers
+and %.6f and %.9f for floating values; nothing width-dependent or representation-dependent
+reaches a format string, and no address is printed.
+PLAIN-char SIGNEDNESS. Plain char was MEASURED as signed on x86-64 and i686 and unsigned on
+AArch64 and RISC-V 64. No plain-char value is printed and no printed line depends on that
+choice.
+EVERY DEFAULT ARGUMENT PROMOTION AND EVERY NARROWING IS WRITTEN OUT RATHER THAN IMPLIED. Each
+float passed to the variadic printf carries an explicit (double) cast, so the promotion the
+standard performs is stated in the source, and each floating-to-integer conversion carries an
+explicit (int) cast. That is what keeps the program clean under the default gate's -Wconversion
+and -Wsign-conversion, for which area 02 sanctions no deviation, and it means a reader can see
+every type change without inferring one.
+THE TWO-VARIANT PAIRING IS THE ASSERTION. Every fold_ line is printed with the runtime line that
+recomputes the same value from volatile operands, and their agreement is what the program exists
+to check: without the runtime twin, optimization would substitute the folder's answer for the
+backend's and a floating-point code-generation defect would escape detection entirely. The
+all_pairs_agree line is the program's own cross-check that all 26 folded values equal their
+runtime twins, and it is redundant to the individual lines above it rather than a substitute for
+them.
+WHAT WOULD LEGITIMATELY BREAK THAT, AND HOW IT MUST THEN BE HANDLED. A conforming target whose
+float or double were not IEEE binary32 and binary64, or which evaluated double expressions in a
+wider format in a way that survived to the printed digits, could print different lines without
+being defective. That would be an implementation-defined divergence rather than a compiler
+defect, and it must then be recorded as an expected divergence with this record's target list
+narrowed and the reason stated in this field -- never left to surface as a finding against a
+backend that did nothing wrong, and never resolved by dropping the floating coverage this program
+exists to provide.
+EXECUTION CHARACTER SET: NOT ENGAGED, VERIFIED RATHER THAN ASSERTED. C11 5.2.1 leaves the
+members of the execution character set and their codes implementation-defined, so a program
+that printed a character's numeric code, or rendered a literal as bytes, would owe an
+accounting here. This one owes none: it contains no character constant at all -- checked
+mechanically, by stripping comments and string literals and finding zero -- and derives no
+printed VALUE from a character. Its only string literals are printf format strings and, where
+it declares any, _Static_assert messages -- the messages consumed by the compiler and never
+emitted, the format strings contributing only fixed label text that is byte-identical in all
+twelve cells of the matrix and in the golden above. There is therefore no code to pin and
+nothing to narrow. That is precisely what distinguishes this program from 004_sizeof_alignof.c
+and 007_string_literal_constants.c in the same area, both of which do print character codes and
+both of which pin every code they print with a _Static_assert for that reason.
+HERMETIC AND DETERMINISTIC. Every input is a literal in the source: nothing is read from the
+clock, the environment, the command line, a file or a socket, and nothing is written anywhere.
+Output is one line per semantic property claimed, in a fixed order, so a single divergent line
+names the construct that produced it. No address or pointer value is printed, there is no
+randomness, no locale-dependent formatting and no data-dependent iteration order, and the
+program returns 0 -- well inside the 0-125 range the suite requires so that no exit status is
+truncated by the operating system.
+MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at
+-O0, -O1 and -O2 -- twelve configurations -- and every one produced these 55 lines
+byte-identically with exit status 0, which is why cross-backend comparison is sound, oracle (b)
+is enabled with no narrowing, and oracle (c) can hold these bytes as the golden record.
+END
+expected_stdout    <<END
+fold_add=0.750000
+rt_add=0.750000
+fold_sub=2.250000
+rt_sub=2.250000
+fold_mul=3.000000
+rt_mul=3.000000
+fold_div_eighth=0.125000000
+rt_div_eighth=0.125000000
+fold_div_half=3.500000000
+rt_div_half=3.500000000
+fold_addf=0.750000
+rt_addf=0.750000
+fold_mixf=3.500000
+rt_mixf=3.500000
+fold_mixd=3.500000
+rt_mixd=3.500000
+fold_mix_agree=1
+rt_mix_agree=1
+fold_cmp_eq=1
+rt_cmp_eq=1
+fold_cmp_lt=1
+rt_cmp_lt=1
+fold_cmp_gt=1
+rt_cmp_gt=1
+fold_cmp_le=1
+rt_cmp_le=1
+fold_cmp_le_strict=1
+rt_cmp_le_strict=1
+fold_cmp_false=0
+rt_cmp_false=0
+fold_trunc_pos=3
+rt_trunc_pos=3
+fold_trunc_neg=-3
+rt_trunc_neg=-3
+fold_int_roundtrip=7
+rt_int_roundtrip=7
+fold_int_to_double=2.500000
+rt_int_to_double=2.500000
+fold_int_to_float=2.250000
+rt_int_to_float=2.250000
+fold_unary_minus=-0.750000
+rt_unary_minus=-0.750000
+fold_group_left=7.000000
+rt_group_left=7.000000
+fold_group_right=2.500000
+rt_group_right=2.500000
+fold_sum3=0.875000
+rt_sum3=0.875000
+static_const_init=0.875000
+static_const_matches_fold=1
+fold_static_scaled=1.750000
+rt_static_scaled=1.750000
+fold_chain=5.500000
+rt_chain=5.500000
+all_pairs_agree=1
+END

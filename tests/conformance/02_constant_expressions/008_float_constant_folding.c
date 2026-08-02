@@ -18,64 +18,42 @@
  * already exact in every format involved, so no target restriction is needed and
  * this program carries no expected-divergence marker.
  *
- * THE TWO-VARIANT RULE, mandatory for an arithmetic program: every computation is
- * written ONCE as a macro and instantiated TWICE - over literal constants, which
- * the folder evaluates at compile time, and over volatile-qualified operands,
- * which must be read at run time and so cannot be folded away.  The two results
- * are printed on adjacent lines as fold_X / rt_X.  Without the runtime twin,
- * optimization would silently substitute the folder's answer for the backend's
- * and a floating-point code-generation defect would escape detection entirely;
- * with it, a divergence is attributable to the folder or to the backend rather
- * than to "one of the two".  Every macro parameter appears exactly once in its
- * body, so no operand is evaluated twice and no volatile object is read twice
- * within a single expression.  Where a computation needs the same value in two
- * places, two distinct volatile objects supply it (v_two / v_two_alt) rather than
- * one object read twice.  Every result is stored in its own named variable and
- * only those variables are passed to printf, so no call receives a
- * side-effecting argument and no argument-evaluation order is ever observable.
+ * Every computation is written ONCE as a macro and instantiated TWICE - over
+ * literal constants, which the folder evaluates at translation time, and over
+ * volatile-qualified operands, which must be re-read at run time and so cannot be
+ * folded away - and the two results are printed on adjacent lines as fold_X / rt_X.
+ * Every macro parameter appears exactly once in its body, so no operand is
+ * evaluated twice; where a computation needs the same value in two places, two
+ * distinct volatile objects supply it (v_two / v_two_alt) rather than one object
+ * read twice.  Every result is stored in its own named variable before it is
+ * printed, so no call receives a side-effecting argument.
  *
- * DETERMINISM AND PORTABILITY.  This program names no header at all and
- * hand-declares the one libc prototype it needs: bcc ships no hosted stdio
- * header, so a directive pulling one in would fail on the bcc side of oracle (a)
- * while succeeding on the reference side - a spurious divergence caused by the
- * test rather than by the compiler.  No math function is called, so the program
- * links against libc alone under -static.  The format set is deliberately
- * minimal: %d for integers, %.6f and %.9f for floating values.  Nothing
- * width-dependent or representation-dependent is ever printed - no value of the
- * widest floating type (measured at 16, 12, 16 and 16 bytes across the four
- * targets, x87 80-bit against IEEE binary128), no plain long, no size_t, no
- * pointer, no address and no plain-char value.  Every float
- * passed to the variadic printf is written with an explicit (double) cast so the
- * default argument promotion is stated rather than implied, and every float ->
- * int conversion is written with an explicit (int) cast, which is what keeps the
- * program clean under the audit gate's -Wconversion and -Wsign-conversion with no
- * sanctioned deviation available to area 02.
+ * No math function is called, so the program links against libc alone under
+ * -static, and nothing representation-dependent is printed: no value of the widest
+ * floating type, no plain long, no size_t, no pointer and no plain-char value.  The
+ * format set is %d, %.6f and %.9f.  Every float passed to the variadic printf
+ * carries an explicit (double) cast so the default argument promotion is stated
+ * rather than implied, and every float -> int conversion carries an explicit (int)
+ * cast, which is what keeps the program clean under the audit gate's -Wconversion
+ * and -Wsign-conversion -- area 02 sanctions no deviation from either.
  *
- * UNDEFINED-BEHAVIOUR FREEDOM, the precondition that makes both oracles sound.
- * No divisor is zero.  No operation overflows to infinity and none produces a
- * NaN: every operand is a small dyadic rational and every result is exact.  Each
- * float -> int conversion is well inside int's range by construction (3, -3 and
- * 7), which forecloses the one undefined case specific to this program.  No
- * signed integer overflow is possible - the only integers are conversion results
- * and comparison results.  No floating value is type-punned through a pointer or
- * a union, so nothing depends on representation.  Every volatile object is
- * initialized at its declaration, so no uninitialized storage is read.  No object
- * is modified twice between sequence points, no pointer arithmetic is performed
- * and no padding byte is observed.  The record's ub_notes carries this argument
- * in prose; the warning and sanitizer gates are its machine half.
+ * Freedom from undefined behaviour.  No divisor is zero; no operation overflows to
+ * infinity and none produces a NaN, every operand being a small dyadic rational and
+ * every result exact.  Each float -> int conversion is well inside int's range by
+ * construction (3, -3 and 7), which forecloses the one undefined case specific to
+ * this program.  No floating value is type-punned through a pointer or a union, so
+ * nothing depends on representation.  Every volatile object is initialized at its
+ * declaration, so no uninitialized storage is read, and no object is modified twice
+ * between sequence points.
  *
- * DELIBERATELY ELSEWHERE, so this program does not duplicate it: the widest
- * floating type's value comparison (13_floating_point/004, which owns the
- * target-varying representation and the recorded reason for restricting its
- * cross-backend comparison), general float <-> int conversion boundaries
- * (13_floating_point/002), finite ordering breadth (13_floating_point/003),
- * sizeof and _Alignof facts (004_sizeof_alignof.c), and the f suffix's typing
- * effect observed through _Generic (005_integer_constant_suffixes.c) - here the
- * f suffix appears only as part of a computed value.  NaN and infinity behaviour
- * is owned by nobody: the area rule forecloses it deliberately, so neither is
- * ever produced.
- *
- * Expected exit status 0, well inside the 0-125 range.
+ * No header is named: bcc ships no stdio.h, its bundled set being the nine required
+ * freestanding headers plus a bonus stdatomic.h, ten files in all
+ * (docs/project-guide.md line 212).  Deliberately elsewhere, so this program does
+ * not duplicate it: the widest floating type's value comparison, general float <->
+ * int conversion boundaries and finite ordering breadth all belong to area 13;
+ * sizeof and _Alignof facts to 004_sizeof_alignof.c; the f suffix's typing effect to
+ * 005_integer_constant_suffixes.c, the suffix appearing here only inside a computed
+ * value.  NaN and infinity are foreclosed by the area rule, so neither is produced.
  */
 
 int printf(const char *, ...);

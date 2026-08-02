@@ -1,3 +1,9 @@
+# Expectation record for 06_control_flow/010_comma_operator_sequencing.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
 program            = 010_comma_operator_sequencing
 area               = 06_control_flow
 description        = Comma operator sequencing with observable side effects in defined order, covering chains, nesting, precedence against assignment, argument position, for and while and do-while clauses, both conditional branches, sequenced volatile writes, and switch and if controlling expressions
@@ -15,9 +21,9 @@ ub_notes           <<END
 Free of undefined and unspecified behaviour. The property under test is an
 evaluation ORDER, so the observation must not be removable: the trace length is
 held in a volatile counter and a volatile tick is incremented on every side
-effect, which prevents dead-code elimination from eliding the appends. Measured
-on the companion short-circuit program at -O2, the volatile form emits 74 counter
-accesses against 34 for the plain form, confirming the qualifier is load-bearing.
+effect. Every access to a volatile object is an observable side effect the
+compiler may not remove, so no optimization level may elide the appends, whereas
+plain counters could legally be removed by dead-code elimination.
 
 No object is modified twice between sequence points. The expression that writes
 the same volatile object three times is legal precisely because the comma

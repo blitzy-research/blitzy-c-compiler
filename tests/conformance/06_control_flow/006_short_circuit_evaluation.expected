@@ -1,3 +1,9 @@
+# Expectation record for 06_control_flow/006_short_circuit_evaluation.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
 program            = 006_short_circuit_evaluation
 area               = 06_control_flow
 description        = Short-circuit evaluation of && and ||, asserting that the right operand is NOT evaluated when the left operand settles the result, observed through a volatile counter
@@ -13,10 +19,10 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
 Free of undefined and unspecified behaviour. The property under test is an
-absence, so the side-effect counter rhs_calls is declared volatile: a plain
-counter could legally be removed by dead-code elimination, which would make the
-assertion vacuous. Measured at -O2, the volatile form emits 74 accesses to the
-counter against 34 for the plain form, confirming the qualifier is load-bearing.
+absence, so the side-effect counter rhs_calls is declared volatile: every access
+to a volatile object is an observable side effect the compiler may not remove,
+whereas a plain counter could legally be removed by dead-code elimination, which
+would make the assertion vacuous.
 Every object is assigned before it is read; no read of uninitialised storage
 occurs. All arithmetic is on int values of small magnitude, so no signed
 overflow is possible; the only division is 100 / a inside a guarded expression

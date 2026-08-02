@@ -14,19 +14,15 @@
  * the smaller candidates from the list: u/U keeps only unsigned types, l/L
  * starts at long, ll/LL starts at long long.
  *
- * Every claim below is printed as OBSERVABLE BEHAVIOUR -- a _Generic selection
- * that names a TYPE, or the value an expression actually computes -- and never
- * as a printed width.  That distinction is what keeps the program comparable
- * across all four supported backends.  `long` is 4 bytes on i686 and 8 bytes on
- * x86-64, AArch64 and RISC-V 64 (docs/technical-specifications.md lines
- * 457-462), so the unsuffixed decimal constant 4294967295 legitimately has type
- * `long` on the three 64-bit targets and `long long` on i686.  Printing a width
- * -- or asking _Generic to distinguish those two types -- would diverge on i686
- * through no fault of the compiler.  Asking instead whether the constant is
- * unsigned, or whether it is one of the two wider SIGNED types, yields one
- * answer on every target while still proving the typing rule was applied.  No
- * sizeof is printed anywhere, and no line depends on the width of long,
- * unsigned long, long double, a pointer, or on plain char's signedness.
+ * Every claim is printed as OBSERVABLE BEHAVIOUR -- a _Generic selection naming a
+ * TYPE, or the value an expression computes -- never as a printed width, and that
+ * distinction is load-bearing here.  Because `long` is 4 bytes on i686 and 8 on the
+ * other three targets, the unsuffixed decimal constant 4294967295 legitimately has
+ * type `long` on the 64-bit targets and `long long` on i686, so printing a width --
+ * or asking _Generic to distinguish those two types -- would diverge on i686 through
+ * no fault of the compiler.  Asking instead whether the constant is unsigned, or is
+ * one of the two wider SIGNED types, yields one answer everywhere while still
+ * proving the typing rule was applied.
  *
  * Which spelling each printed field probes:
  *   u_suffix, suffix_upper_u                       1u    1U          unsigned int
@@ -39,29 +35,21 @@
  *   long_double_lower_l, long_double_upper_l       1.0l  1.0L        long double
  * The ill-formed mixed-case integer forms lL and Ll are deliberately absent.
  *
- * Two-variant rule: every arithmetic consequence is printed twice -- once
- * folded from constants (fold_*) and once recomputed at run time from volatile
- * operands holding the same literals (runtime_*).  Measured at -O2, the
- * volatile twins emit genuine instructions (imulq and shrq on x86-64, mul and
- * lsr on AArch64, mul and srli on RISC-V 64) where the folded forms collapse to
- * immediates, so a code-generation defect cannot hide behind the constant
- * folder.  _Generic selection is resolved entirely at translation time and
- * therefore has no runtime twin by construction, which is correct rather than
- * an omission.
+ * Two-variant rule: every arithmetic consequence is printed twice -- once folded
+ * from constants (fold_*) and once recomputed at run time from volatile operands
+ * holding the same literals (runtime_*).  _Generic selection is resolved entirely
+ * at translation time and therefore has no runtime twin by construction, which is
+ * correct rather than an omission.
  *
- * Undefined-behaviour freedom -- the precondition that makes a divergence
- * evidence about a compiler at all: the only wrapping arithmetic here is
- * UNSIGNED, which C11 6.2.5p9 defines as reduction modulo 2^N, so 0u - 1u,
- * 0xFFFFFFFF + 1 and 0ULL - 1ULL are fully defined rather than overflowing.  No
- * signed expression ever leaves its range -- the widest signed intermediate is
- * 4294967296, formed only in long long.  Both shift counts (16 and 32) are
- * strictly below the width of their 32- and 64-bit unsigned left operands.
- * There are no pointers, no aliasing, no reads of uninitialized storage, no
- * object modified twice between sequence points, no argument with a side
- * effect, and no dependence on padding bytes or on the addresses of unrelated
- * objects.  Limits are spelled as literals because no header is included at
- * all: bcc ships no <stdio.h> (docs/technical-specifications.md line 19 and
- * lines 202-214), so the single prototype this program needs is hand-declared.
+ * Freedom from undefined behaviour: the only wrapping arithmetic here is UNSIGNED,
+ * which C11 6.2.5p9 defines as reduction modulo 2^N, so 0u - 1u, 0xFFFFFFFF + 1 and
+ * 0ULL - 1ULL are fully defined rather than overflowing.  No signed expression ever
+ * leaves its range -- the widest signed intermediate is 4294967296, formed only in
+ * long long -- and both shift counts (16 and 32) are strictly below the width of
+ * their 32- and 64-bit unsigned left operands.  Limits are spelled as literals
+ * because no header is named: bcc ships no stdio.h, its bundled set being the nine
+ * required freestanding headers plus a bonus stdatomic.h, ten files in all
+ * (docs/project-guide.md line 212).
  */
 int printf(const char *, ...);
 

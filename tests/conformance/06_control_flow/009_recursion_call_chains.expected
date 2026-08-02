@@ -1,3 +1,9 @@
+# Expectation record for 06_control_flow/009_recursion_call_chains.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
 program            = 009_recursion_call_chains
 area               = 06_control_flow
 description        = Direct recursion, a branching call tree, two mutual-recursion pairs, a recursion keeping values live across the call, a recursion holding a local array live across the call, and a recursion dispatching through a switch, all at bounded shallow depth
@@ -20,19 +26,27 @@ is_odd(21) reaches 22 frames, is_even(20) reaches 21, fib(15) reaches depth 15,
 ping(10) and pong(10) reach 11, fact(10) reaches 10, and switched(10) and
 frames(5) each reach 6.
 
-The bound was chosen from both directions. It is deep enough to force real
-call-frame work on every target: 31 nested frames guarantee prologue and
-epilogue emission, argument passing and return-value propagation, and in chain
-and frames they additionally force callee-saved register spill and restore,
-because chain keeps two values live across its recursive call and frames keeps a
-fully written eight-element local array live across its own. It is shallow
-enough that no target can approach stack exhaustion under user-mode emulation:
-each frame holds only a handful of int objects plus, in frames alone, one
-eight-element int array at a depth of six, and the repository's own
-runtime-verified recursion depths are single digit (factorial(5) and fib(7)), so
-31 frames stays in the same order of magnitude. Raising any bound would risk an
-emulated stack overflow, which the harness would classify as a run crash and
-misattribute to the compiler.
+What this program asserts is the RESULT of each bounded recursion and each call
+chain, and nothing about how the calls are implemented. No frame, no prologue or
+epilogue, no argument register, no spill and no symbol is required to exist: a
+backend is free to inline every helper, fold a whole recursion to a constant,
+turn self-recursion into a loop, or discard a function's symbol entirely, and
+every line below is still expected to be identical. This suite's oracles compare
+stdout bytes and exit status, so a transformation that changes the call structure
+while preserving the values is not a divergence at all.
+The depths were nevertheless chosen deliberately, as motivation for the shapes
+rather than as a claim about generated code. A depth of 31 is large enough that a
+backend which does emit frames has to pass arguments, propagate return values and
+keep live state across a call; chain keeps two values live across its recursive
+call and frames keeps a fully written eight-element local array live across its
+own, which is the shape that would exercise callee-saved preservation on such a
+backend. The depths are also small enough that every cell completes promptly
+inside the per-cell time budget -- fib stops at 15, so its tree of 1973 calls
+finishes instantly under emulation -- and small enough to be unremarkable for any
+plausible execution environment whether or not the recursion survives
+translation. The repository's own runtime-verified recursion depths are single
+digit (factorial(5) and fib(7)), so these bounds stay in the same order of
+magnitude.
 
 No signed overflow is possible. Every bound was chosen against the 32-bit int
 range that all four targets share: the largest value produced anywhere is
@@ -60,10 +74,13 @@ result appears in the output. int is 32 bits on all four targets, and every
 computed value including the negative intermediate in chain lies far inside that
 range. No address is printed. No floating point is used. The four backends
 implement four different application binary interfaces, and chain and frames are
-deliberately shaped to exercise callee-saved register preservation on each of
-them, so cross-backend comparison here is meaningful rather than
-implementation-defined. All four targets and all three optimization levels are
-therefore compared, and all three oracles are enabled.
+shaped to keep values live across a recursive call, which is the shape that would
+exercise callee-saved preservation on any backend that emits frames for them.
+What is compared is the resulting values, not the mechanism: a backend that
+inlines the recursion away is as acceptable as one that spills, and either way a
+difference in the printed values would be a genuine defect rather than an
+implementation-defined difference. All four targets and all three optimization
+levels are therefore compared, and all three oracles are enabled.
 END
 expected_stdout    <<END
 const_fact=1 120 3628800

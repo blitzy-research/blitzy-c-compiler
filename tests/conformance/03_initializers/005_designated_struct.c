@@ -3,24 +3,14 @@
  * four of them again at automatic duration, and then every member of every object is read
  * back and printed on its own line.
  *
- * No header is brought in and no preprocessor directive appears anywhere in this file.  bcc
- * ships no stdio.h: its bundled set is the nine required freestanding headers plus a bonus
- * stdatomic.h, ten files in all (docs/technical-specifications.md lines 202-214), and no
- * standard I/O header is among them, so naming one would fail against bcc while succeeding
- * against the reference compiler -- a divergence caused by the test rather than by the
- * compiler.  printf is declared by hand instead.  Neither of the suite's two sanctioned
- * include exceptions reaches this area: one is stdarg.h in 07_variadics, the other is the
- * dedicated bundled-header probe in 12_preprocessor.
- *
  * STATIC AND AUTOMATIC DURATION ARE THE TWO VARIANTS HERE.  An initializer for an object of
- * static storage duration is a constant expression evaluated at translation time and
- * materialized into a data section, so it exercises the path that computes an initial image;
- * the same initializer on an object of automatic storage duration is performed by emitted
- * instructions on entry to the block, so it exercises the path that generates stores.  The
- * g_ objects take the first path and the l_ objects the second.  That is the two-variant
- * discipline expressed in the terms this feature area has, and it is why no operand here is
- * volatile: a volatile aggregate would change the accesses under test rather than force the
- * initializer to be performed at run time, which the storage duration already does.
+ * static storage duration is a constant expression settled at translation time, whereas the
+ * same initializer on an object of automatic storage duration is performed on entry to the
+ * block; the g_ objects take the first path and the l_ objects the second.  That is the
+ * two-variant discipline expressed in the terms this feature area has, and it is why no
+ * operand here is volatile: a volatile aggregate would change the accesses under test rather
+ * than force the initializer to be performed at run time, which the storage duration already
+ * does.
  *
  * WHY OMITTING MEMBERS IS GATE-CLEAN.  -Wextra enables -Wmissing-field-initializers and
  * -Werror promotes it, but in C that diagnostic does not fire for a designated initializer,
@@ -29,37 +19,27 @@
  * be rewritten in positional form: doing so would trade the construct under test for a
  * diagnostic.  The program needs no deviation from the suite's default warning gate.
  *
- * WIDTH NORMALIZATION.  Every member of every structure is an int and %d is the only
- * conversion specifier in the file, so nothing whose width varies by target is declared,
- * computed or printed.  The measured i686 difference -- a 4-byte long and pointer against 8
- * bytes on the other three targets (docs/technical-specifications.md lines 456-462) --
- * therefore cannot surface.  No long, size_t, ptrdiff_t, intptr_t, float or double appears,
- * and no length modifier is used.
- *
- * NOTHING UNSPECIFIED IS OBSERVED.  Members are read individually by name and no object is
- * ever printed, copied or reinterpreted as bytes, so padding -- whose contents the standard
- * leaves unspecified -- is never observed.  No address or pointer value is printed.  No
- * character data appears at all, so the measured plain-char signedness split (signed on
- * x86_64 and i686, unsigned on aarch64 and riscv64) is irrelevant here.
+ * Every member of every structure is an int and %d is the only conversion specifier in the
+ * file, so nothing whose width varies by target is declared, computed or printed, and no
+ * character data appears, so plain-char signedness is irrelevant here.  Members are read
+ * individually by name and no object is ever printed, copied or reinterpreted as bytes, so
+ * padding -- whose contents the standard leaves unspecified -- is never observed.
  *
  * FREEDOM FROM UNDEFINED BEHAVIOUR.  A member left unmentioned by a designated initializer
  * is initialized as an object of static storage duration would be, that is to zero, for
  * automatic and static duration alike (C11 6.7.9p19 and p21), so every member printed below
- * has a determinate value and no uninitialized storage is ever read.  No arithmetic is
- * performed on any initialized value, so no signed overflow is possible; the only arithmetic
- * in the file is the loop counter's increment over the range 0 through 4.  Every subscript is
- * a loop counter strictly less than 4 indexing an array of 4, so no out-of-bounds access and
- * no one-past-the-end pointer occurs.  There is no shift, no pointer cast, no pointer
- * arithmetic and no aliasing: each object is read only through an lvalue of its own declared
- * type.  Nothing is modified after its initialization, so no object is modified twice between
- * sequence points, and every printf call receives arguments free of side effects, so the
- * unspecified order in which they are evaluated cannot affect the output.
+ * has a determinate value and no uninitialized storage is ever read.  The only arithmetic in
+ * the file is the loop counter's increment over the range 0 through 4, so no overflow is
+ * possible and every subscript is strictly inside its array of 4.  There is no shift, no
+ * pointer cast, no pointer arithmetic and no aliasing: each object is read only through an
+ * lvalue of its own declared type, and nothing is modified after its initialization.
  *
- * DETERMINISM AND HERMETICITY.  The output is 50 fixed key=value lines in a fixed order, one
- * per member observed, so a single divergent line localizes to a single member of a single
- * initializer form rather than to the program as a whole.  Every input is a literal in this
- * file: nothing is read from the environment, the clock, the file system or the network, and
- * the exit status is a constant 0, inside the 0 through 125 range the suite requires. */
+ * No header is brought in and no preprocessor directive appears anywhere in this file: bcc
+ * ships no stdio.h, its bundled set being the nine required freestanding headers plus a bonus
+ * stdatomic.h, ten files in all (docs/project-guide.md line 212, the one place the repository
+ * states the full ten-file inventory; the table at docs/technical-specifications.md lines
+ * 202-214 enumerates only the nine required headers and does not list stdatomic.h).  printf
+ * is declared by hand instead. */
 int printf(const char *, ...);
 
 /* struct outer nests an aggregate between two scalars, which is what lets a designator
@@ -103,8 +83,8 @@ static struct witharr g_arr_whole  = { .tag = 61, .a = { 62, 63, 64, 65 }, .trai
 int main(void)
 {
     /* Automatic-duration twins of forms one, two, four and six.  These carry the same
-     * designated forms into the path where the initializer is performed by generated code
-     * rather than laid out in a data section, and l_reordered permutes its designators
+     * designated forms into the path where the initializer is performed on entry to the
+     * block rather than settled before startup, and l_reordered permutes its designators
      * differently from g_reordered so the two are not the same case twice. */
     struct outer   l_in_order  = { .tag = 71, .in = { 72, 73 }, .trailer = 74 };
     struct outer   l_reordered = { .trailer = 84, .tag = 81, .in = { 82, 83 } };

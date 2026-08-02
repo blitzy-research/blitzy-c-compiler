@@ -78,8 +78,8 @@ impl_defined_notes <<END
 Every bitfield is declared on an explicit unsigned int or signed int base type.  A bitfield
 declared on unqualified int has implementation-defined signedness, so using it would
 manufacture a divergence that says nothing about code generation; stating the signedness in
-the declaration removes that dependency outright.  The explicit int base type also fixes the
-allocation unit at four bytes on every target under test.
+the declaration removes that dependency outright.  Fixing the signedness is the whole of what
+the base type fixes: it does not fix the allocation unit, whose size is implementation-defined.
 
 Plain char is never used as a value type.  The byte image is an array of unsigned char, whose
 signedness the standard fixes, which matters because plain char signedness was measured to
@@ -87,10 +87,11 @@ differ across the four targets -- signed on x86_64 and i686, unsigned on aarch64
 
 No value whose width varies by target is printed.  The documented target table records that
 the pointer and long widths are four bytes on i686 and eight on the other three, so neither
-sizeof(long) nor sizeof(void *) is printed and no address reaches the output.  Every printed
-size and alignment belongs to a struct whose every field carries an int base type, and int is
-four bytes under both the ILP32 model i686 uses and the LP64 model the other three use, so
-all ten layout values are target-invariant by derivation rather than by coincidence.
+sizeof(long) nor sizeof(void *) is printed and no address reaches the output.  int is four
+bytes under both the ILP32 model i686 uses and the LP64 model the other three use, which
+removes one variable; it does not by itself determine a bitfield allocation unit, so all ten
+layout values below are stated as measured expectations for the four ABIs under test rather
+than as guarantees derived from the base type.
 
 How much storage a bitfield sequence is allocated, whether a field may straddle an allocation
 unit boundary, and in what order fields are placed inside a unit are implementation-defined,
