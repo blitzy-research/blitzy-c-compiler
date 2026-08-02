@@ -1,12 +1,6 @@
-# Expectation record for 08_gcc_extensions/004_case_ranges.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
-
 program            = 004_case_ranges
 area               = 08_gcc_extensions
-description        = Case ranges in switch labels, over buckets, hexadecimal classes and a fallthrough group
+description        = GCC case ranges (case LOW ... HIGH:) including negative, character, degenerate single-value and fallthrough ranges
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -19,30 +13,112 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
 ub_notes           <<END
-No two case ranges overlap and no range overlaps a single label, so no switch has a
-duplicated case value.  Every selector is an initialized int, every accumulator stays
-inside the range of int, and each switch is driven once by a constant and once from
-volatile storage.  No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
+gcc 13.3.0 and re-verified on this branch with gcc 13.4.0. The canonical record of this
+deviation is the matching paragraph of impl_defined_notes below, which is the one field
+this suite reads a gate reason from; it is restated here so that the whole argument for
+this program's fitness as test material can be read in one place.
+
+UB-FREEDOM ARGUMENT. Every value is a small int; the largest computation is 1 + 10, far
+from INT_MIN and INT_MAX, so there is no signed overflow. No shift operator is used. No
+pointer, array or aggregate is used, so there is no aliasing violation and no
+one-past-end pointer. Every object is initialized before it is read. No object is
+modified twice between sequence points. Every printf call receives at most one
+side-effecting argument. Nothing depends on padding bytes or on the addresses of
+unrelated objects. Every switch has a default label, so control flow is total for every
+possible operand value, and the case ranges within any one switch never overlap, so no
+label is ambiguous. The sweep loop runs from -25 to 35 inclusive and always terminates.
+
+Every switch operand is int, never plain char. The character constants used as range
+bounds have type int in C. This is deliberate: char was measured as signed on x86_64 and
+i686 but unsigned on aarch64 and riscv64, so a plain-char operand could change which
+range matches on different targets and manufacture a divergence caused by the test rather
+than by the compiler.
+
+The deliberate fallthrough between two case ranges carries a /* fall through */ comment,
+which GCC recognizes to suppress -Wimplicit-fallthrough; -Wextra enables that warning and
+-Werror makes it fatal, so the comment is required for the gate to pass.
 END
 impl_defined_notes <<END
-The warning gate drops -pedantic for this program.  The subject under test is a GCC
-extension, which is by definition not standard C, and -pedantic exists precisely to reject
-such constructs: with it in force the program could not be compiled at all and the feature
-would go untested, which constraint C3 forbids.  Every other member of the gate is
-retained, including -Werror, so no other class of defect in this program is downgraded.
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
+gcc 13.3.0 and re-verified on this branch with gcc 13.4.0. A gate deviation is not a
+divergence: the gate is a property of the TEST MATERIAL, it is driven by the reference
+compiler only, and it renders no verdict about bcc.
 
-No expected-divergence marker is attached, and that is deliberate.  Case ranges are absent
-from every documented extension inventory in this repository, but an omission from an
-inventory is not a documented limitation: it does not say the frontend rejects the
-construct, only that no inventory mentions it.  A marker minted on that basis would claim a
-divergence nobody has observed, and if bcc accepts case ranges the cell would agree, the
-verdict would be XPASS and the run would fail on a mistake in the test material rather than
-a defect in the compiler.  Until a repository artifact explicitly documents the limitation
-and a real divergence has been observed and reproduced, a divergence here is a FINDING,
-which is exactly what requirement 6 defines a finding to be.  The analysis, the inventory
-evidence and the conditions for minting a marker later are recorded in
-tests/conformance/EXPECTED_DIVERGENCES.md section 4.1.
+Nothing implementation-defined is observed, so no target restriction is needed and all
+four targets are compared. Only int values are printed, so the measured width differences
+cannot be reached: sizeof(long) and sizeof(void *) are 4 on i686 and 8 on x86_64, aarch64
+and riscv64. Plain char is never used as a switch operand or a printed value, so the
+measured char-signedness difference cannot be reached. No address or pointer value is
+printed.
+
+Case range syntax requires a space on both sides of the ellipsis. Measured with
+gcc 13.3.0 and re-verified with gcc 13.4.0: writing case 1...5: without spaces produces
+"error: too many decimal points in number", because the lexer reads 1. followed by ..5 as
+a malformed floating constant. Every range in the program keeps the spaces.
+
+The runtime probes use volatile int operands so the optimizer cannot fold the switch away
+and must emit a genuine lowering. Dense and sparse label sets select different lowering
+strategies, a jump table versus a comparison chain, and only the runtime variant
+exercises them.
+
+Output is identical on all four targets at all three optimization levels.
+END
+expected_divergence.id       = XD-GCCEXT-CASE-RANGES-001
+expected_divergence.class    = compile_failure
+expected_divergence.scope    = oracle_a; all targets; all opt levels
+expected_divergence.basis    = docs/technical-specifications.md, documented GCC extension inventory omits case ranges -- line 13, line 107 and line 761
+expected_divergence.observed <<END
+bcc is expected to reject the case range syntax at the case label, because case ranges
+are absent from every documented bcc extension inventory. The reference compiler accepts
+the program, links it and prints the 18 recorded lines beginning cr_bucket_neg=10.
+
+Basis detail. The documented inventory appears at docs/technical-specifications.md lines
+13, 107 and 761 and at docs/project-guide.md lines 81 and 206. The three technical
+specification entries each enumerate the same seven extensions -- __attribute__,
+__builtin_* intrinsics, inline assembly with operand constraints, statement expressions,
+typeof and __typeof__, computed goto, and __extension__ -- and the two project guide
+entries enumerate five of those same seven. Every one of the five omits case ranges. A
+case-insensitive grep for "case range" across docs/ returns zero matches.
+
+Provenance, stated so the marker is not mistaken for an observation. This branch carries
+the corpus but no bcc binary, so no verdict about bcc has been recorded for these cells
+and the rejection above is stated as anticipated rather than as already seen. The first
+run in which bcc itself compiles this program settles it: a rejection is the XFAIL this
+marker describes, and an acceptance is the XPASS retirement path below.
+
+Per constraint C3 the program is written and executed regardless: this marker changes how
+a divergence is CLASSIFIED, never whether the feature is EXERCISED. The feature is not
+silently excluded from testing.
+
+Scope note for maintainers. This marker covers oracle_a only, and classification is
+strict: it will not absorb a divergence of a different class or a different oracle. If bcc
+instead ACCEPTS case ranges but computes a wrong result, that is a stdout_mismatch and not
+a compile_failure, so this marker will not cover it and the divergence will be reported as
+a FINDING, which is the correct outcome. A compile_failure also denies the cross-backend
+and golden-record arms the subject of their comparison, and those arms fall outside an
+oracle_a scope, so they are reported as FINDING too; widening the scope to all oracles, in
+this record and in the register together, is the one-word change that would absorb them.
+
+Retirement. If bcc compiles and runs this program correctly, the divergence has
+disappeared and the verdict becomes XPASS, which FAILS THE RUN by default. A stale marker
+is stale documented knowledge, and retiring it is a trivial test-only edit: delete all
+five expected_divergence keys from this record AND delete the corresponding entry from
+tests/conformance/EXPECTED_DIVERGENCES.md. Both directions are machine-checked. This
+ambiguity is also flagged for a maintainer to confirm whether the omission is an
+implementation gap or a documentation gap.
 END
 expected_stdout    <<END
 cr_bucket_neg=10

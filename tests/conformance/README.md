@@ -520,9 +520,10 @@ Append all five keys, or none of them, to the record above. This is the **syntax
 may legitimately be written is a separate and much stricter question, answered immediately below.
 
 The block below is an **illustration of the grammar only**. The identifier, the basis and the
-observation are placeholders, deliberately not any real marker: no program in the corpus on this
-branch carries a marker, and [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) is the sole register
-of the ones that ever do.
+observation are placeholders, deliberately not any real marker — quoting a live one in prose would
+outlive its retirement, and prose is not a place a marker can be honoured from.
+[`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) is the sole register of the markers that are
+active, and §4 there enumerates them.
 
 ```text
 expected_divergence.id       = ILLUSTRATION-ONLY-NOT-A-REAL-MARKER
@@ -556,8 +557,13 @@ for, and a first-class reported outcome rather than a compromise. A marker writt
 does active harm: if the construct in fact works the cell agrees, the verdict is **XPASS**, and the
 run fails on a mistake in the test material rather than a defect in the compiler; and until someone
 notices, the marker blinds the suite to a genuine regression in exactly the construct it was meant
-to document. `EXPECTED_DIVERGENCES.md` §8.5 states the same rule as a checklist and §4 works through
-the three candidates the suite has analysed without marking any of them.
+to document. `EXPECTED_DIVERGENCES.md` §8.5 states the same rule as a checklist, and §4 works
+through the three candidates the suite has analysed. Two are left unmarked on exactly this
+reasoning. The third — the case-ranges program — **is** marked, because the specification for this
+suite names that marker by identifier and mandates it; §4.1 and §8.5 record that decision as the one
+knowing exception it is, together with what it costs: the marker is anticipatory rather than
+observed, so if `bcc` in fact accepts the construct the verdict is XPASS, and retiring it is the
+two-file edit described under [Retiring a marker](#retiring-a-marker).
 
 ### Every validation the parser enforces
 
@@ -2748,14 +2754,20 @@ produced either:
   extension inventory (the documented set enumerates `__attribute__`, statement expressions,
   `typeof`, computed goto and inline assembly, and omits case ranges). The program is written
   regardless, with all three oracles enabled on all four targets at all three optimization levels.
-  **No marker is attached, and that is deliberate:** an omission from an inventory is not a
-  documented limitation — it says nothing mentions the construct, not that the frontend rejects it —
-  so a rejection here is a **FINDING**, captured with its reproducer and its exact reproduction
-  commands, until a repository artifact explicitly documents the limitation *and* a real divergence
-  has been observed and reproduced. Nothing is excluded and nothing is excused; the ambiguity
-  between an implementation gap and a documentation gap is surfaced in
-  [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.1 so a maintainer can settle it from a real
-  run rather than from a guess written in advance.
+  **A marker is attached, and it is the corpus's one knowing exception** to the rule stated under
+  [The optional marker block](#the-optional-marker-block): the specification for this suite names
+  that marker by identifier and mandates it, so it is minted on an omission from an inventory rather
+  than on an explicitly documented limitation, and it anticipates a rejection rather than recording
+  one that was observed. Its scope is `oracle_a` and its class is `compile_failure`, so it
+  reclassifies **only** a refusal by the frontend on that arm: if `bcc` instead accepts case ranges
+  and computes a wrong answer, that is a `stdout_mismatch`, the marker does not cover it, and the
+  divergence is reported as a **FINDING** — which is the correct outcome and the reason the narrow
+  scope is worth keeping. Nothing is excluded and nothing is excused beyond that one class on that
+  one arm; the marker changes how a divergence is *classified*, never whether the construct is
+  *exercised*. The ambiguity between an implementation gap and a documentation gap, the cost of the
+  exception and the two-file retirement that settles it are all recorded in
+  [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.1 and §8.5, so a maintainer can settle it
+  from a real run rather than from a guess written in advance.
 - **`13_floating_point/004_long_double_target_restricted.c`** (planned with the floating-point area)
   — `long double` was measured to have three different representations across the four targets (16,
   12, 16 and 16 bytes; x87 80-bit against IEEE binary128), so cross-backend *value* equality is

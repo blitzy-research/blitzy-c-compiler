@@ -6,7 +6,7 @@
 
 program            = 005_straddling_and_zero_width
 area               = 04_bitfields
-description        = Fields straddling an allocation-unit boundary, zero-width separators and unnamed padding
+description        = Bitfields straddling a byte boundary inside a storage unit, fields pushed to a fresh unit, and zero-width and unnamed separators
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,22 +18,64 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Byte images are printed only for structs whose every bit is covered by a named field, so no
-unspecified padding bit is ever observed; the zero-width and unnamed-field structs, which
-necessarily contain padding, are observed only through sizeof, _Alignof and named-member
-read-back.  Every stored value is inside its field's range.  Each field has an explicit
-signed or unsigned base type.  Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+The default undefined-behaviour warning gate applies unmodified, with no deviation:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror.  The program
+was verified to pass that gate and to run cleanly under
+-fsanitize=undefined,address -fno-sanitize-recover=all.
+
+No unspecified padding bit is ever observed, and this is the program's central safety property.
+A bitfield struct's unnamed padding bits hold unspecified values even after every named field
+has been assigned, because padding bits are not members and a member write is not required to
+preserve them.  The program therefore prints a byte image only for the two structs whose every
+bit is covered by a named field: one is exactly thirty-two bits wide and the other exactly
+sixty-four, so neither contains a padding bit at all.  Every struct that necessarily contains
+padding, which is every struct demonstrating a zero-width or unnamed separator and the struct
+whose fields are each pushed to a fresh unit, is observed only through sizeof, _Alignof and
+read-back of its named members.  Both byte-image unions are additionally zeroed byte by byte
+through an explicit loop before any bitfield is written, so even the initial state is defined.
+
+No aliasing violation: the byte image is read exclusively through an unsigned char array member
+of a union that also contains the bitfield struct, which is the well-defined aliasing route.  No
+incompatible pointer type is ever formed or dereferenced, and no struct pointer is cast to any
+other pointer type.
+
+Every store is a constant inside the destination field's representable range, so no conversion
+can change a value.  No arithmetic is performed on any bitfield, so no signed overflow can
+occur.  No shift operator appears anywhere in the program, so no question of shift range,
+negative left shift or implementation-defined negative right shift arises.  No object is
+modified twice between sequence points.  No uninitialized read: the two automatic unions are
+fully zeroed before use, and every file-scope object either has an explicit constant initializer
+or has static storage duration with every field written before it is read.  No pointer value,
+address, timestamp, random value or locale-dependent format is printed, and every loop bound is
+a sizeof of a fixed-size array.
 END
 impl_defined_notes <<END
-Where a field is placed inside its allocation unit is implementation-defined.  Every bit
-position this program asserts is the placement measured on all four targets under test
-rather than a guarantee the standard makes, which is what makes the byte images
-comparable across backends; the program is compared on all four targets rather than
-restricted, and the measured agreement is the reason.
+Every bitfield is declared with an explicit signed int or unsigned int base type, including the
+unnamed separators, which are spelled as unsigned int with no name.  A plain int bitfield's
+signedness is implementation-defined, so using it would manufacture a spurious divergence;
+stating the signedness in the declaration removes that dependency entirely.
+
+Plain char is not used as a value type.  The byte-image arrays are unsigned char, whose
+signedness is fixed by the standard, which matters because plain char signedness was measured
+to differ across the four targets (signed on x86_64 and i686, unsigned on aarch64 and riscv64).
+
+No value whose width varies by target is printed.  sizeof(long) and sizeof(void *) differ on
+i686 (4) from the other three targets (8), so neither is printed, and no pointer value or
+address appears in the output.  Every bitfield is declared on an int base type, and int is four
+bytes on all four targets, so the storage unit is four bytes everywhere and every printed size,
+alignment and byte image is target-invariant by derivation rather than by coincidence.
+
+The allocation order of bitfields within a storage unit and the byte order of that unit are the
+properties the byte images observe.  All four targets are little-endian and were measured to
+produce an identical byte image for a straddling three, five and nine bit sequence, together
+with identical size and alignment, so no target restriction is applied and all three oracles
+remain enabled.  A cross-backend divergence here is a genuine finding rather than an
+implementation-defined difference, and no expected-divergence marker is attached, because no
+documented bitfield limitation exists anywhere in the repository to serve as a basis.
+
+Signed straddling fields are observed through read-back of their values rather than through a
+byte image, because the bit pattern of a negative value is a representation detail rather than a
+value.  Their read-back values are fully defined and are compared across all four targets.
 END
 expected_stdout    <<END
 size_cover32=4 align_cover32=4

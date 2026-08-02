@@ -1593,8 +1593,8 @@ pub struct ExpectedDivergence {
 impl ExpectedDivergence {
     /// Marker identifier, by convention `XD-<AREA>-<TOPIC>-<NNN>`. Unique across the corpus. No
     /// concrete identifier is named here on purpose: the register is the only place a marker
-    /// exists, and quoting a real one in a doc comment would outlive its retirement. There is
-    /// presently no active marker in the corpus.
+    /// exists, and quoting a real one in a doc comment would outlive its retirement. The corpus
+    /// carries markers, and the register is where they are enumerated.
     pub fn id(&self) -> &str {
         &self.id
     }
