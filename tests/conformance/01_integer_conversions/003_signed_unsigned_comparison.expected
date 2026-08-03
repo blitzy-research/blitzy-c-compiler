@@ -6,7 +6,7 @@
 
 program            = 003_signed_unsigned_comparison
 area               = 01_integer_conversions
-description        = Comparisons across signedness where the common type decides the result, folded and volatile-runtime
+description        = Comparison across signedness where the common type changes the result, folded and runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,16 +18,27 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-A bare implicit signed/unsigned comparison is rejected by -Wsign-compare, which -Wextra
-supplies and this program's gate keeps, so every comparison either promotes the mismatch
-away, uses a provably non-negative signed operand, converts explicitly, or sits in an
-unevaluated _Generic controlling expression.  No conversion to an unsigned type is applied
-to a negative value except where the modular result is the property under test and is
-written explicitly.  Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Every comparison is well defined and every operand is within range. No arithmetic is
+performed that could overflow a signed type: the only additions appear inside unevaluated
+_Generic controlling expressions, and every printed comparison yields 0 or 1. Conversion
+of -1 to unsigned int is modular and therefore defined, not undefined. No shift appears.
+No aliasing violation, no uninitialized read, no object modified twice between sequence
+points, at most one side-effecting argument per call, no dependence on padding bytes.
+Authoring constraint recorded for reviewers: a bare implicit signed/unsigned comparison is
+rejected by -Wsign-compare, which -Wextra supplies and which this program's gate keeps, so
+each property is expressed through promotion of a narrow unsigned operand, through a wider
+signed common type, through a signed operand masked provably non-negative, through an
+explicit conversion, or inside an unevaluated _Generic controlling expression. The feature
+is fully exercised; nothing is excluded and no warning-gate deviation is taken.
+END
+impl_defined_notes <<END
+Plain char is never used and no object is declared plain char, because plain char
+signedness was measured signed on x86-64 and i686 but unsigned on AArch64 and RISC-V 64.
+long and unsigned long are never used, because their width is 4 bytes on i686 and 8 bytes
+on the other three targets. No pointer value is printed.
+int is 32 bits and long long is 64 bits on all four supported targets, so long long
+represents every unsigned int value everywhere and the wider-signed-wins results are
+stable across backends.
 END
 expected_stdout    <<END
 fold_lt_ushort=1

@@ -6,7 +6,7 @@
 
 program            = 007_enum_value_arithmetic
 area               = 01_integer_conversions
-description        = Enumeration constants in arithmetic, gaps, differences and switch dispatch
+description        = Enumeration constants in arithmetic and enumerated-type underlying behaviour, folded and runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,15 +18,84 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Every enumerator value is inside the range of int, so the enumeration's implementation-
-defined underlying type cannot affect any printed value.  All sums, differences and
-products stay well inside the int range, so no signed overflow occurs, and the size
-relation is printed as a 0/1 comparison rather than as a width.
-Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
+Every enumerator is small and every arithmetic result is far inside the range of int, so no
+signed type overflows: the largest magnitude occurring anywhere in the program, printed or
+intermediate, is 300. No shift operator appears at all, so no shift count can be out of
+range.
+Both array subscripts are known enumerators inside the bounds of a three element array, and
+the two forms differ deliberately: the folded subscript is the enumeration constant SEQ_C,
+which is 2, while the runtime subscript is read from a volatile object holding SEQ_B, which
+is 1. Neither can reach index 3, so no out-of-bounds access occurs and AddressSanitizer
+stays clean.
+The switch in classify covers all three enumerators of enum Color and is still followed by a
+return statement, so no path falls off the end of a non-void function whatever value reaches
+it.
+Several calls read more than one volatile object in a single argument list, and one of them
+-- the run_switch line -- does so through three function calls. That is deliberate and it is
+not undefined. Every access is a read, every read is of a different object, and no object is
+modified anywhere, so no side effect is unsequenced relative to another side effect on the
+same object or to a value computation using that object, which is the condition C11 6.5p2
+actually states; and the three function calls are indeterminately sequenced with respect to
+one another rather than unsequenced (C11 6.5.2.2p10). Because the accesses touch distinct
+objects and none of them writes, the printed values are identical whichever order an
+implementation chooses, so this program does not depend on unspecified evaluation order
+either -- a separate obligation from undefined-behaviour freedom, and one a differential
+oracle needs just as much.
+Otherwise: no aliasing violation, no uninitialized read -- every volatile object and the
+table are initialized in their own declarations -- and no dependence on padding bytes or on
+the addresses of unrelated objects.
+Every volatile enumerated value that reaches printf does so through an explicit int cast --
+or, on the run_switch line, through classify's prototyped enum Color parameter and its int
+return -- and the size relation is printed through a cast as well, so the type of every
+printed value is fixed at the call site; the enumeration constants already have type int and
+need no cast. The complete default warning gate passes on this program with no diagnostic and
+no deviation, measured with gcc 13.4.0, which is why this record declares no ub_audit_flags
+at all.
+The three _Generic controlling expressions are not evaluated (C11 6.5.1.1p3), so they report
+types without performing a conversion or a volatile access at run time.
+Every arithmetic property is computed twice, once from enumeration constants the folder can
+evaluate at compile time and once from volatile-qualified storage that forces a run-time
+read, so the constant folder's answer cannot stand in for the one the backend computes. The
+size relation is the single property with no runtime twin, because sizeof is evaluated at
+compile time by definition.
 No header is included and printf is declared by hand, so nothing here depends on a
 standard-library header bcc does not ship.
+END
+impl_defined_notes <<END
+Two implementation-defined properties are navigated by authoring technique rather than
+tested naively, and neither is a reason to restrict the target list or to switch an oracle
+off: all four targets stay fully compared under all three oracles.
+First, the enumerated type's compatible type. C11 6.7.2.2p4 leaves the type compatible with
+an enumerated type implementation-defined, so listing both enum Color and int among the
+associations of one _Generic is a constraint violation wherever those two turn out to be
+compatible -- gcc 13.4.0 rejects that form outright with "_Generic specifies two compatible
+types", measured on this program's own enumeration and its volatile enum Color object. The
+portable form used here therefore lists only the enumerated type itself plus default. The
+two probes that do report int are portable for reasons that do not depend on the compatible
+type at all: an identifier declared as an enumeration constant has type int by C11 6.4.4.3p2,
+which is what makes the RED probe report int, and int can represent every value of enum
+Color, so the integer promotions give a + 0 the type int by C11 6.3.1.1p2 whatever the
+compatible type happens to be.
+Second, the enumerated type's width, which follows from that same implementation-defined
+choice. It is never printed as a number. It is asserted only as the relation
+sizeof(enum Color) == sizeof(int), printed as a 0/1 comparison, and that relation was
+measured to hold on all four supported targets, both sizes being 4, which is what makes the
+line comparable across backends. Printing the width itself would risk reporting a purely
+implementation-defined difference as a finding against a backend that did nothing wrong.
+The negative enumerator BLUE = -3 removes a further class of variation by forcing the
+compatible type to be signed, and that was verified rather than assumed: (enum Color)-1 < 0
+was measured true on all four targets, while the same test applied to a control enumeration
+whose enumerators are all non-negative was measured false. The sign of the compatible type
+therefore follows the enumerator values, as the standard requires, and does not vary by
+target here.
+No plain char object is declared and no char value is ever read or printed, because plain
+char signedness was measured signed on x86-64 and i686 but unsigned on AArch64 and
+RISC-V 64. The type char appears only as the pointed-to type of printf's format parameter
+and of the string literals the three type probes return, where its signedness cannot matter
+because no element of either is ever read as a value by this program. long and unsigned long
+are never used at all, because their width was measured as 4 bytes on i686 and 8 bytes on the
+other three targets. No pointer value is printed: the probes return string literals, which %s
+dereferences rather than printing as addresses.
 END
 expected_stdout    <<END
 fold_values=1 5 -3

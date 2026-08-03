@@ -6,7 +6,7 @@
 
 program            = 009_shift_semantics
 area               = 01_integer_conversions
-description        = Shift semantics within range, including arithmetic right shift of negative values
+description        = Shift operators with counts strictly in range, including arithmetic right shift of negatives, folded and runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,9 +18,28 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Undefined behaviour is avoided outright: every shift count is at least zero and strictly
-less than the width of the promoted left operand, no negative value is ever left-shifted,
-and no signed left shift produces a value outside the range of its type.
+Every shift count in this program is at least 0 and strictly less than the width of the
+promoted left operand: 31 or below for the 32-bit int and unsigned int cases, and 63 or below
+for the 64-bit long long and unsigned long long cases, the largest counts used being 62 and
+63.  No count is negative and no count equals or exceeds the operand width, so no shift is
+undefined -- which matters more here than anywhere else in this area, because an out-of-range
+count is the one way a shift program could make a divergence prove nothing about either
+compiler.
+No negative value is ever shifted left.  No signed left shift produces a value outside the
+range of its type: the largest signed left shifts used are 1 << 30 and 1LL << 62, both of
+which are representable.  1 << 31 is deliberately never formed; the only left shift that
+reaches bit 31 is 1u << 31, whose left operand is unsigned and therefore modular rather than
+overflowing.
+The unsigned char operand is promoted to int before shifting, so (unsigned char)128 >> 3 is
+an int shift and %d is the correct specifier.  A shift count of unsigned char type is
+promoted too, and separately: the operands of a shift do not undergo the usual arithmetic
+conversions, so 1 << (unsigned char)4 is an int shift governed by the left operand's type
+alone.
+No signed overflow, no aliasing violation, no uninitialized read, no object modified twice
+between sequence points, at most one side-effecting argument per call, no dependence on
+padding bytes or on the relative addresses of unrelated objects.  No shift operand is an
+unparenthesised additive expression -- none is an additive expression at all -- so the strict
+warning gate is satisfied with no deviation at all, and the sanitizer run reports nothing.
 Every property is computed twice, once from literal constants and once from
 volatile-qualified storage, so the constant folder's answer cannot stand in for the
 one the backend computes at run time.
@@ -28,10 +47,36 @@ No header is included and printf is declared by hand, so nothing here depends on
 standard-library header bcc does not ship.
 END
 impl_defined_notes <<END
-Right shift of a negative signed value is implementation-defined rather than guaranteed.
-All four targets under test were measured to define it as an arithmetic shift, which is
-what makes the printed values comparable across them; the program is therefore compared
-on all four rather than restricted, and the measured agreement is the reason.
+This program takes NO target restriction, and that is an empirical conclusion rather than an
+assumption.  Right shift of a negative signed value is implementation-defined under C11
+6.5.7p5 rather than fixed by the standard, so agreement between the four backends has to be
+measured and cannot be inferred the way division and remainder can.  It was measured, and it
+held: the operation behaves identically on all four supported targets, x86-64, i686, AArch64
+and RISC-V 64 -- -8 >> 1 yields -4, -1024 >> 5 yields -32, and -1 >> 31 yields -1 on every
+one of them, at every optimization level.  Because the four were observed to agree, any
+cross-backend divergence in this program is a genuine finding rather than an
+implementation-defined difference, which is precisely why oracle (b) stays enabled here over
+the full target list instead of being narrowed away.
+The opposite rule is pinned down at the same time, and deliberately: fold_ushr_max and
+run_ushr_max shift the unsigned value 2147483648 right by 31 and require the answer 1, which
+only a zero-filling shift produces.  A backend that sign-extended an unsigned value, or that
+applied one rule to both signednesses, therefore fails this record on one line or the other
+rather than passing both halves.
+What would legitimately break the conclusion above: a target whose implementation defined the
+right shift of a negative value as a logical shift would still be conforming, so the
+resulting difference would be an implementation-defined divergence rather than a compiler
+defect.  It must in that case be recorded as an expected divergence with this record's target
+list narrowed and the reason stated here -- never left to surface as a finding against a
+backend that did nothing wrong, and never resolved by dropping the shift operators from the
+corpus, which would remove a feature this area is required to cover.
+long and unsigned long are deliberately never used, and no object is declared with either.
+Their width was measured as 4 bytes on i686 and 8 bytes on the other three targets, so a
+shift of a long would print two different values across backends for reasons that have
+nothing to do with the compiler.  Only int and unsigned int, 32 bits on all four targets, and
+long long and unsigned long long, 64 bits on all four, appear here.
+Plain char is never used and no object is declared plain char, because plain char signedness
+was measured signed on x86-64 and i686 but unsigned on AArch64 and RISC-V 64.  No pointer
+value is printed and no header is included, so every bound is spelled literally.
 END
 expected_stdout    <<END
 fold_ushl_max=2147483648

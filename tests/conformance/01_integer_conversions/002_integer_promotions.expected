@@ -6,7 +6,7 @@
 
 program            = 002_integer_promotions
 area               = 01_integer_conversions
-description        = Integer promotion of narrow types as operands and in expressions, folded and volatile-runtime
+description        = Integer promotions of narrow types in expressions and as operands, folded and runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,14 +18,23 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Each narrow operand promotes to int, which represents every value of the source type, so
-every promotion is value-preserving.  Products and complements are chosen to stay inside
-the range of int, so no signed overflow occurs, and every shift count is in range.
-Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Every operand is promoted to int before the operation, so no result leaves the range of
+int and no signed type overflows: 200*200 and 300*300 are 40000 and 90000, negating -128
+and -300 yields 128 and 300, and subtracting 1 from -128 yields -129, all representable.
+The only shift count is the literal 20, strictly less than the 32-bit width of the
+promoted operand, so the shift is defined; no negative value is ever shifted left.
+No aliasing violation, no uninitialized read, no object modified twice between sequence
+points, at most one side-effecting argument per call, no dependence on padding bytes.
+The _Generic controlling expressions are unevaluated, so they report the promoted type
+without performing any conversion at run time; unary + is what applies the promotions.
+END
+impl_defined_notes <<END
+Plain char is never used and no object is declared plain char, because plain char
+signedness was measured signed on x86-64 and i686 but unsigned on AArch64 and RISC-V 64.
+Explicit signed char and unsigned char are used instead. long and unsigned long are never
+used, because their width is 4 bytes on i686 and 8 bytes on the other three targets.
+No pointer value is printed. int is 32 bits on all four supported targets, so every
+promoted-width result above is stable across backends.
 END
 expected_stdout    <<END
 fold_uchar_product=40000

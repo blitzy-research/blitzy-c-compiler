@@ -52,14 +52,23 @@ the width of its promoted left operand -- 1 << 10, 1 << 4 through the WIDTH_BASE
 with shift equal to 4, and the two long long shifts by 33 and 30 against a 64-bit left operand. Every
 shifted left operand is the positive literal 1 or 1LL, so only non-negative values are shifted left
 and no negative value is right-shifted.
-NO DIVISION IS UNDEFINED AND NO REMAINDER OPERATOR APPEARS. Every division is by 2, by 7 or by a
-sizeof of a complete object type, which the standard guarantees is non-zero, and no most-negative
-value is divided by -1. The one division performed at run time divides by a volatile object
-initialized to 1LL << 30 in its own declaration and never assigned afterwards, so a zero divisor is
-not reachable there either.
-THE WIDE ARITHMETIC CANNOT OVERFLOW. The widest int value printed is 4000, reached as
-(int)sizeof(int) * 1000 in a case label, and the widest computed int value is 49. The two wide values
-are long long throughout, written with LL-suffixed literals: 1LL << 33 == 8589934592 and 1LL << 30.
+NO DIVISION IS UNDEFINED AND NO REMAINDER OPERATOR APPEARS. Every divisor in the file is one of
+exactly three things, established by stripping comments and string literals and reading every
+division that remains: the literal 2, in the WIDTH_TAIL and MAT_COLS macros, in the case labels
+4 / 2 and 8 / 2, and in the two selector assignments that spell them; the constant 1LL << 30 inside
+WIDE_LEN; and a sizeof of a complete object type, which the standard guarantees is non-zero. No
+divisor is zero, none is negative, and no most-negative value is therefore ever divided by -1. Each
+of those divisions is a constant expression the compiler evaluates at translation time, and the
+remainder operator appears nowhere in the file at all -- also checked mechanically, and zero. NO
+DIVISION IS PERFORMED AT RUN TIME: the twin of the wide quotient reaches 8 by adding 2^30 to an
+accumulator eight times and comparing, never by dividing, which is the choice the wide-arithmetic
+paragraph below explains.
+THE WIDE ARITHMETIC CANNOT OVERFLOW. The widest int value the program handles at all is 4000, reached
+as (int)sizeof(int) * 1000 in a case label and in the volatile selector that matches it; the widest
+int value computed from opaque operands is 49, as 7 * 7 in the last element of spanned, and that same
+49 is the widest int value printed as a value, because 4000 reaches stdout only inside the fixed
+label text sparse_sel4000 rather than as a number. The two wide values are long long throughout,
+written with LL-suffixed literals: 1LL << 33 == 8589934592 and 1LL << 30.
 The 64-bit division twin is performed by repeated addition and comparison rather than by the division
 operator, because every backend implements addition and comparison directly while 64-bit division may
 go through a compiler support routine that is not this program's subject; eight additions of 2^30
@@ -100,11 +109,13 @@ NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, pri
 hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
 bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so a directive
 naming that header would fail on the bcc side of oracle (a) while succeeding on the reference side --
-a spurious divergence caused by the test rather than by the compiler under test. _Alignof is a C11
-keyword and needs no header; stdalign.h is deliberately not named because it would only add the
-lowercase macro spellings. Nothing in the file is a GCC extension, so no include exception and no
-gate deviation is available to area 02 and none is needed; the corpus has exactly two header
-exceptions, area 07's stdarg.h and the dedicated bundled-header probe in area 12.
+a spurious divergence caused by the test rather than by the compiler under test. _Static_assert is a
+C11 keyword rather than a library facility, so the thirteen static assertions above need no header
+either, and assert.h is deliberately not named: it would supply only the run-time macro, which is a
+different construct from the translation-time declaration under test here. Nothing in the file is a
+GCC extension, so no include exception and no gate deviation is available to area 02 and none is
+needed; the corpus has exactly two header exceptions, area 07's stdarg.h and the dedicated
+bundled-header probe in area 12.
 THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
 is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
 -Wconversion -Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers,

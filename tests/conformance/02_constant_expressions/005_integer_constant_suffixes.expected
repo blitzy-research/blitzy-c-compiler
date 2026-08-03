@@ -33,15 +33,20 @@ C11 6.2.5p9 states that a computation involving unsigned operands can never over
 result that cannot be represented is reduced modulo one greater than the largest representable value.
 So 0u - 1u, 0xFFFFFFFFu + 1u, u_zero - 1u and u_max + 1u are fully defined unsigned int operations,
 and 0ULL - 1ULL and ull_zero - 1ULL are fully defined unsigned long long operations; the wraparound
-they exhibit is the behaviour under test rather than a defect in the test, and all of them are
-asserted statically as well as printed.
-NO SIGNED EXPRESSION EVER LEAVES ITS RANGE. The widest signed intermediate anywhere is 4294967296,
-and it is formed only in a type wider than 32 bits: the unsuffixed decimal constant 4294967295 has a
+they exhibit is the behaviour under test rather than a defect in the test. Each of the three constant
+forms is both asserted statically and printed, the printed line spelling the middle one
+0xFFFFFFFF + 1 -- the same unsigned int addition, because a hexadecimal constant above INT_MAX is
+already unsigned int before any suffix is applied, which is itself part of the rule under test. The
+three volatile twins are printed only, because a volatile object's value is not a constant expression
+and therefore cannot appear in a _Static_assert at all.
+NO SIGNED EXPRESSION EVER LEAVES ITS RANGE. The largest signed intermediate anywhere is 10000000000,
+the long long product 100000LL * 100000LL, identical on the folded and the runtime path and far
+inside the 64-bit range C11 guarantees for long long. The next largest is 4294967296, and it too is
+formed only in a type wider than 32 bits: the unsuffixed decimal constant 4294967295 has a
 signed type wide enough to hold it -- long on the LP64 targets, long long on i686, and long long in
 the runtime object -- so 4294967295 + 1 is exact rather than wrapping and the line correctly prints 0
-for "did it wrap". Nothing approaches INT_MAX in int arithmetic, the one signed product
-100000LL * 100000LL is 10000000000 on both the folded and the runtime path, far inside the 64-bit
-range C11 guarantees for long long, and no signed value is negated at its minimum.
+for "did it wrap". Nothing approaches INT_MAX in int arithmetic, and no signed value is negated at
+its minimum.
 BOTH SHIFT COUNTS ARE IN RANGE, AND EVERY SHIFT IS A RIGHT SHIFT OF AN UNSIGNED VALUE. The counts are
 16 and 32. 0xFFFFFFFFuL >> 16 shifts an unsigned long, which is 32 bits on i686 and 64 bits on the
 other three targets, and 16 is strictly below either width; 0xFFFFFFFFFFFFFFFFULL >> 32 shifts an
@@ -59,7 +64,7 @@ Every _Generic here therefore performs no arithmetic at all, which is precisely 
 constants can be classified and then, separately, used in arithmetic on the fold and runtime lines,
 and each association is a small int constant, so no probe can itself misbehave. Every selection has a
 matching association or an explicit default, so no _Generic is ill-formed.
-EVERY _Static_assert IN THE FILE IS SATISFIED AND TARGET-INVARIANT. Fourteen of them pin the
+EVERY _Static_assert IN THE FILE IS SATISFIED AND TARGET-INVARIANT. Thirteen of them pin the
 classifications and the wraparound identities before the program runs, so a mis-typed constant is a
 translation failure rather than a silently wrong line. That second half of the claim is a soundness
 requirement, not a nicety: an assertion that failed on one target would break that target's build and
@@ -67,15 +72,21 @@ destroy the four-way comparison rather than reporting a divergence, and both man
 the observable behaviour of a binary that built successfully. The two-argument form is used
 throughout because the message-less spelling is C23 and the default gate's -pedantic -Werror rejects
 it.
-THERE ARE NO POINTERS AND NO AGGREGATES IN THIS PROGRAM, so no aliasing rule can be broken, no
-one-past-the-end pointer can be formed, no subscript is written, no object representation is
-inspected, no padding byte can be observed and nothing depends on the addresses of unrelated objects.
-Every object is initialized in its own declaration and none is modified afterwards, so no storage is
-read uninitialized and nothing is modified twice between two sequence points. Each printf argument is
-a _Generic selection, a comparison, or a product of volatile reads; none has a side effect beyond
-those reads, each volatile object is read once per expression so the volatile access sequence is
-fixed, and no argument's value depends on the order in which the others are evaluated, so the
-unspecified order of argument evaluation is unobservable.
+THIS PROGRAM DECLARES NO POINTER OBJECT AND NO AGGREGATE OBJECT -- the only pointer type anywhere in
+the file is the const char * parameter of the printf prototype, which each format-string literal
+converts to -- so no aliasing rule can be broken, no one-past-the-end pointer can be formed, no
+subscript is written, no object representation is inspected, no padding byte can be observed and
+nothing depends on the addresses of unrelated objects. All eleven volatile objects are initialized in
+their own declarations and none is assigned to afterwards -- checked mechanically, finding zero
+assignments -- so no storage is read uninitialized and no object is modified even once, let alone
+twice between two sequence points. Each printf argument is a _Generic selection, a comparison, or a
+long long product folded from constants or computed from volatile reads; none has a side effect
+beyond those reads. Ten of the eleven volatile objects are read exactly once per expression. The
+eleventh, ll_factor, is read twice in ll_factor * ll_factor, which is deliberate and harmless:
+nothing anywhere assigns to it, so both reads yield 100000 in whichever order they occur and the
+unspecified order between them is unobservable. No argument's value depends on the order in which the
+others are evaluated either, so the unspecified order of argument evaluation is likewise
+unobservable.
 LIMITS ARE SPELLED AS LITERALS rather than taken from a header, and limits.h is deliberately not
 named: the literals the program needs -- 2147483647, 2147483648, 4294967295, 4294967296,
 18446744073709551615 and the hexadecimal and octal forms of the same magnitudes -- are exactly the

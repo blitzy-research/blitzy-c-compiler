@@ -6,7 +6,7 @@
 
 program            = 006_conditional_and_comma_folding
 area               = 02_constant_expressions
-description        = Folding through the conditional and comma operators, folded and runtime variants
+description        = Folding through the conditional and comma operators, with side-effecting comma operands and volatile-operand runtime twins
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,74 +18,163 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-This program contains no undefined behaviour, which is the property the differential oracle
-rests on.  The two operators under test are precisely the two that impose a sequence point,
-so the ordering of every side effect printed here is fixed by the standard rather than left
-unspecified: the comma operator sequences all side effects of its left operand before its
-right operand is evaluated (C11 6.5.17p2), and the conditional operator evaluates exactly one
-of its second and third operands after its controlling expression (C11 6.5.15p4).  Nothing
-here depends on unspecified evaluation order, which requirement 1 forbids.
-No object is modified twice between two sequence points.  Every modification of a counter or
-an accumulator is separated from the next by a comma operator's sequence point or by a
-statement boundary, and the program contains no expression of the form v = v++, no v++ + v++,
-and no modification of an object outside a comma chain that the same chain also modifies.
-Every comma expression's left operand performs a real side effect -- an assignment to
-volatile or to plain storage, an increment, or a for-clause -- so no operand is evaluated for
-nothing, and holding the observed counters in volatile storage is what makes the ordering part
-of the program's observable behaviour instead of an unobservable internal detail.
-No call receives more than one argument with a side effect.  Where a printed line needs both a
-value produced by a side-effecting expression and a counter read afterwards, the side effect is
-sequenced in a statement of its own first and the counter is snapshotted into a plain local
-before the call, so nothing depends on the unspecified order in which arguments are evaluated.
-Otherwise: no signed overflow -- every signed result is small except the long long product
-6 * 1000000000, which is 6000000000 and inside the range C11 guarantees for long long; the one
-unsigned result printed as 4294967295 is modular reduction, which C11 6.2.5p9 defines for every
-value and which is therefore not undefined at all; no shift of any kind; no aliasing violation;
-no read of uninitialized storage, since every object is initialized before its first read; no
-pointer arithmetic and no pointer value printed; no dependence on padding bytes or on the
-addresses of unrelated objects; and sizeof does not evaluate its operand (C11 6.5.3.4p2), so the
-volatile objects that appear inside a sizeof are never accessed there.
-This program names no header at all and declares printf by hand, so nothing here depends on a
-standard-library header bcc does not ship.  Every value is printed with %d or %lld matched
-exactly to its argument's type, so no output is locale-dependent, address-dependent or
-plain-char-signedness-dependent.
+This program contains no undefined behaviour and depends on no unspecified behaviour, which is the
+precondition that makes both differential oracles sound rather than a stylistic preference:
+undefined behaviour would license either compiler to do anything at all, so a divergence between
+them would prove nothing about either one. Sequencing is unusually worth spelling out here, because
+sequencing is also the subject under test -- the argument below rests on the very two operators the
+program exists to exercise.
+THE TWO OPERATORS UNDER TEST ARE THE TWO THAT SUPPLY THE SEQUENCE POINTS THIS ARGUMENT RESTS ON. The
+comma operator sequences every side effect of its left operand before its right operand is evaluated
+(C11 6.5.17p2), and the conditional operator evaluates exactly one of its second and third operands,
+after its controlling expression and after the sequence point between them (C11 6.5.15p4). The
+ordering of every side effect printed here is therefore fixed by the standard rather than left
+unspecified, so nothing in this program depends on unspecified evaluation order, which requirement 1
+forbids outright.
+NO OBJECT IS MODIFIED TWICE BETWEEN TWO SEQUENCE POINTS. Every modification of a counter or an
+accumulator is separated from the next by a comma operator's sequence point or by a statement
+boundary. There is no expression of the form v = v++, no v++ + v++, and -- the case that matters most
+for this program -- no chain that combines a comma-sequenced modification of an object with a second
+modification of that same object elsewhere in the same full expression. The two four-step chains are
+the concrete instance: plain_chain is modified twice and vchain is modified twice, each time as the
+left operand of a comma whose sequence point separates it from the next step, and neither object is
+touched anywhere else in the full expression that contains it. The same holds for the pair v7 and v6,
+which are assigned in the two left operands and only read in the right operand, after both sequence
+points; and for the volatile counter ticks, which is incremented at most once per full expression.
+NO CALL RECEIVES MORE THAN ONE ARGUMENT WITH A SIDE EFFECT. The order in which a call's arguments are
+evaluated is unspecified (C11 6.5.2.2p10), so two side-effecting arguments would make the printed
+order unspecified as well, and requirement 1 forbids depending on it. Where a printed line needs both
+a value produced by a side-effecting expression and a counter read afterwards, the side effect is
+sequenced in a statement of its own first and the counter is snapshotted into a plain local --
+hits_then_seen, hits_else_seen, ticks_seen -- before the call. The one call that does receive a
+side-effecting argument, identity((ticks = ticks + 1, 6 * 7)) and its volatile twin, takes exactly
+one argument, so there is no second argument for its evaluation to be ordered against.
+EVERY COMMA EXPRESSION'S LEFT OPERAND PERFORMS A REAL SIDE EFFECT, BY DESIGN, AND THE REASON WAS
+MEASURED RATHER THAN ASSUMED. A comma expression whose left operand computes a value nobody uses is
+diagnosed: the probe `v = (1 + 1, 40 + 2);` compiled with gcc-13 under this suite's default gate
+reports `error: left-hand operand of comma expression has no effect [-Werror=unused-value]` followed
+by `cc1: all warnings being treated as errors`, and exits 1. Dropping only -Wall from the gate
+silences it, which confirms -Wunused-value is enabled by -Wall rather than by -Wextra or -pedantic.
+Area 02 sanctions no gate deviation, so the diagnostic was answered by rewriting the expressions --
+every left operand here is an assignment to volatile or plain storage, a counter increment, or a
+for-clause -- and never by weakening the gate, which would have traded a real check for a silence.
+The restriction improves the program rather than constraining it: a side-effecting left operand is
+exactly what makes the sequence point observable, and observable sequencing is the interesting
+property of the comma operator.
+ARM SUPPRESSION IS OBSERVED THROUGH VOLATILE COUNTERS, WHICH IS THE ONLY WAY AN ABSENCE CAN BE
+ASSERTED. The conditional operator's guarantee is partly negative -- the unselected arm is not
+evaluated -- and an assertion that a side effect did not happen is meaningful only if the
+implementation is obliged to honour the observation. The counters then_hits, else_hits and ticks are
+therefore volatile: a volatile access is part of the program's observable behaviour, so no
+optimization may elide the evidence, whereas a plain counter could legally be folded away and the
+absence would then prove nothing. Each printed counter line names both arms, and the unselected arm's
+step is 100 rather than 1, so an arm evaluated in error is unmistakable in the output instead of
+merely off by one.
+THE REST OF THE RULEBOOK IS SATISFIED BY CONSTRUCTION. No signed arithmetic can overflow: every int
+result printed is 42 or smaller except the deliberate counter value 100 and the loop sum 28, and the
+wide arithmetic is performed in long long built from LL-suffixed literals, whose largest product is
+6LL * 1000000000LL == 6000000000 -- orders of magnitude inside the 64-bit minimum range the standard
+guarantees for long long, on every target including the 32-bit one. The one unsigned result, printed
+as 4294967295, is the modular reduction of 0u - 1u, which C11 6.2.5p9 defines for every value and
+which is therefore not undefined at all rather than an overflow that happens to be survivable. No
+shift of any kind occurs anywhere in the file. There is no aliasing violation and no pointer
+question to answer, because the only pointer in the program is the string literal passed to printf:
+no object's address is taken, no one-past-the-end pointer is formed at all -- let alone dereferenced
+-- no object representation is inspected, no padding byte is observed, and nothing depends on the
+relative addresses of unrelated objects. No storage is read uninitialized: every object is
+initialized in its own declaration or assigned before its first read, and the one array,
+folded_bound_probe, has static storage duration -- so its contents are fully determined -- and is
+only ever measured with sizeof, never read. sizeof does not evaluate its operand (C11 6.5.3.4p2), so
+the volatile objects that appear inside a sizeof are not accessed there and the number of volatile
+accesses stays exactly what the source shows.
+NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, printf, is declared by
+hand as `int printf(const char *, ...);`. In fact the file contains no preprocessing directive of any
+kind. bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no
+standard I/O header (docs/project-guide.md line 212), so a directive naming that header would fail on
+the bcc side of oracle (a) while succeeding on the reference side -- a spurious divergence caused by
+the test rather than by the compiler under test. The corpus has exactly two header exceptions, area
+07's stdarg.h and the dedicated bundled-header probe in area 12, and neither applies here.
+NOTHING IN THIS FILE IS A GCC EXTENSION, AND IN PARTICULAR THERE IS NO STATEMENT EXPRESSION. The
+sequence `({` does not occur anywhere in the program -- checked mechanically, by stripping comments
+and string literals and finding none -- and neither does typeof, __typeof__, any __-prefixed
+identifier, or _Generic. A statement expression is a tempting near-neighbour of this subject matter,
+since it too produces a value from a sequence of side effects, but it belongs to area
+08_gcc_extensions, which is the only area permitted to drop -pedantic for exactly that reason.
+Because this program stays inside the standard language, area 02 needs neither an include exception
+nor a gate deviation, and neither is taken.
+THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
+is audited under the suite's full default gate. That is a measured claim, not an intention. It is
+clean -- zero diagnostics, empty stderr -- under -Wall -Wextra -pedantic -Wconversion
+-Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers, twelve
+invocations in all; and it builds and then runs clean, with an empty stderr and exit status 0, under
+the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+reference-compiler-only and are never applied to bcc -- the technical specification lists sanitizers
+among its explicit exclusions (docs/technical-specifications.md line 713, section 0.6.2) -- so
+requirement 3's shared-flag discipline is untouched by either of them.
+OUTPUT IS FULLY DETERMINISTIC: no address, no timestamp, no randomness, no locale-dependent
+formatting, literal loop bounds throughout, and every value printed with %d or %lld matched exactly
+to its argument's type -- those two conversions are the only ones the file uses. main returns 0,
+inside the 0-125 range the suite requires so that no exit status is truncated by the operating
+system. Every input is a literal in this file, so every cell is reproducible from this source and
+this record alone.
 END
 impl_defined_notes <<END
-Three lines print (int)sizeof applied to a conditional expression, which reports the width of
-the common type its two arms select: int against int gives 4, int against long long gives 8,
-and unsigned int against unsigned int gives 4.  Those widths are implementation-defined in
-principle, because C11 fixes only minimum ranges for the integer types.  They were measured
-rather than assumed: the program was executed on all four supported targets at -O0, -O1 and -O2
--- twelve configurations -- and every one printed the same 67 lines byte-identically, including
-fold_result_size_int=4, fold_result_size_llong=8 and fold_result_size_uint=4 together with
-their runtime twins.  Because the widths agree on all four targets and the measured values
-agree, cross-backend comparison of this program is sound and oracle (b) remains enabled for it.
-The two measured differences between the supported targets cannot reach this program by
-construction.  Plain char is never used and no character value is printed, so the plain-char
-signedness difference -- signed on x86_64 and i686, unsigned on aarch64 and riscv64 -- is
-unreachable here.  Plain long is never declared and never printed, so the i686 difference in
-sizeof(long) and sizeof(void *), 4 there against 8 on the other three, is unreachable as well;
-every wide value uses long long and is printed with %lld.  No address or pointer value is
-printed anywhere.
+THIS RECORD NARROWS NOTHING. All four targets are declared, all three optimization levels are swept,
+all three oracles are enabled, and no ub_audit_flags key appears. These notes therefore record the
+normalizations that make the full four-way comparison SOUND, rather than excusing a comparison that
+was not made -- there is no exclusion here to explain.
+THE CONDITIONAL OPERATOR'S RESULT TYPE IS DELIBERATELY OBSERVED, AND EVERY COMMON TYPE IT SELECTS IS
+THE SAME ON ALL FOUR TARGETS. Three lines print (int)sizeof applied to a conditional expression, which
+reports the width of the common type its two arms select: int against int gives 4, int against long
+long gives 8, and unsigned int against unsigned int gives 4. Those widths are implementation-defined
+in principle, because C11 fixes only minimum ranges for the integer types, so they were measured
+rather than assumed. The program was built and executed on all four supported targets at -O0, -O1 and
+-O2 -- twelve configurations -- and every one printed the same 67 lines byte-identically, 1826 bytes
+each, including fold_result_size_int=4, fold_result_size_llong=8 and fold_result_size_uint=4 together
+with their runtime twins. The arms of every conditional are chosen so the common type cannot vary by
+target: the pairs are int/int, int/long long and unsigned int/unsigned int, never a pair whose ranking
+depends on how wide long or a pointer happens to be. Because the widths agree on all four targets and
+the measured values agree, cross-backend comparison of this program is sound and oracle (b) remains
+enabled for it.
+EVERY CONVERSION THAT CHANGES A WIDTH OR A SIGNEDNESS IS WRITTEN AS AN EXPLICIT CAST. The size lines
+cast the size_t result of sizeof to int; the wrapped unsigned value is cast to long long before being
+printed with %lld; and the wide product casts its int operand to long long. Nothing is narrowed or
+re-signed implicitly, which is also why -Wconversion and -Wsign-conversion can stay in the audit gate
+for this program rather than being dropped from it: an implicit conversion here would be a defect in
+the test, not a diagnostic to suppress.
+THE TWO MEASURED DIFFERENCES BETWEEN THE SUPPORTED TARGETS CANNOT REACH THIS PROGRAM BY CONSTRUCTION.
+Plain char is never used as a value type and no character value is formed or printed -- the only char
+in the file is the const char * of the printf prototype -- so the plain-char signedness difference,
+signed on x86_64 and i686 and unsigned on aarch64 and riscv64, is unreachable here. Plain long is
+never declared and never printed either, verified mechanically by collapsing every `long long` and
+finding no bare `long` left, so the i686 difference in sizeof(long) and sizeof(void *) -- 4 bytes
+there against 8 on the other three, recorded in the target table at docs/technical-specifications.md
+lines 457-462 -- is unreachable as well. Every wide value uses long long, is built from LL-suffixed
+literals and is printed with %lld. No address or pointer value is printed anywhere.
 THE EXECUTION CHARACTER SET IS A SEPARATE IMPLEMENTATION-DEFINED PROPERTY FROM CHAR SIGNEDNESS,
-AND IT IS NOT ENGAGED HERE.  The paragraph above settles signedness only.  C11 5.2.1 leaves the
+AND IT IS NOT ENGAGED HERE. The paragraph above settles signedness only. C11 5.2.1 leaves the
 members of the execution character set and their codes implementation-defined as well, so a
 program that printed a character's numeric code, or rendered a literal as bytes, would owe an
-accounting of every code it observed.  This one owes none: it contains no character constant at
+accounting of every code it observed. This one owes none: it contains no character constant at
 all -- checked mechanically, by stripping comments and string literals and finding zero -- and it
-derives no printed VALUE from a character.  Its only string literals are printf format strings,
+derives no printed VALUE from a character. Its only string literals are printf format strings,
 which contribute fixed label text that is byte-identical in all twelve cells of the matrix and in
-the golden above.  There is therefore no code to pin with a _Static_assert and nothing to narrow.
+the golden above. There is therefore no code to pin with a _Static_assert and nothing to narrow.
 That is what distinguishes this program from 004_sizeof_alignof.c and
 007_string_literal_constants.c in the same area, both of which do print character codes and both
 of which pin every code they print for that reason.
-What would legitimately break that assumption, and how it must then be handled: a target on
-which sizeof(int), sizeof(unsigned int) or sizeof(long long) differed would still be
-conforming, so the resulting difference would be an implementation-defined divergence rather
-than a compiler defect.  It must in that case be recorded as an expected divergence with this
-record's target list narrowed and the reason stated here -- never left to surface as a finding
-against a backend that did nothing wrong, and never resolved by dropping the conditional
-operator's result-type coverage, which is part of what requirement 2 asks this program to cover.
+NO TARGET IS RESTRICTED AND NO ORACLE IS DISABLED, so the whole matrix is in force for this program:
+twelve compile-and-run cells, twelve golden-record assertions, twelve same-target reference
+comparisons, and nine cross-backend comparisons against the x86_64 baseline at matching optimization
+levels. A divergence in any of them is a compiler defect to be reported as a finding, not an
+implementation-defined difference to be excused.
+WHAT WOULD LEGITIMATELY BREAK THAT ASSUMPTION, AND HOW IT MUST THEN BE HANDLED: a target on which
+sizeof(int), sizeof(unsigned int) or sizeof(long long) differed would still be conforming, so the
+resulting difference would be an implementation-defined divergence rather than a compiler defect. It
+must in that case be recorded as an expected divergence with this record's target list narrowed and
+the reason stated here -- never left to surface as a finding against a backend that did nothing
+wrong, and never resolved by dropping the conditional operator's result-type coverage, which is part
+of what requirement 2 asks this program to cover.
 END
 expected_stdout    <<END
 fold_cond=42

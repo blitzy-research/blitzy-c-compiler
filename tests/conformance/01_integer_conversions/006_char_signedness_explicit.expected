@@ -6,7 +6,7 @@
 
 program            = 006_char_signedness_explicit
 area               = 01_integer_conversions
-description        = Explicit signed char and unsigned char conversions and arithmetic, folded and volatile-runtime
+description        = Character-type conversions using explicit signed char and unsigned char only, folded and runtime variants
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,21 +18,34 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Plain char is never used for a signedness-dependent value.  Every character object is
-spelled signed char or unsigned char, so its range is fixed by the program rather than by
-the implementation.  Each signed value stays inside the destination range, unsigned
-results wrap modularly as defined, and every shift count is in range.
-Every property is computed twice, once from literal constants and once from
-volatile-qualified storage, so the constant folder's answer cannot stand in for the
-one the backend computes at run time.
-No header is included and printf is declared by hand, so nothing here depends on a
-standard-library header bcc does not ship.
+Every conversion is explicit and every arithmetic operation is performed on operands
+already promoted to int, so no signed type overflows: 255+1 is 256 and -128-1 is -129,
+both representable in int. Narrowing to unsigned char is modular and therefore defined;
+narrowing to signed char is implementation-defined, never undefined. The only shift count
+is the literal 1, strictly less than the 32-bit width of the promoted operand, and no
+negative value is ever shifted left. No aliasing violation, no uninitialized read, no
+object modified twice between sequence points, at most one side-effecting argument per
+call, no dependence on padding bytes.
+Every narrowing is written as an explicit cast, which keeps the strict warning gate clean
+without any deviation. The _Generic controlling expressions are unevaluated, so they report
+promoted types without converting at run time.
 END
 impl_defined_notes <<END
-Plain char has implementation-defined signedness and was measured signed on x86-64 and
-i686 but unsigned on AArch64 and RISC-V 64.  Rather than restrict the target list, the
-program removes the dependence entirely by never using plain char for a value whose
-signedness matters, so all four targets remain fully compared and nothing is excluded.
+This program exists because plain char signedness is implementation-defined and was
+measured signed on x86-64 and i686 but unsigned on AArch64 and RISC-V 64. Not one object,
+parameter or member is declared plain char; only explicit signed char and unsigned char are
+used, and the only occurrences of the bare token are inside const char * string pointers
+and in explanatory comments. Had a plain char carried any signedness-dependent value here,
+cross-backend comparison would report a divergence that says nothing about the compiler.
+This difference is handled by construction rather than by an expected-divergence marker,
+because a marker implies a test that diverges and this test does not diverge.
+Conversion of an out-of-range value to signed char is implementation-defined; all four
+supported targets perform two's-complement truncation identically, so uchar_to_schar and
+int_to_schar are stable across backends. Arithmetic right shift of a negative value was
+likewise measured identical on all four targets.
+long and unsigned long are never used, because their width is 4 bytes on i686 and 8 bytes
+on the other three targets. No pointer value is printed. No header is included, so -128,
+127 and 255 are spelled literally rather than taken from limits.h.
 END
 expected_stdout    <<END
 fold_schar_min=-128

@@ -56,7 +56,7 @@ on the unspecified order in which arguments are evaluated: every argument is a l
 dereference of const data, or a plain local snapshotted beforehand. No object is modified twice
 between sequence points.
 THERE IS NO SIGNED OVERFLOW, NO SHIFT, NO ALIASING VIOLATION AND NO READ OF UNINITIALIZED STORAGE.
-Every arithmetic value is a small length, index or byte value and the largest printed number is 116.
+Every arithmetic value is a small length, index or byte value and the largest printed number is 120.
 Each fold_len line computes sizeof arr - 1u in the unsigned type sizeof yields, where the array size
 is at least 1, so the subtraction cannot wrap and the narrowing cast to int is applied to a value at
 most 11. The only division is an array's element count, whose divisor is a sizeof of a complete
@@ -103,13 +103,15 @@ targets differ.
 THE TWO-VARIANT RULE AND WHY BOTH HALVES ARE NEEDED. Every property is printed twice: once
 from a constant expression, so the answer comes from the constant evaluator, and once from
 volatile-qualified operands, which no implementation may read at translation time, so that
-answer comes from the code generator. The mechanism was verified at instruction level rather
-than assumed: volatile int x = 7; return x * 6; emits a genuine runtime multiply at -O2 where
-the non-volatile form collapses to a single immediate move. Without the runtime half,
-optimization substitutes the folder's answer for the backend's and a code-generation defect
-escapes detection entirely while the suite still reports a pass. With it, a divergent fold_
-line accuses the constant evaluator, a divergent runtime_ line accuses the backend, and a
-pair that disagrees with itself accuses one of the two.
+answer comes from the code generator. The mechanism was verified at instruction level rather than
+assumed, with gcc 13.4.0 for x86-64: volatile int x = 7; return x * 6; stores 7 to a stack slot,
+LOADS IT BACK and computes at run time under -O2 -- movl $7, -4(%rsp), then movl -4(%rsp), %eax,
+then leal (%rax,%rax,2), %eax and addl %eax, %eax, the multiply strength-reduced to shift-and-add
+rather than emitted as a mul -- where the non-volatile form folds away entirely to the single
+immediate move movl $42, %eax. Without the runtime half, optimization substitutes the folder's
+answer for the backend's and a code-generation defect escapes detection entirely while the suite
+still reports a pass. With it, a divergent fold_ line accuses the constant evaluator, a divergent
+runtime_ line accuses the backend, and a pair that disagrees with itself accuses one of the two.
 The one construct with no possible run-time counterpart is sizeof itself, which every conforming
 implementation evaluates at translation time for a non-variable type. Its twin is therefore the
 WALKED LENGTH: every fold_size_ line is matched by a fold_len_ / runtime_len_ / len_agree_
@@ -140,6 +142,16 @@ identical under either signedness choice, and every numeric print goes through a
 in an unsigned char array. Characters printed as characters go through %c, whose argument is
 promoted to int and whose output is the byte either way, and the %c lines print only members of
 the basic execution character set with positive values under both signings.
+AREA SCOPING, AND THE SECOND SIGNEDNESS DIFFERENCE IT KEEPS OUT. Only ordinary narrow literals
+appear here; the wide, UTF-8, 16-bit and 32-bit forms are investigated by
+11_literals_and_strings/003_wide_and_unicode_literals.c. No wchar_t, char16_t or char32_t is
+named in this program, which keeps a SECOND measured signedness difference out of its output:
+wchar_t was MEASURED as signed on x86-64, i686 and RISC-V 64 and unsigned on AArch64, four bytes
+wide on all four, so a wide element printed as a number would have needed exactly the
+normalization the narrow bytes get here. No header naming those types is available in any case
+-- wchar.h and uchar.h are outside bcc's bundled set and outside the corpus's two sanctioned
+header exceptions -- so this scoping costs the suite no coverage; it places that coverage in the
+record that owns it.
 THE EXECUTION CHARACTER SET IS THIS PROGRAM'S PRINCIPAL IMPLEMENTATION-DEFINED PROPERTY, AND IT
 IS PINNED RATHER THAN ASSUMED. Signedness and the character set are two different properties,
 and the (int)(unsigned char) conversion above settles only the first: C11 5.2.1 leaves the
@@ -208,8 +220,8 @@ twins. Only the RENDERING of a control byte is dropped, no escape sequence is dr
 coverage by this arrangement, and rendering control bytes is not what this program is for. The
 same convention is followed by 11_literals_and_strings/001_character_escapes.c, which owns escape
 coverage in breadth and prints every escape it handles as a number and never as a byte. A sweep
-of all ninety-two measured goldens confirms this program was the only one affected and that every
-golden in the corpus is now free of any control byte other than the line feed.
+of every golden the corpus now holds -- all 108, one per program -- confirms this program was the
+only one ever affected and that no golden carries any control byte other than the line feed.
 A NOTE ON POINTER-ARITHMETIC SPELLING, since it looks like an omission and is not. C11 6.5.2.1p2
 defines E1[E2] as identical to (*((E1)+(E2))), so subscripting a literal already exercises
 pointer arithmetic on it. The explicit *(p + n) form is exercised as well, but through a named

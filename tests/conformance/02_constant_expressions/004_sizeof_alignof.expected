@@ -64,14 +64,20 @@ the program.
 THE FLOATING COMPARISONS ARE EXACT BY CONSTRUCTION. 1.5f and 0.5f are exactly representable in binary
 floating point, so inv_obj.f == 1.5f compares two identical values rather than posing a tolerance
 question, and no floating-point value is printed at all.
-TWENTY-ONE _Static_assert DECLARATIONS PIN THE INVARIANTS THIS PROGRAM DEPENDS ON BEFORE IT RUNS --
-the fixed widths of char, short, int, long long, float and double, that long and every pointer
-flavour share one width, that size_t and ptrdiff_t are that width, the string-literal and
-character-constant sizes, the long double ordering laws and the aggregate layout laws -- so a
-mis-folded sizeof is a translation failure rather than a silently wrong number. Every one of them is
-SATISFIED, which is a soundness requirement rather than a preference: both mandated oracles compare
-the observable behaviour of a binary that built, so a deliberately failing assertion would stop both
-compilers and leave nothing to compare.
+TWENTY-SEVEN _Static_assert DECLARATIONS PIN THE INVARIANTS THIS PROGRAM DEPENDS ON BEFORE IT RUNS,
+in two groups. TWENTY-ONE pin the type system: the fixed widths of char, short, int, long long,
+float and double, that long and every pointer flavour share one width, that size_t and ptrdiff_t are
+that width, the string-literal and character-constant sizes, the long double ordering laws and the
+aggregate layout laws -- so a mis-folded sizeof is a translation failure rather than a silently
+wrong number. The remaining SIX pin the execution character set, and are accounted for separately in
+impl_defined_notes because the property they guard is implementation-defined rather than a type fact.
+Every one of the twenty-seven is SATISFIED on all four targets, which is a soundness requirement
+rather than a preference: both mandated oracles compare the observable behaviour of a binary that
+built, so a deliberately failing assertion would stop both compilers and leave nothing to compare,
+and an assertion resting on a target-varying property would stop exactly the target that disagreed
+and silently shrink the four-way comparison to three. Every one carries a MESSAGE STRING, because
+the message-less one-argument form is C23 and -pedantic -- a member of the default gate this record
+declares no deviation from -- rejects it.
 EVERY CHARACTER READ BACK IS CONVERTED THROUGH unsigned char BEFORE IT IS PRINTED, so no plain-char
 signedness difference can reach stdout, and no member offset is ever assumed: a member is read by
 name, never through a computed offset, so no padding byte is observed. There is no aliasing violation
@@ -87,11 +93,19 @@ NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, pri
 hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
 bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so a directive
 naming that header would fail on the bcc side of oracle (a) while succeeding on the reference side --
-a spurious divergence caused by the test rather than by the compiler under test. _Alignof is a C11
-keyword and needs no header, and stddef.h is deliberately not named. Nothing in the file is a GCC
-extension, so no include exception and no gate deviation is available to area 02 and none is needed;
-the corpus has exactly two header exceptions, area 07's stdarg.h and the dedicated bundled-header
-probe in area 12.
+a spurious divergence caused by the test rather than by the compiler under test. stdalign.h IS
+DELIBERATELY NOT INCLUDED EITHER, and that omission is a positive design choice rather than an
+oversight: _Alignof is one of the 44 C11 KEYWORDS the compiler recognises in the lexer
+(docs/technical-specifications.md line 497), so it needs no declaration at all, whereas stdalign.h
+supplies only the lowercase alignas and alignof MACROS that spell those keywords differently
+(docs/technical-specifications.md line 212). Naming the header would therefore test a macro
+definition in a bundled header instead of the keyword in the compiler, which is this area's actual
+subject, and it would put a bundled header on the bcc side of oracle (a) that the reference compiler
+resolves from its own system headers -- two different files, silently compared. Every use in this
+program is the keyword form _Alignof. stddef.h and stdint.h are deliberately not named for the same
+reason. Nothing in the file is a GCC extension, so no include exception and no gate deviation is
+available to area 02 and none is needed; the corpus has exactly two header exceptions, area 07's
+stdarg.h and the dedicated bundled-header probe in area 12.
 size_t, ptrdiff_t and intptr_t therefore cannot be NAMED in this program at all, and their widths are
 probed without naming them: sizeof yields a size_t, so sizeof(sizeof(int)) is size_t's own width, and
 a pointer difference yields a ptrdiff_t, so sizeof of one is ptrdiff_t's width. That is an advantage
@@ -174,18 +188,61 @@ back to a permissive one would turn rule 4 into a comment, so a fifth target can
 judged against another target's width. A refusal to compile is reported with a named message and
 is reproducible from this record's own command template; a silently weakened test is not reported
 at all.
+THE ALIGNMENTS PRINTED RAW ARE A CLOSED LIST OF EIGHT, AND EVERY ONE OF THE EIGHT WAS MEASURED
+IDENTICAL ON ALL FOUR TARGETS BEFORE ITS NUMBER WAS WRITTEN HERE. The four INVARIANT SCALARS the
+normalization is built around are _Alignof(char) is 1, _Alignof(short) is 2, _Alignof(int) is 4 and
+_Alignof(float) is 4, printed on the alignof_char_short_int_float line. Four more join them on the
+same footing and for the same reason -- they too were measured identical everywhere:
+_Alignof(_Bool) is 1 and _Alignof(enum color) is 4 on the alignof_bool_enum line, and
+_Alignof(struct invariant) is 4 and _Alignof(union invariant_union) is 4 on their own lines, those
+last two being the two aggregates built exclusively from invariant-width members, which the next
+paragraph accounts for. That is the whole of the raw set: EVERY OTHER ALIGNMENT IN THE PROGRAM IS
+PRINTED AS A RELATION AND NEVER AS A NUMBER, and each exclusion is individually reasoned.
+_Alignof(long), _Alignof(long long) and _Alignof(double) are 8 on x86-64, AArch64 and RISC-V 64 and
+4 on i686, because the i386 System V ABI requires 4-byte alignment for double and for long long
+where the 64-bit ABIs require 8 -- so each is printed only as an equality against _Alignof(void *)
+on the alignof_wide_is_ptr_align line, which reads 1 1 1 everywhere and, because the anchor has
+already pinned the pointer width and alignof_ptr_is_ptr_width has tied the pointer's alignment to
+that width, pins all three EXACTLY on every target rather than merely relating them to each other.
+_Alignof(void *) is itself 8/4/8/8 and is likewise never printed raw, only as
+_Alignof(void *) == sizeof(void *). _Alignof(long double) is the widest spread of all -- 16 on
+x86-64, 4 on i686, 16 on AArch64 and 16 on RISC-V 64 -- and is printed only as
+_Alignof(long double) >= _Alignof(double), inside the size-is-a-multiple-of-alignment law, and
+inside the alignment-never-exceeds-size ladder. The two aggregates that carry a pointer or a long
+are excluded for exactly the same reason: _Alignof(struct widthful) and _Alignof(struct nested) are
+8/4/8/8, and they appear only as an equality against _Alignof(void *), as an equality against each
+other, and inside that same alignment-never-exceeds-size law -- never as a byte count.
 TWO AGGREGATE SIZES ARE PRINTED RAW, and their shapes were chosen so that they could be.
 struct invariant is char, short, int, float and sizes at 12 bytes with alignment 4 on all four
 targets; the union sizes at 8 with alignment 4. Both were measured on every target before the
 raw values were written here. An aggregate whose padding depended on the alignment of double or
 long long would have sized differently on i686, where those alignments are 4 rather than 8, and
 is deliberately absent.
-WIDTH NORMALIZATION IN THE OUTPUT ITSELF. Every printed value is an int printed with %d, so each
-sizeof and _Alignof result is cast to int before it reaches the variadic call and no size_t is
-ever passed; where the program computes a value too wide for int, that value is written in long
-long with LL-suffixed literals and printed with %lld, which is 64 bits on every enabled target.
-No plain long, no size_t, no ptrdiff_t, no floating-point value and no pointer value is printed
-anywhere.
+WIDTH NORMALIZATION IN THE OUTPUT ITSELF. EVERY ONE of the 63 printed values is an int printed
+with %d, and the program uses no other conversion specifier at all -- no %lld, no %lu, no %zu, no
+%f, no %p. That is not incidental economy: a sizeof result has type size_t and a pointer
+difference has type ptrdiff_t, and both are 8 bytes on x86-64, AArch64 and RISC-V 64 and 4 on
+i686, so passing either one through a variadic call would make the ARGUMENT ITSELF target-varying
+and would additionally mismatch its own conversion specifier on one target or the other -- which
+is undefined behaviour, and so would destroy the precondition the oracles rest on before any
+comparison happened. Every sizeof and every _Alignof result is therefore cast to int before it
+reaches printf, which is always safe here because every one of them is a small byte count, and no
+size_t and no ptrdiff_t value is ever passed. This program needs no wider printed type because
+none of its quantities exceeds a small byte count; where a sibling record in this area describes
+values written in long long and printed with %lld, that describes THAT program and not this one.
+No plain long, no size_t, no ptrdiff_t, no intptr_t, no _Bool, no floating-point value, no
+plain-char value and no pointer value is printed anywhere.
+intptr_t COMPLETES THE HEADER-FREE WIDTH ACCOUNT. It carries exactly the same hazard as size_t and
+ptrdiff_t -- 8 bytes on the three LP64 targets and 4 on i686 -- and exactly the same unavailability,
+because it is declared by stdint.h, which this program does not include; the corpus includes no
+header, so intptr_t cannot be NAMED here any more than size_t or ptrdiff_t can. It needs no separate
+probe, and that is a fact about the language rather than a gap: intptr_t is by definition a signed
+integer type capable of holding a converted void pointer, so the property that would be tested of it
+is the pointer width itself, which ptr_width_exact already pins EXACTLY on every target and which
+alignof_ptr_is_ptr_width ties its alignment to. Round-tripping an object pointer through a
+sufficiently wide integer type is separately the subject of 05_pointers/007_casts_roundtrip.c, so the
+type's observable behaviour is covered in the corpus rather than skipped. Nothing about intptr_t is
+excluded here: no line of this program's output depends on it, so there is no comparison to narrow.
 PLAIN-char SIGNEDNESS. Plain char was MEASURED as signed on x86-64 and i686 and unsigned on
 AArch64 and RISC-V 64. Every character read-back is cast through unsigned char first, so no
 plain-char value is printed as a signed value and no printed line depends on that choice.
@@ -230,10 +287,22 @@ names the construct that produced it. No address or pointer value is printed, th
 randomness, no locale-dependent formatting and no data-dependent iteration order, and the
 program returns 0 -- well inside the 0-125 range the suite requires so that no exit status is
 truncated by the operating system.
-MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at
--O0, -O1 and -O2 -- twelve configurations -- and every one produced these 63 lines
-byte-identically with exit status 0, which is why cross-backend comparison is sound, oracle (b)
-is enabled with no narrowing, and oracle (c) can hold these bytes as the golden record.
+MEASURED EVIDENCE, AND HOW TO REPRODUCE IT. Every number this field tabulates and every line of the
+golden record below was MEASURED rather than reasoned about, with the suite's toolchain of record:
+gcc-13 13.4.0 for x86-64 and i686-linux-gnu-gcc-13, aarch64-linux-gnu-gcc-13 and
+riscv64-linux-gnu-gcc-13 at the same 13.4.0 for the cross arms, with the three non-native binaries
+executed under qemu-i386, qemu-aarch64 and qemu-riscv64 at 10.1.0. The program was built -static at
+-O0, -O1 and -O2 for each of the four targets -- TWELVE CONFIGURATIONS -- and all twelve produced
+these 63 lines BYTE-IDENTICALLY, one shared SHA-256 digest across the set, each exiting with status 0
+and writing nothing to standard error. That single measurement is what licenses three separate claims
+this record makes: that cross-backend comparison is sound here, so oracle (b) is enabled with no
+narrowing; that oracle (c) may hold these bytes as the golden record; and that the normalization
+rulebook above actually worked rather than merely being intended. The same twelve configurations were
+also driven through the default warning gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion
+-Wshadow -Werror with no diagnostic on any of them, which is why no ub_audit_flags key appears above,
+and the native build was compiled and RUN under -fsanitize=undefined,address
+-fno-sanitize-recover=all to completion with an empty standard error. Reproducing all of this needs
+no harness: render this record's own three command templates for each cell and compare the bytes.
 END
 expected_stdout    <<END
 sizeof_char_short_int_llong=1 2 4 8

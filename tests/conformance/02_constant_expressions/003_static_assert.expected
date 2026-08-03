@@ -6,7 +6,7 @@
 
 program            = 003_static_assert
 area               = 02_constant_expressions
-description        = _Static_assert on satisfied conditions across the type system, folded and volatile-runtime
+description        = _Static_assert on satisfied conditions across the type system, each corroborated by a printed run-time value
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,110 +18,178 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-This program contains no undefined and no unspecified behaviour, which is the property
-both differential oracles rest on: undefined behaviour would license either compiler to do
-anything and would make a divergence prove nothing about either.
-Every _Static_assert in the file is SATISFIED, and that is a soundness requirement rather
-than a preference. Both mandated oracles compare the observable behaviour of a binary that
-was built successfully, so a deliberately failing assertion would stop compilation under
-both compilers and leave nothing to compare; error detection -- the correct rejection of an
-invalid program -- is a noted non-goal of this suite for exactly that reason.
-No arithmetic can overflow. The folded expressions are the small constants 2 + 3 * 4,
-(1 << 10) >> 4 and 4294967296LL / 65536, and each runtime twin recomputes precisely that
-value from volatile operands of the same types, so no intermediate leaves the range of int
-or long long. Both shift counts, 10 and 4, are within the range of the 32-bit promoted left
-operand. Both divisions have a non-zero divisor: 65536 is a literal, and the one division
-by a measured value is guarded by a positivity test on both operands, so a divisor of zero
-cannot reach it even if a measurement were to fail.
-No storage is read uninitialized. The ten probe arrays have static storage duration and are
-therefore zero-initialized, and their contents are never read at all -- only the byte
-distance between two of their element addresses is taken. Every automatic object is
-initialized in its own declaration, including the volatile pair array in the local-type
-probe, whose members are read back afterwards.
-Pointer arithmetic stays in range. Both operands of every subtraction address bytes of one
-and the same object, so each difference is defined. The single one-past-end pointer,
-table + TABLE_LEN, is formed and subtracted but never dereferenced. The bounded string scan
-stops at the array's own size, so it cannot read past the terminator whatever the array
-holds. Every reinterpretation of an object's bytes is through a character type, so no
-aliasing rule is broken, and nothing depends on padding bytes or on the relative addresses
-of unrelated objects.
-No object is modified twice between sequence points, no call receives more than one argument
-with a side effect, and the program reads no clock, no environment, no file and no socket:
-every input is a literal in the source.
-No header is included and printf is declared by hand, so nothing here depends on a standard
-library header bcc does not ship. _Static_assert and _Alignof are C11 keywords and need no
-header; stdalign.h is deliberately not included, because it would only add the lowercase
-alignas and alignof macro spellings. Every assertion uses the two-argument form with a
-message, because the message-less form is C23 and the default gate's -pedantic -Werror
-rejects it.
-This record declares no warning-gate deviation: the program is clean under the full default
-gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror at every
-optimization level with all four reference drivers, and clean under the sanitizer gate.
+THIS PROGRAM CONTAINS NO UNDEFINED AND NO UNSPECIFIED BEHAVIOUR, which is the property both
+differential oracles rest on. Undefined behaviour would license either compiler to do anything, so a
+divergence between them would prove nothing about either; unspecified behaviour would let two
+conforming implementations differ with neither being wrong. Neither is present here.
+EVERY ONE OF THE 34 _Static_assert DECLARATIONS IN THIS FILE IS SATISFIED ON ALL FOUR TARGETS, and
+that is a soundness requirement rather than a preference. Both mandated oracles compare the
+observable behaviour of a binary that was built successfully, so a deliberately failing assertion
+would stop translation under both compilers and leave neither oracle anything to compare. Error
+detection -- the correct rejection of an invalid program -- is a noted non-goal of this suite for
+exactly that reason, so no failing assertion appears anywhere, here or elsewhere in the corpus. Each
+assertion is instead paired with a printed line reporting the same property at run time, so a
+compiler that accepted the condition while computing the property differently still changes stdout.
+EVERY ASSERTION IS TARGET-INVARIANT, which is the one hazard a program of this kind must avoid: an
+assertion whose truth depended on a target-varying property would fail to TRANSLATE on some target,
+destroying the four-way comparison rather than testing it. Only two kinds of condition therefore
+appear. Exact values are asserted solely for quantities identical on all four supported targets --
+sizeof of char and of unsigned char (1 apiece), of short, int, long long, float and double (2, 4, 8,
+4 and 8), _Alignof of char, short, int and float (1, 2, 4 and 4), sizeof "abc" and sizeof msg (4
+apiece, the terminator included), sizeof "" (1), the element count of the macro-bounded table (7)
+and its total span as the product TABLE_LEN * sizeof(int), the folded arithmetic 2 + 3 * 4,
+(1 << 10) >> 4 and 4294967296LL / 65536, the enumerator values 0, 2, 10 and -1, and 'A' == 65.
+Everything else is asserted as a RELATION, which holds whatever the individual values are: the two
+size orderings the standard guarantees, sizeof(long) == sizeof(void *), the two header-free width
+probes sizeof(sizeof(int)) == sizeof(void *) and sizeof(&table[1] - &table[0]) == sizeof(void *),
+the two alignment bounds, that a struct aligns as its strictest member does, that a struct is at
+least the sum of its members, and that a union is at least its largest member.
+NO ASSERTION DEPENDS ON A TARGET-VARYING PROPERTY. None requires sizeof(long) or sizeof(void *) to
+be 8, none names sizeof(long double) at all, none pins _Alignof(double), _Alignof(long long) or
+_Alignof(void *), and none observes plain char's signedness -- plain char appears only as a one-byte
+size probe, and no signedness can change a size. The measured values behind every one of those
+exclusions are recorded in impl_defined_notes below.
+NO ARITHMETIC CAN OVERFLOW. The folded expressions are the small constants 2 + 3 * 4, (1 << 10) >> 4
+and 4294967296LL / 65536, and each runtime twin recomputes precisely that value from volatile
+operands of the same types, so no intermediate leaves the range of int or of long long. Both shift
+counts, 10 and 4, are well inside the width of the 32-bit promoted left operand. Both divisions have
+a non-zero divisor: 65536 is a literal, and the one division by a MEASURED value -- the table's byte
+span by its element stride -- is guarded by a positivity test on both operands, so a zero divisor
+cannot reach it even if a measurement were somehow to fail; the guard then prints -1, which keeps
+the divergence observable as output instead of becoming a trap.
+NO STORAGE IS READ UNINITIALIZED. The ten probe arrays have static storage duration and are
+therefore zero-initialized, and their contents are never read at all -- only the byte distance
+between two of their element addresses is taken. Every automatic object is initialized in its own
+declaration, including the volatile pair array in the local-type probe, whose members are read back
+afterwards, and the report struct, which is initialized before its address is passed on.
+POINTER ARITHMETIC STAYS IN RANGE, AND THE TWO WIDTH PROBES EVALUATE NOTHING. Both operands of every
+subtraction address bytes of one and the same object, so each difference is defined. The two
+header-free width probes are operands of sizeof and are therefore UNEVALUATED: sizeof(sizeof(int))
+and sizeof(&table[1] - &table[0]) yield the widths of size_t and of ptrdiff_t without the inner
+expressions being computed at all, so no subtraction is performed there -- and both element
+addresses are in range regardless, the table having seven elements. The single one-past-end pointer
+that is genuinely evaluated, table + TABLE_LEN, is formed and subtracted but never dereferenced. The
+bounded string scan stops at the array's own size, so it cannot read past the terminator whatever
+the array holds. Every reinterpretation of an object's bytes is through a character type, so no
+aliasing rule is broken, and nothing depends on padding bytes or on the relative addresses of
+unrelated objects.
+NO OBJECT IS MODIFIED TWICE BETWEEN SEQUENCE POINTS, no call receives more than one argument capable
+of a side effect, and no printed value can depend on the unspecified order in which a call's
+arguments are evaluated: every argument of every printf call is a plain read of an object or of a
+member, or a pure computation over such reads.
+OUTPUT IS FULLY DETERMINISTIC. No address and no pointer value is printed, no timestamp, no
+randomness, no locale-dependent formatting; every loop bound is a literal or a measured positive
+size; and main returns 0, inside the 0-125 range the suite requires so that no exit status is
+truncated by the operating system. The program reads no clock, no environment variable, no file and
+no socket -- every input is a literal in this source -- so every cell is reproducible from this
+program and this record alone.
+NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs is declared by hand as
+`int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a bonus
+stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so a directive naming
+that header would fail on the bcc side of oracle (a) while succeeding on the reference side -- a
+spurious divergence caused by the test rather than by the compiler under test. _Static_assert and
+_Alignof need no header either: both are C11 KEYWORDS, listed among the 44 the lexer recognises in
+docs/technical-specifications.md line 497, with line 502 recording the declaration parser that
+handles _Static_assert. stdalign.h is therefore deliberately not included; it would only add the
+lowercase alignas and alignof spellings, which this program does not use. Every assertion uses the
+two-argument form WITH A MESSAGE, because the message-less one-argument form is C23 and the default
+gate's -pedantic -Werror rejects it.
+THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
+is audited under the suite's full default gate, which is what area 02 requires of every one of its
+eight programs. It was MEASURED clean under -Wall -Wextra -pedantic -Wconversion -Wsign-conversion
+-Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean
+under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all, whose run exits 0
+with an empty standard error and with stdout byte-identical to the golden record below. Both gates
+are reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline
+is untouched. Two details of the local-type probe are what keep the program gate-clean rather than
+incidental, and the source file's own header names them for anyone editing it.
 END
 impl_defined_notes <<END
-This record narrows nothing -- all four targets, all three optimization levels and all three
-oracles are enabled -- and these notes exist to record how that was achieved, because the
-type system is exactly where a program of this kind would otherwise have had to narrow.
-Every _Static_assert is true on all four targets, which is the condition that makes the
-four-way comparison possible at all: an assertion that failed on one target would break the
-build there rather than report a divergence. Two kinds of condition are used to guarantee
-that. Exact values are asserted only for the quantities measured to be identical on all four
-targets: sizeof char, short, int, long long, float and double are 1, 2, 4, 8, 4 and 8, and
-_Alignof char, short, int and float are 1, 2, 4 and 4. Everything else is asserted as a
-RELATION, which holds whatever the individual values are.
-The target-varying properties are therefore covered without being pinned. Pointer width and
-sizeof(long) are 4 bytes on i686 and 8 on x86-64, AArch64 and RISC-V 64, so this program
-asserts and prints only that long is exactly pointer width, that size_t is exactly pointer
-width, and that ptrdiff_t is exactly pointer width -- each true on all four. sizeof(long
-double) was measured at 16, 12, 16 and 16 bytes across x86-64, i686, AArch64 and RISC-V 64
-(x87 80-bit versus IEEE binary128), so it appears only inside the ordering relation
-sizeof(double) <= sizeof(long double), and its size is never printed. The alignments of
-double and long long likewise appear only in relations. size_t and ptrdiff_t are probed
-without being named -- as sizeof(sizeof(int)) and as sizeof of a pointer difference --
-because naming them would require stddef.h, and this program includes no header.
-Plain char signedness was measured as signed on x86-64 and i686 and unsigned on AArch64 and
-RISC-V 64, so it is never asserted and never observed. Plain char appears only as a
-one-byte size probe whose signedness cannot affect a size, and the one character value that
-is printed is read from an explicitly signed char holding 65, which every char signedness
-represents exactly.
-THE EXECUTION CHARACTER SET IS A SEPARATE IMPLEMENTATION-DEFINED PROPERTY FROM CHAR
-SIGNEDNESS, AND IT IS PINNED RATHER THAN ASSUMED. Routing a character through an explicitly
-signed char settles the signedness question and settles nothing about which code the letter
-carries: C11 5.2.1 leaves the members of the execution character set and their codes
-implementation-defined, so an implementation is free to place A somewhere other than 65.
-Exactly two printed lines observe a character's value here -- fold_char_a, which prints
-(int)'A' from a constant expression, and run_char_a, which prints the same value back out of
-the signed char -- and nothing else in the program observes one: msg is measured only by its
-size and by the offset of its terminator, probe_char only by its element size, and no line
-renders a literal. A single assertion therefore closes the whole accounting, and the program
-carries it: _Static_assert('A' == 65, "the execution character set places A at 65 (ASCII) on
-this target"). All four enabled targets were measured to use the same ASCII-family basic
-execution character set, so the condition holds on every cell of this record's matrix. The
-assertion is the mechanism that keeps the two oracles honest: on an implementation whose
-character set differed, the cell would FAIL TO TRANSLATE naming the reason -- accusing the
-environment, where the difference actually lives -- instead of printing a different number
-that oracle (a) or oracle (b) would charge to the compiler under test. A future target that
-disagreed would announce itself at the build, and the correct response would be to narrow
-this record's target list with the reason recorded here, never to delete the assertion or the
-two lines it protects.
-Two implementation-defined layout facts are relied on and were verified rather than assumed.
-struct triple is int, short, unsigned char and union scalar_bytes has an 8-byte widest
-member; the standard leaves their exact sizes to the implementation, and both were measured
-at 8 bytes on all four targets, which is what licenses printing those two sizes raw. The
-shapes were chosen for that reason: an aggregate whose padding depended on the alignment of
-double or long long would have sized differently on i686, where those alignments are 4
-rather than 8. If a target ever laid these out differently while remaining conforming, the
-resulting difference would be an implementation-defined divergence rather than a compiler
-defect, and it would have to be recorded as an expected divergence with this record's target
-list narrowed and the reason stated here -- never left to surface as a finding against a
-backend that did nothing wrong, and never resolved by deleting the aggregate assertions,
-which would remove coverage this program exists to provide. The size of the enumerated type
-is implementation-defined too, and it is deliberately neither asserted nor printed; only the
-enumerator values, which their constant expressions fix, are.
-The exact per-target alignments and widths that this program declines to pin are not left
-untested elsewhere: 10_declarations_and_types/007_alignof_alignas.c pins them exactly,
-selecting the expectation from the architecture predefined macro. The division of labour is
-deliberate, so that neither program needs a restricted target list.
+THIS RECORD NARROWS NOTHING. All four targets, all three optimization levels and all three oracles
+are enabled, no expected-divergence marker is attached, and the full four-way cross-backend
+comparison therefore applies to every line this program prints. These notes exist to record how that
+was achieved, because a program of this kind could easily have had to narrow: _Static_assert reaches
+straight into the type system, which is precisely where the four supported targets differ.
+THE NORMALIZATION IN ONE SENTENCE: a raw value is printed only where it was MEASURED identical on
+all four targets, and every property that varies by target is printed as a 0/1 RELATION instead.
+NO ADDRESS, NO POINTER VALUE AND NO PLAIN long IS PRINTED ANYWHERE, no sizeof result whose width
+differs per target reaches a format string, and the entire format vocabulary of the program is %d
+and %lld -- the latter exactly 64 bits wide on every enabled target. Every quantity printed with %d
+is an int by its own type or by an explicit cast, so no conversion in a format argument can differ
+between the ILP32 backend and the three LP64 backends.
+WHY THE ASSERTIONS ARE THE HARDER HALF OF THAT NORMALIZATION. A printed value that varied by target
+would merely produce a divergence; a _Static_assert whose condition varied by target would break the
+BUILD there, which is worse, because a cell that never runs cannot be compared at all. The asserted
+set is therefore restricted to exact quantities measured identical on all four targets and to
+relations that hold whatever the individual values are -- ub_notes above enumerates both sets in
+full and names every target-varying property the program deliberately does not assert. The
+paragraphs below record what each of those properties was measured to be, and why declining to pin
+it costs no coverage.
+WIDTH NORMALIZATION. sizeof(long) and sizeof(void *) were MEASURED at 4 bytes with ELF32 on i686 and
+at 8 bytes with ELF64 on x86-64, AArch64 and RISC-V 64, exactly as the per-target table in
+docs/technical-specifications.md lines 457-462 records, so this program asserts and prints only that
+long is exactly pointer width, that size_t is exactly pointer width, and that ptrdiff_t is exactly
+pointer width -- each true on all four. size_t and ptrdiff_t are probed WITHOUT BEING NAMED, as
+sizeof(sizeof(int)) and as sizeof of a pointer difference, because naming either would require
+stddef.h and this program includes no header. The runtime twin of that pair compares those
+compile-time widths against the pointer size MEASURED as a byte stride, so a backend whose pointer
+size disagreed with its own analyser would print 0 rather than agreeing with itself.
+sizeof(long double) WAS MEASURED AT 16, 12, 16 AND 16 BYTES across x86-64, i686, AArch64 and
+RISC-V 64 -- the x87 80-bit format padded differently against IEEE binary128 -- so it appears only
+inside the ordering relation sizeof(double) <= sizeof(long double), and its size is never printed.
+The alignments of double and of long long were MEASURED at 8, 4, 8 and 8 across the same four
+targets, so they too appear only in relations: that alignment does not decrease with rank, and that
+no type aligns more strictly than its own size. Pinning any of these per target is deliberately
+another program's job; see the division of labour at the end of these notes.
+PLAIN-char SIGNEDNESS was MEASURED as signed on x86-64 and i686 and unsigned on AArch64 and
+RISC-V 64, so it is never asserted and never observed. Plain char appears only as a one-byte size
+probe, whose signedness cannot affect a size, and the one character value that is printed is read
+back from an explicitly signed char holding 65 -- a value every char signedness represents exactly.
+THE EXECUTION CHARACTER SET IS PINNED RATHER THAN ASSUMED. It is an implementation-defined property
+separate from char signedness, and the two must not be confused: routing a character through an
+explicitly signed char settles the signedness question and settles nothing about which code the
+letter carries. C11 5.2.1 leaves the members of the execution character set and their codes
+implementation-defined, so an implementation is free to place A somewhere other than 65. Exactly two
+printed lines observe a character's value here -- fold_char_a, which prints (int)'A' from a constant
+expression, and run_char_a, which prints the same value back out of the signed char -- and nothing
+else in the program observes one: msg is measured only by its size and by the offset of its
+terminator, probe_char only by its element size, and no line renders a literal. A single assertion
+therefore closes the whole accounting, and the program carries it: _Static_assert('A' == 65, "the
+execution character set places A at 65 (ASCII) on this target"). All four enabled targets were
+MEASURED to use the same ASCII-family basic execution character set, so the condition holds on every
+cell of this record's matrix. The assertion is the mechanism that keeps the two oracles honest: on
+an implementation whose character set differed, the cell would FAIL TO TRANSLATE naming the reason
+-- accusing the environment, where the difference actually lives -- instead of printing a different
+number that oracle (a) or oracle (b) would charge to the compiler under test. A future target that
+disagreed would announce itself at the build, and the correct response would be to narrow this
+record's target list with the reason recorded here, never to delete the assertion or the two lines
+it protects.
+TWO IMPLEMENTATION-DEFINED LAYOUT FACTS ARE RELIED ON AND WERE VERIFIED RATHER THAN ASSUMED. struct
+triple is int, short, unsigned char and union scalar_bytes has an 8-byte widest member; the standard
+leaves their exact sizes to the implementation, and both were MEASURED at 8 bytes on all four
+targets, with _Alignof(struct triple) measured at 4 everywhere, which is what licenses printing
+those sizes raw. The shapes were chosen for that reason: an aggregate whose padding depended on the
+alignment of double or of long long would have sized differently on i686, where those alignments are
+4 rather than 8. If a target ever laid these out differently while remaining conforming, the
+resulting difference would be an implementation-defined divergence rather than a compiler defect,
+and it would have to be recorded as an expected divergence with this record's target list narrowed
+and the reason stated here -- never left to surface as a finding against a backend that did nothing
+wrong, and never resolved by deleting the aggregate assertions, which would remove coverage this
+program exists to provide. The size of the enumerated type is implementation-defined too, and it is
+deliberately neither asserted nor printed; only the enumerator values, which their constant
+expressions fix, are.
+THE DIVISION OF LABOUR, so that nothing this program declines to pin is left untested. Every
+width-varying and alignment-varying quantity above is pinned EXACTLY, per target, by
+10_declarations_and_types/007_alignof_alignas.c: it selects one expected number from the
+architecture predefined macro -- 8 on x86-64, AArch64 and RISC-V 64, and 4 on i686 -- and then
+asserts _Alignof(double), _Alignof(long long), _Alignof(long), _Alignof(void *), sizeof(void *) and
+sizeof(long) against it, so a compiler that chose 5, 6, 7, or the wrong one of 4 and 8, changes that
+program's stdout. long double is the one type for which no exact answer exists to assert, its
+representation being implementation-defined, so cross-backend VALUE equality for it is a recorded
+exclusion in 13_floating_point/004_long_double_target_restricted.c, while the sibling
+004_sizeof_alignof.c in this area bounds it without ever printing its size. Splitting the work this
+way is deliberate: it is what lets all three programs keep the full four-target list instead of any
+one of them narrowing.
 END
 expected_stdout    <<END
 static_assert_count=34
