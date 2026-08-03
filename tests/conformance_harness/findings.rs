@@ -191,7 +191,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use super::classify::FINDINGS_REGISTER;
+use super::classify::{self, EXPECTED_DIVERGENCE_REGISTER, FINDINGS_REGISTER};
 use super::compare::{locate_stdout_divergence, unified_diff, Comparison};
 use super::compile::CompileOutcome;
 use super::env::Capabilities;
@@ -474,6 +474,16 @@ struct Contribution {
     /// filing finding would make it appear and disappear as other oracles contributed, which is the
     /// class of defect the merge exists to remove.
     attribution: Option<&'static str>,
+    /// Why the program's marker does not document **this oracle's** observation, when it has one.
+    ///
+    /// Per contribution for exactly the reason the attribution above is. A marker's scope names
+    /// oracles, so "the scope does not reach this arm" can be true of one arm of a cell and false of
+    /// another: a marker scoped to oracle (a) leaves an oracle (c) divergence outside its scope
+    /// entirely, while an oracle (a) divergence of another class is inside the scope and outside the
+    /// class. One note rendered for the whole directory would state one arm's answer over both, and
+    /// the arm it did not describe would be described wrongly — in a committed artifact, about the
+    /// one question a reader uses to decide whether a marker needs widening.
+    marker_note: Option<String>,
 }
 
 /// One finding directory's contributions and what the run has been charged for it.
@@ -885,6 +895,7 @@ fn build_contribution(
         comparison_block: render_comparison_block(finding, &captures),
         diff: render_diff_section(finding),
         attribution: finding.cross_arm_attribution(),
+        marker_note: finding.marker_note().map(String::from),
     };
     for capture in &captures {
         contribution.capture_blocks.push((
@@ -1792,7 +1803,8 @@ pub struct Finding {
 ///   stdout difference is unreadable without it, and sending the reader to the record for it
 ///   defeats the purpose of a self-contained artifact directory.
 /// - **Whether the program carries a marker at all** is stated explicitly, in both directions.
-///   When one exists but does not cover the cell, `marker_note` explains it; when none exists,
+///   When one exists but does not document this divergence — a different class, a scope that does
+///   not reach this cell, or both — `marker_note` names which dimension missed; when none exists,
 ///   nothing else in the manifest says so, and "this program is documented nowhere" is precisely
 ///   what makes the divergence a finding rather than an expected divergence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1842,7 +1854,9 @@ impl RecordedContract {
             "  documented_by_marker = {}{}\n",
             self.carries_marker,
             if self.carries_marker {
-                " (a marker is present; the note above states why it does not cover this cell)"
+                " (a marker is present but does not document this divergence; each observation \
+                 section above carries a note stating which dimension missed for that arm — the \
+                 class the marker claims, or the scope it covers, or both)"
             } else {
                 " (no expected-divergence marker of any scope, which is what makes this \
                  divergence undocumented and therefore a finding)"
@@ -1877,11 +1891,17 @@ impl Finding {
     /// # Errors
     ///
     /// Refuses a comparison that observed no divergence, a comparison the record excluded from its
-    /// oracle, a divergence an expected-divergence marker already covers, a record that describes a
-    /// different program from the cell, and a corpus path that does not satisfy the containment
-    /// rules above. Every one of those is a defect in the caller or in the corpus rather than
-    /// something an environment can produce, so each is an explanatory hard failure rather than a
-    /// finding written anyway.
+    /// oracle, a divergence an expected-divergence marker **documents** — meaning
+    /// [`classify::covering_marker`] matches all four dimensions, the class as well as the oracle,
+    /// the target and the optimization level — a record that describes a different program from the
+    /// cell, and a corpus path that does not satisfy the containment rules above. Every one of those
+    /// is a defect in the caller or in the corpus rather than something an environment can produce,
+    /// so each is an explanatory hard failure rather than a finding written anyway.
+    ///
+    /// A marker that is merely *in scope* is deliberately **not** one of those refusals. A program
+    /// may carry a marker for one class and then diverge in another on the very arm the marker
+    /// names; that second divergence is undocumented, and it is a finding — with its artifacts —
+    /// not a precondition violation. The note the finding carries says which dimension missed.
     pub fn new(
         key: CellKey,
         comparison: &Comparison,
@@ -1936,40 +1956,107 @@ impl Finding {
             "c",
         )?;
 
-        // A marker whose scope DOES cover this cell means the divergence is documented, which makes
-        // it an expected divergence rather than a finding. Refused rather than written, for the same
-        // reason an agreement is: a finding names an *undocumented* difference, so filing a
-        // documented one would add an entry to the register that the repository has already
-        // explained. This enforces the invariant the rest of the module states — a marker
-        // identifier never appears on a finding's outcome — instead of merely relying on it.
+        // A marker that documents THIS divergence means it is an expected divergence rather than a
+        // finding. Refused rather than written, for the same reason an agreement is: a finding names
+        // an *undocumented* difference, so filing a documented one would add an entry to the register
+        // that the repository has already explained. This enforces the invariant the rest of the
+        // module states — a marker identifier never appears on a finding's outcome — instead of
+        // merely relying on it.
         //
         // This is not the writer taking over classification. It renders no verdict and chooses no
         // alternative; it declines a precondition violation and names the classification the caller
         // should have reached, exactly as the three refusals above do.
-        if let Some(marker) = manifest.marker() {
-            if marker.covers(&key, comparison.oracle) {
-                return Err(HarnessError::new(
-                    context,
-                    format!(
-                        "expected-divergence marker {} covers this cell (class {}, scope {}), so \
-                         this divergence is DOCUMENTED and belongs in the expected-divergence \
-                         register, not the finding register; classify it as an expected divergence \
-                         instead of writing a finding for it",
-                        sanitize_text_for_report(marker.id()),
-                        sanitize_text_for_report(&marker.class().to_string()),
-                        sanitize_text_for_report(marker.scope().raw())
-                    ),
-                ));
-            }
+        //
+        // # Why the question is asked of the classifier's own predicate
+        //
+        // "Documented" is [`classify::covering_marker`], and asking it here rather than re-deriving
+        // it is the whole point: the writer's precondition and the verdict that sent the cell here
+        // are then the same question, so they cannot disagree. Documented means all four dimensions
+        // agree — the marker's scope covers this oracle, this target and this optimization level,
+        // **and** its class equals the class observed.
+        //
+        // Asking the scope half alone ([`ExpectedDivergence::covers`], which by design says nothing
+        // about the class) would refuse exactly the case the classifier correctly rules a finding: a
+        // marked program that diverges in a class its marker does not claim, on an oracle the
+        // marker's scope happens to name. A marker documenting a `compile_failure` says the compiler
+        // rejects a construct; it says nothing whatever about the compiler ACCEPTING that construct
+        // and computing a wrong answer, which is a second and undocumented defect. Refusing there
+        // would suppress the artifact for the arm carrying the strongest evidence — that the
+        // independent reference compiler produced a different answer — and the refusal's own advice
+        // would point a maintainer at reclassifying a wrong answer as an expected divergence, which
+        // requirement 5 forbids. So the class is part of the question, and a marker is never widened
+        // to absorb a divergence it does not describe.
+        if let Some(marker) = classify::covering_marker(manifest, &key, comparison.oracle, class) {
+            return Err(HarnessError::new(
+                context,
+                format!(
+                    "expected-divergence marker {} documents this divergence — it claims class {} \
+                     and its scope {} covers this cell and {}, which is the {} observed here — so \
+                     this divergence is DOCUMENTED and belongs in the expected-divergence \
+                     register, not the finding register; classify it as an expected divergence \
+                     instead of writing a finding for it",
+                    sanitize_text_for_report(marker.id()),
+                    sanitize_text_for_report(&marker.class().to_string()),
+                    sanitize_text_for_report(marker.scope().raw()),
+                    comparison.oracle,
+                    sanitize_text_for_report(&class.to_string()),
+                ),
+            ));
         }
 
-        // A marker that exists but does not cover this cell is evidence worth carrying: it tells a
-        // reader that the divergence was considered and scoped elsewhere, which is a different
-        // situation from a program nobody has documented at all.
+        // A marker that exists but does not document this divergence is evidence worth carrying: it
+        // tells a reader that a divergence in this program was considered and scoped elsewhere, which
+        // is a different situation from a program nobody has documented at all.
+        //
+        // # Why the note names WHICH dimension missed
+        //
+        // Reaching this point means [`classify::covering_marker`] said no, and there are two
+        // independent ways for it to say so — the class the marker claims, and the scope it covers.
+        // Both are reachable and they mean different things to a maintainer, so the note states which
+        // one it was rather than asserting one of them. A note that said "its scope does not cover
+        // this cell" for a class mismatch would be plainly false in a committed artifact, and would
+        // send a reader to widen a scope that was never the problem.
+        //
+        // The two halves are read from the same predicates that compose the authority — the marker's
+        // own class, and [`ExpectedDivergence::covers`] for the scope — so no dimension is matched a
+        // second time here and the note cannot drift away from the decision it explains.
         let marker_note = manifest.marker().map(|marker| {
+            let scope_covers = marker.covers(&key, comparison.oracle);
+            let gap = match (scope_covers, marker.class() == class) {
+                // The case Issue-1's class-blind precondition suppressed: documented for one class,
+                // in scope for this arm, and silent about what actually happened.
+                (true, false) => format!(
+                    "whose scope covers this cell but whose class does not — it documents {} while \
+                     a {class} was observed",
+                    marker.class()
+                ),
+                (false, true) => format!(
+                    "which documents this very class but whose scope does not cover this cell — it \
+                     covers {}",
+                    marker.scope().raw()
+                ),
+                (false, false) => format!(
+                    "which covers neither this cell nor this divergence — its scope is {} and it \
+                     documents {} while a {class} was observed",
+                    marker.scope().raw(),
+                    marker.class()
+                ),
+                // Unreachable: a marker covering both halves is the documented case the precondition
+                // above refuses. Stated rather than assumed, and stated as what it would mean if the
+                // two ever disagreed, so a note is never silently wrong.
+                (true, true) => String::from(
+                    "which appears to document this divergence, which contradicts the precondition \
+                     that admitted this finding; treat the classification of this cell as \
+                     unestablished and report it",
+                ),
+            };
             sanitize_text_for_report(&format!(
-                "the program carries expected-divergence marker {} (class {}, scope {}), whose \
-                 scope does not cover this cell, so this divergence is undocumented",
+                "the program carries expected-divergence marker {} (class {}, scope {}), {gap}, so \
+                 this divergence is undocumented and is NOT excused by it. A marker is never \
+                 widened to absorb a divergence it does not describe, because that would launder a \
+                 genuine second defect into an expected divergence while the register still \
+                 documented only the first; if this divergence is also documented, it needs its own \
+                 marker in this program's record and in {EXPECTED_DIVERGENCE_REGISTER} both",
                 marker.id(),
                 marker.class(),
                 marker.scope().raw()
@@ -2038,6 +2125,20 @@ impl Finding {
     /// Every capture held as evidence, in the order it was added.
     pub fn captures(&self) -> &[Capture] {
         &self.captures
+    }
+
+    /// Why this program's marker, when it has one, does not document this divergence.
+    ///
+    /// `None` when the program carries no marker at all, which is the ordinary shape of a finding.
+    /// `Some` names the marker and the dimension that missed — the class it claims, or the scope it
+    /// covers, or both — and the manifest reproduces it verbatim.
+    ///
+    /// Offered for reading because the note is a *claim about the classification*, and the
+    /// infrastructure audit holds it against the same predicate the precondition consulted. A note
+    /// nothing can inspect is a sentence that can quietly become false, which is precisely how a
+    /// marked program's divergence came to be described as out of scope when only its class differed.
+    pub fn marker_note(&self) -> Option<&str> {
+        self.marker_note.as_deref()
     }
 
     /// The identifier, and therefore the directory name.
@@ -3775,6 +3876,16 @@ fn render_isolated_environment() -> String {
             .copied()
             .unwrap_or("TMPDIR"),
     )));
+    text.push_str(&comment(&format!(
+        "The launch is placed in a process group of its own where the machine has `setsid`, and that \
+         happens HERE, in front of the command `env` is given. `setsid` is a program and cannot \
+         execute a shell function, so it can only ever be applied on this side of the isolation. The \
+         process the watchdog backgrounds is unaffected: this function `exec`s, `env` `exec`s, and \
+         `setsid` establishes the new session in that same process, so the backgrounded PID is still \
+         the group leader — which is what makes the negated PID in {SH_BOUNDED} a real group. It also \
+         means the utility in front of the command runs under the recorded environment rather than \
+         the reader's, which is what the run did."
+    )));
     text.push_str(&format!("{SH_ISOLATED}() {{\n"));
     text.push_str("    if ! command -v env > /dev/null 2>&1; then\n");
     text.push_str(
@@ -3783,6 +3894,9 @@ fn render_isolated_environment() -> String {
          invocation\\n' >&2\n",
     );
     text.push_str("        exit 1\n");
+    text.push_str("    fi\n");
+    text.push_str(&format!("    if [ -n \"${{{VAR_SETSID}:-}}\" ]; then\n"));
+    text.push_str(&format!("        set -- \"${VAR_SETSID}\" \"$@\"\n"));
     text.push_str("    fi\n");
     text.push_str("    exec env -i \\\n");
     text.push_str(&format!("        PATH=\"${VAR_CHILD_PATH}\" \\\n"));
@@ -4015,6 +4129,15 @@ fn render_bounded_invocation(
 ///   any signal reaches it. Where `setsid` is absent the function kills the direct child and **says
 ///   so on stderr**, which is a stated degradation rather than a silent one.
 ///
+///   `setsid` is applied *inside* [`SH_ISOLATED`], in front of the command handed to `env`, and it
+///   has to be: `setsid` is a program, so it can only exec another program, and a launch of the shape
+///   `setsid isolated …` names a shell function it cannot exec. That shape fails to start anything —
+///   status 127, `setsid: failed to execute isolated` on stderr — while the comparison below still
+///   runs and prints a verdict about two empty streams, which is the one outcome an artifact whose
+///   purpose is reproduction must never produce. Applying it inside costs nothing the group needs:
+///   [`SH_ISOLATED`] `exec`s, `env` `exec`s, and `setsid` establishes the session in that same
+///   process, so the PID the shell backgrounded is still the group leader.
+///
 ///   The direct child is always reaped with `wait`, whichever path was taken, so no zombie is left
 ///   behind; descendants killed by the group signal are children of the child and are reaped by the
 ///   system, which is not something a script can wait on.
@@ -4044,13 +4167,16 @@ fn render_bounded_run_function() -> String {
          put it. Its status is never read. Where the preamble declares none, the reproduction is \
          still bounded, by the loop below."
     )));
-    text.push_str(&comment(
+    text.push_str(&comment(&format!(
         "The launch is placed in a process group of its OWN, through `setsid` where the machine has \
          it, so that a timeout kills the program and not merely the utility in front of it. `setsid` \
          makes the child a group leader, so its PGID is its PID, and that group cannot be this \
          script's own because this script's group leader is alive and the kernel cannot have reused \
-         its PID. Without `setsid` the fallback kills the direct child only, and says so on stderr.",
-    ));
+         its PID. It is applied in front of the command inside {SH_ISOLATED} above — a program cannot \
+         execute a shell function — and the backgrounded PID is still the leader because that path is \
+         a chain of exec calls in one process. Without `setsid` the fallback kills the direct child \
+         only, and says so on stderr."
+    )));
     text.push_str(&format!(
         "{VAR_SETSID}=$(command -v setsid 2> /dev/null || :)\n\n"
     ));
@@ -4063,40 +4189,27 @@ fn render_bounded_run_function() -> String {
     text.push_str(&format!(
         "    _b_outer=$(( _b_budget + ${{{VAR_OUTER_MARGIN}:-5}} ))\n"
     ));
-    // Four launches rather than two, because the group and the outer net are independent choices and
-    // collapsing them would leave one of the four cases untested. The isolation wraps the utility as
-    // well as the command, which is what the harness does: it installs the environment on the one
-    // command it spawns, and that command is already the wrapped vector. Isolating only the inner
-    // command would leave the utility running under the reader's environment and pass that environment
-    // on to the program it bounds. `setsid` goes outside the isolation, because it has to be the
-    // process the shell backgrounds for its PID to be the group's.
+    // Two launches, one per outer-net choice. The process group is NOT a third choice made here:
+    // `setsid` is a program and cannot execute a shell function, so a launch of the shape
+    // `setsid isolated …` fails to exec — measured as status 127 on every bounded invocation, with
+    // `setsid: failed to execute isolated` on stderr, which reproduces nothing while still printing a
+    // comparison. The group is therefore established inside [`SH_ISOLATED`], in front of the command
+    // `env` is given, where the thing `setsid` execs is a program. The process the shell backgrounds
+    // is still the group leader, because that path is a chain of `exec`s in one process.
+    //
+    // The isolation wraps the utility as well as the command, which is what the harness does: it
+    // installs the environment on the one command it spawns, and that command is already the wrapped
+    // vector. Isolating only the inner command would leave the utility running under the reader's
+    // environment and pass that environment on to the program it bounds.
     text.push_str(&format!("    if [ -n \"${{{VAR_TIMEOUT}:-}}\" ]; then\n"));
     text.push_str(&format!(
-        "        if [ -n \"${{{VAR_SETSID}:-}}\" ]; then\n"
-    ));
-    text.push_str(&format!(
-        "            \"${VAR_SETSID}\" {SH_ISOLATED} \"${VAR_TIMEOUT}\" \"$_b_outer\" \"$@\" \
+        "        {SH_ISOLATED} \"${VAR_TIMEOUT}\" \"$_b_outer\" \"$@\" \
          > \"$_b_stdout\" 2> \"$_b_stderr\" &\n"
     ));
-    text.push_str("        else\n");
-    text.push_str(&format!(
-        "            {SH_ISOLATED} \"${VAR_TIMEOUT}\" \"$_b_outer\" \"$@\" \
-         > \"$_b_stdout\" 2> \"$_b_stderr\" &\n"
-    ));
-    text.push_str("        fi\n");
     text.push_str("    else\n");
     text.push_str(&format!(
-        "        if [ -n \"${{{VAR_SETSID}:-}}\" ]; then\n"
+        "        {SH_ISOLATED} \"$@\" > \"$_b_stdout\" 2> \"$_b_stderr\" &\n"
     ));
-    text.push_str(&format!(
-        "            \"${VAR_SETSID}\" {SH_ISOLATED} \"$@\" > \"$_b_stdout\" \
-         2> \"$_b_stderr\" &\n"
-    ));
-    text.push_str("        else\n");
-    text.push_str(&format!(
-        "            {SH_ISOLATED} \"$@\" > \"$_b_stdout\" 2> \"$_b_stderr\" &\n"
-    ));
-    text.push_str("        fi\n");
     text.push_str("    fi\n");
     text.push_str("    _b_child=$!\n");
     text.push_str("    _b_waited=0\n");
@@ -4658,13 +4771,16 @@ fn assemble_manifest(
         if let Some(attribution) = contribution.attribution {
             text.push_str(&format!("\n{}\n", attribution_account(attribution)));
         }
+        // Inside this oracle's section, because it answers a question about this oracle: a marker's
+        // scope names oracles, so the dimension that missed can differ from arm to arm. See
+        // [`Contribution::marker_note`].
+        if let Some(note) = &contribution.marker_note {
+            text.push_str(&format!("\n  note: {note}\n"));
+        }
         text.push_str("\ncaptures contributed by this oracle:\n");
         for line in &contribution.roster {
             text.push_str(&format!("  {line}\n"));
         }
-    }
-    if let Some(note) = &finding.marker_note {
-        text.push_str(&format!("\n  note: {note}\n"));
     }
 
     text.push_str(&finding.contract.render());
@@ -6340,8 +6456,10 @@ fn publish_artifacts(
 /// mistake for a finding that was recorded properly.
 ///
 /// The marker identifier is always absent: a finding is by definition an **undocumented**
-/// divergence. One that a marker covered would have been classified as an expected divergence, and
-/// cannot reach this point at all — [`Finding::new`] refuses to assemble it.
+/// divergence. One a marker *documents* — its class as well as its scope — would have been
+/// classified as an expected divergence and cannot reach this point at all: [`Finding::new`] refuses
+/// to assemble it. A marker that is merely in scope for the arm documents nothing about a divergence
+/// of another class, so such a cell does reach here, and it reaches here with its artifacts.
 pub fn record(finding: &Finding, caps: &Capabilities) -> Outcome {
     match write(finding, caps) {
         Ok(artifacts) => Outcome::new(

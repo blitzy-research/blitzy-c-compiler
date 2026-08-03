@@ -618,6 +618,13 @@ fn infra_expected_divergence_register() {
         );
     }
 
+    // And what each marker actually *does* to a verdict, which the two checks above cannot see. A
+    // marker consistent with the register can still be applied wrongly: the register audit compares
+    // documents, while this compares the two predicates that decide whether a divergence is excused
+    // — the classifier's authority and the finding writer's precondition — over every class, so a
+    // marker can never absorb a divergence of a class it does not document.
+    violations.extend(marker_classification_violations(&markers));
+
     assert!(
         violations.is_empty(),
         "the expected-divergence markers and {} are not consistent — {} violation(s):\n{}",
@@ -4289,6 +4296,354 @@ fn comma_list(items: &[impl AsRef<str>]) -> String {
         .map(|item| item.as_ref().to_string())
         .collect::<Vec<String>>()
         .join(", ")
+}
+
+/// Whether the finding writer and the classifier still agree about what a marker *documents*, over
+/// every committed marker, every cell of the full matrix and every divergence class.
+///
+/// # The failure this exists to prevent
+///
+/// A marker excuses a divergence only when all four dimensions agree: its scope must cover the
+/// oracle, the target and the optimization level, **and** its class must equal the class observed.
+/// That is [`classify::covering_marker`]. The scope half alone is
+/// [`manifest::ExpectedDivergence::covers`], which is deliberately class-blind because two callers
+/// have no observed class to compare against — a stale marker on an agreement, and an arm the record
+/// excluded.
+///
+/// Two predicates that answer *almost* the same question are exactly how a suite drifts. Asking the
+/// class-blind one where the class matters produces the worst possible outcome for this suite: a
+/// marked program that diverges in a class its marker does not claim, on an oracle the marker's scope
+/// happens to name, is refused its finding artifact and reported as an unexplained failure — and the
+/// refusal's own advice sends a maintainer to reclassify a genuine wrong answer as an expected
+/// divergence, which requirement 5 forbids and which would launder a second defect into
+/// documentation that never described it. The compiler accepting a construct and computing the wrong
+/// value is the most plausible real outcome for a newly implemented feature, so this is not a corner.
+///
+/// # What is asserted, and why it exercises the writer for real
+///
+/// For every committed marker, at every cell of `Target::ALL × OptLevel::ALL`, for every oracle and
+/// every class:
+///
+/// - [`classify::covering_marker`] answers `Some` exactly when the scope covers the arm **and** the
+///   class matches — never for the other five classes, and never outside the scope;
+/// - [`Finding::new`] — the writer's own precondition, not a copy of it — refuses exactly the
+///   documented combination and admits every other, so a class the marker does not claim gets its
+///   artifact even on an arm the marker's scope names;
+/// - the admitted finding's marker note states *which* dimension missed, and never claims a scope
+///   miss on an arm the scope covers, because that note ships inside a committed artifact and a
+///   maintainer acts on it.
+///
+/// The writer is called rather than re-implemented, which is what makes this a regression test for
+/// the defect rather than a restatement of the intended rule. It is safe to call in an audit:
+/// [`Finding::new`] validates and reads, and writing artifacts is a separate step this never
+/// reaches, so nothing is compiled, executed or written. The comparison handed to it is synthetic and
+/// says so in its own summary.
+///
+/// Folded into the register audit deliberately: it needs no compiler, no emulator and no toolchain —
+/// only the committed records — and the suite's test count is fixed by its own health gate, so a new
+/// `#[test]` is not available to spend.
+fn marker_classification_violations(markers: &[manifest::ExpectedDivergence]) -> Vec<String> {
+    let mut violations: Vec<String> = Vec::new();
+    let mut documented_refusals = 0usize;
+    let mut undocumented_admissions = 0usize;
+
+    for marker in markers {
+        // The record is loaded from the program the marker governs, so the manifest handed to both
+        // predicates is the very one a real cell would use — including its own program identity,
+        // which `Finding::new` checks against the cell key.
+        let record = match manifest::load_for_source(marker.program_path()) {
+            Ok(record) => record,
+            Err(error) => {
+                violations.push(format!(
+                    "marker {} governs {} but its expectation record could not be loaded: {error}. \
+                     Without the record neither the classifier's authority nor the finding writer's \
+                     precondition can be exercised, so the agreement between them is unestablished",
+                    marker.id(),
+                    marker.program_label(),
+                ));
+                continue;
+            }
+        };
+
+        for &target in &Target::ALL {
+            for &opt in &OptLevel::ALL {
+                let key = match CellKey::new(record.area(), record.program(), target, opt) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        violations.push(format!(
+                            "marker {}: the cell identity {}/{} @ {target} {} could not be built: \
+                             {error}",
+                            marker.id(),
+                            record.area(),
+                            record.program(),
+                            opt.flag(),
+                        ));
+                        continue;
+                    }
+                };
+                for &oracle in &Oracle::ALL {
+                    for &class in &DivergenceClass::ALL {
+                        let probe = ClassificationProbe {
+                            marker,
+                            record: &record,
+                            key: key.clone(),
+                            oracle,
+                            class,
+                        };
+                        let (result, defects) = probe.audit();
+                        violations.extend(defects);
+                        match result {
+                            ProbeResult::DocumentedRefused => documented_refusals += 1,
+                            ProbeResult::UndocumentedAdmitted => undocumented_admissions += 1,
+                            ProbeResult::Inconsistent => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!(
+        "marker classification — {} marker(s) exercised over {} target(s) × {} level(s) × {} \
+         oracle(s) × {} class(es): {} documented combination(s) refused by the finding writer as \
+         expected divergences, {} undocumented combination(s) admitted as findings with their \
+         artifacts. A class the marker does not claim is NOT excused by it, even on an arm its scope \
+         names",
+        markers.len(),
+        Target::ALL.len(),
+        OptLevel::ALL.len(),
+        Oracle::ALL.len(),
+        DivergenceClass::ALL.len(),
+        documented_refusals,
+        undocumented_admissions,
+    );
+
+    violations
+}
+
+/// One (marker, cell, oracle, class) combination of [`marker_classification_violations`].
+///
+/// A value rather than a long argument list, following the `Side`/`CellPlan` idiom already used in
+/// this file: the four dimensions plus the record travel together because every check below asks
+/// about the same combination, and grouping them keeps each check to one line at its call site.
+struct ClassificationProbe<'a> {
+    /// The committed marker under audit.
+    marker: &'a manifest::ExpectedDivergence,
+    /// The record that carries it — the same record a real cell of this program would use.
+    record: &'a Manifest,
+    /// The cell the divergence is imagined at.
+    key: CellKey,
+    /// The oracle that would have observed it.
+    oracle: Oracle,
+    /// The class that would have been observed, which is the dimension the defect ignored.
+    class: DivergenceClass,
+}
+
+/// What one probe established, so the audit can count the two legitimate answers separately and
+/// report anything else as a defect.
+enum ProbeResult {
+    /// The marker documents this divergence and the writer refused it: an expected divergence.
+    DocumentedRefused,
+    /// Nothing documents it and the writer admitted it, with its artifacts: a finding.
+    UndocumentedAdmitted,
+    /// Neither, which the returned violations describe.
+    Inconsistent,
+}
+
+impl ClassificationProbe<'_> {
+    /// Whether the marker's scope reaches this arm — the class-blind half of the question.
+    fn scope_covers(&self) -> bool {
+        self.marker.covers(&self.key, self.oracle)
+    }
+
+    /// Whether the marker **documents** this divergence: the scope half **and** the class.
+    fn documented(&self) -> bool {
+        self.scope_covers() && self.marker.class() == self.class
+    }
+
+    /// The combination, named once for every diagnostic this probe can produce.
+    fn situation(&self) -> String {
+        format!(
+            "marker {} (class {}, scope {}) against a {} observed by {} at {}",
+            self.marker.id(),
+            self.marker.class().label(),
+            self.marker.scope().raw(),
+            self.class,
+            self.oracle,
+            self.key,
+        )
+    }
+
+    /// Ask both authorities about this combination and report every disagreement.
+    ///
+    /// Three checks, made for every combination rather than for a sample: the classifier's
+    /// predicate, the finding writer's own precondition — called, not restated — and the note the
+    /// writer produced when it admitted the finding.
+    fn audit(&self) -> (ProbeResult, Vec<String>) {
+        let mut defects: Vec<String> = Vec::new();
+        let documented = self.documented();
+        let situation = self.situation();
+
+        // Check one: the classifier's authority, which is what decides XFAIL against FINDING.
+        let authority = classify::covering_marker(self.record, &self.key, self.oracle, self.class);
+        if authority.is_some() != documented {
+            defects.push(format!(
+                "{situation}: classify::covering_marker answered {} where {} is correct. A marker \
+                 documents a divergence only when its scope covers the arm ({} here) AND its class \
+                 equals the class observed ({} here). Relaxing this predicate would let one marker \
+                 absorb a second, undocumented defect",
+                describe_documentation(authority.is_some()),
+                describe_documentation(documented),
+                self.scope_covers(),
+                self.marker.class() == self.class,
+            ));
+        }
+
+        // Check two: the finding writer's own precondition, exercised rather than restated.
+        let comparison = synthetic_divergence(self.oracle, self.class);
+        let result = match (
+            documented,
+            Finding::new(self.key.clone(), &comparison, self.record),
+        ) {
+            (true, Err(_)) => ProbeResult::DocumentedRefused,
+            (true, Ok(_)) => {
+                defects.push(format!(
+                    "{situation}: the finding writer ADMITTED a divergence this marker documents. \
+                     A documented divergence is an expected divergence; filing it as a finding \
+                     would put an entry in the findings register that the repository has already \
+                     explained, and would break the invariant that a marker identifier never \
+                     appears on a finding's outcome"
+                ));
+                ProbeResult::Inconsistent
+            }
+            (false, Ok(finding)) => {
+                defects.extend(marker_note_defects(
+                    &finding,
+                    self.marker,
+                    self.class,
+                    self.scope_covers(),
+                ));
+                ProbeResult::UndocumentedAdmitted
+            }
+            (false, Err(error)) => {
+                defects.push(format!(
+                    "{situation}: the finding writer REFUSED to assemble the finding, reporting: \
+                     {error}. This divergence is undocumented, so the classifier rules it a \
+                     finding and the writer must produce its artifacts; a refusal here surfaces as \
+                     an unexplained failure with no reproducer, and its advice would send a \
+                     maintainer to reclassify an undocumented divergence as a documented one. The \
+                     precondition must ask classify::covering_marker — the class as well as the \
+                     scope — and never the class-blind scope half"
+                ));
+                ProbeResult::Inconsistent
+            }
+        };
+        (result, defects)
+    }
+}
+
+/// `documented` or `undocumented`, so the two halves of a disagreement read the same way.
+fn describe_documentation(documented: bool) -> &'static str {
+    if documented {
+        "documented"
+    } else {
+        "undocumented"
+    }
+}
+
+/// Whether the note an admitted finding carries tells the truth about why the marker does not
+/// document the divergence.
+///
+/// Asserted as properties rather than as an exact sentence: the note must name the marker, must name
+/// the class actually observed whenever that differs from the class the marker claims, and must not
+/// assert the wrong dimension — no scope miss on an arm the scope covers, and no scope hit on an arm
+/// it does not. The note ships inside a committed artifact directory and is the sentence a
+/// maintainer acts on, so a note that named the wrong dimension would be the same misdirection in a
+/// quieter place.
+fn marker_note_defects(
+    finding: &Finding,
+    marker: &manifest::ExpectedDivergence,
+    class: DivergenceClass,
+    scope_covers: bool,
+) -> Vec<String> {
+    let context = format!(
+        "the finding admitted for {} under {} carries a marker note that",
+        finding.key(),
+        finding.oracle(),
+    );
+    let Some(note) = finding.marker_note() else {
+        return vec![format!(
+            "{context} is absent, although {} carries marker {}. A reader must be told that a \
+             divergence in this program was considered and scoped elsewhere, because that is a \
+             different situation from a program nobody has documented at all",
+            marker.program_label(),
+            marker.id(),
+        )];
+    };
+
+    let mut defects: Vec<String> = Vec::new();
+    if !note.contains(marker.id()) {
+        defects.push(format!(
+            "{context} does not name marker {}, so a reader cannot look up what was documented: \
+             {note}",
+            marker.id(),
+        ));
+    }
+    if marker.class() != class && !note.contains(class.label()) {
+        defects.push(format!(
+            "{context} does not name the {class} actually observed, only the {} the marker claims, \
+             so it describes the documentation rather than the divergence: {note}",
+            marker.class().label(),
+        ));
+    }
+    if scope_covers
+        && (note.contains("does not cover this cell") || note.contains("covers neither"))
+    {
+        defects.push(format!(
+            "{context} claims the marker's scope does not reach this cell, but its scope {} does \
+             cover {} at {}; the dimension that missed is the class. A note that sends a reader to \
+             widen a scope that was never the problem is worse than no note: {note}",
+            marker.scope().raw(),
+            finding.oracle(),
+            finding.key(),
+        ));
+    }
+    if !scope_covers && note.contains("scope covers this cell") {
+        defects.push(format!(
+            "{context} claims the marker's scope covers this cell, but its scope {} does not reach \
+             {} at {}: {note}",
+            marker.scope().raw(),
+            finding.oracle(),
+            finding.key(),
+        ));
+    }
+    defects
+}
+
+/// A divergence of a given class and oracle, constructed in memory for the audit above.
+///
+/// Says what it is in its own summary, because it travels into [`Finding::new`] and a reader of any
+/// diagnostic quoting it must not mistake it for something a compiler produced. Nothing here is
+/// compiled, executed, compared or written: the audit asks the writer a question about
+/// classification and discards the answer's evidence.
+fn synthetic_divergence(oracle: Oracle, class: DivergenceClass) -> Comparison {
+    Comparison {
+        equal: false,
+        class: Some(class),
+        summary: format!(
+            "expected-divergence register audit: a synthetic {class} attributed to {oracle}, \
+             constructed in memory to ask the finding writer whether this divergence is documented; \
+             nothing was compiled, executed or compared to produce it"
+        ),
+        detail: String::from(
+            "This comparison is an audit construct, not an observation. It exists so that the \
+             finding writer's marker precondition is exercised for every divergence class against \
+             every committed marker, which is what keeps that precondition and the classifier's own \
+             authority from drifting apart.",
+        ),
+        oracle,
+        excluded: None,
+    }
 }
 
 /// Every curated finding directory committed under the corpus, in a deterministic order.
