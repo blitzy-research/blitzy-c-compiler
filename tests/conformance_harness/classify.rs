@@ -25,7 +25,8 @@
 //! | The comparison agrees and no marker governs the cell | `PASS` | no |
 //! | The comparison agrees and a marker covers this cell and oracle | `XPASS` | **yes**, unless `BCC_CONFORMANCE_ALLOW_XPASS` |
 //! | A divergence, and a marker covers this oracle, target, level **and** class | `XFAIL` | no |
-//! | A build produced no artifact, and a marker covers this target, level **and** class | `XFAIL` on every oracle the refusal blocked | no |
+//! | A build produced no artifact, and a marker covers this oracle, target, level **and** class | `XFAIL` on that oracle's arm | no |
+//! | A build produced no artifact, and a marker covers the other three dimensions but not this oracle | `FINDING` on that arm | no — a finding is a deliverable |
 //! | A divergence with no covering marker | `FINDING` | no — a finding is a deliverable |
 //! | Not attempted because the record narrows coverage, and a marker covers the scope | `XFAIL` citing the marker | no |
 //! | Not attempted because the record narrows coverage, with no covering marker | `XFAIL` citing the record's own recorded reason | no |
@@ -36,7 +37,7 @@
 //!
 //! | Class | Meaning, and how it can be excused |
 //! |---|---|
-//! | `compile_failure` | One compiler rejected a program the other accepted. Excusable by a marker citing a documented unimplemented extension — the worked example is GCC case ranges, which appear in no documented extension inventory. |
+//! | `compile_failure` | One compiler rejected a program the other accepted. Excusable by a marker citing a limitation the repository **explicitly documents** — never by an inventory that merely omits the construct, which is why GCC case ranges carry no marker and a refusal there is a finding. |
 //! | `link_failure` | The program translated but did not link. **Attributable to this machine** when a target's C runtime is absent, in which case it is `UNAVAILABLE` at environment scope and never a finding against the compiler. |
 //! | `run_crash` | The program died on a signal instead of exiting. Compared as a raw wait status, so it is never conflated with a numerically equal ordinary exit. |
 //! | `exit_code_mismatch` | Two completed runs disagreed on status. |
@@ -76,14 +77,14 @@
 //!
 //! # Scope matching is strict
 //!
-//! A marker excuses a **diverging comparison** only when its scope covers this oracle, this
-//! target and this optimization level **and** its class equals the class observed — see
-//! [`covers`]. A marker for `compile_failure` on oracle (a) must not absorb a
-//! `stdout_mismatch` on oracle (b): that would launder a genuine second defect into an
-//! expected divergence. When a marker exists but does not cover the observation, the verdict
-//! falls through to [`Verdict::Finding`] and the detail says exactly which dimension failed to
-//! match. A **refusal** is matched on three of those four dimensions for the reason the next
-//! section gives.
+//! A marker excuses a divergence only when its scope covers this oracle, this target and this
+//! optimization level **and** its class equals the class observed — see [`covers`]. A marker for
+//! `compile_failure` on oracle (a) must not absorb a `stdout_mismatch` on oracle (b): that would
+//! launder a genuine second defect into an expected divergence. When a marker exists but does not
+//! cover the observation, the verdict falls through to [`Verdict::Finding`] and the detail says
+//! exactly which dimension failed to match. All **four** dimensions are matched for **every**
+//! divergence this module classifies — a comparison that differed and a build that produced nothing
+//! alike; the next section gives the reason the oracle dimension is meaningful for a refusal too.
 //!
 //! A marker changes how a divergence is **classified**, never whether the feature is
 //! **exercised**. Nothing here can short-circuit execution because a marker exists: the
@@ -302,18 +303,17 @@ pub enum Attribution {
 impl Attribution {
     /// Mirror the build layer's own scope, exhaustively.
     ///
-    /// The only conversion offered, and deliberately so. An earlier version took the build layer's
-    /// "is the machine answerable" predicate as a boolean, which was sound only while there were
-    /// two scopes; a boolean over more than two cannot be read correctly, because that predicate is
-    /// `false` both for a compiler defect and for a failure whose answerable party is *unknown*.
-    /// Every caller of the boolean form would therefore have silently promoted an unattributable
-    /// refusal to [`Attribution::Compiler`] — a manufactured finding against a compiler on the
-    /// strength of diagnostics nobody read, which is the single most expensive mistake this module
-    /// can make: it manufactures a false deliverable on a machine that is merely modestly
-    /// provisioned.
+    /// The only conversion offered, and deliberately so: it is a total `match` over
+    /// [`FailureScope`], never a boolean. A boolean cannot carry this judgement, because "is the
+    /// machine answerable" is `false` both for a compiler defect and for a failure whose
+    /// answerable party is *unknown*, and a caller reading the two as one promotes an
+    /// unattributable refusal to [`Attribution::Compiler`] — a manufactured finding against a
+    /// compiler on the strength of diagnostics nobody read, which is the most expensive mistake
+    /// this module can make: it manufactures a false deliverable on a machine that is merely
+    /// modestly provisioned.
     ///
-    /// A `match` instead buys a compiler-checked guarantee: a scope added to the build layer stops
-    /// this file compiling until the policy states what the new scope means.
+    /// The `match` buys a compiler-checked guarantee instead: a scope added to the build layer
+    /// stops this file compiling until the policy states what the new scope means.
     ///
     /// # The harness's own scope is not an observation about anything
     ///

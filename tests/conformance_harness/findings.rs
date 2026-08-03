@@ -153,9 +153,11 @@
 //! it does not contain; reduction is a supervised activity, and a reduced reproducer reaches the
 //! curated set through a human.
 //!
-//! Minimization is therefore best-effort **by design**. The external reducer is used only if the
-//! environment has one, is never required, and its absence never fails a run and never suppresses
-//! an artifact — see [`Minimization`] for the full reasoning and for what is recorded instead.
+//! Minimization is therefore best-effort **by design**. No run invokes an external reducer at all;
+//! where the environment has one, its exact command is *recorded* for the maintainer who curates the
+//! finding, and where it has none, minimization is manual. Either way a reducer is never required,
+//! and its absence never fails a run and never suppresses an artifact — see [`Minimization`] for the
+//! full reasoning and for what is recorded instead.
 //!
 //! The corpus is read-only to the harness: a reproducer is a *copy* inside the finding directory,
 //! and no corpus program is ever modified in place.
@@ -183,26 +185,28 @@
 //!
 //! Edition 2021, minimum supported Rust 1.70.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use super::compare::{locate_stdout_divergence, unified_diff, Comparison};
 use super::compile::CompileOutcome;
 use super::env::Capabilities;
-use super::execute::{RunOutcome, Termination};
+use super::execute::{RunOutcome, Termination, TIMEOUT_UTILITY_OUTER_MARGIN};
 use super::manifest::{self, Manifest};
 use super::sandbox::{
     claim_ownership, live_foreign_owner_identity, retire_directory_contents, RUN_OWNER_ENTRY,
 };
 use super::{
-    create_directory_chain_below, findings_root, is_forbidden_for_side, posix_quote,
-    publish_bytes_no_follow, read_file_bounded, redact_secrets, remove_entry,
-    require_contained_corpus_file, require_directory_chain_below, require_replaceable,
-    run_generation, sanitize_text_for_report, shown_path, stable_digest, CellKey, CompilerSide,
-    DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Outcome, Replaceable, Target,
-    Verdict, MAX_INSPECTED_FILE_BYTES,
+    create_directory_chain_below, digest_hex_of_bytes, disclosure_defects, findings_root,
+    is_forbidden_for_side, posix_quote, publish_bytes_no_follow, read_file_bounded, redact_secrets,
+    remove_entry, require_contained_corpus_file, require_directory_chain_below,
+    require_replaceable, run_generation, sanitize_text_for_report, shown_path, stable_digest,
+    CellKey, CompilerSide, DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Outcome,
+    Replaceable, Target, Verdict, MAX_INSPECTED_FILE_BYTES,
 };
 
 /// The reproducer: a **verbatim**, byte-for-byte copy of the corpus program.
@@ -227,6 +231,13 @@ pub const MANIFEST_NAME: &str = "MANIFEST.txt";
 /// depends on. A check that silently stops checking is worse than no check, because it still reads
 /// like one.
 pub const MANIFEST_IDENTIFIER_PREFIX: &str = "finding_id       = ";
+
+/// The [`MANIFEST_NAME`] line recording the digest of the reproducer the evidence was produced from.
+///
+/// Shared by the renderer that writes it and the curated-finding check that reads it back, for the
+/// same reason as [`MANIFEST_IDENTIFIER_PREFIX`]: a check that silently stops finding its line is
+/// worse than no check, because it still reads like one.
+pub const MANIFEST_REPRODUCER_DIGEST_PREFIX: &str = "reproducer_digest = ";
 
 /// The exact reproduction commands, runnable with `sh commands.sh`.
 pub const COMMANDS_NAME: &str = "commands.sh";
@@ -269,6 +280,214 @@ pub const SUBJECT_PREFIX: &str = "bcc";
 /// pathological single line cannot turn a deliverable into a file nobody can open. Truncation
 /// always announces itself, so a bounded diff can never be mistaken for a complete one.
 pub const MAX_DIFF_BYTES: usize = 256 * 1024;
+
+// -------------------------------------------------------------------------------------------------
+// The run's artifact budget
+//
+// A finding directory is written for every divergence a run observes, and the number of divergences
+// a run can observe is bounded only by the size of the matrix: 1,296 cells, each judged by up to
+// three oracles. A compiler under test that cannot build anything produces exactly that run. The
+// evidence in one directory is text and is small — tens of kilobytes — but "small times unbounded"
+// is not a bound, and the streams a capture holds are bounded per stream rather than in aggregate,
+// so a pathological program that prints megabytes multiplies through the whole matrix.
+//
+// Three ceilings therefore apply, and the policy differs from the one the per-cell workspaces use in
+// exactly one respect that matters. A retained workspace is *optional* evidence, so `sandbox` prunes
+// it and reports the pruning. A finding's artifacts **are** the deliverable, so there is nothing here
+// it would be honest to prune: a directory missing its captures is not a smaller finding, it is a
+// finding that cannot be acted on. Exceeding a ceiling is therefore a **loud refusal** — the write
+// fails, `record` turns that into a failing verdict naming the ceiling and the totals, and the run
+// says so rather than filling the build directory and discovering the limit from the filesystem.
+//
+// The refusal happens **before** anything is written, because every artifact's bytes are known before
+// the first one is published: the whole set is rendered first, and a capture's streams are already in
+// memory. So a refused finding leaves no partial directory behind, exactly as a refused reproduction
+// script does.
+// -------------------------------------------------------------------------------------------------
+
+/// Upper bound on the bytes one artifact inside a finding directory may hold.
+///
+/// Every text artifact this module renders is already bounded by its own renderer, so this ceiling is
+/// reached only by a captured stream — which is bounded per stream by the execution layer and can
+/// still be large. Eight mebibytes is far more than a corpus program's few hundred bytes of output
+/// and far less than a file a maintainer cannot open.
+pub const FINDING_ARTIFACT_BYTES_MAX: u64 = 8 * 1024 * 1024;
+
+/// Upper bound on the bytes one finding directory may hold in total.
+///
+/// A directory holds the reproducer, its record, four rendered text artifacts and up to six entries
+/// per capture involved. Sixteen mebibytes is roughly two hundred times what the largest finding this
+/// suite has produced needs, and reaching it means a capture is pathological rather than informative.
+pub const FINDING_DIRECTORY_BYTES_MAX: u64 = 16 * 1024 * 1024;
+
+/// Upper bound on the bytes every finding directory of one run may hold together.
+///
+/// This is the ceiling the review's resource finding is really about. Without it, a run against a
+/// compiler that diverges everywhere writes one directory per divergence with no aggregate limit at
+/// all. A gibibyte is more evidence than any investigation reads and far less than a build directory
+/// can be allowed to lose.
+pub const FINDING_RUN_BYTES_MAX: u64 = 1024 * 1024 * 1024;
+
+/// How many finding directories one run may publish.
+///
+/// The count matters independently of the bytes: the matrix has 1,296 cells, so a run in which every
+/// cell diverges legitimately files 1,296 directories and must be allowed to. Past that the number
+/// can only be a defect in the derivation or a corpus that has grown, and either is worth stopping
+/// for — an investigation that begins with more candidate directories than the matrix has cells has
+/// not been helped by the surplus.
+pub const FINDING_RUN_COUNT_MAX: u64 = 1536;
+
+/// Bytes this run has published into finding directories so far.
+static PUBLISHED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Finding directories this run has published so far.
+static PUBLISHED_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Bytes and directories this run has published as finding artifacts.
+///
+/// Read once, when the run summary is assembled, so the deliverable states what the run cost rather
+/// than leaving it to be measured from the filesystem afterwards.
+pub fn artifact_totals() -> (u64, u64) {
+    (
+        PUBLISHED_BYTES.load(Ordering::Relaxed),
+        PUBLISHED_COUNT.load(Ordering::Relaxed),
+    )
+}
+
+/// Which oracles have filed into each finding directory during this process.
+///
+/// The counterpart of dropping the oracle from [`FindingId::derive`]: one root cause files once, and
+/// this is where the set of windows that observed it accumulates so the manifest can name all of
+/// them. Keyed by identifier text rather than by [`FindingId`] so the map has one obvious ordering
+/// when it is read back.
+///
+/// It is in-process state, and that is sufficient rather than a compromise. Every oracle arm of a
+/// given cell is judged by the one area test that owns that cell, so the contributions to a
+/// directory are always made by a single thread in sequence; and a *second run* re-files every
+/// contribution from scratch, because the generated-findings root is emptied once per process before
+/// the first directory is created.
+fn contributions() -> &'static Mutex<BTreeMap<String, BTreeSet<Oracle>>> {
+    static CONTRIBUTIONS: OnceLock<Mutex<BTreeMap<String, BTreeSet<Oracle>>>> = OnceLock::new();
+    CONTRIBUTIONS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Refuse a finding whose artifacts would take this run past a ceiling.
+///
+/// Called once, after everything is rendered and before anything is written, with the exact byte
+/// count the directory will hold. `fresh` says whether this contribution is publishing a *new*
+/// directory, which is what the count ceiling governs.
+///
+/// The three ceilings are checked from the most specific outward, so the message names the one that
+/// actually bit. Each names the ceiling, what was measured against it and the run's totals, because a
+/// refusal a reader cannot size up is a refusal they cannot act on.
+fn require_within_artifact_budget(
+    context: &str,
+    directory: &Path,
+    largest_artifact: u64,
+    directory_bytes: u64,
+    fresh: bool,
+) -> HarnessResult<()> {
+    let refuse = |cause: String| {
+        Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{cause}. The artifacts are the whole of a finding, so there is nothing here it \
+                 would be honest to shorten: this is refused loudly rather than published \
+                 incomplete or allowed to exhaust the build directory. Run totals so far: {} \
+                 byte(s) of {FINDING_RUN_BYTES_MAX} across {} directory(ies) of \
+                 {FINDING_RUN_COUNT_MAX}. The directory that would have been written is {}",
+                PUBLISHED_BYTES.load(Ordering::Relaxed),
+                PUBLISHED_COUNT.load(Ordering::Relaxed),
+                shown_path(directory)
+            ),
+        ))
+    };
+
+    if largest_artifact > FINDING_ARTIFACT_BYTES_MAX {
+        return refuse(format!(
+            "one artifact of this finding would hold {largest_artifact} byte(s), past the \
+             {FINDING_ARTIFACT_BYTES_MAX}-byte ceiling on a single artifact"
+        ));
+    }
+    if directory_bytes > FINDING_DIRECTORY_BYTES_MAX {
+        return refuse(format!(
+            "this finding's artifacts would hold {directory_bytes} byte(s) together, past the \
+             {FINDING_DIRECTORY_BYTES_MAX}-byte ceiling on one finding directory"
+        ));
+    }
+    let projected = PUBLISHED_BYTES
+        .load(Ordering::Relaxed)
+        .saturating_add(directory_bytes);
+    if projected > FINDING_RUN_BYTES_MAX {
+        return refuse(format!(
+            "publishing this finding's {directory_bytes} byte(s) would take the run to {projected} \
+             byte(s), past the {FINDING_RUN_BYTES_MAX}-byte ceiling on everything one run files"
+        ));
+    }
+    if fresh && PUBLISHED_COUNT.load(Ordering::Relaxed) >= FINDING_RUN_COUNT_MAX {
+        return refuse(format!(
+            "this would be finding directory number {}, past the {FINDING_RUN_COUNT_MAX}-directory \
+             ceiling on one run — which is above the number of cells the matrix has, so reaching it \
+             means the derivation is filing more directories than there are divergences to file",
+            PUBLISHED_COUNT.load(Ordering::Relaxed).saturating_add(1)
+        ));
+    }
+    Ok(())
+}
+
+/// Charge one published finding directory against the run's totals.
+///
+/// Called after a successful write, so the totals describe what is actually on disk. A directory a
+/// later contribution adds to is charged for the bytes it added and is not counted a second time.
+fn charge_artifact_budget(directory_bytes: u64, fresh: bool) {
+    PUBLISHED_BYTES.fetch_add(directory_bytes, Ordering::Relaxed);
+    if fresh {
+        PUBLISHED_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// What `oracle` observing the finding `id` *would* mean, without committing to it.
+///
+/// Returns whether this would be the **first** contribution of the run to that directory — which
+/// decides whether the captured outputs are replaced or added to — and the set of oracles that would
+/// then have observed it, which the manifest names.
+///
+/// # Why this does not record anything
+///
+/// Recording here is what an earlier form of this did, and it made the directory-count ceiling
+/// bypassable in a way that measured cleanly and behaved wrongly: a first contribution refused by the
+/// budget still left its identifier in the map, so the *next* oracle for that cell was told the
+/// directory already existed, skipped the count check on that basis and published it. The ceiling was
+/// set to five and twelve directories appeared. Recording only [after a successful
+/// write](commit_contribution) keeps the two facts in agreement — a directory is "already ours" only
+/// when it is actually on disk — so a cell whose first contribution the budget refuses has every
+/// contribution refused and leaves nothing behind.
+fn peek_contribution(id: &FindingId, oracle: Oracle) -> (bool, Vec<Oracle>) {
+    let held = match contributions().lock() {
+        Ok(held) => held,
+        // A poisoned lock means a thread panicked while recording. The records already made are still
+        // true, and losing them would make a subsequent contribution purge captures its siblings had
+        // written — so they are recovered rather than discarded.
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut observed = held.get(id.as_str()).cloned().unwrap_or_default();
+    let first = observed.is_empty();
+    observed.insert(oracle);
+    (first, observed.into_iter().collect())
+}
+
+/// Record that `oracle`'s evidence for the finding `id` is on disk.
+///
+/// Called only after the write has completed, for the reason on [`peek_contribution`].
+fn commit_contribution(id: &FindingId, oracle: Oracle) {
+    let mut held = match contributions().lock() {
+        Ok(held) => held,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    held.entry(String::from(id.as_str()))
+        .or_default()
+        .insert(oracle);
+}
 
 // Why this module derives an identifier that is injective rather than merely unlikely to repeat.
 //
@@ -734,31 +953,44 @@ impl Capture {
     /// A reproduction script sees none of that. A shell reports every one of the three as a single
     /// `$?`, folding a signal death into `128 + signal` and leaving a timeout to look like whichever
     /// mechanism enforced it. So the expectation is returned in two parts: a sentence naming the
-    /// outcome as the suite observed it, and — where the shell's encoding of that outcome is
-    /// unambiguous — the number a reproduction should actually see. A timeout deliberately has no
-    /// number, because [`TIMEOUT_UTILITY_STATUS`] and a signalled `137` are both correct for it
-    /// depending on what did the terminating, and printing one of them as *the* expectation would be
-    /// telling the reader something untrue half the time.
-    fn shell_expectation(&self) -> (String, Option<i32>) {
+    /// outcome as the suite observed it, and the **classification** a reproduction should record for
+    /// it, in the vocabulary [`SH_BOUNDED`] writes — [`TERMINATION_EXITED`],
+    /// [`TERMINATION_SIGNALLED`] or [`TERMINATION_TIMEOUT`].
+    ///
+    /// A timeout has a classification here where it could not have a number. That is the point of the
+    /// vocabulary: [`TIMEOUT_UTILITY_STATUS`] and a signalled `137` are both plausible *numbers* for
+    /// an expiry, so naming either as the expectation would be untrue half the time — whereas the
+    /// script derives `timeout` from having performed the kill itself and can therefore be compared
+    /// against directly. The one distinction the shell genuinely cannot make is between a signal
+    /// death and a program that exited with `128 + n` of its own accord; the sentence beside the
+    /// classification says which the harness observed, which is where that difference is kept.
+    fn shell_expectation(&self) -> (String, Option<String>) {
         if let Some(run) = &self.run {
             return match run.termination() {
-                Termination::Exited(code) => (format!("exited with {code}"), Some(code)),
+                Termination::Exited(code) => (
+                    format!("exited with {code}"),
+                    Some(format!("{TERMINATION_EXITED} {code}")),
+                ),
                 Termination::Signalled(signal) => (
                     format!(
                         "killed by signal {signal}, which a shell reports as {}",
                         SHELL_SIGNAL_STATUS_BASE.saturating_add(signal)
                     ),
-                    Some(SHELL_SIGNAL_STATUS_BASE.saturating_add(signal)),
+                    Some(format!(
+                        "{TERMINATION_SIGNALLED} {}",
+                        SHELL_SIGNAL_STATUS_BASE.saturating_add(signal)
+                    )),
                 ),
                 Termination::TimedOut => (
                     format!(
-                        "exceeded its {} second budget and was terminated; a bounded reproduction \
-                         reports {TIMEOUT_UTILITY_STATUS} when the timeout utility enforced it, or \
-                         {} when a signal did",
+                        "exceeded its {} second budget and was terminated; a reproduction records \
+                         that as `{TERMINATION_TIMEOUT}` on the strength of its own watchdog having \
+                         killed the command, never from a status — {TIMEOUT_UTILITY_STATUS} and {} \
+                         are both plausible numbers for an expiry and neither is evidence of one",
                         run.budget().as_secs(),
                         SHELL_SIGNAL_STATUS_BASE.saturating_add(9)
                     ),
-                    None,
+                    Some(String::from(TERMINATION_TIMEOUT)),
                 ),
             };
         }
@@ -769,7 +1001,7 @@ impl Capture {
                      expectation record prescribes, {}",
                     recorded.expect_exit
                 ),
-                Some(recorded.expect_exit),
+                Some(format!("{TERMINATION_EXITED} {}", recorded.expect_exit)),
             );
         }
         (
@@ -853,12 +1085,32 @@ pub struct FindingId {
 }
 
 impl FindingId {
-    /// Derive the identifier of the finding for one cell, one oracle and one divergence class.
+    /// Derive the identifier of the finding for one cell and one divergence class.
     ///
-    /// A pure function of those three: no counter, no process identifier, no clock, no environment.
+    /// A pure function of those two: no counter, no process identifier, no clock, no environment.
     /// The same divergence therefore derives the same identifier in every run and on every machine,
     /// which is what lets a second run rewrite one directory instead of accumulating another and
     /// lets a register entry keep pointing at the same evidence.
+    ///
+    /// # Why the oracle is not part of the identity
+    ///
+    /// It used to be, and that is what made a single divergence file itself three times. One cell
+    /// whose build was refused is refused for oracle (a), for oracle (b) and for oracle (c) alike —
+    /// one root cause, observed through three windows — and an oracle-keyed identity gave each window
+    /// its own directory holding its own copy of the same reproducer, the same record, the same
+    /// commands, the same fingerprint and the same captured compiler diagnostics. Measured on one
+    /// program of twelve cells against a compiler that refuses everything: **33 directories for 12
+    /// divergences.**
+    ///
+    /// Keying on the **root cause** instead — the cell and the class of what went wrong — files it
+    /// once, and the oracles that observed it are recorded *inside* the manifest, where a set belongs.
+    /// Nothing is lost: the directory then holds the union of the authority captures rather than one
+    /// oracle's, so it is strictly more evidence in strictly less space, and every report row for
+    /// every affected oracle points at the same directory instead of at a near-identical sibling.
+    ///
+    /// The class stays in the identity because it is not one root cause seen twice: a cell that
+    /// refuses to build and a cell that builds and then prints the wrong bytes are different findings
+    /// with different evidence, and folding them together would overwrite one with the other.
     ///
     /// # Why this is injective, and why that is not a nicety
     ///
@@ -875,13 +1127,11 @@ impl FindingId {
     ///   each component through an escaping encoder whose output alphabet is `[A-Za-z0-9_]` plus
     ///   `%`-introduced hexadecimal escapes, and joins them with `+`. Two different cell identities
     ///   cannot render the same slug.
-    /// - That alphabet contains **no hyphen**, and neither does a hexadecimal digest nor a single
-    ///   oracle letter, so each occupies exactly one hyphen-delimited field. The identifier
-    ///   therefore parses uniquely from the left: `F`, the digest, the slug, the oracle letter, and
-    ///   then the divergence class.
-    /// - The oracle letters are pairwise distinct, and the six divergence-class labels remain
-    ///   pairwise distinct after kebab-casing, so neither can absorb or be confused with a
-    ///   neighbouring field.
+    /// - That alphabet contains **no hyphen**, and neither does a hexadecimal digest, so each
+    ///   occupies exactly one hyphen-delimited field. The identifier therefore parses uniquely from
+    ///   the left: `F`, the digest, the slug, and then the divergence class.
+    /// - The six divergence-class labels remain pairwise distinct after kebab-casing, so the trailing
+    ///   field can neither absorb nor be confused with the slug before it.
     ///
     /// Nothing is abbreviated or truncated, deliberately — truncating the descriptive part is
     /// precisely how an earlier form of this function could map two distinct programs onto one
@@ -889,29 +1139,23 @@ impl FindingId {
     /// collision was a coincidence away. The digest is carried at full width and produced by the
     /// harness's shared [`stable_digest`], so a digest written here means the same thing as a digest
     /// written by a report.
-    pub fn derive(key: &CellKey, oracle: Oracle, class: DivergenceClass) -> FindingId {
-        let oracle_letter = oracle.letter();
+    pub fn derive(key: &CellKey, class: DivergenceClass) -> FindingId {
         // Hashed from the unabbreviated names, so the digest reflects the identity in full.
         let digest = stable_digest(&[
             key.area(),
             key.program(),
             key.target().short_name(),
             key.opt().short(),
-            &String::from(oracle_letter),
             class.label(),
         ]);
         FindingId {
-            text: format!(
-                "F-{digest}-{}-{oracle_letter}-{}",
-                key.slug(),
-                kebab(class.label())
-            ),
+            text: format!("F-{digest}-{}-{}", key.slug(), kebab(class.label())),
             digest,
         }
     }
 
     /// The identifier as text, for example
-    /// `F-9d3c1a5f7b204e68-04_bitfields+005_straddling_and_zero_width+aarch64+O2-b-stdout-mismatch`.
+    /// `F-9d3c1a5f7b204e68-04_bitfields+005_straddling_and_zero_width+aarch64+O2-stdout-mismatch`.
     pub fn as_str(&self) -> &str {
         &self.text
     }
@@ -953,9 +1197,9 @@ impl fmt::Display for FindingId {
 ///
 /// # Why reduction is not performed during a run
 ///
-/// The external reducer is used **if the environment has one** and is **never required**. This
-/// module goes one step further and does not invoke it during a run at all, for three reasons that
-/// are worth stating because the decision looks like a shortcut and is not:
+/// **This module never invokes a reducer.** Nothing on the runtime path reduces anything: the
+/// reproducer a run writes is a verbatim copy of the corpus program. Three reasons, worth stating
+/// because the decision looks like a shortcut and is not:
 ///
 /// - **A reduction is not a bounded operation.** It re-compiles and re-runs a candidate program
 ///   thousands of times; minutes is a good outcome and hours is an ordinary one. Doing that inside
@@ -964,14 +1208,44 @@ impl fmt::Display for FindingId {
 ///   schedule and how it interleaves. A finding directory is a deliverable that is compared between
 ///   runs to see whether a divergence changed, and a reproducer that changed on its own would make
 ///   every such comparison meaningless.
-/// - **The corpus is already minimal by construction.** Every program in it exercises exactly one
-///   semantic concern and prints one line per property it claims, which is what makes a single
-///   divergent line point at a single construct. There is usually very little left to remove.
+/// - **A verbatim copy is already a narrow reproducer**, though it is not a minimized one. Every
+///   corpus program exercises one semantic concern and prints one line per property it claims, so a
+///   single divergent line already points at a single construct — which is what makes the unreduced
+///   copy usable immediately. It is not the same thing as minimization: the program still carries
+///   the other properties of its concern, and a human curating the finding may well cut it further.
+///
+/// **This module never invokes a reducer.** Reduction is curation, a human step outside any run:
+/// where the environment has one, this type records the exact command a maintainer can run against
+/// the copy, and where it has none, minimization is manual and this type says so. Adding one as a
+/// dependency is forbidden, and a finding must not depend on a system tool being installed.
 ///
 /// So the reproducer is a verbatim copy, this type records that no automated reduction was
 /// performed and why, and — when the environment has a reducer — it carries the exact command a
 /// maintainer can run against the copy. A missing reducer changes one line of a manifest and
 /// nothing else: it never fails a run and never suppresses an artifact.
+/// What reducing a reproducer obliges, stated in every manifest whether or not a reducer exists.
+///
+/// # Why this sentence is in the deliverable rather than only in the register
+///
+/// Every other artifact in a finding directory was produced **from** the program the reproducer was
+/// when the run observed the divergence: the captured streams, the diff computed from them, the
+/// recorded terminations, the description of what differed. Reducing the reproducer and leaving those
+/// in place produces the one kind of broken deliverable a reader cannot detect — evidence that looks
+/// complete and describes a program that is no longer there. A reduced program with unreduced
+/// captures is worse than an unreduced finding, because the unreduced one is at least true.
+///
+/// So the obligation travels with the artifact that provokes it. The reduction happens first, the
+/// affected cells are re-run against the reduced program, and the evidence is regenerated from that
+/// run — not copied from the one before it. It is also a *checked* obligation rather than an
+/// instruction: the manifest records the digest of the program filed beside it, and
+/// [`curated_finding_defects`] refuses a curated directory whose reproducer no longer matches, so a
+/// reduction that skipped the refresh fails the suite instead of reaching a reader.
+const REFRESH_AFTER_REDUCING: &str = "Reducing obliges a refresh: every other artifact here was \
+     produced from the program as it was, so after reducing, re-run each affected cell against the \
+     reduced program and regenerate the record, the captured outputs, the diff, the commands and \
+     this manifest from that run rather than copying them forward — including the manifest's \
+     reproducer digest, which the curated-finding audit compares against the program actually filed.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Minimization {
     performed: bool,
@@ -991,14 +1265,17 @@ impl Minimization {
                  the lines in {COMMANDS_NAME} and exits zero only while the difference persists, \
                  then run the reducer over the copy of {REPRODUCER_SOURCE_NAME}. Reduce the copy, \
                  never the corpus program: the corpus is read-only to this suite, and the program \
-                 it holds is exercised by the whole matrix rather than by this finding alone."
+                 it holds is exercised by the whole matrix rather than by this finding alone. \
+                 {}",
+                REFRESH_AFTER_REDUCING
             ),
             None => format!(
                 "No reducer was found in this environment, which changes nothing about the \
                  completeness of {id}: the reproducer, the exact commands in {COMMANDS_NAME}, the \
                  captured outputs and the environment fingerprint do not depend on one. Reduce by \
                  hand if the reproducer is larger than the difference needs, always on a copy \
-                 rather than on the corpus program."
+                 rather than on the corpus program. {}",
+                REFRESH_AFTER_REDUCING
             ),
         };
         Minimization {
@@ -1343,8 +1620,12 @@ impl Finding {
     /// [`FindingId::directory`], and a write goes through [`prepare_directory`] rather than
     /// through any path a caller could have obtained in advance, so there is exactly one
     /// derivation and no second spelling that could drift from it.
+    ///
+    /// The oracle is deliberately not part of it — see [`FindingId::derive`]. Two findings of this
+    /// cell and class observed through different oracles are one root cause, and they share the
+    /// directory and are both named in its manifest.
     pub fn id(&self) -> FindingId {
-        FindingId::derive(&self.key, self.oracle, self.class)
+        FindingId::derive(&self.key, self.class)
     }
 
     // There is deliberately no `directory` accessor here. It would return exactly
@@ -1405,6 +1686,7 @@ pub struct FindingArtifacts {
     id: FindingId,
     directory: PathBuf,
     entries: Vec<PathBuf>,
+    observers: Vec<Oracle>,
 }
 
 impl FindingArtifacts {
@@ -1770,23 +2052,6 @@ fn write_text(context: &str, path: &Path, text: &str) -> HarnessResult<()> {
     write_bytes(context, path, text.as_bytes())
 }
 
-/// Copy a corpus file into the finding directory.
-///
-/// One-directional by construction: this is how a program and its record enter a finding, and there
-/// is no counterpart that writes back out, so the corpus stays read-only to the suite. Both paths
-/// have already been proved to be regular files inside the corpus by [`Finding::new`].
-///
-/// Read-then-write rather than `fs::copy`, which follows a symbolic link at **both** ends: at the
-/// source it would read through a link out of the corpus, and at the destination it would write a
-/// corpus program through a link and out of the build directory. [`read_file_bounded`] refuses a
-/// link, refuses anything that is not a regular file, and refuses a file larger than the ceiling
-/// this suite reads — a corpus program is a few kilobytes, so the ceiling is only ever reached by
-/// something that is not one. The write then takes the guarded path above.
-fn copy_corpus_file(context: &str, source: &Path, destination: &Path) -> HarnessResult<()> {
-    let bytes = read_file_bounded(context, source, MAX_INSPECTED_FILE_BYTES)?;
-    write_bytes(context, destination, &bytes)
-}
-
 /// Create this finding's directory, replacing the captured outputs of any previous run.
 ///
 /// Re-running must be idempotent: the same divergence derives the same identifier, so a second run
@@ -1834,7 +2099,7 @@ fn copy_corpus_file(context: &str, source: &Path, destination: &Path) -> Harness
 /// The stamp is bookkeeping rather than evidence. [`REQUIRED_ARTIFACTS`] does not list it,
 /// [`require_complete`] does not look for it, [`validate_component`] refuses it as an artifact name
 /// so nothing else can write to it, and it is not among the entries a [`FindingArtifacts`] reports.
-fn prepare_directory(id: &FindingId) -> HarnessResult<(PathBuf, PathBuf)> {
+fn prepare_directory(id: &FindingId, fresh: bool) -> HarnessResult<(PathBuf, PathBuf)> {
     let context = format!("preparing the artifact directory for finding {id}");
     // The root is claimed and retired before the first finding directory is created inside it, so a
     // previous run's set cannot survive beside this one's. Remembered per process: this is a no-op
@@ -1865,17 +2130,27 @@ fn prepare_directory(id: &FindingId) -> HarnessResult<(PathBuf, PathBuf)> {
     create_directory(&context, &directory)?;
 
     let outputs = guarded_path(&context, &directory, &[OUTPUTS_DIR_NAME])?;
-    require_replaceable(&context, &outputs, Replaceable::Directory)?;
-    remove_entry(&context, &outputs).map_err(|error| {
-        HarnessError::new(
-            error.context().to_string(),
-            format!(
-                "{}; the previous run's captures are replaced rather than merged so that a stale \
-                 capture cannot be mistaken for evidence of the current divergence",
-                error.cause()
-            ),
-        )
-    })?;
+    // Replaced for the run's **first** contribution to this directory, added to for every one after.
+    //
+    // Both halves of that are load-bearing. Replacing on the first contribution is what keeps a
+    // previous run's captures from surviving beside this run's, and `outputs/` is a set whose
+    // membership can shrink, so a stale entry would look like evidence of the current divergence.
+    // *Not* replacing on a later contribution is what makes one directory per root cause work at all:
+    // the oracles that observed this cell each bring their own authority capture, and purging here
+    // would leave the directory holding only whichever oracle happened to file last.
+    if fresh {
+        require_replaceable(&context, &outputs, Replaceable::Directory)?;
+        remove_entry(&context, &outputs).map_err(|error| {
+            HarnessError::new(
+                error.context().to_string(),
+                format!(
+                    "{}; a previous run's captures are replaced rather than merged so that a stale \
+                     capture cannot be mistaken for evidence of the current divergence",
+                    error.cause()
+                ),
+            )
+        })?;
+    }
     create_directory(&context, &outputs)?;
 
     claim_ownership(&context, &directory)?;
@@ -2047,7 +2322,18 @@ const VAR_BCC: &str = "BCC";
 const VAR_TIMEOUT: &str = "TIMEOUT";
 
 /// Shell variable holding the per-execution budget, in whole seconds, that the recorded run used.
+///
+/// This is the number [`SH_BOUNDED`] polls to, so it is the script's authoritative bound and is
+/// declared for every finding — including one whose compiler refused the program and which therefore
+/// has no execution at all.
 const VAR_BUDGET: &str = "BUDGET_SECS";
+
+/// Shell variable holding the seconds the outer net sits behind the watchdog, when there is one.
+///
+/// Mirrors the harness's own margin, so a reproduction that has a `timeout` utility places it exactly
+/// where the run did: at the budget plus this, behind the watchdog that actually classifies. A reader
+/// who wants the two levels closer together or further apart changes one number.
+const VAR_OUTER_MARGIN: &str = "OUTER_MARGIN_SECS";
 
 /// Shell variable holding the search path every reproduced invocation is given.
 ///
@@ -2055,6 +2341,47 @@ const VAR_BUDGET: &str = "BUDGET_SECS";
 /// machine can change it in one place — it is the one value in that environment that is a property of
 /// the machine the run happened on rather than of the suite.
 const VAR_CHILD_PATH: &str = "CHILD_PATH";
+
+/// Shell variable holding the search path the **script itself** runs with.
+///
+/// Kept distinct from [`VAR_CHILD_PATH`] because the two are adjusted for different reasons: this one
+/// decides which `mktemp`, `rm`, `cmp` and `env` the script runs, and the other decides what a
+/// compiler driver and an emulator can reach. A reader relocating their coreutils changes this one; a
+/// reader relocating a toolchain changes the other.
+const VAR_SCRIPT_PATH: &str = "SCRIPT_PATH";
+
+/// Search path the script gives itself when the run recorded none.
+///
+/// Reached only when the run's own path could not be computed — an environment with no usable `PATH`
+/// at all. Two absolute system directories rather than an empty value, because an empty search path
+/// makes every helper unfindable and turns a safety measure into a script that cannot run; and only
+/// those two, because a fallback should name the fewest places a POSIX utility is expected to be.
+const FALLBACK_SCRIPT_PATH: &str = "/usr/bin:/bin";
+
+/// Basename prefix of the private scratch directory the script creates inside a caller-supplied one.
+///
+/// A distinctive prefix rather than a bare template, so that a reader inspecting a retained directory
+/// can see at a glance which entry the replay created.
+const SCRATCH_TEMPLATE: &str = "bcc-repro.XXXXXX";
+
+/// Shell variable holding the directory a caller supplied, once the private one is made inside it.
+///
+/// Retained so the commentary and the closing report can name both — the directory the reader chose,
+/// which the script neither created nor removes, and the private one inside it, which it did both.
+const VAR_WORK_PARENT: &str = "WORK_PARENT";
+
+/// The phrase the scratch commentary uses for how a private directory is obtained.
+///
+/// A constant so the explanation in the comment and the diagnostic printed when the utility is absent
+/// cannot describe two different mechanisms.
+const SH_MKTEMP_MSG: &str = "created with `mktemp -d` under a 077 umask";
+
+/// Every helper name the generated script may reach, in roughly the order it first uses them.
+///
+/// Emitted into a single `unset -f` so an inherited exported shell function cannot stand in for one of
+/// them. `command` is included deliberately: unsetting a *function* by that name leaves the builtin
+/// intact, and the builtin is what the rest of the script relies on to bypass function lookup.
+const SH_HELPERS: &str = "command printf mktemp rm env cmp cat diff kill test";
 
 /// The shell function through which every reproduced invocation is run.
 ///
@@ -2081,16 +2408,62 @@ const VAR_CHILD_PATH: &str = "CHILD_PATH";
 /// then be split into two arguments. `"$@"` passes the invocation through element for element.
 const SH_ISOLATED: &str = "isolated";
 
-/// Exit status GNU `timeout` reports when it terminates the command it was bounding.
+/// Exit status a `timeout` utility reports when it terminates the command it was bounding.
 ///
-/// Documented in the script rather than relied upon by it: the classification the script prints names
-/// this value, so a reader who sees it knows the bound fired rather than the program choosing to exit
-/// with 124 of its own accord. The distinction cannot be made from the number alone, which is exactly
-/// why the recorded expectation is printed beside it.
+/// **Never interpreted**, here or in the emitted script, and named only so that both can say why.
+/// The corpus contract admits any status from 0 to [`MAX_CONTRACT_EXIT_CODE`], so this value lies
+/// *inside* the range a program may legitimately return, and a script that read it as expiry would
+/// report a program which deliberately returned 124 as a program that never finished. The emitted
+/// script therefore classifies a termination by [whether the script itself did the
+/// killing](SH_BOUNDED) and records that classification out of band, exactly as the harness does —
+/// so a 124 from a command that returned promptly is reported as `exited 124`, which is what it is.
 const TIMEOUT_UTILITY_STATUS: i32 = 124;
 
 /// Offset a POSIX shell adds to a signal number when reporting a command killed by a signal.
 const SHELL_SIGNAL_STATUS_BASE: i32 = 128;
+
+/// The shell function through which every reproduced invocation is bounded, run and classified.
+///
+/// # Why a reproduction has its own watchdog rather than a `timeout` prefix
+///
+/// The harness does not decide a timeout by reading a status: it decides one when, and only when, it
+/// killed the child itself, because expiry statuses are not distinguishable from statuses a program
+/// may legitimately return. A reproduction script that wrapped each command in the utility and read
+/// `$?` would throw that away and reintroduce the exact ambiguity — and where the reader had no
+/// utility at all it would run unbounded, which turns the one divergence class that *is* a
+/// non-terminating program into a script that hangs instead of reporting it.
+///
+/// So this function is the script's watchdog. It backgrounds the invocation, polls for the recorded
+/// budget, kills what is still running, and then reports [`TERMINATION_TIMEOUT`] **because it did the
+/// killing** rather than because of any number it read. The bound therefore exists on every machine,
+/// with or without a utility, and the classification is out of band on all of them.
+///
+/// # How the outer net is preserved
+///
+/// Where the run's own launch was wrapped, the utility is still applied — at the budget plus
+/// [`VAR_OUTER_MARGIN`], behind this watchdog, which is precisely where the harness puts it and
+/// precisely why it never fires in a healthy reproduction. Its status is not read, so its presence
+/// cannot change a classification; it is there for the case this shell's own polling is starved.
+const SH_BOUNDED: &str = "bounded_run";
+
+/// Classification written out of band for a command that chose its own exit status.
+const TERMINATION_EXITED: &str = "exited";
+
+/// Classification written out of band for a command a signal ended.
+///
+/// A shell folds a signal death into `128 + signal`, and a program that itself exited with such a
+/// number is indistinguishable from one that was signalled — a property of `wait`, not of this
+/// suite. The harness compares raw wait status and so keeps the two apart; the script says which it
+/// saw in the terms a shell can actually observe, and the recorded expectation beside it names what
+/// the harness observed.
+const TERMINATION_SIGNALLED: &str = "signalled";
+
+/// Classification written out of band for a command the script's own watchdog terminated.
+///
+/// This is the sentinel the ambiguity argument on [`TIMEOUT_UTILITY_STATUS`] turns on: it is written
+/// on the strength of the script having performed the kill, never on the strength of a status, so no
+/// exit code a program can return will produce it and no expiry can fail to.
+const TERMINATION_TIMEOUT: &str = "timeout";
 
 /// The tool paths a reproduction script lifts into its preamble.
 ///
@@ -2102,9 +2475,13 @@ const SHELL_SIGNAL_STATUS_BASE: i32 = 128;
 ///
 /// So each tool path is declared once, and each command line references the declaration. The
 /// substitution is by **exact string equality** on a whole argument, never a textual splice, so the
-/// referenced line reconstructs the recorded argument vector element for element. The exact line is
-/// also emitted verbatim as a comment above each command, which means nothing is hidden by the
-/// indirection.
+/// referenced line reconstructs the recorded argument vector element for element — the executed line
+/// is exact. The same line is also rendered as a comment above each command so the indirection hides
+/// nothing, and that rendering is a *safe* one rather than a literal echo: [`comment`] passes it
+/// through [`sanitize_text_for_report`], which escapes anything that could break out of a comment or
+/// repaint a terminal. On every ordinary path the two read identically; where a path or a diagnostic
+/// contains such a byte, the comment shows it encoded while the executed argument still carries the
+/// true value.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct ShellVariables {
     entries: Vec<(String, String)>,
@@ -2211,12 +2588,13 @@ fn collect_shell_variables(finding: &Finding) -> ShellVariables {
         //
         // Declared from the **build** as well as the execution, and that is the load-bearing half. A
         // finding whose compiler refused the program has no execution at all, so a collection that
-        // looked only at executions would declare neither variable for it — and
-        // `render_bounded_invocation` would then take its unbounded branch for the build line. That
-        // leaves precisely the class of finding most dangerous to reproduce, a compiler that never
-        // returns, reproduced with no bound. The budget is also declared from the build so that a
-        // build-only finding still carries the number the run used, rather than falling back to the
-        // script's default.
+        // looked only at executions would declare no budget for it, leaving the one class of finding
+        // most dangerous to reproduce — a compiler that never returns — bounded by the script's
+        // default rather than by the number the run actually used.
+        //
+        // The budget is unconditional because `bounded_run` polls it. The utility is not: it is the
+        // outer net, it is declared only when the run itself used one, and its absence changes where
+        // the net sits rather than whether there is a bound at all.
         if let Some(compile) = capture.compile() {
             if let Some(tool) = compile.timeout_tool() {
                 variables.declare(VAR_TIMEOUT, tool);
@@ -2232,6 +2610,14 @@ fn collect_shell_variables(finding: &Finding) -> ShellVariables {
             variables.declare(VAR_BUDGET, &run.budget().as_secs().to_string());
         }
     }
+    // The margin the harness places between its own watchdog and the outer net, so a reproduction
+    // that has a utility puts it exactly where the run did. Declared for every finding rather than
+    // only for a wrapped one: it costs one line, and a reader who supplies their own `TIMEOUT` on a
+    // finding recorded without one then gets the same two-level arrangement instead of the default.
+    variables.declare(
+        VAR_OUTER_MARGIN,
+        &TIMEOUT_UTILITY_OUTER_MARGIN.as_secs().to_string(),
+    );
     variables
 }
 
@@ -2323,8 +2709,10 @@ fn comment(text: &str) -> String {
 /// # What makes it exact
 ///
 /// Every command line is rendered from the argument vector the run actually spawned, so pasting it
-/// reconstructs that vector element for element. Above each one, the recorded line is repeated
-/// verbatim as a comment, so the variable references cannot hide what ran.
+/// reconstructs that vector element for element. Above each one, the same line is repeated as a
+/// comment so the variable references cannot hide what ran — as a sanitized rendering, since a
+/// comment is text a reader's terminal will display: see [`comment`] for what that escapes and why
+/// the executed line beside it is the unescaped authority.
 ///
 /// That vector is the program's own expectation record already rendered: the command templates in
 /// the record are turned into arguments by `manifest`'s renderers, which `compile` and `execute`
@@ -2408,8 +2796,10 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
     ));
     script.push_str("#\n");
     script.push_str(&comment(
-        "Each command below is the line this run performed, repeated verbatim in the comment above \
-         it. Only the tool paths are lifted into the variables in the preamble, so the script can be \
+        "Each command below is the line this run performed. The comment above it shows the same \
+         line in a form that is safe to display, so a byte that could not be shown literally appears \
+         encoded there while the command itself carries the true value. Only the tool paths are \
+         lifted into the variables in the preamble, so the script can be \
          adjusted on another machine without editing every line. Every build carries -static and one \
          optimization level, and nothing else beyond the output path: that is the whole set of flags \
          the suite verified both compilers honour with the same meaning. The compiler under test \
@@ -2442,7 +2832,8 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
          success. Every scratch path is therefore refused rather than reused if something is already \
          at it, by {SH_REFUSE_EXISTING} below."
     )));
-    script.push_str("\nset -eu\n\n");
+    script.push_str("\nset -eu\n");
+    script.push_str(&render_script_own_environment());
 
     script.push_str(&comment(
         "--- tools this run used (adjust the paths if yours differ) ------------------",
@@ -2452,11 +2843,12 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
          BCC_REF_CC, BCC_REF_CC_<ARCH> and BCC_QEMU_<ARCH>.",
     ));
     script.push_str(&comment(&format!(
-        "{VAR_TIMEOUT} and {VAR_BUDGET} bound every build and every execution below, because one of \
-         the divergence classes this suite records is a program that never finishes. If \
-         {VAR_TIMEOUT} is absent from the preamble the environment had no such utility and the \
-         reproduction runs unbounded — an execution that does not return is then the reader's to \
-         interrupt, and it is still the finding."
+        "{VAR_BUDGET} bounds every build and every execution below, because one of the divergence \
+         classes this suite records is a program that never finishes. The bound is enforced by \
+         {SH_BOUNDED}, this script's own watchdog, so it applies whether or not your machine has a \
+         timeout utility: no invocation here runs unbounded. {VAR_TIMEOUT}, when the preamble \
+         declares one, is the outer net the run itself used and sits at \
+         {VAR_BUDGET} + {VAR_OUTER_MARGIN} behind that watchdog; its exit status is never read."
     )));
     let preamble = variables.render();
     if preamble.is_empty() {
@@ -2476,8 +2868,17 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
         "The reproducer travels with this script, so {VAR_SOURCE} points beside it rather than into \
          a checkout."
     )));
+    // The directory is computed with shell parameter expansion rather than by running `dirname`,
+    // because this is the first thing the script does with a path and it must not depend on an
+    // external program at all: a planted `dirname` earlier on the reader's search path would
+    // otherwise choose where every input below is read from. `${0%/*}` strips the last component,
+    // and the `case` covers the one shape it cannot handle — a bare name with no slash, which is
+    // the current directory.
     script.push_str(&format!(
-        "{VAR_FINDING_DIR}=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n"
+        "case \"$0\" in\n    */*) {VAR_FINDING_DIR}=${{0%/*}} ;;\n    *) {VAR_FINDING_DIR}=. ;;\nesac\n"
+    ));
+    script.push_str(&format!(
+        "{VAR_FINDING_DIR}=$(CDPATH= cd -- \"${VAR_FINDING_DIR}\" && pwd) || exit 1\n"
     ));
     script.push_str(&format!(
         "{VAR_SOURCE}=\"${VAR_FINDING_DIR}/{REPRODUCER_SOURCE_NAME}\"\n"
@@ -2490,6 +2891,10 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
     script.push('\n');
     script.push_str(&render_isolated_environment());
     script.push_str(&render_working_directory());
+    // After the isolation, which it calls, and before the first capture block, every invocation of
+    // which goes through it.
+    script.push('\n');
+    script.push_str(&render_bounded_run_function());
 
     for capture in &captures {
         script.push_str(&render_capture_block(capture, &variables));
@@ -2540,6 +2945,91 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
 /// Setting `REPRO_KEEP` keeps it, which is how a reader inspects the captured streams after the
 /// script has finished; the path is printed either way, so it can be found without reading the source
 /// of the script.
+/// Render the environment the script gives **itself**, before it runs its first external helper.
+///
+/// # The gap this closes
+///
+/// [`render_isolated_environment`] gives every *child* the run's own vetted search path, and that is
+/// necessary but not sufficient: the script is itself a program made of external helpers. It creates a
+/// scratch directory, removes it, compares two files, prints, and clears the environment — and every
+/// one of those was resolved through whatever `PATH` the reader happened to have exported. A reader
+/// who runs `PATH=/somewhere/else:$PATH sh commands.sh`, or whose shell profile prepends a directory,
+/// therefore hands the choice of `mktemp`, `rm`, `cmp`, `cat` and `env` to that directory — before the
+/// vetted path is applied to anything. The consequence is not a wrong comparison but arbitrary code
+/// execution at the reader's privilege, in a script the report tells them to run.
+///
+/// Three measures close it, and they are complementary rather than alternatives:
+///
+/// * **The vetted search path is installed for the script itself**, as the first executable statement
+///   after `set -eu` and before any external program is named. It is the same value the run gave its
+///   children: the entries of `PATH` that were neither relative nor writable by an account the suite
+///   does not trust.
+/// * **Every external helper is invoked through `command`**, which POSIX defines as suppressing shell
+///   function lookup. A `PATH` that is trusted does not help against an *exported shell function*
+///   named `printf` or `rm`, which a function-exporting shell will happily inherit and prefer over
+///   both the builtin and the file; `command` is what makes that inheritance irrelevant.
+/// * **`IFS` and `CDPATH` are reset**, so word splitting and `cd` resolution are the standard ones
+///   rather than whatever was exported, and `set -C` makes every redirection in the script refuse to
+///   write through anything that already exists.
+///
+/// # What it cannot close, stated rather than implied
+///
+/// A shell that sources a startup file named by an environment variable does so *before* the first
+/// line of this script runs, so no statement here can prevent it. That is a property of the reader's
+/// shell rather than of this script, and the comment the script carries says so, because a reader who
+/// believes they are protected against something they are not is worse off than one who knows.
+fn render_script_own_environment() -> String {
+    let mut text = String::new();
+    text.push_str(&comment(
+        "--- the environment this SCRIPT runs in ------------------------------------",
+    ));
+    text.push_str(&comment(
+        "This script is itself made of external helpers — it creates a scratch directory, removes \
+         it, compares files and prints. Those were resolved through whatever PATH you had exported, \
+         so a directory earlier on it could substitute any of them. The search path is therefore \
+         installed HERE, before the first external program is named, and it is the same vetted value \
+         the run gave every compiler and emulator it spawned.",
+    ));
+    text.push_str(&comment(&format!(
+        "Every helper is additionally invoked through `command`, which POSIX defines as suppressing \
+         shell FUNCTION lookup: a trusted PATH is no defence against an exported shell function \
+         named `rm` or `printf`, and this is. Adjust {VAR_SCRIPT_PATH} below if a tool this script \
+         needs is somewhere else on your machine."
+    )));
+    text.push_str(&comment(
+        "Not closed by anything here, and stated rather than implied: a shell that sources a startup \
+         file named by an environment variable does so before line one of this script, so run it \
+         from a shell you trust.",
+    ));
+    text.push_str(&format!(
+        "{VAR_SCRIPT_PATH}={}\n",
+        posix_quote(&match super::env::sanitized_search_path() {
+            Some(path) => path.to_string_lossy().into_owned(),
+            None => String::from(FALLBACK_SCRIPT_PATH),
+        })
+    ));
+    text.push_str(&format!("PATH=\"${VAR_SCRIPT_PATH}\"\n"));
+    text.push_str("export PATH\n");
+    text.push_str("unset IFS\n");
+    text.push_str("CDPATH=\n");
+    text.push_str("export CDPATH\n");
+    text.push_str(&comment(
+        "A shell that exports FUNCTIONS through the environment would let an inherited function named \
+         after a helper win over both the builtin and the file on the vetted path above. Removing any \
+         such definition is one line and covers every helper uniformly; the ones whose misuse would be \
+         most damaging are additionally invoked through `command`, which suppresses function lookup on \
+         its own.",
+    ));
+    text.push_str(&format!("unset -f {SH_HELPERS} 2>/dev/null || :\n"));
+    text.push_str(&comment(
+        "noclobber: every redirection below creates its target exclusively, so none can write \
+         through a file — or a symbolic link, including a dangling one — that is already at the name.",
+    ));
+    text.push_str("set -C\n");
+    text.push_str("umask 077\n\n");
+    text
+}
+
 fn render_scratch_setup() -> String {
     let mut text = String::new();
     text.push_str(&comment(&format!(
@@ -2574,13 +3064,32 @@ fn render_scratch_setup() -> String {
         "    if [ \"${{{VAR_WORK_OWNED}:-0}}\" = 1 ] && [ -z \"${{{VAR_KEEP}:-}}\" ] && \
          [ -n \"${{{VAR_WORK}:-}}\" ]; then\n"
     ));
-    text.push_str(&format!("        rm -rf -- \"${VAR_WORK}\"\n"));
+    text.push_str(&format!("        command rm -rf -- \"${VAR_WORK}\"\n"));
     text.push_str("    fi\n");
     text.push_str("}\n\n");
 
     text.push_str(&comment(&format!(
-        "Scratch root: a private directory this script creates, unless {VAR_WORK} names one already."
+        "Scratch root: ALWAYS a private directory this script creates itself. When {VAR_WORK} names a \
+         directory, the private one is created INSIDE it rather than used in place of it."
     )));
+    text.push_str(&comment(&format!(
+        "Creating one unconditionally is what makes the guards below sufficient rather than merely \
+         helpful. Every scratch name is derived from a stem this script chooses, so if the script \
+         wrote directly into a directory you supplied, all of those names would be predictable to \
+         anyone who knew which finding was being replayed — and a symbolic link planted at one of \
+         them before the script reached it would receive the write. Checking each name first narrows \
+         that window but cannot close it, because the check and the write are two operations. A \
+         directory {SH_MKTEMP_MSG} closes it instead: the name is unpredictable, the creation is \
+         exclusive, and nothing existed inside it to plant."
+    )));
+    text.push_str("if ! command -v mktemp > /dev/null 2>&1; then\n");
+    text.push_str(
+        "    printf 'mktemp is required: this script always writes into a private directory it \
+         creates itself, and mktemp is what creates one exclusively under an unpredictable name\\n' \
+         >&2\n",
+    );
+    text.push_str("    exit 1\n");
+    text.push_str("fi\n");
     text.push_str(&format!("if [ -n \"${{{VAR_WORK}:-}}\" ]; then\n"));
     text.push_str(&format!("    if [ -L \"${VAR_WORK}\" ]; then\n"));
     text.push_str(&format!(
@@ -2596,40 +3105,41 @@ fn render_scratch_setup() -> String {
     ));
     text.push_str("        exit 1\n");
     text.push_str("    fi\n");
-    text.push_str(&format!("    {VAR_WORK_OWNED}=0\n"));
+    text.push_str(&format!(
+        "    {VAR_WORK_PARENT}=\"${VAR_WORK}\"\n    {VAR_WORK}=$(umask 077; command mktemp -d \
+         \"${VAR_WORK_PARENT}/{SCRATCH_TEMPLATE}\") || exit 1\n"
+    ));
     text.push_str("else\n");
-    text.push_str("    if ! command -v mktemp > /dev/null 2>&1; then\n");
     text.push_str(&format!(
-        "        printf 'mktemp is required to create a private scratch directory; install it, or \
-         set {VAR_WORK} to an existing directory of your own\\n' >&2\n"
+        "    {VAR_WORK}=$(umask 077; command mktemp -d) || exit 1\n"
     ));
-    text.push_str("        exit 1\n");
-    text.push_str("    fi\n");
-    text.push_str(&format!(
-        "    {VAR_WORK}=$(umask 077; mktemp -d) || exit 1\n"
-    ));
-    text.push_str(&format!("    if [ -z \"${VAR_WORK}\" ]; then\n"));
+    text.push_str("fi\n");
+    text.push_str(&format!("if [ -z \"${VAR_WORK}\" ]; then\n"));
     text.push_str(
-        "        printf 'mktemp -d produced no directory, so there is nowhere safe to write\\n' >&2\n",
+        "    printf 'mktemp -d produced no directory, so there is nowhere safe to write\\n' >&2\n",
     );
-    text.push_str("        exit 1\n");
-    text.push_str("    fi\n");
-    text.push_str(&format!("    {VAR_WORK_OWNED}=1\n"));
-    text.push_str(&format!("    trap {SH_CLEANUP} EXIT\n"));
+    text.push_str("    exit 1\n");
+    text.push_str("fi\n");
+    text.push_str(&format!("{VAR_WORK_OWNED}=1\n"));
+    text.push_str(&format!("trap {SH_CLEANUP} EXIT\n"));
     for signal in ["HUP", "INT", "TERM"] {
         text.push_str(&format!(
-            "    trap '{SH_CLEANUP}; trap - {signal}; kill -{signal} $$' {signal}\n"
+            "trap '{SH_CLEANUP}; trap - {signal}; kill -{signal} $$' {signal}\n"
         ));
     }
+    text.push_str(&format!(
+        "command printf 'scratch directory: %s\\n' \"${VAR_WORK}\"\n"
+    ));
+    text.push_str(&format!("if [ -n \"${{{VAR_WORK_PARENT}:-}}\" ]; then\n"));
+    text.push_str(&format!(
+        "    command printf 'it was created inside the %s you supplied, which is not itself \
+         removed\\n' {VAR_WORK}\n"
+    ));
     text.push_str("fi\n");
     text.push_str(&format!(
-        "printf 'scratch directory: %s\\n' \"${VAR_WORK}\"\n"
-    ));
-    text.push_str(&format!("if [ \"${{{VAR_WORK_OWNED}}}\" = 1 ]; then\n"));
-    text.push_str(&format!(
-        "    if [ -n \"${{{VAR_KEEP}:-}}\" ]; then\n        printf 'it is kept on exit because \
-         {VAR_KEEP} is set\\n'\n    else\n        printf 'it is removed on exit; set {VAR_KEEP}=1 to \
-         keep it\\n'\n    fi\nfi\n"
+        "if [ -n \"${{{VAR_KEEP}:-}}\" ]; then\n    command printf 'it is kept on exit because \
+         {VAR_KEEP} is set\\n'\nelse\n    command printf 'it is removed on exit; set {VAR_KEEP}=1 \
+         to keep it\\n'\nfi\n"
     ));
     text
 }
@@ -2689,6 +3199,18 @@ fn render_working_directory() -> String {
 /// workspace the run used, which no longer exists on any machine and never existed on theirs. That is
 /// the one deliberate difference from the recorded environment, and it is the one that makes the
 /// script hermetic on the reader's machine rather than on the machine that produced the finding.
+///
+/// # Why the last command is `exec`, and the invariant that follows
+///
+/// Without it this function leaves a shell between the watchdog and the command: the background job
+/// is a subshell, the subshell waits on `env`, and the process [`SH_BOUNDED`] can see is the
+/// subshell rather than the thing that has to be terminated. Killing it then leaves the actual
+/// program running — measured, on a probe of exactly this shape, as a surviving process per bounded
+/// invocation. `exec` replaces the subshell, so the direct child is the command itself (or the outer
+/// net supervising it), which is both what the harness spawns and what can be killed.
+///
+/// It is therefore an invariant that **this function is only ever invoked as a background job**, as
+/// [`SH_BOUNDED`] does. Called in the foreground it would replace the script.
 fn render_isolated_environment() -> String {
     let mut text = String::new();
     text.push_str(&comment(
@@ -2735,7 +3257,7 @@ fn render_isolated_environment() -> String {
     );
     text.push_str("        exit 1\n");
     text.push_str("    fi\n");
-    text.push_str("    env -i \\\n");
+    text.push_str("    exec env -i \\\n");
     text.push_str(&format!("        PATH=\"${VAR_CHILD_PATH}\" \\\n"));
     for (name, value) in super::child_fixed_environment() {
         text.push_str(&format!("        {name}={} \\\n", posix_quote(value)));
@@ -2775,11 +3297,13 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
         )));
         block.push_str(&comment(&format!("Termination: {expectation}")));
         // Materialized as a status file like every other side, so the comparison below can compare
-        // termination uniformly instead of special-casing the one authority that never ran.
-        if let Some(status) = expected_status {
+        // termination uniformly instead of special-casing the one authority that never ran. The text
+        // written is the same classification vocabulary `bounded_run` records for a side that did run,
+        // which is what lets the comparison be a string equality rather than a case analysis.
+        if let Some(classification) = expected_status {
             block.push_str(&format!(
                 "printf '%s\\n' {} > \"${VAR_WORK}/{stem}.status\"\n",
-                posix_quote(&status.to_string())
+                posix_quote(&classification)
             ));
         }
         return block;
@@ -2811,7 +3335,7 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
     }
 
     if let Some(compile) = capture.compile() {
-        block.push_str(&comment("build, exactly as this run performed it:"));
+        block.push_str(&comment("build, as this run performed it (shown safely):"));
         block.push_str(&comment(&format!("  {}", compile.command_line())));
         block.push_str(&comment(&format!(
             "  bounded by the recorded {} second budget; the build reported {}",
@@ -2826,14 +3350,12 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
         ));
         block.push_str(&render_bounded_invocation(
             &render_argv(compile.argv(), variables, &substitutions),
+            &format!("\"${VAR_WORK}/{stem}.compile.status\""),
             &format!("\"${VAR_WORK}/{stem}.compile.stdout\""),
             &format!("\"${VAR_WORK}/{stem}.compile.stderr\""),
         ));
         block.push_str(&format!(
-            "printf '%s\\n' \"$status\" > \"${VAR_WORK}/{stem}.compile.status\"\n"
-        ));
-        block.push_str(&format!(
-            "printf 'build %s : exit %s (recorded: %s)\\n' {} \"$status\" {}\n",
+            "printf 'build %s : %s (recorded: %s)\\n' {} \"$termination\" {}\n",
             posix_quote(&stem),
             posix_quote(&describe_compile_termination(compile))
         ));
@@ -2841,28 +3363,27 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
 
     match capture.run() {
         Some(run) => {
-            block.push_str(&comment("run, exactly as this run performed it:"));
+            block.push_str(&comment("run, as this run performed it (shown safely):"));
             block.push_str(&comment(&format!("  {}", run.command_line())));
             block.push_str(&comment(&format!("  termination recorded: {expectation}")));
             block.push_str(&format!(
                 "{SH_REFUSE_EXISTING} \"${VAR_WORK}/{stem}.stdout\" \"${VAR_WORK}/{stem}.stderr\"\n"
             ));
+            // The classification is written to a file as well as printed, because the comparison at
+            // the foot of the script compares termination between the two sides and cannot read text
+            // that only ever went to the terminal. The oracles compare stdout *and* termination, so a
+            // script that reproduced only the stdout half would report "did not reproduce" for every
+            // exit-code divergence — the one class where the stdout of both sides is identical by
+            // definition. `bounded_run` performs that write, so the recorded classification and the
+            // recorded number cannot disagree with each other.
             block.push_str(&render_bounded_invocation(
                 &render_argv(run.argv(), variables, &substitutions),
+                &format!("\"${VAR_WORK}/{stem}.status\""),
                 &format!("\"${VAR_WORK}/{stem}.stdout\""),
                 &format!("\"${VAR_WORK}/{stem}.stderr\""),
             ));
-            // The status is written to a file as well as printed, because the comparison at the foot
-            // of the script compares termination between the two sides and cannot read a number that
-            // only ever went to the terminal. The oracles compare stdout *and* termination, so a
-            // script that reproduced only the stdout half would report "did not reproduce" for every
-            // exit-code divergence — the one class where the stdout of both sides is identical by
-            // definition.
             block.push_str(&format!(
-                "printf '%s\\n' \"$status\" > \"${VAR_WORK}/{stem}.status\"\n"
-            ));
-            block.push_str(&format!(
-                "printf 'run   %s : exit %s (recorded: %s)\\n' {} \"$status\" {}\n",
+                "printf 'run   %s : %s (recorded: %s)\\n' {} \"$termination\" {}\n",
                 posix_quote(&stem),
                 posix_quote(&expectation)
             ));
@@ -2919,33 +3440,129 @@ fn describe_compile_termination(compile: &CompileOutcome) -> String {
     }
 }
 
-/// Render one invocation, bounded by the timeout utility when the reader has one.
+/// Render the call that runs one invocation through [`SH_BOUNDED`].
 ///
-/// `status` is set to the command's exit status without `set -e` aborting the script, which matters
-/// because a finding's whole point is that at least one side does *not* succeed: an unguarded failing
-/// command under `set -e` would end the script before it reached the comparison it exists to perform.
+/// One line, and deliberately no branch: the bound and the classification live in the function, so
+/// every invocation in the script is bounded the same way and no call site can be the one that
+/// forgot. The status file is written by the function rather than by the caller, which is what makes
+/// the recorded classification and the recorded number arrive together and agree.
 ///
-/// The bound is applied through a runtime test rather than baked in, so one script works both where
-/// the utility exists and where it does not. Where it does not, the unbounded form runs and the
-/// preamble has already said the reproduction is unbounded — an execution the reader must interrupt is
-/// a poor outcome, but a silently skipped reproduction is a worse one.
-fn render_bounded_invocation(invocation: &str, stdout_file: &str, stderr_file: &str) -> String {
-    let mut rendered = String::from("status=0\n");
-    rendered.push_str(&format!("if [ -n \"${{{VAR_TIMEOUT}:-}}\" ]; then\n"));
-    // The isolation wraps the *timeout utility* as well as the command, which is what the harness
-    // does: it installs the environment on the one command it spawns, and that command is already the
-    // wrapped vector. Isolating only the inner command would leave the utility running under the
-    // reader's environment and pass that environment on to the program it bounds.
-    rendered.push_str(&format!(
-        "    {SH_ISOLATED} \"${VAR_TIMEOUT}\" \"${{{VAR_BUDGET}:-30}}\" {invocation} > \
-         {stdout_file} 2> {stderr_file} || status=$?\n"
+/// `status` and `termination` are left set for the caller's own reporting line, and `set -e` cannot
+/// abort on a failing command — a finding's whole point is that at least one side does *not* succeed,
+/// so a script that stopped at the first non-zero status would never reach the comparison it exists
+/// to perform.
+fn render_bounded_invocation(
+    invocation: &str,
+    status_file: &str,
+    stdout_file: &str,
+    stderr_file: &str,
+) -> String {
+    format!("{SH_BOUNDED} {status_file} {stdout_file} {stderr_file} {invocation}\n")
+}
+
+/// Render the watchdog function every reproduced invocation runs through.
+///
+/// The reasoning is on [`SH_BOUNDED`]; what follows is how the four properties it claims are actually
+/// established in POSIX shell, since each one is a place a plausible-looking script would be wrong.
+///
+/// - **The bound exists unconditionally.** The invocation is backgrounded and polled, so the timing
+///   is the script's own. A reader with no `timeout` utility gets the same bound as one who has it.
+/// - **The classification is out of band.** `termination` is set to [`TERMINATION_TIMEOUT`] on the
+///   strength of `kill` having been issued by this function, never from `$?`. A command that returns
+///   [`TIMEOUT_UTILITY_STATUS`] promptly is reported as having exited with it.
+/// - **Nothing is orphaned.** When the utility is in front, *it* is the direct child and the program
+///   is its descendant, so killing the child alone would leave the program running. The process group
+///   is therefore killed instead — but only after confirming the child leads a group of its own, which
+///   a wrapped launch does and a bare one does not. Killing a group the script itself belongs to would
+///   kill the script, so that case takes the direct kill.
+/// - **The outer net keeps its margin.** The utility, when the run used one, is applied at
+///   `BUDGET_SECS + OUTER_MARGIN_SECS`: behind the watchdog above, never in front of it.
+///
+/// The polling interval is one second, which is coarse for a machine and imperceptible to a reader
+/// waiting on a reproduction. A finer interval would spawn thirty times as many `sleep` processes to
+/// discover the same thing.
+fn render_bounded_run_function() -> String {
+    let mut text = String::new();
+    text.push_str(&comment(&format!(
+        "{SH_BOUNDED} <status-file> <stdout-file> <stderr-file> <command...> runs one invocation \
+         under this script's own watchdog and records how it ended."
+    )));
+    text.push_str(&comment(&format!(
+        "The classification is written to the status file as one of `{TERMINATION_EXITED} <n>`, \
+         `{TERMINATION_SIGNALLED} <n>` or `{TERMINATION_TIMEOUT}`, and `{TERMINATION_TIMEOUT}` is \
+         written only when this function performed the kill. That is the whole reason the watchdog is \
+         here rather than a bare `{TERMINATION_TIMEOUT}` prefix: a utility reports expiry as \
+         {TIMEOUT_UTILITY_STATUS}, a program is entitled to return {TIMEOUT_UTILITY_STATUS} of its \
+         own accord, and no reading of the number can tell those apart."
+    )));
+    text.push_str(&comment(&format!(
+        "${VAR_TIMEOUT}, when the preamble declares one, is applied at \
+         ${VAR_BUDGET} + ${VAR_OUTER_MARGIN} — behind this watchdog, exactly where the run itself \
+         put it. Its status is never read. Where the preamble declares none, the reproduction is \
+         still bounded, by the loop below."
+    )));
+    text.push_str(&format!("{SH_BOUNDED}() {{\n"));
+    text.push_str("    _b_status=$1\n");
+    text.push_str("    _b_stdout=$2\n");
+    text.push_str("    _b_stderr=$3\n");
+    text.push_str("    shift 3\n");
+    text.push_str(&format!("    _b_budget=${{{VAR_BUDGET}:-30}}\n"));
+    text.push_str(&format!(
+        "    _b_outer=$(( _b_budget + ${{{VAR_OUTER_MARGIN}:-5}} ))\n"
     ));
-    rendered.push_str("else\n");
-    rendered.push_str(&format!(
-        "    {SH_ISOLATED} {invocation} > {stdout_file} 2> {stderr_file} || status=$?\n"
+    text.push_str(&format!("    if [ -n \"${{{VAR_TIMEOUT}:-}}\" ]; then\n"));
+    // The isolation wraps the utility as well as the command, which is what the harness does: it
+    // installs the environment on the one command it spawns, and that command is already the wrapped
+    // vector. Isolating only the inner command would leave the utility running under the reader's
+    // environment and pass that environment on to the program it bounds.
+    text.push_str(&format!(
+        "        {SH_ISOLATED} \"${VAR_TIMEOUT}\" \"$_b_outer\" \"$@\" \
+         > \"$_b_stdout\" 2> \"$_b_stderr\" &\n"
     ));
-    rendered.push_str("fi\n");
-    rendered
+    text.push_str("    else\n");
+    text.push_str(&format!(
+        "        {SH_ISOLATED} \"$@\" > \"$_b_stdout\" 2> \"$_b_stderr\" &\n"
+    ));
+    text.push_str("    fi\n");
+    text.push_str("    _b_child=$!\n");
+    text.push_str("    _b_waited=0\n");
+    text.push_str("    _b_killed=0\n");
+    text.push_str("    while [ \"$_b_waited\" -lt \"$_b_budget\" ]; do\n");
+    text.push_str("        kill -0 \"$_b_child\" 2> /dev/null || break\n");
+    text.push_str("        sleep 1\n");
+    text.push_str("        _b_waited=$(( _b_waited + 1 ))\n");
+    text.push_str("    done\n");
+    text.push_str("    if kill -0 \"$_b_child\" 2> /dev/null; then\n");
+    text.push_str("        _b_killed=1\n");
+    // Established at runtime rather than assumed. A wrapped launch puts the utility in a process
+    // group of its own and the program inside it, so the group is what has to go; a bare launch stays
+    // in this script's group, where a group kill would take the script with it.
+    text.push_str("        _b_group=$(ps -o pgid= -p \"$_b_child\" 2> /dev/null | tr -d ' ')\n");
+    text.push_str("        _b_self=$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')\n");
+    text.push_str("        if [ -n \"$_b_group\" ] && [ \"$_b_group\" != \"$_b_self\" ]; then\n");
+    text.push_str("            kill -9 \"-$_b_group\" 2> /dev/null || :\n");
+    text.push_str("        else\n");
+    text.push_str("            kill -9 \"$_b_child\" 2> /dev/null || :\n");
+    text.push_str("        fi\n");
+    text.push_str("    fi\n");
+    text.push_str("    status=0\n");
+    text.push_str("    wait \"$_b_child\" || status=$?\n");
+    text.push_str("    if [ \"$_b_killed\" -eq 1 ]; then\n");
+    text.push_str(&format!("        termination={TERMINATION_TIMEOUT}\n"));
+    text.push_str(&format!(
+        "    elif [ \"$status\" -ge {SHELL_SIGNAL_STATUS_BASE} ]; then\n"
+    ));
+    text.push_str(&format!(
+        "        termination=\"{TERMINATION_SIGNALLED} $status\"\n"
+    ));
+    text.push_str("    else\n");
+    text.push_str(&format!(
+        "        termination=\"{TERMINATION_EXITED} $status\"\n"
+    ));
+    text.push_str("    fi\n");
+    text.push_str("    printf '%s\\n' \"$termination\" > \"$_b_status\"\n");
+    text.push_str("}\n");
+    text
 }
 
 /// Render the closing block that states the difference and compares the two streams.
@@ -3314,6 +3931,8 @@ fn render_manifest(
     id: &FindingId,
     caps: &Capabilities,
     minimization: &Minimization,
+    reproducer_digest: &str,
+    observers: &[Oracle],
 ) -> String {
     let mut text = String::from("BLITZY C COMPILER — DIFFERENTIAL CONFORMANCE FINDING\n");
     text.push_str("====================================================\n\n");
@@ -3323,6 +3942,15 @@ fn render_manifest(
     // maintainer comparing two archived directories can settle that from one field instead of parsing
     // a name apart. Deterministic, so `MANIFEST.txt` stays comparable between runs.
     text.push_str(&format!("identity_digest  = {}\n", id.digest()));
+    // The digest of the program this evidence was produced from, which is what makes a reduction
+    // auditable. A run copies the corpus program verbatim, so at publication this always matches the
+    // reproducer beside it; a maintainer who reduces that copy and refreshes the directory writes a
+    // new digest here, and one who reduces it and forgets leaves a manifest that provably describes a
+    // different program from the one it ships. `curated_finding_defects` compares the two, so
+    // "refresh the evidence after reducing" is a checked obligation rather than an instruction.
+    text.push_str(&format!(
+        "{MANIFEST_REPRODUCER_DIGEST_PREFIX}{reproducer_digest}\n"
+    ));
     text.push_str(&format!("area             = {}\n", finding.key().area()));
     text.push_str(&format!("program          = {}\n", finding.key().program()));
     text.push_str(&format!(
@@ -3334,6 +3962,19 @@ fn render_manifest(
         "oracle           = {}, letter {}\n",
         finding.oracle(),
         finding.oracle().letter()
+    ));
+    // Every oracle that observed this root cause, not just the one whose write produced this text.
+    // The identity is the cell and the class, so one refused build is one finding however many oracles
+    // were watching, and this is where that set is recorded rather than in three near-identical
+    // directories. The line is present even when a single oracle observed it, so a reader never has to
+    // wonder whether an absent field means one observer or an older manifest.
+    text.push_str(&format!(
+        "observed_by      = {}\n",
+        observers
+            .iter()
+            .map(|oracle| format!("{} ({})", oracle, oracle.letter()))
+            .collect::<Vec<String>>()
+            .join(", ")
     ));
     text.push_str(&format!("divergence_class = {}\n", finding.class()));
     text.push_str(&format!("verdict          = {}\n", Verdict::Finding));
@@ -3582,6 +4223,27 @@ fn describe_termination(capture: &Capture) -> String {
 /// be able to know what stream it holds without first working out whether that side's build
 /// succeeded, and a scheme that put compiler diagnostics in `.stderr` whenever a program had not run
 /// would make exactly that question unavoidable.
+/// The byte count of every entry [`write_capture`] will publish for one capture.
+///
+/// Kept beside that function and derived from the same conditions, because the budget is decided
+/// before anything is written and a projection that disagreed with the write would either refuse a
+/// finding that fitted or accept one that did not.
+fn capture_artifact_sizes(capture: &Capture) -> Vec<u64> {
+    let mut sizes = vec![
+        capture.stdout().len() as u64,
+        capture.stderr().len() as u64,
+        capture.exit_report().len() as u64,
+    ];
+    if let Some(compile) = capture.compile() {
+        sizes.push(compile.stdout().len() as u64);
+        sizes.push(compile.stderr().len() as u64);
+        if let Some(report) = capture.compile_report() {
+            sizes.push(report.len() as u64);
+        }
+    }
+    sizes
+}
+
 fn write_capture(context: &str, outputs: &Path, capture: &Capture) -> HarnessResult<Vec<PathBuf>> {
     let stem = capture.file_stem();
     let mut written = Vec::new();
@@ -3666,6 +4328,263 @@ fn require_complete(context: &str, directory: &Path, key: &CellKey) -> HarnessRe
         }
     }
     require_reproducer_pair_usable(context, directory, key)
+}
+
+/// Why a finding's artifact directory falls short of being a deliverable, or `None`.
+///
+/// The published counterpart of [`require_complete`], and it exists so that nobody has to restate the
+/// list of what a complete finding holds. A reporter checking a row it is about to call "present", a
+/// driver deciding whether the finding it just announced is really there, and this module's own
+/// completeness check at the moment of publication all answer the question the same way — because
+/// they all ask this.
+///
+/// Every entry [`REQUIRED_ARTIFACTS`] names is required, not merely the directory and the script:
+/// losing `reproducer.c`, `reproducer.expected`, `MANIFEST.txt`, `environment.txt`, `diff.txt` or
+/// `outputs/` leaves a row that reads as a recorded observation with the observation missing. The
+/// reproducer pair is additionally required to **load**, because "reproducible" is a claim about the
+/// record parsing rather than about the file existing.
+///
+/// # Why nothing here follows a final symbolic link
+///
+/// A finding directory's name is derived deterministically from the divergence, so every name checked
+/// here is predictable before the run that publishes it — which is exactly the precondition a planted
+/// link needs. [`Path::is_dir`] and [`Path::is_file`] answer about a link's *target*, so a link at one
+/// of these names would certify a present artifact while the directory holds nothing but a pointer
+/// elsewhere. Metadata is read without following, so only an entry a run actually published counts.
+pub fn artifact_defect(directory: &Path) -> Option<String> {
+    let published_directory = fs::symlink_metadata(directory)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+    if !published_directory {
+        return Some(String::from(
+            "its artifact directory is not there, so nothing it names can be opened",
+        ));
+    }
+    for name in REQUIRED_ARTIFACTS {
+        let entry = directory.join(name);
+        let observed = fs::symlink_metadata(&entry).ok();
+        let present = match &observed {
+            Some(metadata) if *name == OUTPUTS_DIR_NAME => metadata.is_dir(),
+            Some(metadata) => metadata.is_file(),
+            None => false,
+        };
+        if !present {
+            let found = match &observed {
+                None => "nothing is there",
+                Some(metadata) if metadata.file_type().is_symlink() => {
+                    "a symbolic link is there, which is not an artifact a run published and is not \
+                     followed"
+                }
+                Some(metadata) if metadata.is_dir() => "a directory is there",
+                Some(_) => "a non-regular file is there",
+            };
+            return Some(format!("it is missing {name} ({found})"));
+        }
+    }
+    // An empty captures directory satisfies every existence test above and delivers nothing, and it
+    // is the one shape of incompleteness a run can produce by itself: an interrupted write leaves
+    // the directory created and unfilled.  It is reported separately from the directory being
+    // absent, because a finding that names per-compiler and per-backend evidence it does not carry
+    // is the one shape of report that actively misleads.
+    let captures = directory.join(OUTPUTS_DIR_NAME);
+    let empty_captures = match fs::read_dir(&captures) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => true,
+    };
+    if empty_captures {
+        return Some(format!(
+            "its {OUTPUTS_DIR_NAME} directory holds nothing, so the per-compiler and per-backend \
+             evidence it names was never published"
+        ));
+    }
+    if let Err(error) = load_curated_pair(directory) {
+        return Some(format!(
+            "its reproducer pair cannot be loaded, so the reproduction it promises cannot be \
+             performed: {error}"
+        ));
+    }
+    None
+}
+
+/// Load the reproducer record of a published finding directory, whatever cell it came from.
+///
+/// The identity is taken from the record itself rather than supplied, because a caller inspecting a
+/// directory on disk — a reporter, or a maintainer validating a curated finding — has no `CellKey` to
+/// supply and deriving one from the directory name would test the name rather than the record. The
+/// record's own `area` and `program` fields are therefore read first and then used as the expected
+/// identity, which still proves the record is internally consistent and that its sibling source
+/// resolves to the reproducer beside it.
+fn load_curated_pair(directory: &Path) -> HarnessResult<Manifest> {
+    let context = format!("loading the reproducer pair in {}", shown_path(directory));
+    let record_path = directory.join(REPRODUCER_RECORD_NAME);
+    let text = String::from_utf8(read_file_bounded(
+        &context,
+        &record_path,
+        MAX_INSPECTED_FILE_BYTES,
+    )?)
+    .map_err(|error| {
+        HarnessError::new(
+            context.clone(),
+            format!("{} is not valid UTF-8: {error}", shown_path(&record_path)),
+        )
+    })?;
+    let (area, program) = manifest::declared_identity(&text, &record_path)?;
+    let record = manifest::load_replay(&record_path, &area, &program)?;
+    let sibling = record.source_path();
+    let expected_source = directory.join(REPRODUCER_SOURCE_NAME);
+    if sibling != expected_source {
+        return Err(HarnessError::new(
+            context,
+            format!(
+                "the record resolves its program to {}, but the reproducer beside it is {}; a record \
+                 that names a different program than the one filed with it would reproduce something \
+                 other than this finding",
+                shown_path(&sibling),
+                shown_path(&expected_source)
+            ),
+        ));
+    }
+    Ok(record)
+}
+
+/// Every way a **curated** finding directory falls short of being committable, or an empty list.
+///
+/// The mandatory check behind the curation procedure in `tests/conformance/FINDINGS.md`: a generated
+/// finding is promoted into `tests/conformance/findings/` by a human, and this is what makes that
+/// promotion an audited step rather than a copy. It is run by the register audit over every curated
+/// directory on every run, so a curated finding that decays — because its reproducer was reduced and
+/// its evidence was not refreshed, or because an artifact was dropped in a rebase — is reported
+/// rather than discovered by the next reader.
+///
+/// Four classes of defect, each closing a way a curated finding can lie:
+///
+/// 1. **Incompleteness.** Exactly the check [`artifact_defect`] makes, so a curated finding is held
+///    to the same standard as a generated one.
+/// 2. **Identity.** The directory's name and the identifier inside its own `MANIFEST.txt` must agree.
+///    A promoted directory that was renamed, or whose manifest came from a different finding, would
+///    otherwise be indexed in the register under a name nothing inside it claims.
+/// 3. **Post-reduction consistency.** The manifest records a digest of the reproducer it was written
+///    against. Minimization edits `reproducer.c`, and the whole point of the curation flow is that
+///    the record, the captures, the diff and the commands are refreshed to match the reduced program;
+///    a digest that no longer matches is the mechanical signature of evidence that was not refreshed,
+///    which is precisely the stale-artifact defect this check exists to catch.
+/// 4. **Disclosure.** Every text artifact is scanned with [`disclosure_defects`]. A generated
+///    artifact may name absolute paths — it is re-run on the machine that produced it — but a
+///    committed one is read by people who never saw that machine, so the checkout's location and any
+///    credential-bearing value must be elided before promotion, never after.
+///
+/// Every returned line is already safe to render.
+pub fn curated_finding_defects(directory: &Path) -> Vec<String> {
+    let mut defects: Vec<String> = Vec::new();
+    if let Some(defect) = artifact_defect(directory) {
+        defects.push(defect);
+        // Everything below reads those artifacts, so there is nothing further to say until they are
+        // there. Returning early keeps one missing file from producing a page of consequences.
+        return defects;
+    }
+
+    let name = directory
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let context = format!("validating the curated finding {}", shown_path(directory));
+    let manifest_path = directory.join(MANIFEST_NAME);
+    let manifest_text = match read_file_bounded(&context, &manifest_path, MAX_INSPECTED_FILE_BYTES)
+    {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => {
+            defects.push(format!("its {MANIFEST_NAME} could not be read: {error}"));
+            String::new()
+        }
+    };
+
+    match manifest_line_value(&manifest_text, MANIFEST_IDENTIFIER_PREFIX) {
+        Some(identifier) if identifier == name => {}
+        Some(identifier) => defects.push(format!(
+            "its directory is named {} while its own {MANIFEST_NAME} declares the identifier {}; the \
+             register indexes a finding by its directory name, so the two must agree or a reader \
+             following an entry arrives at evidence for a different divergence",
+            sanitize_text_for_report(&name),
+            sanitize_text_for_report(&identifier)
+        )),
+        None => defects.push(format!(
+            "its {MANIFEST_NAME} states no `{}` line, so nothing inside the directory claims the \
+             identifier the register indexes it under",
+            MANIFEST_IDENTIFIER_PREFIX.trim_end()
+        )),
+    }
+
+    match (
+        manifest_line_value(&manifest_text, MANIFEST_REPRODUCER_DIGEST_PREFIX),
+        reproducer_digest(directory),
+    ) {
+        (Some(recorded), Some(observed)) if recorded == observed => {}
+        (Some(recorded), Some(observed)) => defects.push(format!(
+            "its {MANIFEST_NAME} was written against a reproducer whose digest is {recorded}, but \
+             the {REPRODUCER_SOURCE_NAME} beside it digests to {observed}. Reducing a reproducer is \
+             expected; leaving the record, the captures, the diff, the commands and this manifest \
+             describing the program before the reduction is not — rerun every affected cell and \
+             refresh the whole directory, so the evidence and the program agree"
+        )),
+        (Some(_), None) => defects.push(format!(
+            "its {REPRODUCER_SOURCE_NAME} could not be digested, so the manifest's record of which \
+             program the evidence was produced from cannot be confirmed"
+        )),
+        (None, _) => defects.push(format!(
+            "its {MANIFEST_NAME} states no `{}` line, so there is no way to tell whether the \
+             evidence beside it was produced from the reproducer it now holds — which is exactly \
+             what a reduction changes",
+            MANIFEST_REPRODUCER_DIGEST_PREFIX.trim_end()
+        )),
+    }
+
+    for artifact in CURATED_TEXT_ARTIFACTS {
+        let path = directory.join(artifact);
+        let text = match read_file_bounded(&context, &path, MAX_INSPECTED_FILE_BYTES) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(error) => {
+                defects.push(format!("its {artifact} could not be read: {error}"));
+                continue;
+            }
+        };
+        for defect in disclosure_defects(&text) {
+            defects.push(format!(
+                "its {artifact} must not be committed as it is: {defect}"
+            ));
+        }
+    }
+
+    defects
+}
+
+/// The text artifacts a curation step must scan before committing a finding.
+///
+/// The captured streams under `outputs/` are deliberately excluded: they are a program's own stdout
+/// and a compiler's own diagnostics, byte for byte, and rewriting them would destroy the evidence.
+/// A compiler diagnostic naming the workspace it was given is a fact about the run, and the
+/// procedure in `FINDINGS.md` is what tells a curator to review those by eye.
+const CURATED_TEXT_ARTIFACTS: &[&str] = &[
+    MANIFEST_NAME,
+    COMMANDS_NAME,
+    DIFF_NAME,
+    ENVIRONMENT_NAME,
+    REPRODUCER_RECORD_NAME,
+    REPRODUCER_SOURCE_NAME,
+];
+
+/// The value of the first line of `text` beginning with `prefix`, trimmed.
+fn manifest_line_value(text: &str, prefix: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .map(|value| String::from(value.trim()))
+}
+
+/// Digest of the reproducer program in a finding directory, or `None` when it cannot be read.
+fn reproducer_digest(directory: &Path) -> Option<String> {
+    let path = directory.join(REPRODUCER_SOURCE_NAME);
+    let context = format!("digesting {}", shown_path(&path));
+    let bytes = read_file_bounded(&context, &path, MAX_INSPECTED_FILE_BYTES).ok()?;
+    Some(digest_hex_of_bytes(&bytes))
 }
 
 /// Confirm the emitted reproducer pair is one the harness can actually load.
@@ -3781,17 +4700,26 @@ pub fn write(finding: &Finding, caps: &Capabilities) -> HarnessResult<FindingArt
 
     // Establish the run's identity before anything is written beneath the findings root.
     //
-    // The generated-findings root is emptied once per process, and until that has happened the root
-    // still holds the *previous* run's directories. A finding written before it would land beside
-    // stale neighbours and then be retired along with them by whichever caller initialized the run
-    // second — so this run's own deliverable would vanish, and the report row pointing at it would
-    // name a directory that no longer existed.
-    //
-    // Making it a precondition of the write rather than of the caller is what closes that for good:
-    // the driver, the flag probe, the audit gate and any later caller all get the same guarantee
-    // without having to know they need it. Initialization is performed once per process under a
-    // `OnceLock`, so every call after the first is a load and a comparison.
+    // `sandbox::ensure_roots` creates the three artifact roots and publishes this run's manifest; it
+    // clears nothing, by design. Retiring the previous run's generated findings belongs to this
+    // module's own namespace preparation — `prepare_findings_namespace`, reached through
+    // `ensure_findings_namespace` from `prepare_directory` below, and performed once per process: it
+    // refuses a live foreign owner first, then removes the stale directories and stamps this run's
+    // ownership. Both are preconditions of a write rather than obligations on a caller, which is what
+    // closes the hazard for good: until the findings root has been prepared it still holds the
+    // *previous* run's directories, and a finding written beside them would be retired along with
+    // them by whichever caller prepared the namespace second — so this run's own deliverable would
+    // vanish and the report row pointing at it would name a directory that no longer existed. The
+    // driver, the flag probe, the audit gate and any later caller all get the guarantee without
+    // having to know they need it, and each initializer runs once per process under a `OnceLock`, so
+    // every call after the first is a load and a comparison.
     super::sandbox::ensure_roots()?;
+
+    // Consulted before anything is rendered, because the manifest names every oracle that has
+    // observed this root cause and the answer depends on who has already filed here. Consulted rather
+    // than recorded: the record is made once the bytes are on disk, so a refusal below cannot leave
+    // the next oracle believing this directory already exists.
+    let (fresh, observers) = peek_contribution(&id, finding.oracle());
 
     // Rendered before the directory exists, so a refusal leaves nothing behind.
     let commands = render_commands(finding, &id)?;
@@ -3799,19 +4727,65 @@ pub fn write(finding: &Finding, caps: &Capabilities) -> HarnessResult<FindingArt
     let environment = render_environment(finding, caps, &variables);
     let diff = render_diff(finding);
     let minimization = finding.minimization(caps);
-    let manifest = render_manifest(finding, &id, caps, &minimization);
+    // Read once, digested and published from the same bytes. Reading the program a second time to
+    // digest it would leave the manifest describing one revision while the reproducer beside it held
+    // another whenever the two reads straddled an edit — and the whole value of the digest is that it
+    // is a statement about the bytes actually filed.
+    let reproducer_bytes = read_file_bounded(&context, &finding.source, MAX_INSPECTED_FILE_BYTES)?;
+    // Read up front for the same reason the program is: the budget below is decided before the first
+    // byte is published, and it can only be decided from sizes that are already known.
+    //
+    // Both corpus files enter the finding by being read and then written, never by `fs::copy`, which
+    // follows a symbolic link at *both* ends — at the source it would read through a link out of the
+    // corpus, and at the destination it would write a corpus program through a link and out of the
+    // build directory. `read_file_bounded` refuses a link, refuses anything that is not a regular
+    // file, and refuses a file past the ceiling this suite reads; the write then takes the guarded
+    // path every other artifact takes. The traffic is one-directional by construction: nothing here
+    // writes back out, so the corpus stays read-only to the suite.
+    let record_bytes = read_file_bounded(&context, &finding.record, MAX_INSPECTED_FILE_BYTES)?;
+    let manifest = render_manifest(
+        finding,
+        &id,
+        caps,
+        &minimization,
+        &digest_hex_of_bytes(&reproducer_bytes),
+        &observers,
+    );
 
-    let (directory, outputs) = prepare_directory(&id)?;
+    // Every artifact's bytes are known at this point, so the budget is settled before the directory
+    // exists rather than discovered part way through writing it.
+    let mut sizes: Vec<u64> = vec![
+        reproducer_bytes.len() as u64,
+        record_bytes.len() as u64,
+        manifest.len() as u64,
+        commands.len() as u64,
+        environment.len() as u64,
+        diff.len() as u64,
+    ];
+    for capture in ordered_captures(finding) {
+        sizes.extend(capture_artifact_sizes(capture));
+    }
+    let directory_bytes: u64 = sizes.iter().copied().sum();
+    let largest_artifact = sizes.iter().copied().max().unwrap_or(0);
+    require_within_artifact_budget(
+        &context,
+        &id.directory(),
+        largest_artifact,
+        directory_bytes,
+        fresh,
+    )?;
+
+    let (directory, outputs) = prepare_directory(&id, fresh)?;
     let mut entries = Vec::new();
 
     // Written in the order REQUIRED_ARTIFACTS lists, so the returned paths and the completeness
     // check read in the same sequence as the documented artifact table.
     let source = guarded_path(&context, &directory, &[REPRODUCER_SOURCE_NAME])?;
-    copy_corpus_file(&context, &finding.source, &source)?;
+    write_bytes(&context, &source, &reproducer_bytes)?;
     entries.push(source.clone());
 
     let record = guarded_path(&context, &directory, &[REPRODUCER_RECORD_NAME])?;
-    copy_corpus_file(&context, &finding.record, &record)?;
+    write_bytes(&context, &record, &record_bytes)?;
     entries.push(record.clone());
 
     let manifest_path = guarded_path(&context, &directory, &[MANIFEST_NAME])?;
@@ -3835,10 +4809,13 @@ pub fn write(finding: &Finding, caps: &Capabilities) -> HarnessResult<FindingArt
     }
 
     require_complete(&context, &directory, finding.key())?;
+    charge_artifact_budget(directory_bytes, fresh);
+    commit_contribution(&id, finding.oracle());
     Ok(FindingArtifacts {
         id,
         directory,
         entries,
+        observers,
     })
 }
 

@@ -159,9 +159,11 @@ representation. Its raw size is therefore never printed. What is printed instead
 facts that hold everywhere: it is at least as wide as double, at least as strictly aligned as
 double, and its size is a whole multiple of its alignment. The type is therefore exercised here
 rather than dropped for being awkward. Cross-backend VALUE equality for long double is the
-subject of 13_floating_point/004_long_double_target_restricted.c, where it is a recorded exclusion
-carrying marker XD-TYPE-LONGDOUBLE-001; here nothing is excluded, because nothing
-representation-dependent is printed.
+subject of 13_floating_point/004_long_double_target_restricted.c, where it is a RECORDED
+EXCLUSION -- oracle_b disabled, with the measured representations as its basis -- and deliberately
+NOT a marker: the marker contract admits only an observed divergence backed by captured evidence,
+and an implementation-defined representation difference is not a bcc defect to begin with. Here
+nothing is excluded at all, because nothing representation-dependent is printed.
 THE TARGET-KEYED ANCHOR IS KEYED TO THE ARCHITECTURE, NOT TO A WIDTH MACRO, and the difference
 matters. The architecture is a categorical fact the harness fixes when it selects the cell's
 target, whereas a width macro such as __SIZEOF_POINTER__ is a numeric claim by the compiler

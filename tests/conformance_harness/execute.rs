@@ -82,32 +82,49 @@
 //! interpreted here any more.** A timeout is reported when, and only when, this module killed
 //! the child itself.
 //!
-//! The measurements that motivated distrusting the utility are kept, because they are the reason
-//! the arrangement is shaped this way. The implementation installed in the environment this suite
-//! was developed against (`timeout (uutils coreutils) 0.2.2`) was measured to be defective in two
-//! of its three spellings:
+//! Two constraints on how the utility is invoked follow, and both are properties of what an
+//! implementation of it may do rather than of any particular one:
 //!
-//! | invocation | observed status | observed elapsed | conclusion |
-//! | --- | --- | --- | --- |
-//! | `timeout 1 sleep 5` | 124 | 1.008 s | correct |
-//! | `timeout -s KILL 1 sleep 5` | 124 | **5.008 s** | no signal is sent; it waits for the child and then reports expiry |
-//! | `timeout -s KILL 1 <spin loop>` | — | **never returned** | hung indefinitely with the child still at 100% CPU |
-//! | `timeout -k 1 1 <spin loop>` | **125** | 1.107 s | the child does die, but 125 means "the utility itself failed" and collides with the contract range |
-//! | `timeout 1 <spin loop>` | 124 | 1.008 s | correct |
+//! - **`--signal=KILL` and `--kill-after` are never passed.** An implementation is free to wait for
+//!   its child rather than signal it promptly, and one that does turns those spellings into a longer
+//!   wait or an indefinite one, while `--kill-after`'s own failure status collides with the corpus's
+//!   0 to [`MAX_CONTRACT_EXIT_CODE`] contract range. Uncatchable termination is guaranteed by this
+//!   module's watchdog instead, which owes nothing to the utility's options.
+//! - **Its per-invocation cost is accepted, not optimized away.** A polling implementation charges
+//!   its poll granularity on every invocation whatever the budget — on the order of a hundred
+//!   milliseconds where a trivial artifact costs a fraction of one — and the supervision this module
+//!   adds on top is a few milliseconds. The wrapper is kept regardless, because the project plan
+//!   names the system `timeout` utility as the per-cell bound and this module's watchdog as the
+//!   fallback when it is absent; declining a tool the plan mandates is not a decision this module
+//!   gets to make on performance grounds. A maintainer who wants the cost back has one supported
+//!   lever — point the timeout-tool discovery at an implementation that signals promptly — and the
+//!   watchdog behaviour does not change either way.
 //!
 //! So `--signal=KILL` and `--kill-after` are deliberately **not** passed. Uncatchable
 //! termination is guaranteed by this module instead.
 //!
-//! One further measured property of that implementation is recorded here rather than discovered
-//! again later: it charges roughly **103 ms per invocation whatever the budget**, because it polls
-//! its child on a 100 ms granularity. A trivial artifact costs 0.5 ms bare, 103 ms under the
+//! One further measured property of that implementation is why the wrapper is no longer applied
+//! unconditionally: it charges roughly **103 ms per invocation whatever the budget**, because it
+//! polls its child on a 100 ms granularity. A trivial artifact costs 0.5 ms bare, 103 ms under the
 //! utility, and 108 ms through this module — so the supervision added here is under 5 ms and the
-//! rest is the utility. The wrapper is kept regardless, because the project plan names the system
-//! `timeout` utility as the per-cell bound and this module's watchdog as the fallback when it is
-//! absent; declining to use a tool the plan mandates is not a decision this module gets to make on
-//! performance grounds. A maintainer who wants the cost back has one supported lever: point the
-//! timeout-tool discovery at an implementation that signals promptly, and the watchdog behaviour
-//! does not change either way.
+//! rest is the utility. Across the matrix's 5,508 bounded invocations that is roughly **569 s** of
+//! wall time spent on a net that never fires in a healthy run, against about 188 s of actual work.
+//!
+//! So the outer net is **qualified by behaviour** before it is engaged. `env.rs` measures the
+//! discovered implementation once per run — supervising a child that exits immediately, under a
+//! budget it therefore never reaches — and engages it only when that cost is inside
+//! `OUTER_NET_OVERHEAD_MAX`; `caps.outer_net_tool()` is the resulting decision and the only value
+//! any caller passes here. The decision is stated in the pre-flight capability report and in every
+//! finding's environment fingerprint, so a declined net is visible rather than silent, and
+//! `BCC_CONFORMANCE_OUTER_TIMEOUT` forces it either way. Nothing about the *bound* changes with that
+//! decision: the watchdog below is authoritative in both cases, which is precisely what makes the
+//! outer net's engagement a cost question rather than a correctness one — and it is why the project
+//! plan's own degradation table records the fallback as "no behavioural change".
+//!
+//! Which implementation a machine has, its version, and whether that measurement engaged or
+//! declined it are recorded in the pre-flight capability report and in every finding's environment
+//! fingerprint, so a run's supervision behaviour is auditable from its own artifacts rather than
+//! from an assumption made here.
 //!
 //! A timeout is a **first-class divergence class**, never an infrastructure error: a program
 //! that finishes promptly under one compiler and hangs under another is exactly the kind of
@@ -140,12 +157,19 @@
 //! miscompiled loop, a runaway emulator or a hostile artifact, however, can print without end,
 //! and an unbounded buffer would exhaust the harness before any clock expired.
 //!
-//! Reaching the ceiling is **classified explicitly** rather than silently truncated: the reader
-//! stops, the child and its whole group are terminated and reaped, and the execution is refused
-//! with a diagnostic naming the stream, the ceiling and the byte counts. Refusal rather than
-//! comparison is the same judgement this module already makes about an undrainable pipe, and for
-//! the same reason. Two flooding sides truncated at the same ceiling would compare **equal**, so
-//! a silent truncation is the one failure mode capable of turning a real divergence into a pass.
+//! Two things are bounded, and they are bounded separately, because conflating them would trade one
+//! failure for another. **Retention** stops at the ceiling: past it the reader keeps every byte it
+//! already holds and holds no more, counting what it drops. **Draining does not stop** — the reader
+//! goes on consuming the pipe to end of file, because a reader that stopped reading would leave the
+//! child blocked forever on a full pipe and would have converted a memory bound into a hang.
+//!
+//! Reaching the ceiling is then **classified explicitly** rather than silently truncated: the
+//! overflow is recorded as it happens, the child and its whole group are terminated and reaped, and
+//! the execution is refused with a diagnostic naming the stream, the ceiling and the byte counts —
+//! both what the stream produced and what was retained. Refusal rather than comparison is the same
+//! judgement this module already makes about an undrainable pipe, and for the same reason. Two
+//! flooding sides truncated at the same ceiling would compare **equal**, so a silent truncation is
+//! the one failure mode capable of turning a real divergence into a pass.
 //!
 //! # Capture, without the classic deadlock
 //!
@@ -245,7 +269,7 @@ use super::sandbox::{
     REFERENCE_EXIT_NAME, REFERENCE_STDERR_NAME, REFERENCE_STDOUT_NAME,
 };
 use super::{
-    ensure_within, isolate_child_environment, own_process_group, posix_command_line,
+    ensure_within, isolate_child_environment, own_process_group, posix_command_line, public_text,
     redact_secrets, require_regular_file, sanitize_text_for_report, shown_path,
     terminate_process_group, CaptureIntegrity, CellKey, DivergenceClass, GroupTermination,
     HarnessError, HarnessResult, Target, CAPTURE_CHUNK_BYTES, CAPTURE_RETAINED_BYTES_MAX,
@@ -531,10 +555,20 @@ impl RunOutcome {
     }
 
     /// The argument vector as a single POSIX shell line, quoted so it can be pasted into a
-    /// terminal and reproduce this execution exactly.
+    /// terminal and reproduce this execution.
     ///
-    /// This is the line a finding artifact publishes and a report row names, and it is
-    /// reproducible on its own: no wrapper of this module's appears in it.
+    /// This is the line a finding artifact publishes and a report row names, and it carries no
+    /// wrapper of this module's: pasting it launches the program the way this module launched it,
+    /// with the same argument vector element for element.
+    ///
+    /// A command line is not the whole invocation, though, and the two inputs it does not carry are
+    /// both recorded elsewhere in a finding directory rather than left implicit: the **working
+    /// directory**, which is the cell's own workspace and is what every relative path in the vector
+    /// resolves against, and the **environment**, which this module clears and replaces with the
+    /// suite's fixed set — a fixed C locale, fixed sanitizer options, the vetted search path, and
+    /// the scratch directory as `HOME` and `TMPDIR`. An exported `LD_PRELOAD`, a locale that prints
+    /// a decimal comma or a relaxed sanitizer setting would each change the result, so a finding's
+    /// `commands.sh` re-establishes both around every line it runs and states that it does.
     pub fn command_line(&self) -> String {
         posix_command_line(&self.argv)
     }
@@ -722,7 +756,10 @@ impl RunOutcome {
             described.push_str("; note: ");
             described.push_str(note);
         }
-        sanitize_text_for_report(&described)
+        // `public_text` rather than sanitization alone: this line ends with the command that ran,
+        // which names the artifact and the emulator by absolute path, and it is published to the
+        // console and into report rows. Reproduction reads the argument vector, never this line.
+        public_text(&described)
     }
 
     /// The same line with the measured duration appended, for progress output only.
@@ -1085,7 +1122,7 @@ pub fn run(
         command,
         budget_for(caps),
         runner,
-        caps.timeout_tool().path(),
+        caps.outer_net_tool(),
         Some(BoundArtifact {
             path: artifact,
             identity: &identity,
@@ -1284,7 +1321,8 @@ pub fn run_and_record(
 ///
 /// # The timeout utility is a parameter, not a second entry point
 ///
-/// `timeout_tool` is the path discovery vetted, normally `caps.timeout_tool().path()`. When it is
+/// `timeout_tool` is the utility the run decided to wrap with, which every caller obtains from
+/// `caps.outer_net_tool()` — the qualified decision, not the raw discovery result. When it is
 /// `Some` and the budget is a whole number of seconds it wraps the launch as an outer net beyond
 /// the budget; when it is `None` nothing wraps the launch. Either way this module's own watchdog
 /// is what enforces the budget, so the observable behaviour is identical and the utility is
@@ -1913,9 +1951,12 @@ struct CaptureState {
 /// A pipe being drained on its own thread.
 struct StreamCapture {
     state: Arc<CaptureState>,
-    /// Sends exactly once when the reader stops: `None` for end-of-file, `Some(message)` for a
-    /// read error or for the ceiling. A bounded receive on this is what keeps a stuck pipe from
-    /// blocking the harness forever, which a plain thread join could not.
+    /// Sends exactly once when the reader stops: `None` for end-of-file, `Some(message)` for a read
+    /// error or a poisoned buffer. Reaching the retention ceiling is deliberately **not** one of
+    /// them — the reader goes on draining past it and records the overflow in
+    /// [`CaptureState::truncated`], which [`StreamCapture::reached_ceiling`] reports separately. A
+    /// bounded receive on this is what keeps a stuck pipe from blocking the harness forever, which a
+    /// plain thread join could not.
     finished: Receiver<Option<String>>,
 }
 
@@ -1945,9 +1986,11 @@ impl StreamCapture {
 ///
 /// Retention is bounded at [`CAPTURE_RETAINED_BYTES_MAX`], and the pipe keeps being read past that
 /// bound. Both halves matter and for different reasons: without the bound, a program that prints
-/// without end exhausts memory across 1,296 concurrent cells; without the continued reading, the
-/// child blocks forever on a full pipe and the bound would have converted a memory fault into a
-/// hang. What the quota discards is counted, so the overflow is disclosed rather than absorbed.
+/// without end exhausts memory — and the nominal matrix total is 1,296 `bcc` cells, run across the
+/// built-in harness's thread pool, so the ceiling is charged per stream of every cell that is in
+/// flight; without the continued reading, the child blocks forever on a full pipe and the bound
+/// would have converted a memory fault into a hang. What the quota discards is counted, so the
+/// overflow is disclosed rather than absorbed.
 fn spawn_reader<R: Read + Send + 'static>(mut source: R) -> StreamCapture {
     let state = Arc::new(CaptureState {
         buffer: Mutex::new(Vec::new()),

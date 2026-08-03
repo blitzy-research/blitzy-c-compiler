@@ -107,11 +107,14 @@
 //!
 //! # Integration with `tests/common/mod.rs`, and what happens in each case
 //!
-//! The repository's sixteen existing integration suites share one helper module,
-//! `tests/common/mod.rs`, and this suite is required to integrate with that convention rather than
-//! duplicate it. The obligation is conditional on the file existing, because `mod common;` is a
-//! compile-time assertion that it does: declared against an absent file it does not fall back, it
-//! fails the build, and a suite that cannot compile reuses nothing.
+//! The repository documents sixteen existing integration suites sharing one helper module,
+//! `tests/common/mod.rs` (`docs/project-guide.md`, test inventory), and this suite is required to
+//! integrate with that convention rather than duplicate it. Neither those suites nor that helper is
+//! present in this checkout: the branch carries the project documentation and this suite, while the
+//! compiler crate, its manifest and its existing tests live on the project's open pull request. The
+//! obligation is therefore conditional on the file existing, because `mod common;` is a compile-time
+//! assertion that it does: declared against an absent file it does not fall back, it fails the build,
+//! and a suite that cannot compile reuses nothing.
 //!
 //! **If `tests/common/mod.rs` is present**, this file declares `mod common;` and delegates to it —
 //! specifically its compile helper, its run helper, its assertion macros and its temporary-directory
@@ -149,11 +152,16 @@
 //! is an unexplained result, not a delivered one.
 //!
 //! The second half of that discipline lives in `classify.rs`: a refusal happens once per cell,
-//! before any oracle is asked, and it removes the authority every one of them needs. When a marker
-//! documents that refusal, **every** arm it blocked is an expected divergence traceable to that one
-//! documented root cause — not one expected divergence and a cascade of undocumented findings for
-//! the same defect. The marker's own scope is never widened to achieve that, and every outcome
-//! detail says which oracle the marker names and which oracle it is excusing.
+//! before any oracle is asked, and it removes the authority every one of them needs. It nevertheless
+//! reaches the classifier once per oracle arm, and each arm is matched against a marker's scope
+//! **strictly, on all four dimensions — class, oracle, target and optimization level**. So a marker
+//! excuses the arms its scope names and no others: the corpus's one active marker is scoped
+//! `oracle_a`, which means a refusal it documents is an expected divergence on oracle (a) while the
+//! same refusal seen by oracles (b) and (c) is reported as a **finding**, each delivered with the
+//! refusal's own artifacts. A marker meant to cover every arm a refusal blocks scopes `all oracles`,
+//! which is one word in the record and the register; this module never widens a scope on a marker's
+//! behalf, and every outcome detail names both the oracle the marker covers and the oracle being
+//! judged, so the two can never be confused for one another.
 //!
 //! Only the standard library is used, every operation is safe, no lint is suppressed, and not one
 //! of the eighteen tests is marked ignored — the repository's ignored-test count is itself the most
@@ -162,6 +170,7 @@
 
 mod conformance_harness;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -527,6 +536,33 @@ fn infra_expected_divergence_register() {
             ));
         }
     }
+
+    // The second committed register, audited by the same test and for the same reason. A finding is a
+    // deliverable, so `FINDINGS.md` and the curated directories beneath `tests/conformance/findings/`
+    // make the same kind of promise the marker register does — and decay the same way. Three failures
+    // are possible and none of them is visible without a check: a curated directory whose evidence was
+    // not refreshed after its reproducer was reduced, so the manifest provably describes a different
+    // program from the one it ships; a curated directory that lost an artifact in a rebase, so a
+    // reader following a register entry finds no reproduction; and a curated artifact still naming the
+    // absolute location of the machine that produced it, which is disclosure rather than evidence once
+    // it is committed. `findings::curated_finding_defects` is the mandatory scan the curation
+    // procedure in that register names, and running it here is what makes it mandatory rather than
+    // advisory.
+    let curated = curated_finding_directories();
+    for directory in &curated {
+        for defect in findings::curated_finding_defects(directory) {
+            violations.push(format!(
+                "the curated finding {} is not committable as it stands: {defect}",
+                shown_path(directory),
+            ));
+        }
+    }
+    println!(
+        "curated findings — {} directory(ies) under {}, each validated for completeness, identity, \
+         post-reduction consistency and disclosure",
+        curated.len(),
+        classify::FINDINGS_REGISTER,
+    );
 
     println!(
         "expected-divergence register — {} marker(s) in the corpus, {} identifier(s) in {}",
@@ -1422,10 +1458,11 @@ impl<'a> CellPlan<'a> {
     /// The compiler under test produced no artifact: every applicable oracle says so.
     ///
     /// One refusal, one class, one cell — and every oracle blocked by the same absence, so each is
-    /// settled against the same evidence. When the refusal is documented, `classify.rs` records each
-    /// arm as an expected divergence traceable to that one documented root cause; when it is not,
-    /// each arm is a finding, and every one of them is delivered with the refusal's own artifacts
-    /// rather than as a bare verdict.
+    /// settled against the same evidence. Each arm is then judged separately: `classify.rs` records
+    /// it as an expected divergence only when a marker's scope names **that** oracle as well as the
+    /// target, the level and the class, so a marker scoped to one oracle excuses that arm alone and
+    /// the arms it does not name remain findings. Whichever way an arm lands, it is delivered with
+    /// the refusal's own artifacts rather than as a bare verdict.
     ///
     /// # What the reference arm contributes, and what it does not
     ///
@@ -2454,6 +2491,43 @@ fn preflight_gap(area: &str, blocking: &[&report::PreflightGate]) -> String {
     text
 }
 
+/// Why an incomplete finding artifact fails the run, and what to do about it.
+///
+/// One message for both scopes that raise it — a feature area and the run summary — because the
+/// defect and the correction are identical in either: a report on disk names a deliverable that is
+/// not there. The sentences themselves come from the harness, which is the only place that read the
+/// directories, so this frames them rather than restating them.
+fn artifact_gap(shortfalls: &[String]) -> String {
+    let mut text = format!(
+        "{} reported finding(s) do not carry their complete artifacts, so a published report names \
+         deliverables that are not on disk.\n\n",
+        shortfalls.len(),
+    );
+    for shortfall in shortfalls {
+        text.push_str("   ");
+        text.push_str(shortfall);
+        text.push_str("\n\n");
+    }
+    text.push_str(
+        "Requirement 6 makes a finding a deliverable rather than a defect to patch: the program \
+         minimized as far as practical, the outputs from each compiler and each backend, and the \
+         exact reproduction commands are what is actually being delivered. A row that says FINDING \
+         while its directory is missing one of those promises evidence it does not hold, and a \
+         reader who follows the row finds nothing — which is why this fails the run even though \
+         FINDING itself never does.\n\n\
+         This is a defect in the SUITE, not an observation about the compiler under test, so the \
+         correction is never a compiler source change. Check whether something removed or replaced \
+         the generated-findings tree while the run was executing — a concurrent `cargo test` sharing \
+         this build directory is the usual cause, and each run claims the tree precisely so that is \
+         reported rather than tolerated — and whether the run was interrupted between creating a \
+         finding's directory and filling it.\n\n\
+         The report and the summary were both still written, and each states this in its own \
+         diagnostics, so what was observed survives for comparison. Re-run with \
+         `BCC_CONFORMANCE_KEEP_WORK=1` to retain every cell workspace beside the findings.",
+    );
+    text
+}
+
 /// Create the build-directory roots every cell writes beneath, and claim this run's report and
 /// generated-findings trees.
 ///
@@ -2752,11 +2826,21 @@ fn publish(spec: &'static AreaSpec, outcomes: &[Outcome], caps: &Capabilities) {
     }
 
     match report::try_finalize(caps) {
-        Ok(true) => println!(
-            " run summary written:\n   {}\n   {}",
-            shown_path(&report::summary_markdown_path()),
-            shown_path(&report::summary_tsv_path()),
-        ),
+        Ok(true) => {
+            println!(
+                " run summary written:\n   {}\n   {}",
+                shown_path(&report::summary_markdown_path()),
+                shown_path(&report::summary_tsv_path()),
+            );
+            // Asserted in the arm that wrote the summary, and only there, so the caller that fails
+            // is the caller that made the promise. The check itself ran inside the harness,
+            // immediately before the summary's bytes were written; this is where its answer is
+            // turned into the outcome of a test. Placed after the write for the reason the whole
+            // file is ordered this way — a summary withheld on account of an incomplete finding
+            // would delete the record of which finding was incomplete.
+            let shortfalls = report::artifact_shortfalls(report::SUMMARY_SCOPE);
+            assert!(shortfalls.is_empty(), "{}", artifact_gap(&shortfalls));
+        }
         // Never left as a bare "pending": the harness states which areas it is still waiting for,
         // and names any area report it REFUSED because that report belongs to a different run —
         // the one case where a missing summary needs acting on rather than merely noting. Pending
@@ -2949,6 +3033,18 @@ fn conclude(
         preflight_gap(spec.directory(), &blocking)
     );
 
+    // A finding is a deliverable, and the report this area just published names its artifacts and
+    // tells a reader to execute the script inside them. The harness revalidated every one of those
+    // directories against disk immediately before writing those bytes — the whole required artifact
+    // set and the captures inside it, without following a link — and this is where that answer
+    // decides the test. It is separate from the verdict tally below on purpose: FINDING does not fail
+    // a run, because a divergence the suite recorded honestly is the deliverable working as intended.
+    // An *empty* finding is a different thing entirely — a row that reads as a recorded observation
+    // and delivers nothing — and it is a defect in the suite rather than an observation about the
+    // compiler, so it fails here where no verdict policy could reach it.
+    let shortfalls = report::artifact_shortfalls(spec.directory());
+    assert!(shortfalls.is_empty(), "{}", artifact_gap(&shortfalls));
+
     assert!(
         !outcomes.is_empty() || config.is_reduced_run(),
         "the feature area {:?} enumerated {} program(s) and produced no outcome at all, so it \
@@ -2986,6 +3082,80 @@ fn conclude(
         digest,
         failing_guidance(config),
     );
+
+    // A finding does not fail the run — it is a deliverable — but a finding whose deliverable is not
+    // there does, and that is a different statement. Until now the report noted the loss as a
+    // diagnostic and the area still passed, so a run could announce a divergence, name a directory
+    // holding nothing, and report success: the one shape of result that is worse than a failure,
+    // because it reads as a recorded observation.
+    //
+    // Checked here, last, so a reader of a broken area sees the real divergences first and this only
+    // when nothing else is wrong. Checked against disk while the run that wrote them is still able to
+    // say so, and against the writer's own completeness validator rather than a second opinion about
+    // what a finding holds.
+    let incomplete = incomplete_finding_artifacts(outcomes);
+    assert!(
+        incomplete.is_empty(),
+        "the feature area {:?} recorded {} finding(s) whose artifacts are not a deliverable.\n\n{}\n\
+         \nA finding is kept as the program, the outputs from each compiler and backend, and the \
+         exact reproduction commands — so a row naming artifacts that are not there is a defect in \
+         this suite rather than an observation about the compiler. Nothing beneath the build \
+         directory is committed, so the usual cause is an interrupted or concurrently cleaned run: \
+         re-run the area. If it recurs, the write path is at fault and the divergence has not been \
+         delivered.\n\n{}",
+        spec.directory(),
+        incomplete.len(),
+        incomplete
+            .iter()
+            .map(|defect| format!("   {defect}"))
+            .collect::<Vec<String>>()
+            .join("\n"),
+        digest,
+    );
+}
+
+/// Why any finding this area recorded falls short of being a deliverable, in directory order.
+///
+/// # Why the directories are deduplicated first
+///
+/// A finding is identified by its cell and its divergence class, not by the oracle that observed it,
+/// so one refused build seen by three oracles is three outcomes pointing at **one** directory. Asking
+/// each outcome independently would report a single missing artifact three times and make a reader
+/// hunt for three directories that are one. The set of directories is therefore collapsed before
+/// anything is checked, which also means the disk is read once per finding rather than once per arm.
+///
+/// The check itself is [`findings::artifact_defect`] — the same validator the write path applies at
+/// publication and the reporter applies when it calls a row's artifacts present. One definition of
+/// what a complete finding holds, asked by everyone who needs the answer.
+fn incomplete_finding_artifacts(outcomes: &[Outcome]) -> Vec<String> {
+    let mut directories: BTreeMap<String, (PathBuf, Vec<String>)> = BTreeMap::new();
+    for outcome in outcomes {
+        if outcome.verdict() != Verdict::Finding {
+            continue;
+        }
+        // A finding with no class cannot name a directory at all. That is an internal inconsistency
+        // rather than a lost artifact, and the area report already diagnoses it by name, so it is not
+        // re-reported here as a missing deliverable it never had.
+        let Some(class) = outcome.class() else {
+            continue;
+        };
+        let id = findings::FindingId::derive(outcome.key(), class);
+        let entry = directories
+            .entry(String::from(id.as_str()))
+            .or_insert_with(|| (id.directory(), Vec::new()));
+        entry.1.push(outcome.oracle().to_string());
+    }
+    directories
+        .into_iter()
+        .filter_map(|(id, (directory, observers))| {
+            findings::artifact_defect(&directory).map(|defect| {
+                format!(
+                    "finding {id} (observed by {}): {defect}",
+                    observers.join(", ")
+                )
+            })
+        })
+        .collect()
 }
 
 /// What a reader of a failing area should do next, and what they must not do.
@@ -3116,12 +3286,14 @@ fn matrix_statement(config: &RunConfig) -> String {
 /// what an entry consists of. `Program` is included because an entry that named the wrong program
 /// would send a reader to a construct the marker never governed, and `Observed` because an entry
 /// that omitted it would describe an authority without describing what it excuses.
-const REGISTER_ENTRY_FIELDS: [&str; 6] = [
+const REGISTER_ENTRY_FIELDS: [&str; 8] = [
     "Identifier",
     "Class",
     "Scope",
     "Program",
     "Basis",
+    "Documented",
+    "Evidence",
     "Observed",
 ];
 
@@ -3347,33 +3519,35 @@ fn registered_identifiers(register: &str) -> Vec<String> {
 
 /// Every way in which the register's entry for `marker` fails to describe it.
 ///
-/// Empty when the entry states all six fields and every one agrees with the record. A mismatch is
+/// Empty when the entry states all eight fields and every one agrees with the record. A mismatch is
 /// reported per field, with both readings quoted, so a maintainer sees which document is wrong rather
 /// than only that the two disagree.
 ///
 /// Comparison is exact after trimming for the five single-line fields, because §2.4 of the register
-/// requires one canonical rendering reproduced character for character. `Observed` is compared with
-/// runs of whitespace collapsed, and only because a Markdown table cell cannot contain a newline
-/// while the record's `observed` field is a heredoc that frequently does: the alternative would be a
-/// rule no author could satisfy, which is a rule that ends up unenforced.
+/// requires one canonical rendering reproduced character for character. `Documented`, `Evidence` and
+/// `Observed` are compared with runs of whitespace collapsed, and only because a Markdown table cell
+/// cannot contain a newline while those three fields are heredocs that frequently do: the alternative
+/// would be a rule no author could satisfy, which is a rule that ends up unenforced.
 fn register_entry_mismatches(
     marker: &manifest::ExpectedDivergence,
     entry: &RegisterEntry,
 ) -> Vec<String> {
     let mut mismatches: Vec<String> = Vec::new();
     let program = marker.program_label();
-    let expected: [(&str, &str); 6] = [
+    let expected: [(&str, &str); 8] = [
         ("Identifier", marker.id()),
         ("Class", marker.class().label()),
         ("Scope", marker.scope().raw()),
         ("Program", &program),
         ("Basis", marker.basis()),
+        ("Documented", marker.documented()),
+        ("Evidence", marker.evidence()),
         ("Observed", marker.observed()),
     ];
     for (field, recorded) in expected {
         let Some(stated) = entry.value(field) else {
             mismatches.push(format!(
-                "its entry at line {} states no {field} field; the six fields {} are each required, \
+                "its entry at line {} states no {field} field; the eight fields {} are each required, \
                  because an entry that omits one describes an authority the record does not, and \
                  the two accounts then differ in a way no reader can reconcile. The record says \
                  {}",
@@ -3384,7 +3558,9 @@ fn register_entry_mismatches(
             continue;
         };
         let agrees = match field {
-            "Observed" => collapse_whitespace(stated) == collapse_whitespace(recorded),
+            "Documented" | "Evidence" | "Observed" => {
+                collapse_whitespace(stated) == collapse_whitespace(recorded)
+            }
             _ => stated.trim() == recorded.trim(),
         };
         if !agrees {
@@ -3404,7 +3580,17 @@ fn register_entry_mismatches(
 
 /// Every way in which the document a marker cites fails to be a basis a reader can check.
 ///
-/// Three properties are asserted, and each closes a distinct way a basis can be hollow:
+/// Four properties are asserted, and each closes a distinct way a basis can be hollow:
+///
+/// The fourth is the one that makes the other three mean anything, and it was added because they do
+/// not. A contained, readable document plus a locator that resolves establishes only that a file
+/// exists and that a line number is within it — nothing at all about whether the section named says
+/// what the marker claims it says. A marker could therefore cite any committed document, any real
+/// line, and any prose it liked, and the audit would certify it. The marker must now also QUOTE the
+/// sentence that documents the limitation, and that quotation is resolved against the cited
+/// document's own bytes: an omission cannot be quoted, so a basis resting on what the repository
+/// fails to say can no longer pass, and a basis resting on what it does say is checkable by anyone
+/// with the file in front of them.
 ///
 /// - **Containment.** The cited path is resolved and required to lie beneath the package root, so a
 ///   marker cannot reclassify a divergence on the authority of something outside this repository.
@@ -3453,8 +3639,11 @@ fn basis_violations(marker: &manifest::ExpectedDivergence) -> Vec<String> {
     let document = String::from_utf8_lossy(&bytes);
     match resolve_locators(marker.basis_citation(), &document) {
         Ok(resolved) => {
+            if let Some(violation) = documented_quotation_violation(marker, &document, &absolute) {
+                return vec![violation];
+            }
             println!(
-                "  basis of {} resolved in {}: {}",
+                "  basis of {} resolved in {}: {}, and its documenting sentence occurs verbatim",
                 marker.id(),
                 shown_path(&absolute),
                 comma_list(&resolved),
@@ -3471,6 +3660,40 @@ fn basis_violations(marker: &manifest::ExpectedDivergence) -> Vec<String> {
             shown_path(&absolute),
         )],
     }
+}
+
+/// Why a marker's documenting quotation is not a quotation of the document it cites, or `None`.
+///
+/// The quotation is compared with runs of whitespace collapsed, and that is the only latitude given:
+/// a Markdown document wraps its lines wherever its own formatting demands, so requiring the
+/// quotation to match the file's line breaks would be requiring the author to reproduce an accident.
+/// Everything else must match — every word, in order — because the whole value of the check is that a
+/// reader can find the sentence and judge whether it says what the marker claims.
+///
+/// A quotation spanning several lines in the record is normalised the same way, so an author may wrap
+/// it for legibility.
+fn documented_quotation_violation(
+    marker: &manifest::ExpectedDivergence,
+    document: &str,
+    absolute: &Path,
+) -> Option<String> {
+    let quotation = collapse_whitespace(marker.documented());
+    if collapse_whitespace(document).contains(&quotation) {
+        return None;
+    }
+    Some(format!(
+        "marker {} quotes {} as the sentence documenting the limitation, but that text does not \
+         occur in {}. A path, a readable file and a locator that resolves establish only that a \
+         document exists and that a line is inside it — they establish nothing about whether the \
+         section says what the marker claims. The quotation is what closes that gap, so it has to be \
+         the document's own words: copy the sentence that states the limitation, exactly, allowing \
+         only a change of line wrapping. If no sentence in the repository states it, the divergence \
+         is not documented, and requirement 6 makes it a FINDING — a deliverable with a reproducer \
+         and exact commands — rather than something to be excused here",
+        marker.id(),
+        quoted_for_diagnostic(marker.documented()),
+        shown_path(absolute),
+    ))
 }
 
 /// Resolve every locator a citation contains against the cited document.
@@ -3675,6 +3898,36 @@ fn comma_list(items: &[impl AsRef<str>]) -> String {
         .map(|item| item.as_ref().to_string())
         .collect::<Vec<String>>()
         .join(", ")
+}
+
+/// Every curated finding directory committed under the corpus, in a deterministic order.
+///
+/// An empty result is the ordinary and honest state of a branch that has recorded no finding: the
+/// directory holds only its own placeholder, and the register says so. Anything that is not a
+/// directory is skipped rather than reported, because the placeholder that keeps an empty directory
+/// in version control is a regular file and is not a finding.
+///
+/// A directory that cannot be listed at all is skipped too, and deliberately: the curated set is
+/// optional by construction, so an absent or unreadable directory must not fail a run that has
+/// nothing to do with findings. What must not be skipped is a directory that *is* there and is
+/// defective, which is exactly what [`findings::curated_finding_defects`] reports on.
+fn curated_finding_directories() -> Vec<PathBuf> {
+    let root = corpus_root().join(conformance_harness::CURATED_FINDINGS_DIR_NAME);
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut directories: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_dir() && !kind.is_symlink())
+                .unwrap_or(false)
+        })
+        .map(|entry| entry.path())
+        .collect();
+    directories.sort();
+    directories
 }
 
 /// The corpus markers as one readable list, for a message that has to name them all.

@@ -400,11 +400,11 @@ pub const RETAINED_WORKSPACE_BYTES_MAX: u64 = 32 * 1024 * 1024;
 
 /// Upper bound on the bytes every retained workspace of one run may hold together.
 ///
-/// This is the bound the review's resource-management finding is really about. The matrix has 1,296
-/// cells, and a run in which every one of them fails — a compiler under test that cannot build
-/// anything at all is exactly that run — would otherwise retain 1,296 workspaces with no ceiling
-/// whatever. Two gigabytes is far more evidence than any investigation needs and far less than a
-/// build directory can be allowed to lose.
+/// A per-workspace bound is not enough on its own. The nominal matrix is 1,296 cells, and a run in
+/// which every one of them fails — a compiler under test that cannot build anything at all is exactly
+/// that run — would otherwise retain 1,296 workspaces with no ceiling whatever. Two gigabytes is far
+/// more evidence than any investigation needs and far less than a build directory can be allowed to
+/// lose.
 pub const RETAINED_RUN_BYTES_MAX: u64 = 2 * 1024 * 1024 * 1024;
 
 /// How many workspaces one run may retain before further retentions are pruned.
@@ -420,27 +420,11 @@ pub const RETAINED_WORKSPACE_COUNT_MAX: usize = 512;
 /// is performed under a [`OnceLock`], so fourteen concurrently starting areas initialize the run
 /// once between them and all fourteen observe the same result.
 ///
-/// # What initialization does, and why creating the roots is not enough
+/// # What initialization does
 ///
-/// The three roots are created, and then the two that hold *this run's account of itself* are
-/// emptied completely: every per-area report, the run summary, and every generated finding of any
-/// previous run is removed. That is the correction the review's report-lifecycle finding asks for,
-/// and it closes a failure that merely creating the directories leaves wide open. Report and finding
-/// paths are deterministic, so a previous run's `areas/09_optimization_levels.tsv` sits exactly
-/// where this run's will, its `summary.md` sits exactly where this run's would, and so does its
-/// finding directory. Finalization would then aggregate a set of files that never described one run
-/// — a reduced run's rows counted beside a full run's, or a finding that was fixed weeks ago
-/// presented as current — and the summary would state the total with no way for a reader to tell.
-/// Worse, a run that never reached finalization at all would leave the *previous* run's summary
-/// standing as though it were this one's.
-///
-/// The per-cell workspace root is deliberately **not** wiped: [`allocate`] purges each workspace as
-/// it is allocated, so a cell always starts empty, and wiping the whole root would destroy the
-/// retained evidence of a run a maintainer is still reading while a second, filtered run gathers
-/// one more data point.
-///
-/// The identity itself is written to [`RUN_MANIFEST_NAME`] beside the reports, so a reader looking
-/// at a report directory can tell which run produced it.
+/// The three roots are created, and this run's identity is written to [`RUN_MANIFEST_NAME`] beside
+/// the reports, so a reader looking at a report directory can tell which run produced it. Nothing is
+/// removed here — see the next section for why, and for which module owns each root's clearing.
 ///
 /// Created through the suite's shared guarded walk rather than a bare recursive create, so a
 /// symbolic link planted at one of the three root names is refused here — at the first moment the
@@ -467,8 +451,11 @@ pub const RETAINED_WORKSPACE_COUNT_MAX: usize = 512;
 /// findings root. Both stamp this run's ownership afterwards, and both verify every level on the way
 /// down before following one, so a stale run's artifacts are cleared while a live run's are refused.
 ///
-/// The per-cell workspace root is never emptied wholesale at all: a workspace is retired by the cell
-/// that owns it, and the retention budget prunes the rest, so no run-wide sweep is needed.
+/// The per-cell workspace root is never emptied wholesale at all, by anyone: [`allocate`] purges each
+/// workspace as it is allocated so a cell always starts empty, a workspace is retired by the cell that
+/// owns it, and the retention budget prunes the rest — so no run-wide sweep is needed, and none would
+/// be safe, since it would destroy the retained evidence of a run a maintainer is still reading while
+/// a second, filtered run gathers one more data point.
 ///
 /// A second layer answers whatever a clearing could not reach. `report.rs` stamps every area report
 /// with the identity *and* the unique per-process token of the run that wrote it and excludes any file
@@ -1585,14 +1572,14 @@ fn take_largest(entries: &mut Vec<RetainedEntry>) -> Option<RetainedEntry> {
 fn prune_entry(entry: &RetainedEntry, reason: &str, notes: &mut Vec<String>) {
     let context = format!("pruning the retained entry {}", entry.path.display());
     match purge(&context, &entry.path) {
-        // What the note may promise is bounded by what is actually still there. An earlier wording
-        // said the entry could be rebuilt from the command lines retained beside it, which is true
-        // of a pruned executable in a workspace that kept its `commands.txt` and false in the two
-        // cases that matter most: the workspace-count ceiling prunes *every* entry, command lines
-        // included, and the program source and its record were copies rather than build products in
-        // the first place. So the note promises only what always holds — the directory the entry
-        // stood in names the cell exactly, so re-running that one cell reproduces it — which is also
-        // the more useful instruction, because it works whatever else was pruned.
+        // What the note promises is bounded by what is actually still there, so it promises only what
+        // always holds: the directory the entry stood in names the cell exactly, so re-running that
+        // one cell reproduces it. Pointing at the command lines retained beside the entry would be
+        // true of a pruned executable in a workspace that kept its `commands.txt` and false in the
+        // two cases that matter most — the workspace-count ceiling prunes *every* entry, command
+        // lines included, and the program source and its record were copies rather than build
+        // products in the first place. Naming the cell also happens to be the more useful
+        // instruction, because it works whatever else was pruned.
         Ok(()) => notes.push(note_pruning(format!(
             "{} ({} byte(s)) was pruned from the retained evidence because {reason}; the directory \
              it stood in names the cell, so re-running that one cell reproduces it",

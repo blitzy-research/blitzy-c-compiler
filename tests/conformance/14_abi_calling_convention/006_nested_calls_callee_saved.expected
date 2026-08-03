@@ -1,0 +1,151 @@
+# Expectation record for 14_abi_calling_convention/006_nested_calls_callee_saved.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 006_nested_calls_callee_saved
+area               = 14_abi_calling_convention
+description        = A nine-frame chain of genuinely out-of-line calls in which every frame keeps ten values live across its nested call and prints them only after that call returns, so that a callee-saved register the callee failed to restore changes exactly one frame's output
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction:
+- No signed integer overflow. The seed enters at 100 and grows by 10 per level, reaching 180
+  at the deepest frame; each frame's six ints are the seed plus 1 through 6, and the returned
+  totals accumulate to a value in the low tens of thousands -- three orders of magnitude
+  from INT_MAX.
+- Every floating value is a dyadic rational -- the seed 1.0 plus a whole number of quarters
+  -- so it is exactly representable in binary64, and every printed value carries an explicit
+  precision with room to spare, so no rounding decision is taken and i686's x87 extended
+  intermediate precision cannot perturb a result. No non-finite value, no negative zero and
+  no division appears. The one floating-to-integer conversion multiplies by 4.0 first, so
+  its integral part is exact and small.
+- No shift operator appears, so no shift count can be out of range.
+- No array indexing and no pointer arithmetic. The only pointer value is the address of a
+  string literal, threaded through the chain as a tag and consumed by printf; it is never
+  printed, never converted to an integer and never modified.
+- No read of uninitialized storage: every local is initialized at its declaration, and the
+  three volatile objects have static initializers.
+- No object is modified twice between sequence points.
+- Recursion is absent: every level calls a DIFFERENT function, the depth is a fixed nine
+  frames plus main, and there is no loop anywhere, so termination is structural.
+- NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and this is enforced structurally
+  rather than argued. An access to a volatile object IS an observable side effect and the
+  order in which a call's arguments are evaluated is unspecified, so every volatile datum
+  is read exactly once, in a statement of its own, and only the resulting plain locals are
+  passed. Machine-checked on this branch: flattening the program into statements and
+  counting references to its volatile objects finds NO statement with more than one. The
+  snapshots cost nothing in coverage, because each is itself a load from volatile storage
+  that the optimizer may neither fold nor elide, so every value the callee receives was
+  genuinely materialised at run time and marshalled through the ABI; what changed is only
+  that the loads are now SEQUENCED rather than unordered.
+- Hermetic, as constraint C4 requires: every input is a literal in the source. Nothing is
+  opened, no socket is created, no environment variable and no program argument is read,
+  and no storage is obtained from the heap.
+- main returns 0, inside the 0-125 range the suite requires.
+- Verified empirically on this branch: the default strict warning gate
+  (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
+  diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
+  -fno-sanitize-recover=all runs to completion with empty stderr and exit status 0.
+END
+impl_defined_notes <<END
+THE PRESERVED REGISTER SETS, STATED IN FULL. What follows is what each ABI REQUIRES a
+callee to preserve. It is not a claim about how any compiler chooses to allocate, which is
+the compiler's business and not something a test may assume.
+  System V AMD64  rbx, rbp, r12, r13, r14, r15 (and rsp). There is NO callee-saved SSE or
+                  x87 DATA register at all; the x87 control word and the mxcsr control bits
+                  are preserved, but no data register is.
+  System V i386   ebx, esi, edi and EBP (and esp) -- four, the narrowest set of the four,
+                  and likewise no callee-saved floating-point data register.
+  AAPCS64         x19-x28, plus x29 as the frame pointer (x30 is the link register, saved by
+                  the caller's own prologue). For the SIMD/FP file the obligation is PARTIAL
+                  and precise: only the LOW 64 BITS of v8-v15, that is d8-d15, are
+                  preserved; the upper bits of those registers, like the whole of v0-v7 and
+                  v16-v31, are not.
+  LP64D           s0-s11 integer, where s0 doubles as the frame pointer, and fs0-fs11
+                  floating.
+
+WHAT THE PROGRAM ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. Each frame keeps six ints,
+three doubles and one pointer live ACROSS its nested call and prints them only after that
+call returns. Ten live values is more than the narrowest of those sets can hold, so on every
+target some of them must survive the call somewhere other than a preserved register -- but
+which value goes where is the compiler's choice, and this program does not assert it. What
+it asserts is the OBSERVABLE consequence: if any of the ten fails to survive the call, the
+printed line for that frame changes and the divergence localises to the exact frame.
+
+THE CALL BARRIER. Every call this program makes to the function whose ABI boundary is
+under test goes through a FILE-SCOPE volatile FUNCTION POINTER, and that is load-bearing
+rather than stylistic. A C11 volatile lvalue must be re-read on every access, so no
+conforming compiler may assume which function the pointer designates: it can neither
+inline the callee nor clone it, and it must marshal the arguments exactly as the ABI
+prescribes because it cannot know what will receive them. This is plain standard C rather
+than a compiler attribute, so both sides of oracle (a) honour it for the same reason and
+neither needs to support an extension for the barrier to hold. It also makes the
+function-pointer load the ONLY volatile access in each call expression, which is what
+keeps the one-side-effecting-argument rule satisfied. Measured before-state on this branch: with direct calls, gcc 13.4.0 at
+-O2 left only level1 standing -- levels 2 through 8 and the leaf were all inlined into it,
+so the nine frames collapsed to one and the property under test did not exist at that
+optimization level. Measured after: all nine functions are emitted unmodified at -O1 and -O2
+on all four targets, with no .constprop and no .isra clone anywhere.
+
+MEASURED STACK USE, not estimated. From the reference compiler's -O0 prologues on each
+target: x86_64 eight 96-byte frames plus one 48 and one 32, with ten 8-byte return-address
+and frame-pointer saves, about 1.0 KiB; i686 eight 84-byte frames plus one 36 and one 32,
+with ten 4-byte saves, about 0.8 KiB; aarch64 eight 128-byte frames plus one 64 and one 48,
+about 1.1 KiB; riscv64 eight 144-byte frames plus one 64 and one 48, about 1.2 KiB. The C
+library's own printf frame sits on top of that and is not counted. So the honest figure is
+one to two kibibytes rather than a few hundred bytes, which the ten-scalar count alone would
+have suggested and which the measurement contradicts. It stays roughly three orders of
+magnitude below the 8 MiB default stack these binaries run under, both natively (ulimit -s
+reports 8192 KiB) and under QEMU user-mode emulation (QEMU_STACK_SIZE defaults to 8388608
+bytes).
+
+Plain char signedness is implementation-defined and was measured as signed on x86_64 and
+i686 and unsigned on aarch64 and riscv64; no plain-char value is printed. sizeof(long) and
+sizeof(void *) were measured as 4 on i686 and 8 on x86_64, aarch64 and riscv64
+(docs/technical-specifications.md lines 457-462); no long, size_t, ptrdiff_t, intptr_t or
+pointer value is printed and no long or pointer conversion specification is used. long
+double has three different representations across the four targets (measured 16, 12, 16 and
+16 bytes; x87 80-bit versus IEEE binary128) and is absent from this program entirely --
+using it would import a difference that has nothing to do with parameter passing. That
+type is covered by 13_floating_point/004_long_double_target_restricted, whose record
+disables oracle (b) alone with the measured reason recorded and carries NO marker.
+
+No target is dropped, no oracle is disabled and this record carries no expected-divergence
+marker: a cross-backend divergence here is a GENUINE FINDING rather than an
+implementation-defined difference, because nothing implementation-defined reaches the
+output. Measured on this branch with gcc 13.4.0 and the matching i686, aarch64 and riscv64
+cross drivers, executed natively and under QEMU user-mode 10.1.0: stdout is byte-identical
+and the exit status is 0 in all twelve target-and-optimization-level cells.
+END
+expected_stdout    <<END
+nest_folded_L9 seed=180 fseed=9.0000 r=216
+nest_folded_L8 a=3801 b=-3802 c=3803 d=-3804 e=3805 f=-3806 x=22.2500 y=-23.5000 z=24.7500 p=5808 inner=216
+nest_folded_L7 a=3701 b=-3702 c=3703 d=-3704 e=3705 f=-3706 x=19.2500 y=-20.5000 z=21.7500 p=5707 inner=213
+nest_folded_L6 a=3601 b=-3602 c=3603 d=-3604 e=3605 f=-3606 x=16.2500 y=-17.5000 z=18.7500 p=5606 inner=210
+nest_folded_L5 a=3501 b=-3502 c=3503 d=-3504 e=3505 f=-3506 x=13.2500 y=-14.5000 z=15.7500 p=5505 inner=207
+nest_folded_L4 a=3401 b=-3402 c=3403 d=-3404 e=3405 f=-3406 x=10.2500 y=-11.5000 z=12.7500 p=5404 inner=204
+nest_folded_L3 a=3301 b=-3302 c=3303 d=-3304 e=3305 f=-3306 x=7.2500 y=-8.5000 z=9.7500 p=5303 inner=201
+nest_folded_L2 a=3201 b=-3202 c=3203 d=-3204 e=3205 f=-3206 x=4.2500 y=-5.5000 z=6.7500 p=5202 inner=198
+nest_folded_L1 a=3101 b=-3102 c=3103 d=-3104 e=3105 f=-3106 x=1.2500 y=-2.5000 z=3.7500 p=5101 inner=195
+nest_folded_total=192
+nest_runtime_L9 seed=180 fseed=9.0000 r=216
+nest_runtime_L8 a=3801 b=-3802 c=3803 d=-3804 e=3805 f=-3806 x=22.2500 y=-23.5000 z=24.7500 p=5808 inner=216
+nest_runtime_L7 a=3701 b=-3702 c=3703 d=-3704 e=3705 f=-3706 x=19.2500 y=-20.5000 z=21.7500 p=5707 inner=213
+nest_runtime_L6 a=3601 b=-3602 c=3603 d=-3604 e=3605 f=-3606 x=16.2500 y=-17.5000 z=18.7500 p=5606 inner=210
+nest_runtime_L5 a=3501 b=-3502 c=3503 d=-3504 e=3505 f=-3506 x=13.2500 y=-14.5000 z=15.7500 p=5505 inner=207
+nest_runtime_L4 a=3401 b=-3402 c=3403 d=-3404 e=3405 f=-3406 x=10.2500 y=-11.5000 z=12.7500 p=5404 inner=204
+nest_runtime_L3 a=3301 b=-3302 c=3303 d=-3304 e=3305 f=-3306 x=7.2500 y=-8.5000 z=9.7500 p=5303 inner=201
+nest_runtime_L2 a=3201 b=-3202 c=3203 d=-3204 e=3205 f=-3206 x=4.2500 y=-5.5000 z=6.7500 p=5202 inner=198
+nest_runtime_L1 a=3101 b=-3102 c=3103 d=-3104 e=3105 f=-3106 x=1.2500 y=-2.5000 z=3.7500 p=5101 inner=195
+nest_runtime_total=192
+END

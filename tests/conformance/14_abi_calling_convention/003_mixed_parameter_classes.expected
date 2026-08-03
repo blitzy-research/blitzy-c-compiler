@@ -1,0 +1,151 @@
+# Expectation record for 14_abi_calling_convention/003_mixed_parameter_classes.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 003_mixed_parameter_classes
+area               = 14_abi_calling_convention
+description        = Twenty-six parameters interleaving four classes -- int, double, a second double, a pointer and a small aggregate, five times over, plus a tag -- so that each target's classification rules are exercised together rather than one class at a time, in a folded and a volatile-runtime variant
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction:
+- Every floating value is a dyadic rational exactly representable in binary64, printed with
+  an explicit precision with room to spare, so no rounding decision is taken and i686's x87
+  extended intermediate precision cannot perturb a result. No non-finite value, no negative
+  zero and no division appears.
+- No signed integer overflow; every integer is within +/-210 and none is arithmetically
+  combined.
+- No shift operator appears, so no shift count can be out of range.
+- POINTER DISCIPLINE. The five pointers passed are addresses of elements of a static const
+  int array, formed with constant indices strictly inside its bounds; each is dereferenced
+  in the callee and only the pointed-to int is printed. No pointer value is printed, no
+  one-past-end pointer is formed, and no pointer is converted to an integer.
+- AGGREGATE DISCIPLINE. Only named members are read back. No padding byte is printed,
+  compared or memcmp'd, and no aggregate is inspected byte-wise, so the fact that a
+  two-int aggregate's layout is the compiler's business cannot reach the output.
+- No read of uninitialized storage: the five runtime aggregates have every member assigned
+  from a volatile snapshot before they are passed.
+- No object is modified twice between sequence points.
+- NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and this is enforced structurally
+  rather than argued. An access to a volatile object IS an observable side effect and the
+  order in which a call's arguments are evaluated is unspecified, so every volatile datum
+  is read exactly once, in a statement of its own, and only the resulting plain locals are
+  passed. Machine-checked on this branch: flattening the program into statements and
+  counting references to its volatile objects finds NO statement with more than one. The
+  snapshots cost nothing in coverage, because each is itself a load from volatile storage
+  that the optimizer may neither fold nor elide, so every value the callee receives was
+  genuinely materialised at run time and marshalled through the ABI; what changed is only
+  that the loads are now SEQUENCED rather than unordered.
+- Hermetic, as constraint C4 requires: every input is a literal in the source. Nothing is
+  opened, no socket is created, no environment variable and no program argument is read,
+  and no storage is obtained from the heap.
+- main returns 0, inside the 0-125 range the suite requires.
+- Verified empirically on this branch: the default strict warning gate
+  (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
+  diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
+  -fno-sanitize-recover=all runs to completion with empty stderr and exit status 0.
+END
+impl_defined_notes <<END
+WHICH REGISTER FILES ARE EXHAUSTED. Twenty-six parameters arranged as five repetitions of
+(int, double, double, pointer, 8-byte aggregate) followed by an integer tag: sixteen
+integer-class consumers and ten floating-class consumers, so BOTH files are exhausted on
+System V AMD64, AAPCS64 and LP64D, while System V i386 cdecl marshals all twenty-six on the
+stack. The interleaving is the point -- it forces each ABI to advance its integer and
+floating allocators independently and in step, which is exactly where the four conventions
+disagree.
+
+THE CALL BARRIER. Every call this program makes to the function whose ABI boundary is
+under test goes through a FILE-SCOPE volatile FUNCTION POINTER, and that is load-bearing
+rather than stylistic. A C11 volatile lvalue must be re-read on every access, so no
+conforming compiler may assume which function the pointer designates: it can neither
+inline the callee nor clone it, and it must marshal the arguments exactly as the ABI
+prescribes because it cannot know what will receive them. This is plain standard C rather
+than a compiler attribute, so both sides of oracle (a) honour it for the same reason and
+neither needs to support an extension for the barrier to hold. It also makes the
+function-pointer load the ONLY volatile access in each call expression, which is what
+keeps the one-side-effecting-argument rule satisfied. Measured before-state on this branch, and the reason the barrier exists:
+with a direct call, gcc 13.4.0 at -O2 emitted only take_mixed26.constprop.0, a clone with
+the constants folded in, so the documented twenty-six parameter boundary was not crossed at
+that level at all. Measured after: take_mixed26 is emitted unmodified at -O1 and -O2 on all
+four targets, with no .constprop and no .isra clone anywhere.
+
+Plain char signedness is implementation-defined and was measured as signed on x86_64 and
+i686 and unsigned on aarch64 and riscv64; no plain-char value is printed. sizeof(long) and
+sizeof(void *) were measured as 4 on i686 and 8 on x86_64, aarch64 and riscv64
+(docs/technical-specifications.md lines 457-462); no long, size_t, ptrdiff_t, intptr_t or
+pointer value is printed and no long or pointer conversion specification is used. long
+double has three different representations across the four targets (measured 16, 12, 16 and
+16 bytes; x87 80-bit versus IEEE binary128) and is absent from this program entirely --
+using it would import a difference that has nothing to do with parameter passing. That
+type is covered by 13_floating_point/004_long_double_target_restricted, whose record
+disables oracle (b) alone with the measured reason recorded and carries NO marker.
+
+No target is dropped, no oracle is disabled and this record carries no expected-divergence
+marker: a cross-backend divergence here is a GENUINE FINDING rather than an
+implementation-defined difference, because nothing implementation-defined reaches the
+output. Measured on this branch with gcc 13.4.0 and the matching i686, aarch64 and riscv64
+cross drivers, executed natively and under QEMU user-mode 10.1.0: stdout is byte-identical
+and the exit status is 0 in all twelve target-and-optimization-level cells.
+END
+expected_stdout    <<END
+mix_folded_i1=201
+mix_folded_d1=1.5000
+mix_folded_e1=-6.7500
+mix_folded_p1_deref=3001
+mix_folded_s1_lo=41 s1_hi=-42
+mix_folded_i2=-202
+mix_folded_d2=-2.2500
+mix_folded_e2=7.8750
+mix_folded_p2_deref=-3002
+mix_folded_s2_lo=43 s2_hi=-44
+mix_folded_i3=203
+mix_folded_d3=3.1250
+mix_folded_e3=-8.1875
+mix_folded_p3_deref=3003
+mix_folded_s3_lo=45 s3_hi=-46
+mix_folded_i4=-204
+mix_folded_d4=-4.0625
+mix_folded_e4=9.2500
+mix_folded_p4_deref=-3004
+mix_folded_s4_lo=47 s4_hi=-48
+mix_folded_i5=205
+mix_folded_d5=5.5000
+mix_folded_e5=-10.5000
+mix_folded_p5_deref=3005
+mix_folded_s5_lo=49 s5_hi=-50
+mix_runtime_i1=201
+mix_runtime_d1=1.5000
+mix_runtime_e1=-6.7500
+mix_runtime_p1_deref=3001
+mix_runtime_s1_lo=41 s1_hi=-42
+mix_runtime_i2=-202
+mix_runtime_d2=-2.2500
+mix_runtime_e2=7.8750
+mix_runtime_p2_deref=-3002
+mix_runtime_s2_lo=43 s2_hi=-44
+mix_runtime_i3=203
+mix_runtime_d3=3.1250
+mix_runtime_e3=-8.1875
+mix_runtime_p3_deref=3003
+mix_runtime_s3_lo=45 s3_hi=-46
+mix_runtime_i4=-204
+mix_runtime_d4=-4.0625
+mix_runtime_e4=9.2500
+mix_runtime_p4_deref=-3004
+mix_runtime_s4_lo=47 s4_hi=-48
+mix_runtime_i5=205
+mix_runtime_d5=5.5000
+mix_runtime_e5=-10.5000
+mix_runtime_p5_deref=3005
+mix_runtime_s5_lo=49 s5_hi=-50
+END

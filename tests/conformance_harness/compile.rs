@@ -159,10 +159,10 @@ use super::sandbox::{
 use super::{
     bcc_requires_explicit_target, bcc_target_arguments, corpus_root, ensure_within,
     is_bcc_target_selector, is_forbidden_for_side, isolate_child_environment, own_process_group,
-    posix_command_line, redact_secrets, require_regular_file, sanitize_text_for_report, shown_path,
-    terminate_process_group, CaptureIntegrity, CompilerSide, DivergenceClass, GroupTermination,
-    HarnessError, HarnessResult, OptLevel, Target, BCC_TARGET_FLAG, CAPTURE_CHUNK_BYTES,
-    CAPTURE_RETAINED_BYTES_MAX, DIFFERENTIAL_FLAGS_MINIMAL,
+    posix_command_line, public_text, redact_secrets, require_regular_file,
+    sanitize_text_for_report, shown_path, terminate_process_group, CaptureIntegrity, CompilerSide,
+    DivergenceClass, GroupTermination, HarnessError, HarnessResult, OptLevel, Target,
+    BCC_TARGET_FLAG, CAPTURE_CHUNK_BYTES, CAPTURE_RETAINED_BYTES_MAX, DIFFERENTIAL_FLAGS_MINIMAL,
 };
 
 /// The flag that names the artifact, spelled once so the argument builder, the allow-list and
@@ -493,15 +493,14 @@ impl BuildFailure {
 
     // # Why there is no `is_environment` predicate here
     //
-    // There was one, and it was removed rather than extended when [`FailureScope::Indeterminate`]
-    // was introduced. A boolean over three scopes cannot be read correctly: "is the machine
-    // answerable" is `false` both for a compiler defect and for a failure whose answerable party is
-    // unknown, so every caller of such a predicate silently treats the second as the first — which
-    // is a manufactured finding against a compiler on the strength of diagnostics nobody read.
+    // A boolean over three scopes cannot be read correctly: "is the machine answerable" is `false`
+    // both for a compiler defect and for a failure whose answerable party is unknown, so every
+    // caller of such a predicate silently treats the second as the first — which is a manufactured
+    // finding against a compiler on the strength of diagnostics nobody read.
     //
     // [`BuildFailure::scope`] is the only accessor, and every consumer matches it exhaustively, so
     // a fourth scope added later cannot reach a report until each consumer says what it means. That
-    // is a compiler-checked guarantee where the predicate offered only a convention.
+    // is a compiler-checked guarantee where a predicate would offer only a convention.
 
     /// The same failure with its scope declared unattributable, and the reason appended.
     ///
@@ -1150,7 +1149,9 @@ impl CompileOutcome {
     // For the reason given on [`BuildFailure`]: a boolean cannot carry a three-way judgement, and
     // the reading it forces on its callers is the damaging one. A caller deciding whether to raise
     // a finding reads [`CompileOutcome::failure`] and matches that failure's own
-    // [`BuildFailure::scope`], which the compiler checks for exhaustiveness.
+    // [`BuildFailure::scope`], which the compiler checks for exhaustiveness. The one predicate
+    // this type does offer — [`CompileOutcome::is_harness_failure`] below — answers a different
+    // question: whether this process's own bookkeeping failed, which every caller must ask first.
 
     /// Whether the failure, if any, is a fault in this process's own bookkeeping.
     ///
@@ -1202,7 +1203,13 @@ impl CompileOutcome {
         }
         line.push_str("; ");
         line.push_str(&self.command_line);
-        line
+        // The command line is the one part of this description that carries absolute paths — the
+        // workspace, the program, the driver — and this line goes to the console as progress and into
+        // report rows, so it is published rather than kept. `public_text` redacts any credential in it
+        // and elides the checkout's own location; what a maintainer re-runs is rendered from the
+        // argument vector by `commands.sh`, never from this description, so nothing reproducible is
+        // lost.
+        public_text(&line)
     }
 
     /// The same line with the measured duration appended, for progress output only.
@@ -1939,11 +1946,20 @@ fn cross_check_against_template(
     ))
 }
 
-/// Prefix an invocation with the system timeout utility when the environment provides one.
+/// Prefix an invocation with the system timeout utility when the run engaged it as an outer net.
 ///
 /// Returns the vector to spawn and whether the utility is in it.
 ///
-/// The utility is preferred over the harness's own watchdog for one reason that matters: an
+/// The decision is `caps.outer_net_tool()`, which `env.rs` reached once for the whole run by
+/// **measuring** the discovered implementation rather than merely finding it: an outer net that never
+/// fires still charges for supervising every child it wraps, and the implementation measured in this
+/// environment charges about 103 ms per invocation — roughly 569 s across the matrix, against about
+/// 188 s of actual work. An implementation inside the ceiling is engaged and one above it is
+/// declined, with the decision and its evidence stated in the pre-flight report and in every
+/// finding's environment fingerprint. This function therefore asks one question and never
+/// re-litigates it.
+///
+/// The utility is worth engaging when it is cheap for one reason that matters: an
 /// implementation that signals the process group can reach further than this module can. The
 /// driver this module spawns starts sub-processes of its own — a preprocessor, a compiler proper,
 /// an assembler, a linker — and it is one of *those* that hangs. Terminating only the driver
@@ -1960,19 +1976,19 @@ fn cross_check_against_template(
 /// budget whether the utility acted or not. Reading the captures with a deadline rather than to
 /// end of file is what makes a surviving descendant survivable.
 ///
-/// Where the utility is absent, or where its path cannot be rendered as text without loss, the
-/// vector is returned untouched and the watchdog is the whole bound. That is a complete
-/// substitute rather than a degradation of correctness — it bounds the invocation just as surely,
-/// it forfeits only a reach the utility might have had, and the child's own process group is swept
-/// on every exit path regardless — so it is taken silently rather than refused. Reporting
-/// the untouched vector is also what keeps [`CompileOutcome::spawned_command_line`] a faithful
-/// record of what ran.
+/// Where the outer net was declined or is absent, or where its path cannot be rendered as text
+/// without loss, the vector is returned untouched and the watchdog is the whole bound. That is a
+/// complete substitute rather than a degradation of correctness — it bounds the invocation just as
+/// surely, it forfeits only a reach the utility might have had, and the child's own process group is
+/// swept on every exit path regardless — so it is taken without refusing anything. It is not taken
+/// *silently*: the capability report states the decision either way. Reporting the untouched vector
+/// is also what keeps [`CompileOutcome::spawned_command_line`] a faithful record of what ran.
 fn wrap_with_timeout_tool(
     argv: &[String],
     caps: &Capabilities,
     budget: Duration,
 ) -> (Vec<String>, bool) {
-    let Some(tool) = caps.timeout_tool().path() else {
+    let Some(tool) = caps.outer_net_tool() else {
         return (argv.to_vec(), false);
     };
     let Some(program) = tool.to_str() else {
@@ -2531,7 +2547,7 @@ fn regular_file_size(path: &Path) -> Option<u64> {
 /// # The order of the tests, and why it is this order
 ///
 /// Every test below can match evidence another would also match, so the sequence is the
-/// judgement. Two principles set the order, and both were arrived at by way of a defect:
+/// judgement. Two principles set the order:
 ///
 /// - **Facts before text.** A signal, an exit status and this process's own watchdog observation
 ///   are facts about a process. A diagnostic signature is a guess about a string the subject
@@ -2539,9 +2555,24 @@ fn regular_file_size(path: &Path) -> Option<u64> {
 /// - **Attributing a failure to the machine requires corroboration the subject cannot fabricate.**
 ///   An `Environment` attribution is not a neutral classification: it becomes `UNAVAILABLE`, and
 ///   `UNAVAILABLE` does not fail a run by default. A compiler able to reach that verdict by
-///   printing a chosen line could excuse its own defects. So no diagnostic signature attributes a
-///   failure to the machine on its own; each one must be corroborated by an independent
-///   observation this process made itself.
+///   printing a chosen line could excuse its own defects. So a diagnostic signature from the
+///   **compiler under test** never attributes a failure to the machine on its own: each such
+///   signature must be corroborated by an independent observation this process made itself — the C
+///   runtime probe of test 5, performed against a driver of this module's own choosing before the
+///   subject ran.
+///
+///   **There is exactly one exception, and it is a stated trust assumption rather than an
+///   oversight: test 6.** A stage-execution diagnostic — the reference driver reporting that it
+///   could not `exec` its own preprocessor, assembler or linker — reaches
+///   [`FailureScope::Environment`] on the strength of the diagnostic alone, with no independent
+///   corroboration, and it is available to the **reference compiler only**. Two things make that
+///   sound. The reference compiler is this suite's oracle rather than its subject: it has no
+///   verdict to escape, so it has no motive to fabricate, and if it were compromised the whole
+///   comparison would already be worthless. And the diagnostic is not merely a claim but a claim
+///   only a multi-process driver can even make; the compiler under test is a single self-contained
+///   binary with an integrated assembler and linker, so the identical text from it is a string it
+///   chose to print and is attributed to the **compiler**, which test 6 does explicitly. The
+///   exception therefore cannot be reached by the side that would benefit from it.
 ///
 /// The sequence:
 ///
@@ -2556,9 +2587,9 @@ fn regular_file_size(path: &Path) -> Option<u64> {
 ///    lost must fail rather than read as an arm that could not be attempted.
 /// 3. **Termination by a signal next**, ahead of every text test. A signal is an unambiguous fact
 ///    about the process, and a compiler that dies on a valid program is a defect that no
-///    diagnostic it managed to print beforehand may excuse. This test was previously *below* the
-///    two environment-signature tests, which meant a subject that crashed while printing
-///    `cannot find crt1.o` was attributed to the machine.
+///    diagnostic it managed to print beforehand may excuse. Ordering it above the two
+///    environment-signature tests is what settles the awkward case: a subject that crashes while
+///    printing `cannot find crt1.o` is a crash, not a fact about the machine.
 /// 4. **Success next**, which is delegated to [`classify_successful_build`]. Answering it here,
 ///    rather than as an afterthought at the end, is what makes every test below a *failure-only*
 ///    test: none of them can ever see a build that succeeded, so none has to guard against one.
@@ -2589,10 +2620,10 @@ fn regular_file_size(path: &Path) -> Option<u64> {
 ///
 /// Note what is **not** in the list. No exit status is read as belonging to the bounding utility.
 /// The installed utility passes its child's status through verbatim, so 124, 125, 126 and 127
-/// carry no information about which process produced them; a compiler exiting 125 used to be
-/// reported as an environment failure, and therefore did not fail the run. Those statuses now
-/// reach test 9 like any other, and the watchdog's own observation carries the only timeout fact
-/// this module has.
+/// carry no information about which process produced them: a compiler exiting 125 is a compiler
+/// exiting 125, and reading it as the utility's own failure would excuse it from failing the run.
+/// Those statuses reach test 9 like any other, and the watchdog's own observation carries the only
+/// timeout fact this module has.
 ///
 /// A build that succeeded is checked once more, for an artifact that is absent or empty. That
 /// case is reported here rather than left to surface later as an execution that could not start,

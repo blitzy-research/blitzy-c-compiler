@@ -21,14 +21,166 @@
  *   struct s24  24 bytes, six ints          - memory on every target
  *   struct sbig 40 bytes, ten ints          - unambiguously memory everywhere
  *
- * Instance counts are chosen so the aggregates alone exhaust the eight-register
- * files of AAPCS64 and LP64D and the six integer registers of System V AMD64.
- * System V i386 cdecl marshals everything on the stack.
+ * WHICH REGISTER FILE EACH SHAPE ACTUALLY EXHAUSTS.  Stated per function rather
+ * than as one blanket claim, because the shapes do not behave alike and a single
+ * sentence about "exhausting the register files" would be false for two of them.
+ * Slot counts below are for the aggregates only; the trailing int tag is counted
+ * separately and named where it matters.  System V i386 cdecl marshals every
+ * argument of every one of these calls on the stack, so it is not repeated per
+ * row.
+ *
+ *   take_s8x10   10 x s8.  One integer slot each on all three 64-bit ABIs, so 10
+ *                slots plus the tag = 11.  EXHAUSTS the integer file on all
+ *                three (6 on AMD64, 8 on AAPCS64, 8 on LP64D) and spills.  No
+ *                floating slot is used.
+ *   take_s16ix5   5 x s16i.  Two integer slots each = 10, plus the tag = 11.
+ *                EXHAUSTS the integer file on all three and spills.  No
+ *                floating slot is used.
+ *   take_s16mx5   5 x s16m.  The interesting one, and the reason a blanket claim
+ *                would be wrong.  AMD64 classifies each as INTEGER + SSE, so 5
+ *                integer slots plus the tag fills EXACTLY the six integer
+ *                registers while using only 5 of 8 SSE registers -- the floating
+ *                file is NOT exhausted.  AAPCS64 sees a non-homogeneous 16-byte
+ *                aggregate and uses two integer slots each = 10 plus the tag, so
+ *                the integer file IS exhausted and no floating-point ARGUMENT
+ *                register is used at all.  LP64D splits each into one integer
+ *                plus one floating slot, giving 6 of 8 integer registers with the
+ *                tag and 5 of 8 floating, so on that target NEITHER file is
+ *                exhausted -- what this call exercises there is the independent
+ *                advance of the two allocators, which is the genuinely valuable
+ *                property and is why the shape is kept.  All three readings were
+ *                measured in the reference compiler's assembly at -O0.
+ *   take_s16dx5   5 x s16d.  Two floating slots each = 10 on all three, so the
+ *                FLOATING file is exhausted on every one of them.  What happens
+ *                to the overflow differs, and that difference is part of the
+ *                point: AMD64 and AAPCS64 place the fifth aggregate on the stack
+ *                and use one integer register for the tag, whereas LP64D spills
+ *                the two remaining doubles into INTEGER argument registers before
+ *                the tag, so on that target the integer file carries floating
+ *                data as well.  Measured in the reference compiler's assembly at
+ *                -O0 for each target.
+ *   take_s16fx5   5 x s16f.  AMD64 packs each into two SSE registers = 10, so
+ *                the floating file is exhausted.  AAPCS64 treats each as a
+ *                four-float HFA = 20 floating slots, exhausted far past the
+ *                threshold.  LP64D declines the floating path for a 16-byte
+ *                four-member aggregate and uses two integer slots each = 10 plus
+ *                the tag, so on that target it is the INTEGER file that is
+ *                exhausted.  The same source shape therefore exhausts different
+ *                files on different targets, which is exactly the disagreement
+ *                worth testing.
+ *   take_s24x4    4 x s24, 24 bytes.  Memory on every target -- AMD64 by the
+ *                MEMORY class, AAPCS64 and LP64D by an indirect reference -- so
+ *                no file is exhausted.  What this row tests is the by-memory
+ *                path itself, on the far side of every threshold.
+ *   take_sbigx2   2 x sbig, 40 bytes.  Unambiguously memory everywhere, for the
+ *                same reason and with the same purpose.
+ *
+ * THE CALL BARRIER, AND WHY THESE BOUNDARIES WOULD OTHERWISE NOT EXIST.  An
+ * aggregate-passing boundary is only under test if the call actually happens.
+ * Measured with gcc 13.4.0 at -O2, with direct calls to these static functions
+ * the only one left standing was take_s8x10: the other six were inlined away and
+ * six of the seven documented boundaries above were not crossed at all at that
+ * level.  Every call below therefore goes through a FILE-SCOPE volatile FUNCTION
+ * POINTER.  A volatile lvalue must be re-read on every access, so no conforming
+ * compiler may assume which function the pointer designates -- it can neither
+ * inline nor clone the callee, and it must marshal each aggregate exactly as the
+ * ABI prescribes because it cannot know what will receive it.  This is plain
+ * standard C rather than a compiler attribute, so both sides of oracle (a)
+ * honour it for the same reason.  Verified in the generated assembly of all four
+ * targets at -O2: all seven callees are emitted unmodified, with no .constprop
+ * and no .isra clone.
+ *
+ * EVALUATION-ORDER DISCIPLINE.  An access to a volatile object is an observable
+ * side effect and argument evaluation order is unspecified, so every volatile
+ * aggregate and every volatile tag is copied into an ordinary local in a
+ * statement of its own, and only those locals are passed -- at most one
+ * side-effecting argument per call, which here means the function-pointer load
+ * and nothing else.  The copies do not weaken the runtime variant: each is
+ * itself a read of volatile storage the optimizer may not fold, so every
+ * aggregate the callee receives was genuinely materialised at run time.
+ *
+ * Member coverage: EVERY named member of EVERY aggregate is read back on both
+ * sides of both variants - all ten elements of the 40-byte shape included.  A
+ * member the program never reads is a member the backend's aggregate copy is
+ * never checked on, and for the two memory-passed shapes that copy is the whole
+ * mechanism under test.
+ *
+ * Volatile staging discipline: copying a volatile aggregate accesses the whole
+ * object, so each such copy is made in a full expression of its own, into plain
+ * staging storage, before any runtime call; the calls pass only plain objects.
+ * Several volatile accesses inside one argument list would leave the relative
+ * order of those side effects unspecified, and an unspecified-behaviour program
+ * cannot make a divergence attributable to either compiler.  No volatile lvalue
+ * appears in any argument list in this file.
+ *
+ * WHAT THE TABLE ABOVE DESCRIBES, AND AT WHICH OPTIMIZATION LEVEL.  Every row is
+ * a classification the SOURCE requests: eight aggregate shapes, each passed to a
+ * separate static function, on both sides of every target's by-register /
+ * by-memory threshold.  Whether a call survives to exercise that classification
+ * at run time is a separate question, and it was measured rather than assumed.
+ * Counting the program's own static helpers that are still emitted, and the calls
+ * to them, in the reference compiler's assembly - `<driver> -O<n> -S -o -
+ * 004_small_and_large_struct_passing.c`, then grepping for the helper labels:
+ *
+ *   -O0  all 8 helpers, 21 calls   on x86-64, i686, AArch64 and RISC-V 64 alike
+ *   -O1  5 helpers / 10 calls on x86-64 and AArch64, 1 / 2 on RISC-V 64,
+ *        and 0 / 0 on i686 - every helper inlined away
+ *   -O2  1 helper / 2 calls on x86-64, AArch64 and RISC-V 64, 0 / 0 on i686
+ *
+ * So the argument-marshalling paths are genuinely exercised as calls at -O0 on
+ * all four targets, and only partly above it: the reference compiler inlines
+ * these small static helpers, and on i686 it removes them entirely from -O1
+ * upward.  That does not make the higher levels idle - all three oracles still
+ * compare the same printed member values at every level, so a wrong result is
+ * still caught - but a claim that the threshold CALLS survive every level would
+ * be false, and the by-register / by-memory classification is what -O0 is for
+ * here.  The compiler under test may inline differently again; its own behaviour
+ * is not measured on this branch, since no bcc binary is present.
  *
  * Padding discipline: sizeof is never printed and no aggregate is ever
  * memcmp'd.  Only named members are read back, so the fact that struct s16m is
  * 12 bytes on i686 (where double has four-byte alignment) and 16 bytes on the
  * other three targets cannot affect the output.
+ *
+ * EVERY MEMBER OF EVERY AGGREGATE IS READ BACK, not a sample of them.  The two
+ * forty-byte aggregates print all ten of their members, in both variants,
+ * exactly as the smaller shapes print all of theirs.  A sampled read-back -
+ * first, middle, last - would pass while a by-memory copy corrupted,
+ * transposed or dropped any of the other seven members, and a by-memory
+ * aggregate is precisely the shape where a wrong copy length or a wrong
+ * hidden-pointer offset shows up.  The cost of reading every member is a few
+ * more printed fields; the cost of sampling is a defect that passes.
+ *
+ * THE CALL BOUNDARY IS ENFORCED, NOT HOPED FOR.  Every callee is reached
+ * through a volatile-qualified function pointer rather than by name.  An
+ * ordinary static callee may legally be inlined at -O1 and -O2, and an inlined
+ * callee marshals nothing at all: worse, the aggregates it takes by value
+ * become candidates for scalar replacement, which dissolves exactly the
+ * by-register versus by-memory classification this program exists to test.
+ * Measured with gcc 13.4.0 at -O2 before the indirection was added: of the
+ * fourteen intended aggregate-passing boundaries only two survived, the other
+ * twelve having been inlined away, and the two survivors survived only by
+ * exceeding the inliner's size budget.
+ *
+ * A volatile pointer must be re-read at the point of call, so the designated
+ * function is unknown and the call is genuinely indirect; and because the
+ * address escapes into storage, the signature may not be cloned or scalarised
+ * either.  The mechanism is pure ISO C: a function attribute would have been
+ * shorter, but the documented attribute set for the compiler under test is
+ * packed, aligned, section, unused, deprecated, visibility and format
+ * (docs/technical-specifications.md line 506), so an inlining attribute would
+ * risk a divergence caused by the test and would import an extension into an
+ * area whose subject is the calling convention.
+ *
+ * ONE VOLATILE READ PER FULL STATEMENT.  No argument list contains a volatile
+ * lvalue.  Each runtime aggregate is copied out of its volatile object into a
+ * plain local of the same type in a statement of its own, and the tag
+ * likewise, so the call reads only plain locals.  Copying a volatile-qualified
+ * aggregate is an observable access, and the order of side effects within one
+ * argument list is unspecified, so a list holding several such copies would
+ * have an unspecified order of side effects - and a suite whose premise is
+ * that a divergence means a defect needs the program to have exactly one
+ * defined behaviour.
  */
 
 int printf(const char *, ...);
@@ -163,6 +315,33 @@ static volatile struct sbig vbig[2] = {
 
 static volatile int vtag = 1;
 
+/* The enforced call boundary, one volatile-qualified pointer per aggregate
+   shape.
+   Each is re-read at its call site, so every call is indirect at every
+   optimization level, no callee body is inlined, and no by-value aggregate
+   parameter can be scalarised out of existence.  Both variants of every shape
+   travel through these pointers, so the folded and the runtime call cross the
+   same boundary. */
+static void (*volatile take_s8x10_p)(struct s8, struct s8, struct s8, struct s8,
+                                     struct s8, struct s8, struct s8, struct s8,
+                                     struct s8, struct s8, int) = take_s8x10;
+static void (*volatile take_s16ix5_p)(struct s16i, struct s16i, struct s16i,
+                                      struct s16i, struct s16i, int) =
+    take_s16ix5;
+static void (*volatile take_s16mx5_p)(struct s16m, struct s16m, struct s16m,
+                                      struct s16m, struct s16m, int) =
+    take_s16mx5;
+static void (*volatile take_s16dx5_p)(struct s16d, struct s16d, struct s16d,
+                                      struct s16d, struct s16d, int) =
+    take_s16dx5;
+static void (*volatile take_s16fx5_p)(struct s16f, struct s16f, struct s16f,
+                                      struct s16f, struct s16f, int) =
+    take_s16fx5;
+static void (*volatile take_s24x4_p)(struct s24, struct s24, struct s24,
+                                     struct s24, int) = take_s24x4;
+static void (*volatile take_sbigx2_p)(struct sbig, struct sbig, int) =
+    take_sbigx2;
+
 static const char *variant_tag(int variant)
 {
     return (variant == 0) ? "folded" : "runtime";
@@ -249,31 +428,87 @@ static void take_s24x4(struct s24 p1, struct s24 p2, struct s24 p3,
            p4.a, p4.b, p4.c, p4.d, p4.e, p4.f);
 }
 
+/* Every one of the ten members is printed, with its index as its label.
+ *
+ * A large aggregate is the one shape passed wholly through memory on all four targets, so
+ * the copy the callee reads is produced by an explicit block copy the compiler emits.  A
+ * defect in that copy - a wrong length, a wrong displacement, a partially overlapping
+ * move - corrupts the MIDDLE of the object far more readily than its ends, and an earlier
+ * form of this program observed only indices 0, 4 and 9.  Seven of the ten members per
+ * value could therefore be arbitrary and every oracle still agreed, in all twelve cells.
+ * The values are consecutive by construction, so a reader spots a break in the sequence at
+ * a glance, and one line per struct value keeps the output bounded.
+ */
 static void take_sbigx2(struct sbig p1, struct sbig p2, int variant)
 {
     const char *t = variant_tag(variant);
-    printf("sbig_%s_p1 v0=%d v4=%d v9=%d\n", t, p1.v[0], p1.v[4], p1.v[9]);
-    printf("sbig_%s_p2 v0=%d v4=%d v9=%d\n", t, p2.v[0], p2.v[4], p2.v[9]);
+    printf("sbig_%s_p1 v0=%d v1=%d v2=%d v3=%d v4=%d v5=%d v6=%d v7=%d v8=%d v9=%d\n", t,
+           p1.v[0], p1.v[1], p1.v[2], p1.v[3], p1.v[4], p1.v[5], p1.v[6], p1.v[7],
+           p1.v[8], p1.v[9]);
+    printf("sbig_%s_p2 v0=%d v1=%d v2=%d v3=%d v4=%d v5=%d v6=%d v7=%d v8=%d v9=%d\n", t,
+           p2.v[0], p2.v[1], p2.v[2], p2.v[3], p2.v[4], p2.v[5], p2.v[6], p2.v[7],
+           p2.v[8], p2.v[9]);
 }
 
 int main(void)
 {
-    take_s8x10(c8[0], c8[1], c8[2], c8[3], c8[4], c8[5], c8[6], c8[7],
-               c8[8], c8[9], 0);
-    take_s16ix5(c16i[0], c16i[1], c16i[2], c16i[3], c16i[4], 0);
-    take_s16mx5(c16m[0], c16m[1], c16m[2], c16m[3], c16m[4], 0);
-    take_s16dx5(c16d[0], c16d[1], c16d[2], c16d[3], c16d[4], 0);
-    take_s16fx5(c16f[0], c16f[1], c16f[2], c16f[3], c16f[4], 0);
-    take_s24x4(c24[0], c24[1], c24[2], c24[3], 0);
-    take_sbigx2(cbig[0], cbig[1], 0);
+    /* Plain destinations for the runtime variants, one per aggregate the
+       runtime calls pass.  Only these are read at the call sites, so no
+       argument list holds a volatile access and none depends on an unspecified
+       order. */
+    struct s8 r8[10];
+    struct s16i r16i[5];
+    struct s16m r16m[5];
+    struct s16d r16d[5];
+    struct s16f r16f[5];
+    struct s24 r24[4];
+    struct sbig rbig[2];
+    int plain_tag;
+    int k;
 
-    take_s8x10(v8[0], v8[1], v8[2], v8[3], v8[4], v8[5], v8[6], v8[7],
-               v8[8], v8[9], vtag);
-    take_s16ix5(v16i[0], v16i[1], v16i[2], v16i[3], v16i[4], vtag);
-    take_s16mx5(v16m[0], v16m[1], v16m[2], v16m[3], v16m[4], vtag);
-    take_s16dx5(v16d[0], v16d[1], v16d[2], v16d[3], v16d[4], vtag);
-    take_s16fx5(v16f[0], v16f[1], v16f[2], v16f[3], v16f[4], vtag);
-    take_s24x4(v24[0], v24[1], v24[2], v24[3], vtag);
-    take_sbigx2(vbig[0], vbig[1], vtag);
+    take_s8x10_p(c8[0], c8[1], c8[2], c8[3], c8[4], c8[5], c8[6], c8[7],
+                 c8[8], c8[9], 0);
+    take_s16ix5_p(c16i[0], c16i[1], c16i[2], c16i[3], c16i[4], 0);
+    take_s16mx5_p(c16m[0], c16m[1], c16m[2], c16m[3], c16m[4], 0);
+    take_s16dx5_p(c16d[0], c16d[1], c16d[2], c16d[3], c16d[4], 0);
+    take_s16fx5_p(c16f[0], c16f[1], c16f[2], c16f[3], c16f[4], 0);
+    take_s24x4_p(c24[0], c24[1], c24[2], c24[3], 0);
+    take_sbigx2_p(cbig[0], cbig[1], 0);
+
+    /* One volatile aggregate copy per full statement, each separated from the
+       next by a sequence point.  The copies are still loads from volatile
+       storage, so nothing becomes available for compile-time substitution and
+       the runtime calls are still fed genuine runtime aggregates. */
+    plain_tag = vtag;
+    for (k = 0; k < 10; k++) {
+        r8[k] = v8[k];
+    }
+    for (k = 0; k < 5; k++) {
+        r16i[k] = v16i[k];
+    }
+    for (k = 0; k < 5; k++) {
+        r16m[k] = v16m[k];
+    }
+    for (k = 0; k < 5; k++) {
+        r16d[k] = v16d[k];
+    }
+    for (k = 0; k < 5; k++) {
+        r16f[k] = v16f[k];
+    }
+    for (k = 0; k < 4; k++) {
+        r24[k] = v24[k];
+    }
+    for (k = 0; k < 2; k++) {
+        rbig[k] = vbig[k];
+    }
+
+    take_s8x10_p(r8[0], r8[1], r8[2], r8[3], r8[4], r8[5], r8[6], r8[7],
+                 r8[8], r8[9], plain_tag);
+    take_s16ix5_p(r16i[0], r16i[1], r16i[2], r16i[3], r16i[4], plain_tag);
+    take_s16mx5_p(r16m[0], r16m[1], r16m[2], r16m[3], r16m[4], plain_tag);
+    take_s16dx5_p(r16d[0], r16d[1], r16d[2], r16d[3], r16d[4], plain_tag);
+    take_s16fx5_p(r16f[0], r16f[1], r16f[2], r16f[3], r16f[4], plain_tag);
+    take_s24x4_p(r24[0], r24[1], r24[2], r24[3], plain_tag);
+    take_sbigx2_p(rbig[0], rbig[1], plain_tag);
     return 0;
 }

@@ -1,0 +1,100 @@
+# Expectation record for 12_preprocessor/004_predefined_macros.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 004_predefined_macros
+area               = 12_preprocessor
+description        = Predefined macros asserted only as normalized relations: the standard conformance and version macros, source-position macros, architecture-macro consistency, and the tie between the preprocessor's view of the target and the code generator's pointer width
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined and no unspecified behaviour. The only arithmetic is a bounded
+increment over the characters of a string literal and a sum of four operands each of which is 0 or 1,
+so no signed overflow is reachable. No shift operator appears, so no shift count can be out of range.
+There is no cast between object pointer types, no union and no type-punning, so no aliasing rule is
+stressed. The helper walks a string literal and stops at its terminator, so no pointer is formed past
+the end of an object and none is dereferenced outside one; no string literal is modified. Every object
+is initialized at its declaration. No object is modified twice between sequence points. Every call
+receives a single argument that has no side effect at all, so nothing depends on unspecified
+evaluation order.
+
+DETERMINISM. Every printed value is an int printed with %d or a string constant written in this
+source, so nothing target-varying, address-derived, time-derived, random or locale-dependent can
+reach stdout. No plain char value is printed: char signedness was measured as signed on x86_64 and
+i686 and unsigned on aarch64 and riscv64, so a plain-char value would diverge for a reason that is
+not a defect. No raw type width is printed: sizeof(long) and sizeof(void *) were measured as 4 on
+i686 and 8 on the other three targets. Iteration order is fixed by literal bounds. main returns 0,
+inside the 0-125 range the suite requires so that no exit status is truncated.
+
+HERMETICITY. Every input is a literal in this source. Nothing is opened, nothing is read from the
+environment, the command line, the clock or the file system, and no storage is allocated, so a cell
+is reproducible from this source and this record alone.
+
+GATE. The default warning gate applies unmodified and no `ub_audit_flags` key appears:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. The program was verified
+clean under that gate with all four reference drivers and with the alternate reference compiler, and
+it builds and runs clean under -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
+
+NO HEADER IS INCLUDED and printf is declared by hand as `int printf(const char *, ...);`. bcc bundles
+only freestanding headers and ships no standard I/O header, so naming one would fail on the bcc side
+of oracle (a) while succeeding on the reference side -- a spurious divergence caused by the test
+rather than by a compiler.
+END
+impl_defined_notes <<END
+WHICH MACROS MAY BE ASSERTED AS INVARIANTS, AND WHICH MAY NOT. This is the whole design of the
+program, and it is a soundness requirement rather than a stylistic preference.
+
+Only macros the C standard itself requires are invariants here: __STDC__ and __STDC_VERSION__ (C11
+6.10.8.1), and the source-position macros __LINE__ and __FILE__ (same clause). A conforming
+implementation must define each of them, so a divergence in one is a real conformance gap and a
+legitimate finding.
+
+The architecture macros are NOT invariants, and an earlier form of this program wrongly made them one
+by asserting that exactly one of __x86_64__, __i386__, __aarch64__ and __riscv is defined. Those are
+spellings of a particular compiler family; no clause obliges any implementation to define them, and
+this repository documents no per-target predefined-macro contract for the compiler under test. That
+assertion would therefore have accused a correct compiler of a defect merely for spelling its
+architecture macro differently, or for leaving the choice to a target header. They are still
+exercised, because dropping them would be excluding a feature for being awkward, but only through
+assertions no correct compiler can fail: that NO MORE THAN ONE of the four is defined, which is a
+consistency property rather than a naming one, and that ANY macro that IS defined agrees with the
+pointer width the code generator actually produced, written as a two-sided implication so that an
+undefined macro satisfies it vacuously. Together those still catch the defect worth catching -- a
+preprocessor that disagrees with its own back end, or that claims two architectures at once -- while a
+differently spelled or absent macro set passes.
+
+The strict-conformance macro is asserted NOWHERE, in either direction, for the same reason:
+__STRICT_ANSI__ is a compiler-family spelling with no standard mandate, so requiring its absence would
+be a false oracle and requiring its presence would be another. Whether GNU extensions are on offer is
+exercised where it belongs, in feature area 08, by programs that USE an extension.
+
+WIDTH NORMALIZATION. No macro value and no type width is printed as an absolute. The one place a width
+appears is inside a relation, `sizeof(void *) == 4u`, whose truth value is compared against an
+architecture macro rather than printed, and `sizeof(void *) == sizeof(long)`, which is a genuine
+four-target invariant even though the shared value differs between the 32-bit target and the other
+three. The line-number macro is reduced to positivity and the file-name macro to non-emptiness, so no
+workspace path can reach the output and no later edit to the comments above can change a printed
+value.
+END
+expected_stdout    <<END
+stdc_is_one=1
+stdc_at_least_c99=1
+stdc_at_least_c11=1
+arch_count_at_most_one=1
+arch_id_agrees_with_pointer_width=1
+pointer_width_eq_long_width=1
+line_macro_positive=1
+file_macro_nonempty=1
+END

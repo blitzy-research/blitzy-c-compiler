@@ -6,7 +6,7 @@
 
 program            = 011_flexible_array_member
 area               = 03_initializers
-description        = Flexible array member declaration, sizing and access through allocated-equivalent storage at BOTH storage durations: a union pairing the incomplete-array struct with a same-prefix sized struct, instantiated once as a file-scope static image and once as an automatic twin inside main, each read back across a function boundary that knows only the incomplete type, then mutated in place through the flexible arm
+description        = Flexible array member declaration and sizing through allocated-equivalent storage at BOTH storage durations: a union pairing the incomplete-array struct with a same-prefix sized struct, instantiated once as a file-scope static image and once as an automatic twin inside main, with the shared count written through one arm and read back through the other and across a function boundary that knows only the incomplete type, and the element data carried by the sized arm where it is declared
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -37,16 +37,27 @@ inspecting the common initial sequence of structures that share a union, which h
 access reads or writes storage last written through an lvalue of that same type. No pointer cast
 appears anywhere in the program.
 The flexible array member itself contributes nothing to sizeof the struct (C11 6.7.2.1p18), which is
-asserted directly rather than relied on silently: sizeof_struct_fam is printed and must read 4.
+asserted directly rather than relied on silently: sizeof_struct_fam is printed and must read 4, and
+fam_size_as_if_omitted asserts the inequality the standard actually states -- the size is as if the
+member were omitted, allowing only extra trailing padding -- against a header-only twin type.
+NO SUBSCRIPT IS EVER APPLIED TO THE FLEXIBLE MEMBER, AND THAT IS THE PROGRAM'S CENTRAL SAFETY
+PROPERTY. C11 6.7.2.1p18 replaces the member with the longest array that would not make the structure
+larger than THE OBJECT BEING ACCESSED, and states that if that array would have no elements, any
+attempt to access an element is undefined. A `struct fam *` aimed at the union's flexible arm
+designates an object of size sizeof(struct fam) -- four bytes, the header alone -- so the replacement
+array there has NO elements and subscripting it would be out of bounds on the read side and on the
+write side alike. The union makes the two arms alias legitimately; it does not enlarge either arm.
+Every element access in this program is therefore made through the SIZED arm, whose data member is
+declared with FAM_CAP == 8 elements, and the flexible arm is used only for the member the two share.
 EVERY SUBSCRIPT IS IN BOUNDS, AND EVERY BOUND IS DERIVED FROM THE OBJECT RATHER THAN ASSUMED.
-The sized arm provides FAM_CAP == 8 elements in both unions, and sum_prefix loops to p->count, taking
-the element count from the object itself across a function boundary at which the callee knows only
-the incomplete type. The static object's count is only ever 5 then 6 and the highest index it touches
-is 5; the automatic object's count is only ever 4 then 5 and the highest index it touches is 4. All
-four counts are strictly below the capacity, so no access reaches past the backing array, no
-one-past-the-end pointer is formed or dereferenced, and no pointer arithmetic leaves its object. `p`
-designates the file-scope object, which lives for the whole run, and `lp` designates the automatic
-object, which is read only inside main where it is alive, so neither pointer is ever dangling.
+sum_prefix loops to u->flex.count -- the shared member, read through the flexible arm -- and indexes
+u->sized.data, so the bound comes from the object and the storage comes from the arm that declares it.
+The static object's count is only ever 5 then 6 and the highest index it touches is 5; the automatic
+object's count is only ever 4 then 5 and the highest index it touches is 4. All four counts are
+strictly below the capacity, so no access reaches past the backing array, no one-past-the-end pointer
+is formed or dereferenced, and no pointer arithmetic leaves its object. `p` designates the file-scope
+object, which lives for the whole run, and `lp` designates the automatic object, which is read only
+inside main where it is alive, so neither pointer is ever dangling.
 NO UNINITIALIZED STORAGE IS READ, at either storage duration. Both unions carry a designated
 initializer for their sized arm, so every element of that arm is determinate -- the live values plus
 the explicit trailing zeros -- and a member or element an initializer had omitted would be zeroed in
@@ -60,8 +71,9 @@ No signed overflow is possible: the largest printed value is 2133 and the larges
 while INT_MAX is at least 2147483647 on every conforming target. There is no shift, no division, no
 remainder and no integer-to-pointer conversion anywhere in the program.
 No object is modified twice between two sequence points. Each mutation phase is three separate
-statements -- one element rewritten in place, the count grown by one, one previously zero slot filled
--- and `total += p->data[i];` inside sum_prefix is a statement of its own. Every printf call receives
+statements -- one element rewritten in place through the sized arm, the count grown by one through the
+flexible arm, one previously zero slot filled through the sized arm -- and the accumulation inside
+sum_prefix is a statement of its own. Every printf call receives
 at most one loop counter and one already-computed value, so the unspecified order in which a function
 call's arguments are evaluated cannot be observed.
 No object representation is inspected and nothing is read byte by byte, so neither padding nor byte
@@ -90,10 +102,30 @@ reference-compiler-only and are never applied to bcc, so requirement 3's shared-
 untouched.
 END
 impl_defined_notes <<END
-This record narrows one SPELLING of the initializer, and records the reason below as the suite
-requires, but it narrows no target, no optimization level and no oracle, it carries no
-expected-divergence marker, and no `ub_audit_flags` key appears because the program passes the
-suite's full default warning gate unmodified.
+This record narrows two things and records the reason for each below, as the suite requires: one
+SPELLING of the initializer, and one unsound WAY OF REACHING the member's elements. It narrows no
+target, no optimization level and no oracle, it carries no expected-divergence marker, and no
+`ub_audit_flags` key appears because the program passes the suite's full default warning gate
+unmodified.
+ELEMENT ACCESS THROUGH THE FLEXIBLE MEMBER ITSELF IS EXCLUDED, AND THE REASON IS THE STANDARD RATHER
+THAN DIFFICULTY. An earlier form of this program subscripted the member through a `struct fam *`
+aimed at the union arm. Under C11 6.7.2.1p18 the replacement array for that access is sized against
+the object being accessed, which is the four-byte `struct fam` arm, so it has no elements and every
+such subscript was undefined -- exactly the kind of unsound input that would make any divergence it
+provoked unattributable. The construction the standard unambiguously supports is an allocated object
+genuinely larger than the header, and it is out of reach for this corpus: a portable declaration of an
+allocation function needs size_t, which is `unsigned int` on i686 and `unsigned long` on the other
+three targets, so no single spelling serves all four; the corpus forbids including the header that
+would define it; and a declaration without a prototype was MEASURED to be rejected by the reference
+compiler and by the alternate reference compiler alike under the mandatory gate
+(-Werror=builtin-declaration-mismatch and -Werror=strict-prototypes respectively). The exclusion is
+therefore narrow -- one way of reaching one member -- and it costs no coverage of the feature that can
+be observed soundly: the declaration is accepted, the sizeof contribution is measured twice over, the
+incomplete type crosses a function boundary, and the member the two arms share is written through one
+arm and read through the other, which is precisely the access C11 6.5.2.3p6 sanctions. The elements
+themselves are carried by the sized arm, where they are declared and where subscripting them is
+beyond argument. Per constraint C3 this is stated rather than left silent, in the program's own
+header comment as well as here.
 ONE SPELLING OF THIS CONSTRUCT IS EXCLUDED, NARROWLY AND ON AN EXPLICIT PLAN BASIS RATHER THAN ON
 DIFFICULTY. Direct initialization -- `static struct fam d = { 3, {1,2,3} };` -- was probed against
 the mandatory strict gate in this environment and REJECTED with "error: initialization of a flexible
@@ -145,18 +177,21 @@ different paths through the compiler. Both are compiled at all three optimizatio
 volatile operand is added: qualifying one would suppress exactly the optimizer behaviour the pairing
 exists to survive.
 MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
--O1 and -O2 -- twelve configurations -- and every one produced these 30 lines byte-identically with
+-O1 and -O2 -- twelve configurations -- and every one produced these 35 lines byte-identically with
 exit status 0, which is why oracle (b) compares this program's targets against each other without any
 narrowing and why oracle (c) can hold these bytes as the golden record. Every live element is printed
 individually in both the read-back and the post-mutation phase of both halves, so a single wrong slot
 localizes to one initializer form at one storage duration rather than to the aggregate, and the four
-sum lines confirm that the same storage is reached through both union arms rather than merely that
-each arm is self-consistent.
+sum lines, together with count_arms_agree and the three count_via_boundary lines, confirm that the
+same storage is reached through both union arms rather than merely that each arm is self-consistent.
 END
 expected_stdout    <<END
 sizeof_struct_fam=4
 sizeof_storage=36
+fam_size_as_if_omitted=1
 count=5
+count_arms_agree=1
+count_via_boundary=5
 data[0]=100
 data[1]=200
 data[2]=300
@@ -164,6 +199,7 @@ data[3]=400
 data[4]=500
 sum=1500
 after_count=6
+after_count_via_boundary=6
 after[0]=100
 after[1]=200
 after[2]=333
@@ -172,6 +208,7 @@ after[4]=500
 after[5]=600
 after_sum=2133
 l_count=4
+l_count_via_boundary=4
 l_data[0]=11
 l_data[1]=22
 l_data[2]=33

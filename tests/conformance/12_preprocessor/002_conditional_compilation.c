@@ -51,8 +51,15 @@
  *     one argument with a side effect - none of the arguments here has any.
  *   - Nothing depends on padding bytes or on the addresses of unrelated objects.
  *   - -7 / 2 and 17 % 5 rely on truncation toward zero and a dividend-signed remainder,
- *     which C99 onward mandates and which were measured identical on all four targets,
- *     so no target restriction is needed and all three oracles stay enabled.
+ *     which C99 onward mandates for every conforming implementation, so the result is
+ *     fixed by the language rather than by the target and no target restriction is called
+ *     for.  The sibling record 002_conditional_compilation.expected acts on exactly that
+ *     reasoning: it narrows no target and disables no oracle - all four targets, all three
+ *     optimization levels and all three oracles - and this comment is the reason why.  Its
+ *     golden stdout was measured on this branch and is byte-identical across all twelve
+ *     cells.  What no cell of this program has yet done is resolve a VERDICT, and the
+ *     reason is not the record: there is no compiler under test on this branch, so the
+ *     flag-capability probe is recorded UNPERFORMED and blocks every area unconditionally.
  */
 
 int printf(const char *, ...);

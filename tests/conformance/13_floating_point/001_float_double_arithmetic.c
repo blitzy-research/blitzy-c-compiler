@@ -20,17 +20,25 @@
  * extended's sixty-four, so NO operation in this program ever makes a rounding
  * decision at all.
  *
- * That is what makes the twelve cells of this program's matrix comparable byte for
- * byte rather than merely comparable in principle.  i686 evaluates floating
- * expressions in x87 extended precision - FLT_EVAL_METHOD 2 - while x86-64 uses
- * SSE, AArch64 uses its FP/SIMD unit and RISC-V 64 uses the F and D extensions.
- * Excess precision changes a result only where a rounding decision was taken, and
- * here none ever is: an exact value is exact in every one of those formats, and
- * converting it between them is lossless in both directions.  A single operand that
- * needed rounding - 0.1, or a quotient by anything other than a power of two -
- * would let i686 double-round and would manufacture a divergence that says nothing
- * about any compiler.  So no target is restricted, no oracle is disabled, and this
- * program carries no expected-divergence marker.
+ * That is what makes this program comparable byte for byte across targets rather
+ * than merely comparable in principle.  i686 evaluates floating expressions in x87
+ * extended precision - FLT_EVAL_METHOD 2 - while x86-64 uses SSE, AArch64 uses its
+ * FP/SIMD unit and RISC-V 64 uses the F and D extensions.  Excess precision changes
+ * a result only where a rounding decision was taken, and here none ever is: an exact
+ * value is exact in every one of those formats, and converting it between them is
+ * lossless in both directions.  A single operand that needed rounding - 0.1, or a
+ * quotient by anything other than a power of two - would let i686 double-round and
+ * would manufacture a divergence that says nothing about any compiler.
+ *
+ * That exactness argument is a property of the program above, and it holds whether or
+ * not anything runs.  The sibling record 001_float_double_arithmetic.expected acts on it:
+ * because the printed digits are exact on every target, the record restricts no target,
+ * disables no oracle and carries no expected-divergence marker - four targets, three
+ * optimization levels, all three oracles - and its single golden stdout was measured on
+ * this branch and is byte-identical across all twelve cells.  What none of those cells has
+ * yet resolved is a VERDICT, and the record is not the reason: no compiler under test
+ * exists on this branch, so the flag-capability probe is recorded UNPERFORMED and blocks
+ * every area unconditionally.
  *
  * Every value is printed with an explicit .6 precision.  Each needs at most three
  * fractional digits, so the printed digits are exact with three digits to spare -
@@ -71,10 +79,14 @@
  * compound assignment is a full expression of its own.  Nothing is converted to an
  * integer type, so the one undefined case of a floating-to-integer conversion cannot
  * arise.  Every float -> double widening and double -> float narrowing carries an
- * explicit cast, which is also what keeps the program clean under the audit gate's
- * -Wconversion and -Wsign-conversion - area 13 sanctions no deviation from the
- * default warning gate, so this program is compiled under all of -Wall -Wextra
- * -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror.
+ * explicit cast, which is also what keeps the program clean under -Wconversion and
+ * -Wsign-conversion.  Area 13 sanctions no deviation from the default warning gate,
+ * so the program is written to satisfy that gate in full - -Wall -Wextra -pedantic
+ * -Wconversion -Wsign-conversion -Wshadow -Werror - and it does: the reference
+ * compiler accepts it with no diagnostic under exactly those flags.  The gate the
+ * harness applies is selected by the program's own record, and that record is not
+ * committed on this branch, so today the claim rests on the same flags run by hand
+ * rather than on a recorded ub_audit_flags field.
  *
  * No header is named.  bcc ships no stdio.h - its bundled set is the nine required
  * freestanding headers plus a bonus stdatomic.h (docs/technical-specifications.md

@@ -1,0 +1,118 @@
+# Expectation record for 13_floating_point/002_float_int_conversions.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_float_int_conversions
+area               = 13_floating_point
+description        = Conversions in both directions between the floating and integer types, at representable boundaries and with truncation toward zero, in a folded and a volatile-runtime variant, plus four round trips
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction, and the conversion rules
+are the whole subject here, so they are argued precisely:
+- FLOATING TO INTEGER. C11 6.3.1.4p1 discards the fractional part and leaves the
+  behaviour undefined only when THE INTEGRAL PART cannot be represented in the
+  destination. Every such conversion below is inside its destination by a wide margin --
+  the narrowest margin anywhere is the 5 that separates 250 from unsigned char's maximum,
+  and the narrowest on a signed destination is the 27 that separates 100 from signed
+  char's. The two negative floating sources, -1000000.5 and -0.75, are converted ONLY to
+  signed destinations, where their integral parts -1000000 and 0 are both comfortably in
+  range. No negative floating value is converted to any unsigned type anywhere, which is
+  a requirement of this program rather than a tidiness.
+- INTEGER TO FLOATING. An integer not exactly representable in the destination format is
+  converted with implementation-defined rounding, so every integer converted below is
+  EXACTLY representable in the format it is converted to and no rounding decision is ever
+  taken. binary32 carries 24 significand bits and binary64 carries 53; the exactness of a
+  value depends on the width of its ODD PART, since trailing factors of two are absorbed
+  by the exponent. 4000000000 is 2^11 * 5^9 and needs 21 bits; 4000000000000 is
+  2^14 * 5^12 and needs the 28 bits of 5^12 = 244140625; 1234567890123 is odd and needs
+  41. The last two therefore exceed binary32's 24 bits and are converted only to double,
+  never to float.
+- No signed integer overflow, no division by zero and no shift operator, so no shift
+  count can be out of range.
+- No array indexing beyond bounds, no pointer arithmetic, no aliasing violation, and no
+  floating object inspected byte-wise or reinterpreted through overlapping storage.
+- No read of uninitialized storage, and no object modified twice between sequence points.
+- Nothing depends on unspecified evaluation order: each volatile operand is read exactly
+  once, in a statement of its own, and no argument list contains more than one
+  side-effecting argument.
+- Hermetic, as constraint C4 requires: every input is a literal in the source, nothing is
+  opened or allocated, and no environment variable or program argument is read.
+- main returns 0, inside the 0-125 range the suite requires.
+- Verified empirically on this branch: the default strict warning gate produces zero
+  diagnostics at -O0, -O1 and -O2, and the sanitizer gate runs to completion with empty
+  stderr and exit status 0.
+END
+impl_defined_notes <<END
+FLOATING-POINT DETERMINISM rests on three deliberate choices, each verified by
+measurement rather than assumed:
+1. Every floating value in the program is a DYADIC RATIONAL -- an integer, or an integer
+   plus a sum of negative powers of two -- so it is exactly representable in binary32 and
+   binary64 alike and no rounding decision is ever taken.
+2. Every printed floating value carries an explicit precision with room to spare, so no
+   default precision is relied on and no digit is at the mercy of a rounding mode.
+3. Excess intermediate precision cannot perturb an exact value. This matters because i686
+   evaluates floating expressions in x87 extended precision (FLT_EVAL_METHOD 2) while the
+   other three targets do not; the exactness of every operand and every result is what
+   makes the difference unobservable.
+No not-a-number, no infinity, no negative zero, no subnormal and no division by zero is
+produced or assumed anywhere.
+
+Truncation is toward zero rather than toward negative infinity, and the two negative cases
+pin that down: -1000000.5 gives -1000000 rather than -1000001, and -0.75 gives 0 rather
+than -1. A backend that rounded instead of truncating, or truncated the wrong way, changes
+those two fields and nothing else, which is what localises the defect.
+
+THE TWO-VARIANT RULE. Every conversion is performed twice, once over constants and once
+over volatile-qualified operands, so a divergence is attributable to the folder or to the
+backend rather than to "one of the two".
+
+Plain char signedness is implementation-defined and was measured as signed on x86_64 and
+i686 and unsigned on aarch64 and riscv64; no plain-char value is printed. sizeof(long)
+and sizeof(void *) were measured as 4 on i686 and 8 on the other three targets
+(docs/technical-specifications.md lines 457-462); no long, size_t, ptrdiff_t, intptr_t or
+pointer value is printed and no long or pointer conversion specification is used. Only
+int, long long and their unsigned counterparts appear as integer destinations, each the
+same width on all four targets. No address or pointer value is printed. The two character conversions name signed char and unsigned char
+explicitly for that reason.
+
+long double is absent, its representation having been measured at 16, 12, 16 and 16 bytes
+across the four targets. It belongs to 004_long_double_target_restricted in this area,
+which carries NO marker: that program's record instead disables oracle (b) alone with the
+measured representation difference as its recorded reason, and keeps oracles (a) and (c)
+enabled on all four targets at all three optimization levels.
+
+No target is dropped, no oracle is disabled here and this record carries no
+expected-divergence marker: a divergence is a genuine finding. Measured on this branch with gcc 13.4.0 and the matching i686, aarch64 and riscv64 cross
+drivers, executed natively and under QEMU user-mode 10.1.0: stdout is byte-identical and
+the exit status is 0 in all twelve target-and-optimization-level cells.
+END
+expected_stdout    <<END
+d2i_pos=1000000 d2i_neg=-1000000 d2i_trunc_pos=0 d2i_trunc_neg=0
+d2i_bound_pos=2147480000 d2i_bound_neg=-2147480000 d2ll=1234567890123 d2ull=4000000000000
+d2u=4000000000 d2short=32000 d2ushort=65000 d2schar=100 d2uchar=200
+negfrac2u=0 negfrac2uchar=0 negfrac2ull=0
+f2i=16777216 f2i_trunc=3 f2u=1000000 f2short=-32000 f2uchar=250
+i2f=12345.000000 i2d=-12345.000000 u2d=4000000000.000000 ll2d=9007199254740992.000000
+i2f_pow2=16777216.000000 sc2d=-125.000000 uc2f=250.000000 ull2d=4000000000000.000000
+roundtrip_i_d_i=12345 roundtrip_i_f_i=1024 roundtrip_ll_d_ll=1234567890123 roundtrip_u_d_u=4000000000
+rt_d2i_pos=1000000 rt_d2i_neg=-1000000 rt_d2i_trunc_pos=0 rt_d2i_trunc_neg=0
+rt_d2i_bound_pos=2147480000 rt_d2i_bound_neg=-2147480000 rt_d2ll=1234567890123 rt_d2ull=4000000000000
+rt_d2u=4000000000 rt_d2short=32000 rt_d2ushort=65000 rt_d2schar=100 rt_d2uchar=200
+rt_negfrac2u=0 rt_negfrac2uchar=0 rt_negfrac2ull=0
+rt_f2i=16777216 rt_f2i_trunc=3 rt_f2u=1000000 rt_f2short=-32000 rt_f2uchar=250
+rt_i2f=12345.000000 rt_i2d=-12345.000000 rt_u2d=4000000000.000000 rt_ll2d=9007199254740992.000000
+rt_i2f_pow2=16777216.000000 rt_sc2d=-125.000000 rt_uc2f=250.000000 rt_ull2d=4000000000000.000000
+rt_roundtrip_i_d_i=12345 rt_roundtrip_i_f_i=1024 rt_roundtrip_ll_d_ll=1234567890123 rt_roundtrip_u_d_u=4000000000
+folded_matches_runtime=1 1 1 1 1 1 1 1
+END

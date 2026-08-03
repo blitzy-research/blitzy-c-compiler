@@ -71,11 +71,12 @@ No rule is invented here, and no rule text is paraphrased, because there is none
 Three independent oracles judge every cell. Two are mandated by the requirements; the third costs
 nothing and closes a hole the other two structurally cannot see.
 
-The **Cell volume** column below states the **final planned** figures, for the full 108-program
-corpus. The corpus present on this branch is smaller — 92 runnable programs — and both sets of
-numbers are published side by side under [the enumerable matrix](#the-enumerable-matrix).
+The **Cell volume** column below states the figures for the full 108-program corpus, which is the
+corpus present on this branch: every source is paired with its record, so the planned and present
+counts agree. They are published side by side, with the commands to check them, under [the
+enumerable matrix](#the-enumerable-matrix).
 
-| Oracle | Compares | Detects | Cell volume (final planned) |
+| Oracle | Compares | Detects | Cell volume |
 | --- | --- | --- | --- |
 | **(a) Reference compiler** | `bcc` against a reference C compiler, same target, same optimization level | A wrong answer `bcc` produces consistently across all four of its backends | **324** native, up to **972** cross |
 | **(b) Cross-backend** | Each non-baseline target against the **x86-64 baseline**, same optimization level | A wrong answer confined to one backend — ABI, register-allocation or instruction-selection defects | **972** comparisons |
@@ -266,11 +267,23 @@ does not excuse a divergence on another; a `compile_failure` marker on oracle (a
 expected divergence. When a marker exists but does not cover the observation, the verdict falls
 through to FINDING and the detail states exactly which dimension failed to match.
 
-**This holds for a build refusal too, which is why one is scoped `all oracles`.** A refusal reaches
-classification once per oracle arm, each settled against its own authority, so the oracle dimension
-narrows a real set there as well; a marker meant to document a refusal names every arm it denies.
-See [Every validation the parser enforces](#every-validation-the-parser-enforces) for the exact
-spelling and what happens when a single oracle is named instead.
+**This holds for a build refusal too, which is why a refusal marker should be scoped `all oracles`.** A
+refusal reaches classification once per oracle arm, each settled against its own authority, so the
+oracle dimension narrows a real set there as well; a marker meant to document a refusal names every arm
+it denies. See [Every validation the parser enforces](#every-validation-the-parser-enforces) for the
+exact spelling and what happens when a single oracle is named instead.
+
+**What the corpus's marker set actually is, so no reader assumes an excuse exists where none does.**
+The corpus carries **no marker at all** today, and the register's own audit re-establishes that on
+every run, resolving zero markers against zero registered identifiers in both directions. Three
+candidates have been analysed and every one is deliberately left unmarked: GCC case ranges (a marker
+there was minted on an inventory omission, in anticipation of a rejection nobody had observed, and has
+been retired), the wide and Unicode literal prefixes, and `long double` — that last one narrows
+**oracle (b) alone** through its own record's recorded reason, which is a *recorded exclusion* rather
+than a marker. A divergence anywhere in the corpus is therefore a **FINDING**, never an XFAIL against
+a marker. [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4 works through all three, and §8.5
+is the checklist any future marker must satisfy — a quoted sentence that states the limitation, and a
+captured observation of the divergence.
 
 **A marker never changes what a program does.** A marker changes how a divergence is *classified*,
 never whether the feature is *exercised*, and nothing in the harness may short-circuit a phase
@@ -289,7 +302,7 @@ never reaches a comparison, so a rule demanding one would make the whole class u
 
 Every program has a sibling `<program>.expected` record. This single file is what makes each test
 reproducible in isolation and what supplies oracle (c). This section is **binding on every record**
-— the 92 present on this branch and every one still to be authored — and matches the hand-written
+— all 108 present on this branch and every one added later — and matches the hand-written
 parser (`manifest.rs`) in
 [`../conformance_harness/`](../conformance_harness/) exactly. A maintainer authoring a new program
 should copy from here.
@@ -392,11 +405,13 @@ record writes them.
 | `ub_notes` | heredoc | **required, non-empty** |
 | `impl_defined_notes` | heredoc | conditional |
 | `expected_stdout` | heredoc | **required** |
-| `expected_divergence.id` | scalar | optional — all five marker keys or none |
-| `expected_divergence.class` | scalar | optional — all five marker keys or none |
-| `expected_divergence.scope` | scalar | optional — all five marker keys or none |
-| `expected_divergence.basis` | scalar | optional — all five marker keys or none |
-| `expected_divergence.observed` | heredoc | optional — all five marker keys or none |
+| `expected_divergence.id` | scalar | optional — all seven marker keys or none |
+| `expected_divergence.class` | scalar | optional — all seven marker keys or none |
+| `expected_divergence.scope` | scalar | optional — all seven marker keys or none |
+| `expected_divergence.basis` | scalar | optional — all seven marker keys or none |
+| `expected_divergence.documented` | heredoc | optional — all seven marker keys or none |
+| `expected_divergence.evidence` | heredoc | optional — all seven marker keys or none |
+| `expected_divergence.observed` | heredoc | optional — all seven marker keys or none |
 
 ### The canonical reference record
 
@@ -516,30 +531,51 @@ carrying its weight:
 
 ### The optional marker block
 
-Append all five keys, or none of them, to the record above. This is the **syntax**; whether a marker
+Append all seven keys, or none of them, to the record above. This is the **syntax**; whether a marker
 may legitimately be written is a separate and much stricter question, answered immediately below.
 
+**No record in the corpus carries a marker today.** The block below is grammar, not an example drawn
+from the corpus, and the two conditions stated after it are why: a marker needs an authority that
+*asserts* the limitation and an observation that has actually been *captured*, and no candidate
+analysed so far satisfies both. [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4 records each
+candidate and what it would take.
+
 The block below is an **illustration of the grammar only**. The identifier, the basis and the
-observation are placeholders, deliberately not any real marker — quoting a live one in prose would
-outlive its retirement, and prose is not a place a marker can be honoured from.
+observation are placeholders, deliberately not any real marker — a live marker reproduced as a sample
+record would read as something honourable from prose, and it would outlive its retirement.
 [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) is the sole register of the markers that are
-active, and §4 there enumerates them.
+active; on this branch that set is **empty**, and §4 there records every candidate analysed and why
+none of them qualifies.
 
 ```text
-expected_divergence.id       = ILLUSTRATION-ONLY-NOT-A-REAL-MARKER
-expected_divergence.class    = compile_failure
-expected_divergence.scope    = all oracles; all targets; all opt levels
-expected_divergence.basis    = docs/project-guide.md, the section that explicitly documents this limitation
-expected_divergence.observed <<END
+expected_divergence.id          = ILLUSTRATION-ONLY-NOT-A-REAL-MARKER
+expected_divergence.class       = compile_failure
+expected_divergence.scope       = all oracles; all targets; all opt levels
+expected_divergence.basis       = docs/project-guide.md, the section that explicitly documents this limitation -- line <n>
+expected_divergence.documented <<END
+<the authorising sentence, quoted verbatim from the cited document, long enough to identify a
+passage rather than a word -- the audit looks for it in that document's own bytes>
+END
+expected_divergence.evidence   <<END
+command: <the exact command line that produced the divergence>
+exit: <the status it produced>
+output: <what it printed, or the relevant part of it>
+toolchain: <which compiler under test, and which reference toolchain>
+captured: <when it was captured>
+END
+expected_divergence.observed   <<END
 bcc: <the diagnostic as it was actually seen>; reference compiler: <what it actually printed>
 END
 ```
 
-The oracle clause reads `all oracles` because the class is a **build refusal**: no artifact is
-produced, so every oracle arm loses the subject of its comparison and a marker naming one arm would
-leave the other two reported as findings. A marker for a class that *is* a comparison —
-`stdout_mismatch` or `exit_code_mismatch` — names the oracle that made it, since only that arm
-observed anything.
+The illustration's oracle clause reads `all oracles` because its class is a **build refusal**: no
+artifact is produced, so every oracle arm loses the subject of its comparison and a marker naming one
+arm leaves the other two reported as findings. A marker for a class that *is* a comparison —
+`stdout_mismatch` or `exit_code_mismatch` — names the oracle that made it, since only that arm observed
+anything. The illustration is an **illustration**: no marker is committed anywhere in this corpus, so
+there is no live example to compare it against, and the rule it demonstrates is enforced in code rather
+than by precedent — see [Marker scope matching is strict](#marker-scope-matching-is-strict) for what a
+build refusal scoped to a single arm would cost, and `classify.rs` for where that is decided.
 
 **A marker may not be minted on an omission, and two conditions must both hold.** A marker
 reclassifies a divergence on the authority of a limitation this repository **explicitly documents**.
@@ -558,12 +594,12 @@ does active harm: if the construct in fact works the cell agrees, the verdict is
 run fails on a mistake in the test material rather than a defect in the compiler; and until someone
 notices, the marker blinds the suite to a genuine regression in exactly the construct it was meant
 to document. `EXPECTED_DIVERGENCES.md` §8.5 states the same rule as a checklist, and §4 works
-through the three candidates the suite has analysed. Two are left unmarked on exactly this
-reasoning. The third — the case-ranges program — **is** marked, because the specification for this
-suite names that marker by identifier and mandates it; §4.1 and §8.5 record that decision as the one
-knowing exception it is, together with what it costs: the marker is anticipatory rather than
-observed, so if `bcc` in fact accepts the construct the verdict is XPASS, and retiring it is the
-two-file edit described under [Retiring a marker](#retiring-a-marker).
+through the three candidates the suite has analysed. **All three are left unmarked on exactly this
+reasoning, so no marker is active anywhere in the corpus on this branch**, and a specification that
+names a marker in advance is not a substitute for either condition: the case-ranges marker was
+minted on that footing and has been withdrawn, as `EXPECTED_DIVERGENCES.md` §8.3 records.
+`classify.rs` enforces the same rule in the code that decides the verdict, so there is no route by
+which an omission-based marker could be honoured even if one were written.
 
 ### Every validation the parser enforces
 
@@ -663,7 +699,7 @@ Each item below is a **hard error**.
 
 **Marker block**
 
-- **A partial `expected_divergence.*` block is a hard error** — all five keys or none.
+- **A partial `expected_divergence.*` block is a hard error** — all seven keys or none.
 - `expected_divergence.class` must be one of the six class identifiers listed above.
 - `expected_divergence.scope` is structured. Clauses are separated by `;`. A clause either names a
   whole dimension — `all oracles`, `all targets`, `all opt levels` — or lists members of exactly one
@@ -691,7 +727,23 @@ Each item below is a **hard error**.
     resolved inside it;
   - **a locator that resolves** — the citation must carry at least one of `line 246`, `lines 696-725`,
     `§0.6.2` or a backtick-quoted phrase from the document, and every locator it carries must resolve.
-- The marker's six fields must also be mirrored by a **structured entry** in
+- **A basis may not rest on an omission.** Wording such as "omits", "absent from", "not documented",
+  "does not list" or "nowhere in" is refused at parse time, in the basis, in the quotation and in the
+  observation alike: an omission records that nobody wrote something down, which authorises nothing and
+  which extending the inventory would erase without disturbing the excuse.
+- `expected_divergence.documented` must carry the authorising passage **quoted verbatim**, long enough
+  to identify a passage rather than a word, and `infra_expected_divergence_register` finds it in the
+  cited document's own bytes with runs of whitespace collapsed. A locator proves a line exists; the
+  quotation is what proves the line says something about the limitation.
+- `expected_divergence.evidence` must name all five of `command`, `exit`, `output`, `toolchain` and
+  `captured`, each as a `name: value` line with a non-empty value. A marker asserts that a divergence
+  *was observed*; without the command, status, output, toolchain and date it cannot be re-run or
+  contradicted.
+- `expected_divergence.observed` must describe the divergence **as seen**. Anticipatory wording — "is
+  expected to", "will reject", "anticipated", "no verdict has been recorded" — is refused. The correct
+  record for a divergence nobody has observed is **no marker**: the run then reports it as a `FINDING`,
+  with a reproducer and exact reproduction commands, which is what requirement 6 asks for.
+- The marker's eight fields must also be mirrored by a **structured entry** in
   [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md), and every field is compared against this
   record on every run. That register defines the entry shape and the locator grammar in full; mentioning
   an identifier there is not documenting a divergence.
@@ -753,13 +805,14 @@ carry a program is passed over silently:
   from outside the corpus would decide both while every report still showed a corpus path.
 
 The corpus's genuine companions are **siblings** of the area directories rather than children, so
-nothing legitimate is displaced by these rules. Three of them are committed on this branch —
-`support/`, `EXPECTED_DIVERGENCES.md` alongside this contract, and `findings/`, which is an empty
-placeholder holding only `.gitkeep` because no curated finding has been recorded in it yet. Two more
-are **specified by the plan but not yet present**: `tools/` and `FINDINGS.md`. Those two are named
-here as plain text rather than linked, precisely because a link to a path that does not exist is a
-broken link. The sibling rule already accommodates all five, so landing the missing two needs no
-parser change.
+nothing legitimate is displaced by these rules. Four of them are committed on this branch —
+`support/`, [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) and
+[`FINDINGS.md`](FINDINGS.md) alongside this contract, and `findings/`, which holds only its
+`.gitkeep` because no curated finding has been recorded in it yet. One more is **specified by the
+plan but not yet present**: `tools/`, for the maintenance-only golden-record regeneration script. It
+is named here as plain text rather than linked, precisely because a link to a path that does not
+exist is a broken link. The sibling rule already accommodates all five, so landing the missing one
+needs no parser change.
 
 ### Read-only, and the golden-record rule
 
@@ -787,8 +840,8 @@ the time to investigate and then teaches them to distrust the suite.
 
 ### Headers: hand-declare, do not include
 
-**Hand-declare the libc prototypes a program needs and include no header**, with the single
-sanctioned exception recorded below. That is `int printf(const char *, ...);` in nearly every
+**Hand-declare the libc prototypes a program needs and include no header**, with the two sanctioned
+exceptions recorded below and no others. That is `int printf(const char *, ...);` in nearly every
 program, and `_Noreturn void exit(int);` as well in `10_declarations_and_types/008_noreturn.c`.
 
 The reason is not obvious, so it is worth stating plainly. `bcc` bundles only nine freestanding
@@ -829,8 +882,7 @@ conflating them is a defect in the test material, so they are stated separately.
 
 **Exception 2 — `12_preprocessor/003_bundled_header_inclusion.c`: the nine required bundled headers.**
 
-- **Scope:** that one program, and no other — planned with the preprocessor area, so the exception is
-  recorded here for when it lands rather than describing a program present today. It is the
+- **Scope:** that one program, and no other. It is **committed** on this branch, and it is the
   **dedicated probe for the bundled header set**, so it may include the nine **required** freestanding
   headers — `stddef.h`, `stdint.h`, `stdarg.h`, `stdbool.h`, `limits.h`, `float.h`, `stdalign.h`,
   `stdnoreturn.h` and `iso646.h`.
@@ -843,6 +895,15 @@ conflating them is a defect in the test material, so they are stated separately.
 **Obligations and limits that apply to both exceptions.**
 
 - **Every program taking either exception must state the exception and its reason in its `ub_notes`.**
+  All seven records that take an exception do so today: the six in `07_variadics`, each naming
+  `<stdarg.h>` and the `va_*` machinery it cannot be written without, and
+  `12_preprocessor/003_bundled_header_inclusion.expected`, whose `ub_notes` opens with a
+  `HEADER EXCEPTION AND ITS REASON` paragraph that names all nine required headers, points at
+  Exception 2 in this file, and records why the bonus `stdatomic.h` is excluded even though the
+  compiler ships it. The obligation is checkable rather than aspirational: a program is paired with
+  exactly one record, so an undeclared exception is a corpus defect a reviewer can find by reading
+  one file, and a program with no record at all resolves no cell and is reported as a defect rather
+  than silently running.
 - **The bonus `stdatomic.h` is deliberately excluded from both.** It is not among the nine required
   headers, it is not mandated by any requirement, and atomics can require `-latomic`, which is not in
   the shared flag set.
@@ -856,8 +917,23 @@ This is the most consequential authoring rule in the suite. **Every arithmetic, 
 bitfield program must contain both a compile-time-constant variant and a runtime variant with
 `volatile`-qualified operands.**
 
-The instruction-level evidence: `volatile int x = 7; return x * 6;` at `-O2` emits a **genuine
-runtime multiply**, whereas the non-`volatile` form folds to a single immediate `mov $0x2a`.
+The instruction-level evidence, with the compiler and target named because an instruction spelling
+belongs to one of each. Compile both forms with the **reference compiler** (`gcc-13`, GCC 13.4.0) for
+**x86-64** and read the assembly:
+
+```text
+printf 'int f(void){volatile int x=7; return x*6;}\nint g(void){int x=7; return x*6;}\n' > tv.c
+gcc-13 -O2 -S -o - tv.c
+```
+
+`f`, the `volatile` form, stores 7 to its stack slot, **loads it back** and computes at run time —
+`movl $7, -4(%rsp)` then `movl -4(%rsp), %eax` then `leal (%rax,%rax,2), %eax; addl %eax, %eax`, GCC
+strength-reducing `× 6` into shift-and-add rather than emitting a `mul`. `g`, the plain form, folds
+entirely: `movl $42, %eax`. The same load-versus-fold split was observed with the matching cross
+drivers on the other three targets, with the immediate spelled per architecture — `mov w0, 42` on
+AArch64, `li a0,42` on RISC-V 64, `movl $42, %eax` on i686. What this establishes is why the runtime
+variant is necessary, on the compiler that judges the corpus; it is **not** a measurement of any `bcc`
+backend, and none is claimed here.
 
 Without the runtime variant, optimization silently substitutes the constant folder's answer for the
 backend's, and a **code-generation defect escapes detection entirely** — the suite would report
@@ -962,22 +1038,25 @@ program must be clean under both UndefinedBehaviorSanitizer and AddressSanitizer
 The gate genuinely bites rather than decorating: it rejected the author's own probe program on a real
 diagnostic during design.
 
-**The volume, counted three ways, because the three numbers are different.** At the final planned
-corpus of 108 programs the audit produces **216 gate results** — 108 programs × 2 gates — and it
-performs them with **324 process invocations**, because a program costs three processes: one
-warning-gate compile, one sanitizer build, and one sanitizer **run** (the sanitizer gate only means
-anything if the instrumented binary is actually executed). Over the 92 programs present on this branch
-the same arithmetic gives a **nominal** 184 gate results from 276 invocations.
+**The volume.** Over the corpus of 108 programs the audit produces **216 gate results** — 108
+programs × 2 gates — and performs them with **324 process invocations**, because a program costs
+three processes: one warning-gate compile, one sanitizer build, and one sanitizer **run** (the
+sanitizer gate only means anything if the instrumented binary is actually executed).
 
-**Performed on this branch: zero, and the reason is this gate's own design.** The audit enumerates the
-corpus **globally** — every one of the fourteen declared areas, so that a program can never be dropped
-from it quietly — and three of those directories are not present. The enumeration therefore fails
-before the first program is gated, the gate is recorded `UNPERFORMED`, and it blocks every area (see
-[the enumerable matrix](#the-enumerable-matrix)). Landing those three areas is what unblocks it:
-every program present is already paired with a readable record, so nothing else stands in the way,
-and a record that could not be read would leave the warning gate undecidable, which the audit records
-as a **defect** rather than passing it. Both figures above are therefore what the audit *will* perform
-on a complete corpus, never a claim about what it has performed.
+**Performed on this branch: all of it.** The audit enumerates the corpus **globally** — every one
+of the fourteen declared areas, so that a program can never be dropped from it quietly — and all
+fourteen are present. Every one of the 108 programs satisfies both gates, in 324 reference-compiler
+invocations, which is the whole of the arithmetic above with nothing outstanding. This gate needs
+no `bcc`: both halves of it are driven by the **reference compiler only**, precisely so that
+requirement 3's shared-flag discipline is never touched, which is why it is the one part of the
+suite that can conclude on a branch with no compiler under test.
+
+The reverse case is worth stating because it is what the global enumeration buys. While any
+declared area directory is absent the enumeration fails before the first program is gated, the gate
+is recorded `UNPERFORMED`, and it blocks **every** area rather than only the missing ones — a
+corpus that was never audited cannot make any divergence attributable. A record that could not be
+read leaves the warning gate undecidable, which the audit records as a **defect** rather than
+passing it.
 
 The audit prints its expected and its performed figures side by side and reconciles them, so a missing
 invocation is visible rather than inferred.
@@ -1044,7 +1123,10 @@ which is linked by default. That limitation is stated rather than glossed over.
 
 - **Never pass a `-std` flag.** `bcc` has none, and the reference compiler's default mode was
   measured as **gnu17** (`__STDC_VERSION__ = 201710L`, no `__STRICT_ANSI__`), which already enables
-  the GNU extensions the corpus exercises.
+  the GNU extensions the corpus exercises. Because that mode cannot be corrected by a flag, it is
+  **proven during discovery instead**: a reference driver whose default mode falls outside C11–C17, or
+  which predefines a strict-conformance macro, is refused rather than used — see
+  [The language-mode contract, enforced rather than documented](#the-language-mode-contract-enforced-rather-than-documented).
 - **Never pass a reference-compiler-only flag in a differential invocation:** `-O3`, `-Os`, any
   `-std=` form, `-pedantic`, `-Wall`, `-Wextra`, `-Werror`, `-Wconversion`, `-Wsign-conversion`,
   `-Wshadow`, `-m32`, `-S`, `-E`, `-fwrapv`, `-fno-strict-aliasing`, any `-fsanitize=` form,
@@ -1132,116 +1214,112 @@ one and says so.
 
 ### The enumerable matrix
 
-Three columns, deliberately, and they are three different numbers. The **final planned target** is
-what the suite's design calls for. The **present** column is what a reader can count in this directory
-on this branch, where three of the fourteen areas have not landed, and its cell figures are **nominal**:
-what those pairs *represent*, not what a run has established. The **admitted as evidence** column
-counts the cells whose result the suite accepts as evidence — equivalently, the cells belonging to an
-area that can *complete* — and it is **zero** until the corpus is complete. Read that third column
-precisely: it is deliberately *not* a count of cells the machinery will attempt, because the machinery
-does run. Collapsing any of the three into another would be exactly the unverifiable claim the
-paragraph below refuses to make.
+Three columns, deliberately, and they are three different numbers. The **planned target** is what
+the suite's design calls for. The **present** column is what a reader can count in this directory
+on this branch — and it now equals the planned target in every row, because the corpus is complete.
+The **admitted as evidence** column counts the cells whose result the suite accepts as evidence
+*about `bcc`*, and it is **zero**, for one reason only: there is no `bcc` binary on this branch.
+Read that third column precisely: it is deliberately *not* a count of cells the machinery will
+attempt, because the machinery does run. Collapsing any of the three into another would be exactly
+the unverifiable claim the paragraph below refuses to make.
 
-| Quantity | Final planned target | Present on this branch | Admitted as evidence |
+| Quantity | Final planned target | Present on this branch | Admitted as evidence about `bcc` |
 | --- | --- | --- | --- |
-| Feature areas | 14 | **11** | **0** |
-| C source programs (`*.c`) | 108 | **92** | — |
-| Expectation records (`*.expected`) | 108 | **92** | — |
-| **Runnable programs** — a source **paired with** its record | **108** | **92** | **0** |
+| Feature areas | 14 | **14** | **0** |
+| C source programs (`*.c`) | 108 | **108** | — |
+| Expectation records (`*.expected`) | 108 | **108** | — |
+| **Runnable programs** — a source **paired with** its record | **108** | **108** | **0** |
 | Sources with no record, which contribute nothing | 0 | **0** | — |
 | Records with no source, which are corpus defects | 0 | **0** | — |
 | Optimization levels per program | 3 | 3 | — |
 | Targets per program | 4, unless the record restricts them with a recorded reason | 4, same rule | — |
-| **`bcc` compile-and-run cells** | **1,296** (108 × 4 × 3) | **1,104** nominal (92 × 4 × 3) | **0** |
-| Reference cells, native | **324** (108 × 3) | **276** nominal (92 × 3) | **0** |
-| Reference cells, cross | up to **972** (108 × 3 × 3) | up to **828** nominal (92 × 3 × 3) | **0** |
-| Oracle (a) comparisons | **1,296** | **1,104** nominal | **0** |
-| Oracle (b) comparisons | **972** | **828** nominal | **0** |
-| Oracle (c) assertions | **1,296** | **1,104** nominal | **0** |
-| **Total differential and golden assertions** | **≈3,564, from 108 runnable programs** | **≈3,036 nominal, from 92 runnable programs** | **0** |
+| **`bcc` compile-and-run cells** | **1,296** (108 × 4 × 3) | **1,296** | **0** |
+| Reference cells, native | **324** (108 × 3) | **324** | **0** |
+| Reference cells, cross | up to **972** (108 × 3 × 3) | up to **972** | **0** |
+| Oracle (a) comparisons | **1,296** | **1,296** | **0** |
+| Oracle (b) comparisons | **972** | **972** | **0** |
+| Oracle (c) assertions | **1,296** | **1,296** | **0** |
+| **Total differential and golden assertions** | **3,564, from 108 runnable programs** | **3,564** | **0** |
 
 **Every cell figure multiplies the `Runnable programs` row, never the source count** — and the two
-rows above it exist so that the difference can never hide. A `.c` file with no sibling record is not a
-test that merely lacks a golden: it cannot execute at all, because the record is where the command
-templates and the `expect_exit` value live, and oracle (c) would have nowhere to read a golden from.
-Such a file contributes **zero** cells and zero assertions while still inflating a count of `*.c`
-files, so quoting the source count as the matrix basis would over-state the suite by twelve cells per
-unpaired program. Both discrepancy rows are therefore published even when — as here — both are zero,
-because a row that only appears when it is non-zero is a row a reader cannot rely on.
+rows above it exist so that the difference can never hide. A `.c` file with no sibling record is
+not a test that merely lacks a golden: it cannot execute at all, because the record is where the
+command templates and the `expect_exit` value live, and oracle (c) would have nowhere to read a
+golden from. Such a file contributes **zero** cells and zero assertions while still inflating a
+count of `*.c` files, so quoting the source count as the matrix basis would over-state the suite by
+twelve cells per unpaired program. Both discrepancy rows are therefore published even when — as
+here — both are zero, because a row that only appears when it is non-zero is a row a reader cannot
+rely on. The suite's own run summary reports the same distinction as four separate dimensions:
+sources discovered, runnable pairs, programs that produced a comparison, and cells executed.
 
 Each figure is countable from the file set with no tooling beyond a shell, which is what makes this
 table evidence rather than assertion:
 
 ```text
-ls -d tests/conformance/[0-9][0-9]_*/ | wc -l                     # feature areas         -> 11
-find tests/conformance -name '*.c'        | wc -l                 # C source programs     -> 92
-find tests/conformance -name '*.expected' | wc -l                 # expectation records   -> 92
+ls -d tests/conformance/[0-9][0-9]_*/ | wc -l                     # feature areas         -> 14
+find tests/conformance -name '*.c'        | wc -l                 # C source programs     -> 108
+find tests/conformance -name '*.expected' | wc -l                 # expectation records   -> 108
 for f in $(find tests/conformance -name '*.c'); do \
-  [ -f "${f%.c}.expected" ] || echo "$f"; done | wc -l            # unpaired sources      ->  0
+  [ -f "${f%.c}.expected" ] || echo "$f"; done | wc -l            # unpaired sources      ->   0
 for f in $(find tests/conformance -name '*.expected'); do \
-  [ -f "${f%.expected}.c" ] || echo "$f"; done | wc -l            # orphan records        ->  0
+  [ -f "${f%.expected}.c" ] || echo "$f"; done | wc -l            # orphan records        ->   0
 ```
 
-Runnable programs is then the source count less the unpaired sources — 92 − 0 — and every remaining
-figure follows by multiplication: 92 × 4 × 3 = 1,104 `bcc` cells, 92 × 3 = 276 native reference cells,
-92 × 3 × 3 = 828 cross reference cells and 828 oracle (b) comparisons, 1,104 oracle (c) assertions,
-so 1,104 + 828 + 1,104 = 3,036 assertions in total.
+Runnable programs is then the source count less the unpaired sources — 108 − 0 — and every remaining
+figure follows by multiplication: 108 × 4 × 3 = 1,296 `bcc` cells, 108 × 3 = 324 native reference
+cells, 108 × 3 × 3 = 972 cross reference cells and 972 oracle (b) comparisons, 1,296 oracle (c)
+assertions, so 1,296 + 972 + 1,296 = 3,564 assertions in total.
 
-**Why the third column is zero, and why that is correct.** Two independent mechanisms, both
-deliberately fail-closed, hold it there — neither is a defect to work around, and together they are
-what stops a partial corpus from reporting a green matrix:
+**Why the third column is zero, and why that is correct.** The compiler under test is absent: the
+`bcc` implementation lives on the project's open pull request, and this branch holds test material
+and documentation. A suite whose subject is absent can run its machinery and prove its own
+arithmetic; it cannot produce one byte of evidence about a compiler. Two fail-closed mechanisms
+used to hold this column at zero for a second reason as well — a partial corpus — and both are now
+**satisfied**, which is worth recording because each is what a future regression would be caught
+by:
 
-1. **A program with no `.expected` record is a hard error, never a skip** (see
-   [Corpus discovery](#corpus-discovery)). On this branch that mechanism removes nothing, because the
-   pairing is complete at 92 — but it is why the source count carries no cell figure of its own, and
-   it is the rule that would fail the run closed the moment a program landed without its record.
-2. **The undefined-behaviour audit enumerates the corpus globally, across all fourteen declared
-   areas**, and three of those directories are not present. The enumeration fails, so the audit is
-   recorded as `UNPERFORMED` and **blocks unconditionally** — the licence that lets an `UNPERFORMED`
-   gate pass outside strict mode covers an absent *tool*, not a corpus that cannot be read (see
-   [What every report says about the gates](#what-every-report-says-about-the-gates)). Because that
-   gate names no area, it governs **all** of them, including the nine mandated areas whose own
-   comparisons would have passed: a corpus that was never audited cannot make any divergence
-   attributable, which is exactly what requirement 1 exists to guarantee. The gate machinery is
-   described under
-   [Two of those four are gates, and every area is judged against them](#two-of-those-four-are-gates-and-every-area-is-judged-against-them).
+1. **No compiler under test exists in this checkout**, so the flag-capability probe cannot verify a
+   single flag and is recorded `UNPERFORMED`. That gate names no area, and a gate naming none governs
+   **all** of them, and it blocks unconditionally — the licence that lets an `UNPERFORMED` gate pass
+   outside strict mode covers an absent *tool*, not a precondition that was never checked (see
+   [What every report says about the gates](#what-every-report-says-about-the-gates)). This mechanism
+   alone holds all fourteen areas at zero, whatever the corpus looks like, and it is also why a run
+   here fails every one of the eighteen tests: the suite resolves the compiler under test before it
+   does anything else.
+2. **A program with no `.expected` record is a hard error, never a skip** (see
+   [Corpus discovery](#corpus-discovery)). It removes nothing here, because the pairing is complete
+   at 108 — but it is why the source count carries no cell figure of its own, and it is the rule
+   that would fail the run closed the moment a program landed without its record.
+3. **The undefined-behaviour audit enumerates the corpus globally, across all fourteen declared
+   areas.** While any program was unpaired the enumeration failed for it and the audit blocked the
+   areas it named. All fourteen areas are now present and every program is paired, and the gate is
+   **met**: 108 programs, both gates each, 324 reference-compiler invocations.
 
-**Measured, not assumed.** The suite has been run on this branch, in an out-of-repo scratch package,
-against a **surrogate** compiler under test rather than `bcc`. The cell machinery does run and it
-traverses the middle column's nominal figures; what it does not do is complete a single one of the
-fourteen area tests, because the audit gate is unmet while three area directories are absent — the two
-survivors of a run are `infra_flag_capability_probe` and `infra_oracle_capability_report`, neither of
-which reads the corpus. The suite says why in its own report: while that gate is unmet, an area's
-passes "are not evidence of agreement" and its divergences "are not evidence of a defect". So the
-middle column is honest arithmetic that a run will indeed traverse, and the third column is what any
-of it is worth as evidence — which is nothing, yet. Two caveats travel with any figure measured that
-way: the compiler under test was a surrogate, so none of it is evidence about `bcc`; and it is quoted
-only to show that the middle column is arithmetic anyone can reproduce, never as a result.
+**Measured, not assumed.** The suite has been run on this branch against a **surrogate** compiler
+under test rather than `bcc` — a stand-in that forwards to the reference toolchain — because this
+checkout has none. Under the surrogate every one of the fourteen area tests completes, every dimension
+of the matrix above reports its planned figure as recorded, and the tally is 3,564 outcomes. In this
+checkout itself, with no compiler at all, mechanism 1 blocks every area. One caveat travels with every
+figure measured that way: the compiler under test was a surrogate, so none of it is evidence about
+`bcc`. It is quoted only to show that the present column is arithmetic anyone can reproduce, never as
+a result.
 
-The three areas still to land are `12_preprocessor` (6 programs), `13_floating_point` (4) and
-`14_abi_calling_convention` (6) — **16 programs**, which is exactly the difference between 92 and the
-planned 108. The per-area table below marks each one. The present column counts the corpus, and a cell
-is only judgeable once its program carries an expectation record, so the `Records` column of that
-table is where record coverage is read separately from program coverage. Those two readings agree on
-this branch — every one of the 92 programs present carries a record — and the column stays in the
-table because the two can diverge and, when they do, the present column alone would overstate what a
-run can actually judge.
 
 **Never publish a coverage percentage in this file or in either register.** Coverage instrumentation
 requires a development dependency, which this repository forbids absolutely — so no percentage in this
 repository is measurable, and publishing one would be fabrication. The matrix above **is** the coverage
 evidence: the present column is countable directly from the file set, the admitted column is how much
-of that a run may present as evidence, and the run summary re-reports what it discovered on every
-execution. `report.rs` treats a discovered count that disagrees with the figures the harness holds as
-a corpus defect, so the numbers cannot silently drift away from the files.
+of that a run may present as evidence about the compiler, and the run summary re-reports what it
+discovered on every execution. `report.rs` treats a discovered count that disagrees with the figures
+the harness holds as a corpus defect, so the numbers cannot silently drift away from the files.
 
 ### The 14 feature areas
 
 `Programs` is the planned count for each area. `Records` is how many of those programs carry an
-expectation record in this directory on this branch, which is where a landed program still awaiting a
-record would be visible. `State` says whether that area is present on this branch or still to land; an
-area marked `present` carries its full planned count as complete source-and-record pairs, with no
-partial area anywhere.
+expectation record in this directory on this branch, which is where a landed program still awaiting
+a record would be visible. `State` says whether that area is present; an area marked `present`
+carries its full planned count as complete source-and-record pairs. All fourteen are present, and
+there is no partial area anywhere.
 
 | Area directory | Programs | Records | Mandated | State |
 | --- | --- | --- | --- | --- |
@@ -1256,34 +1334,34 @@ partial area anywhere.
 | `09_optimization_levels` | 8 | 8 of 8 | yes | present |
 | `10_declarations_and_types` | 10 | 10 of 10 | supplementary | present |
 | `11_literals_and_strings` | 4 | 4 of 4 | supplementary | present |
-| `12_preprocessor` | 6 | 0 of 6 | supplementary | **planned** |
-| `13_floating_point` | 4 | 0 of 4 | supplementary | **planned** |
-| `14_abi_calling_convention` | 6 | 0 of 6 | supplementary | **planned** |
-| **Planned total** | **108** | **92 of 108** | | **92 present across 11 areas; 16 still to land across 3** |
+| `12_preprocessor` | 6 | 6 of 6 | supplementary | present |
+| `13_floating_point` | 4 | 4 of 4 | supplementary | present |
+| `14_abi_calling_convention` | 6 | 6 of 6 | supplementary | present |
+| **Total** | **108** | **108 of 108** | | **108 present across all 14 areas** |
 
-The nine mandated areas are the acceptance floor set by the requirements; each carries no fewer than
-six programs. The five supplementary areas were added because they carry the widest cross-backend
-divergence surface. All nine mandated areas are present and complete; of the five supplementary areas
-two are present and three are still to land, which is what the `State` column here and the present
-column of [the enumerable matrix](#the-enumerable-matrix) both record. Every one of the 92 programs
-present carries a record, so the `Records` column and the `Programs` count agree for all eleven landed
-areas; a landed program without a record is the only way the two columns can disagree, and the column
-exists so that such a gap would be auditable at a glance rather than discovered by a failing run.
+The nine mandated areas are the acceptance floor set by the requirements; each carries no fewer
+than six programs. The five supplementary areas were added because they carry the widest
+cross-backend divergence surface. All fourteen are present and complete, which is what the `State`
+column here and the present column of [the enumerable matrix](#the-enumerable-matrix) both record.
+Every one of the 108 programs carries a record, so the `Records` column and the `Programs` count
+agree in every row; a landed program without a record is the only way the two columns can disagree,
+and the column stays in the table so that such a gap would be auditable at a glance rather than
+discovered by a failing run.
 
 ### Measured performance budget
 
 - ≈**72.5 ms** per compile-and-run pair, including emulator startup (36 pairs completed in 2.612 s
   wall time).
-- The **final planned** matrix is ≈2,592 compile-and-run pairs (1,296 `bcc` + 324 native reference +
-  972 cross reference), so ≈**188 s serially**, and well under a minute spread across the harness's
-  default thread pool given 14 independent area tests.
+- The full matrix is ≈2,592 compile-and-run pairs (1,296 `bcc` + 324 native reference + 972 cross
+  reference), so ≈**188 s serially**, and well under a minute spread across the harness's default
+  thread pool given 14 independent area tests.
 - That is 24 pairs per program — 12 `bcc` cells, 3 native reference cells and up to 9 cross
-  reference cells, the last nine reached only when the three cross drivers are installed — so
-  the 92 programs **present on this branch** represent 2,208 pairs (1,104 + 276 + 828), or
-  **160.1 s serially** at that rate. That cost is real, and a run on this branch traverses those
-  pairs — but it buys nothing yet, because the third column of
-  [the enumerable matrix](#the-enumerable-matrix) is zero: no area completes, so none of the work is
-  admissible as evidence.
+  reference cells, the last nine reached only when the three cross drivers are installed — and the
+  corpus present on this branch is the full 108, so a run traverses the whole ≈2,592 pairs. Measured on
+  this branch against a surrogate compiler under test, all eighteen tests complete in **≈178 s wall
+  time** across the harness's default thread pool. That figure is evidence about the *machinery*, not
+  about `bcc`: the third column of [the enumerable matrix](#the-enumerable-matrix) is zero for the
+  reason recorded there.
 - A per-cell timeout bounds any runaway execution, and a timeout is classified as a divergence
   rather than swallowed as an infrastructure error.
 
@@ -1317,7 +1395,7 @@ and cannot be established in each case:
 | `cargo test --test conformance --no-run` | ❌ **blocked** — no manifest to discover the target from | ✅ runs |
 | `cargo clippy -- -D warnings` | ❌ **blocked** — clippy drives Cargo | ✅ runs |
 | `cargo fmt -- --check` | ❌ **blocked** — `cargo fmt` drives Cargo | ✅ runs |
-| `cargo test --test conformance` (execution: 1,296 cells once the corpus is complete — [today zero](#the-enumerable-matrix)) | ❌ **blocked**, and additionally there is no `bcc` to test | ✅ runs |
+| `cargo test --test conformance` (execution: [1,296 `bcc` cells](#the-enumerable-matrix), the corpus being complete) | ❌ **blocked**, and additionally there is no `bcc` to test | ✅ runs |
 | Whole-repository health gate `cargo test` | ❌ **blocked**, and the existing suites are not present either | ✅ runs |
 
 The two direct invocations in the first two rows are not a substitute for the Cargo gates and are not
@@ -1427,25 +1505,22 @@ area_06_control_flow               area_13_floating_point
 area_07_variadics                  area_14_abi_calling_convention
 ```
 
-All fourteen are declared in the driver. Three of them — `area_12_preprocessor`,
-`area_13_floating_point` and `area_14_abi_calling_convention` — name area directories that have
-**not landed on this branch**, so they cannot pass here: corpus discovery treats a missing area
+All fourteen are declared in the driver, and all fourteen name area directories that are **present
+and complete** on this branch, each program paired 1:1 with its expectation record — the same state
+the [enumerable matrix](#the-enumerable-matrix) and the [per-area table](#the-14-feature-areas)
+record, and those two tables are the authority for it. Corpus discovery treats a missing area
 directory as a corpus defect rather than as an empty area, which is deliberate, because silently
-reporting success for zero programs is the one failure mode a coverage claim must never have. The
-other eleven, `area_01_integer_conversions` through `area_11_literals_and_strings`, name directories
-that are present and complete here, each program paired 1:1 with its expectation record; this is
-the same split the [enumerable matrix](#the-enumerable-matrix) and the
-[per-area table](#the-14-feature-areas) record, and those two tables are the authority for it.
+reporting success for zero programs is the one failure mode a coverage claim must never have; none
+of the fourteen is in that state.
 
-Because corpus discovery is **global** rather than per-area, those three absent directories are not
-contained to their own three tests: any test that enumerates the whole corpus — both gates among them
-— reports the same corpus defect, so enumeration fails before any area's comparisons are reached and
-every area test reports it, including the eleven whose own programs are complete. An area whose own
-comparisons all pass still fails while the three are missing. That is the intended behaviour — an
-incomplete corpus must not be able to report a green run — but it means a red result on this branch
-does **not** by itself indicate a divergence in the eleven landed areas, and it is why the numbers
-above distinguish what is present from what is planned instead of reporting a partial run as a whole
-one.
+Corpus discovery is **global** rather than per-area, and that is worth knowing even now that
+nothing is missing: an absent area directory is not contained to its own test. Any test that
+enumerates the whole corpus — both gates among them — reports the same corpus defect, so
+enumeration fails before any area's comparisons are reached and **every** area test reports it,
+including areas whose own programs are complete. An area whose own comparisons all pass still fails
+while any other is missing. That is the intended behaviour — an incomplete corpus must not be able
+to report a green run — and it is why the numbers above distinguish what is present from what has
+been established rather than reporting a partial run as a whole one.
 
 Plus four infrastructure tests:
 
@@ -1508,15 +1583,15 @@ does not fail; under `BCC_CONFORMANCE_STRICT` — the intended continuous-integr
 toolchain is installed deliberately — it does. A gate that could not be performed is never silently a
 pass, in either mode.
 
-**One `UNPERFORMED` case blocks unconditionally, in either mode: a gate whose own machinery could not
-run at all.** If the flag probe cannot be performed, or if the corpus cannot be enumerated so that the
-audit has nothing to gate, then nothing whatever was established — no flag was shown to mean one thing
-to both compilers, and no program was shown free of undefined behaviour. The strict setting's licence is
-for an absent *tool*, and this is neither: it is a suite that cannot answer the question. Such a gate is
-recorded with no area attached, so it governs every area, and every area's assertion fails on it. That is
-the case a corpus missing a declared feature area or a program's `.expected` record produces, and it is
-why the third column of [the enumerable matrix](#the-enumerable-matrix) reads zero rather than eleven
-areas' worth of cells.
+**One `UNPERFORMED` case blocks unconditionally, in either mode: a gate whose own machinery could
+not run at all.** If the flag probe cannot be performed, or if the corpus cannot be enumerated so
+that the audit has nothing to gate, then nothing whatever was established — no flag was shown to
+mean one thing to both compilers, and no program was shown free of undefined behaviour. The strict
+setting's licence is for an absent *tool*, and this is neither: it is a suite that cannot answer
+the question. Such a gate is recorded with no area attached, so it governs every area, and every
+area's assertion fails on it. That is the case a corpus missing a declared feature area or a
+program's `.expected` record produces — neither of which is the state of this branch, where both
+gates can be and are performed.
 
 A run that recorded **no** preflight at all is treated as fail-closed: the section says `NOT RECORDED`,
 the report is stamped partial, and the blocking count reads `1` rather than `0`, because a zero would be
@@ -1576,14 +1651,13 @@ run can never be mistaken for a full one. The same stamping applies when a name 
 ### Pre-flight check
 
 Run `infra_oracle_capability_report` first in any new environment. It prints the discovered oracle
-inventory and states exactly which arms of which oracles will run, so a misconfigured environment is
-diagnosed **before** the matrix executes — 1,296 `bcc` cells once all fourteen areas and all 108
-records have landed, and a **nominal** 1,104 for the 92 complete pairs present on this branch. On this
-branch a run traverses those 1,104 but no area completes, so the number of cells it can present as
-evidence is **zero**, for the two fail-closed reasons given under
-[the enumerable matrix](#the-enumerable-matrix); the capability report is still worth running, because
-it reads the environment rather than the corpus and so tells you what the oracles would do once the
-corpus is complete.
+inventory and states exactly which arms of which oracles will run, so a misconfigured environment
+is diagnosed **before** the matrix executes — **1,296** `bcc` cells, which is what all fourteen
+areas and all 108 records amount to and what this branch actually holds. A run traverses those
+1,296; the number of cells it can present as evidence about `bcc` is **zero** while no `bcc` binary
+exists here, as [the enumerable matrix](#the-enumerable-matrix) records. The capability report is
+worth running first regardless, because it reads the environment rather than the corpus and so
+tells you which oracle arms will be available before the matrix spends time discovering it.
 
 ---
 
@@ -1641,6 +1715,11 @@ matters rather than being cosmetic is given under
 [Why the reference drivers are pinned to `gcc-13`](#why-the-reference-drivers-are-pinned-to-gcc-13):
 no `-std` flag is ever passed, so the reference compiler's *default* mode is the only thing that selects
 the language it compiles.
+
+**You are not relied upon to get that right, and safe operation does not depend on your pinning.** The
+harness **proves** each reference driver's default language mode during discovery and **refuses** a
+driver whose mode is wrong, rather than trusting a name or an environment variable — see
+[The language-mode contract, enforced rather than documented](#the-language-mode-contract-enforced-rather-than-documented).
 
 **Locating the compiler under test.** By default the suite resolves `bcc` through the Cargo-provided
 `CARGO_BIN_EXE_bcc` path, which points at the **freshly built** binary. That is what guarantees the
@@ -1733,6 +1812,43 @@ has none, so passing one to the reference compiler alone would break the shared-
 therefore load-bearing, and the gnu17 driver has to be the one that is named. Pin it explicitly rather
 than relying on whatever `gcc` happens to resolve to, on every release.
 
+#### The language-mode contract, enforced rather than documented
+
+The paragraph above is advice; this is the mechanism, and it holds whether or not the advice was
+followed. **During discovery the harness asks every reference driver which language it compiles by
+default, and refuses one whose answer is wrong.** The question is put with `-dM -E -x c -`, which is a
+probe against the reference compiler alone and appears in no differential invocation, so the
+shared-flag discipline is untouched — the same justification the `-dumpmachine` probe already carries.
+
+Four answers are refused, each with its own explanatory diagnostic naming the driver, the mode it
+reported and the variable to point elsewhere:
+
+| Answer | Why it is refused |
+| --- | --- |
+| `__STDC_VERSION__` below `201112L` | Older than the C11 this corpus is written in, so the driver would reject the corpus rather than judge it |
+| `__STDC_VERSION__` above `201710L` | Newer than C17, and the difference is observable in this corpus: under C23 a UTF-8 string literal changes type — `_Generic` over `u8"A"` selects `unsigned char *` instead of `char *` — and `bool`, `true` and `false` become keywords. Both constructs appear in the corpus |
+| No `__STDC_VERSION__` at all, or a value that is not a revision number | An unproven language makes every comparison on that arm unattributable, so the non-answer is a refusal rather than a default |
+| `__STRICT_ANSI__` predefined | The default mode rejects the GNU extensions requirement 2 mandates — statement expressions, `typeof`, computed goto, case ranges — all of which this corpus exercises |
+
+A refused driver is **not** silently replaced: its arm of oracle (a) is reported `UNAVAILABLE`, loudly,
+in the capability report and in the run summary, and under `BCC_CONFORMANCE_STRICT` — the continuous
+integration setting — that unavailability **fails the run**. Oracles (b) and (c) are unaffected and
+continue. An accepted driver has its proven mode recorded beside its declared target in the capability
+report, so what was verified is visible rather than assumed:
+
+```text
+reference-cc-native: gcc-13 (…) 13.4.0 (/usr/bin/gcc-13)
+  [reports target x86_64-linux-gnu, compiles __STDC_VERSION__ 201710L by default, GNU extensions enabled]
+```
+
+The flag capability probe asserts the same contract a second time, from the other side and by
+compilation rather than by inspection: `infra_flag_capability_probe` carries a row whose subject is
+**the default language mode (no -std flag is ever passed)**, which compiles a program with **both**
+compilers whose preprocessor gate fails outside the C11–C17 window, prints the window as an observable,
+and proves the GNU extensions are on offer by *using* a statement expression. A negative control that
+requires a revision of C which does not exist must fail to compile for both, which is what proves the
+gate is honoured rather than ignored.
+
 #### Why the i686 runtime is `libc6-dev-i386-cross` and not `libc6-dev-i386`
 
 Both packages exist and both install successfully, but they serve different drivers:
@@ -1758,7 +1874,10 @@ aarch64-linux-gnu-gcc-13 --version  # expect 13.4.0
 riscv64-linux-gnu-gcc-13 --version  # expect 13.4.0
 
 # The reference compiler's DEFAULT mode must already be gnu17, because no -std flag is ever passed.
-gcc-13 -dM -E -x c /dev/null | grep __STDC_VERSION__   # expect 201710L
+# The harness performs this check itself and refuses a driver that answers wrongly; running it by hand
+# is how you find out before the suite tells you.
+gcc-13 -dM -E -x c - < /dev/null | grep __STDC_VERSION__   # expect 201710L
+gcc-13 -dM -E -x c - < /dev/null | grep __STRICT_ANSI__    # expect NO output
 
 # Emulators: the plain spelling on Ubuntu 25.10, the -static spelling on 24.04 LTS and earlier.
 # The harness accepts either; run whichever the host installed.
@@ -2103,7 +2222,7 @@ on your machine. See
 tests/conformance/
 ├── README.md                        this file — the suite contract
 ├── EXPECTED_DIVERGENCES.md          register of every expected-divergence marker
-├── FINDINGS.md                      PLANNED — register of every finding
+├── FINDINGS.md                      register of every curated finding
 ├── 01_integer_conversions/          10 programs: <NNN_name>.c + <NNN_name>.expected
 ├── 02_constant_expressions/          8 programs
 ├── 03_initializers/                 11 programs
@@ -2115,16 +2234,17 @@ tests/conformance/
 ├── 09_optimization_levels/           8 programs
 ├── 10_declarations_and_types/       10 programs
 ├── 11_literals_and_strings/          4 programs
-├── 12_preprocessor/                 PLANNED —  6 programs
-├── 13_floating_point/               PLANNED —  4 programs
-├── 14_abi_calling_convention/       PLANNED —  6 programs
+├── 12_preprocessor/                  6 programs
+├── 13_floating_point/                4 programs  (004 disables oracle (b) — see its record)
+├── 14_abi_calling_convention/        6 programs
 ├── support/
 │   └── include/
 │       └── probe_header.h           the suite's ONLY fixture
 ├── tools/                           PLANNED
 │   └── regenerate_expected.sh       maintenance-only; never invoked by cargo test
 └── findings/                        committed; on this branch it holds only .gitkeep
-    └── F-<digest>-<cell-slug>-<oracle>-<class>/   PLANNED — one curated, committed finding
+    └── F-NNNN-<slug>/               PLANNED — one curated, committed finding, named by the
+        │                            human-allocated identifier FINDINGS.md §2.3 defines
         ├── reproducer.c
         ├── reproducer.expected
         ├── MANIFEST.txt
@@ -2135,39 +2255,74 @@ tests/conformance/
         └── diff.txt
 ```
 
-`PLANNED` marks an entry the plan specifies that has **not landed on this branch yet**. Everything
-unmarked is committed and present. Nothing in this document links to a `PLANNED` path: a link that
-resolves to nothing is worse than no link, because it reads as a promise the repository does not
-keep.
+`PLANNED` marks an entry the plan specifies that has **not landed on this branch yet**. Two entries
+still carry it: `tools/regenerate_expected.sh`, and the curated finding directory shape under
+`findings/`, which is a template rather than a file — no finding has been admitted as evidence yet,
+so there is nothing for it to name. Everything unmarked is committed and present, including all
+fourteen area directories, all 108 sources, all 108 records and all three Markdown registers.
+Nothing in this document links to a `PLANNED` path: a link that resolves to nothing is worse than no
+link, because it reads as a promise the repository does not keep.
 
 ### The finding identifier
 
-A finding directory is named from the divergence itself and from nothing else, so the same divergence
-always names the same directory and two different divergences can never name the same one:
+**Two names, for two different sets.** A *generated* directory under `target/conformance-findings/`
+is named from the divergence itself, by the rule below. A *curated* directory under `findings/` is
+named `F-NNNN-<slug>` — a human-allocated ascending sequence number and a slug naming the construct
+— because a committed deliverable is quoted by people. Curation carries the generated name forward
+into the curated `MANIFEST.txt`, so the two stay tied together; the curated form and the register's
+cardinality rule are specified in [`FINDINGS.md`](FINDINGS.md) §2.1–2.3, which is authoritative for
+them. What follows is the generated form only.
+
+A generated finding directory is named from the divergence itself and from nothing else, so the same
+divergence always names the same directory and two different divergences can never name the same
+one:
 
 ```
-F-<16 hex digits>-<cell slug>-<oracle letter>-<divergence class>
-   e.g. F-9d3c1a5f7b204e68-04_bitfields+005_straddling_and_zero_width+aarch64+O2-b-stdout-mismatch
+F-<16 hex digits>-<cell slug>-<divergence class>
+   e.g. F-9d3c1a5f7b204e68-04_bitfields+005_straddling_and_zero_width+aarch64+O2-stdout-mismatch
 ```
 
 - the **cell slug** is the harness's own cell identity — area, program, target and optimization level
   — with every byte outside `[A-Za-z0-9_]` escaped as `%XX` and the four parts joined with `+`. It is
   **injective**: two different cells cannot produce the same slug, and nothing is abbreviated or
   truncated on the way in;
-- the **oracle letter** is `a`, `b` or `c`;
 - the **divergence class** is one of `compile-failure`, `link-failure`, `run-crash`,
   `exit-code-mismatch`, `stdout-mismatch` or `timeout`;
 - the **digest** is a stable hash of exactly those same components, so it adds a short fixed-width
   handle to quote in conversation without becoming the thing that distinguishes two findings.
 
-Because the slug, the digest and the oracle letter each contain no hyphen, the hyphens above are
-unambiguous separators. **No part of the identifier is abbreviated**, so no two findings can collide
-and overwrite one another's evidence.
+Because the slug and the digest each contain no hyphen, the hyphens above are unambiguous
+separators. **No part of the identifier is abbreviated**, so no two findings can collide and
+overwrite one another's evidence.
+
+**The oracle is deliberately absent from the name.** One divergence is filed **once**, however many
+oracles observed it: a cell whose build was refused is refused for oracle (a), for oracle (b) and
+for oracle (c) alike, so an oracle-keyed name gave each of the three its own directory holding
+another copy of the same reproducer, record, commands, fingerprint and diagnostics — measured at 33
+directories for 12 divergences. The set of oracles that saw it is recorded *inside* the manifest,
+on its `observed_by` line, and the one directory holds the **union** of their authority captures.
+Every report row for every affected oracle therefore points at that same directory rather than at a
+near-identical sibling.
+
+**A run's finding artifacts are bounded, and the bound refuses rather than prunes.** Four ceilings
+apply — one artifact, one finding directory, everything one run files, and the number of
+directories, the last set above the number of cells in the matrix so that a wholly-diverging run
+still files all of them. Unlike a retained workspace, which is optional evidence and is pruned with
+the pruning reported, a finding's artifacts **are** the deliverable: exceeding a ceiling fails that
+cell loudly, naming the ceiling and the run's totals, and writes nothing at all. Every run states
+the accounting in `summary.md`.
 
 Each generated finding directory also carries a `.run-owner` stamp. It is harness bookkeeping rather
 than evidence — it lets a second, concurrent run detect that another run is still writing this
 directory and refuse instead of purging it — and it is not part of the deliverable: no artifact may be
 written to that name, and the completeness check does not look for it.
+
+**How the two are tied together.** Curation copies a generated directory into `findings/F-NNNN-<slug>/`
+and leaves its `MANIFEST.txt` `finding_id` and `identity_digest` lines **intact**, so the committed
+artifact can always be traced back to the run that produced it while the short `F-NNNN-<slug>` handle
+stays what a human quotes. The generated name therefore survives inside the curated directory, but
+**never as the curated directory's own name**: a committed path spelled with a digest would tell a
+reader the finding had never been reviewed and allocated.
 
 ### The single fixture
 
@@ -2197,24 +2352,23 @@ record mechanically; the *protection* is already in place.
 
 **Committed and tracked — this folder.** Present on this branch:
 
-- 92 programs across eleven area directories, and **92 expectation records — a complete 1:1 pairing,
-  with no program awaiting a record and no record without a program** — and every one of the eleven
-  areas carries its full planned program count. Every one of the 92 records parses under
-  `manifest.rs`, and every `expected_stdout` was derived from measurement rather than written by hand;
+- 108 programs across all fourteen area directories, and **108 expectation records — a complete 1:1
+  pairing, with no program awaiting a record and no record without a program** — every area carrying
+  its full planned program count. Every one of the 108 records parses under `manifest.rs`, and every
+  `expected_stdout` was derived from measurement rather than written by hand;
 - `support/`, holding the suite's only fixture;
 - `findings/`, which on this branch holds only `.gitkeep` — the directory is committed so that the
   first curated finding has a tracked home, and its emptiness is the accurate statement that none has
   been curated, not a placeholder for one;
-- two Markdown files: this contract and [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md).
+- three Markdown files: this contract, [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) and
+  [`FINDINGS.md`](FINDINGS.md).
 
-Planned, and not yet present — named as plain text for the reason given under the layout tree:
+Planned, and not present on this branch — named as plain text for the reason given under the layout
+tree:
 
-- the remaining **16** programs and their records, across the **three** areas still to land
-  (`12_preprocessor` 6, `13_floating_point` 4, `14_abi_calling_convention` 6), bringing the corpus
-  to 108 programs and 108 records;
-- `tools/`, and therefore `tools/regenerate_expected.sh`, together with every curated finding
-  directory beneath `findings/`;
-- `FINDINGS.md`.
+- `tools/`, and therefore `tools/regenerate_expected.sh`, the maintenance-only golden-record
+  regeneration script;
+- every curated finding directory beneath `findings/`, none having been curated yet.
 
 **Transient and git-ignored — elsewhere entirely, beneath the build directory:**
 
@@ -2227,7 +2381,7 @@ Planned, and not yet present — named as plain text for the reason given under 
 | `target/conformance-report/areas/<area>.tsv` | Per-area machine-readable report — each area writes only its own file, so there is no contention under parallel execution. Its **first line** is the generation preamble described below; the column header is line two |
 | `target/conformance-report/summary.md` | The deliverable summary |
 | `target/conformance-report/summary.tsv` | The same data, machine-readable |
-| `target/conformance-findings/F-<digest>-<cell-slug>-<oracle>-<class>/` | Auto-generated finding artifacts from the current run |
+| `target/conformance-findings/F-<digest>-<cell-slug>-<class>/` | Auto-generated finding artifacts from the current run. One directory per divergence, **not** per oracle: every oracle that observed the same divergence at the same cell contributes to this one directory and is indexed in its `MANIFEST.txt` `observed_by` line. Four ceilings bound what a run may publish here — 8 MiB on one artifact, 16 MiB on one directory, 1 GiB and 1,536 directories across the run — and exhausting any of them fails the run loudly rather than filling the disk |
 
 **`findings.rs` never writes into `tests/conformance/`.** The curated finding set and both registers
 are human-maintained committed deliverables. A run writes only beneath the build directory.
@@ -2426,9 +2580,10 @@ its name **relative to** the corpus root rather than its location on disk.
 
 A file that could not be read, or a feature area that could not be enumerated, contributes the *fact*
 that it contributed no bytes — **per file and per area, never all-or-nothing**. That granularity is
-load-bearing on a branch like this one, where three of the fourteen area directories have not landed: a
-digest that collapsed to a single "corpus unreadable" value the moment one area was missing would be a
-constant here, and would detect nothing whatever.
+what keeps the digest informative on a partial corpus: one that collapsed to a single "corpus
+unreadable" value the moment a single area was missing would be a constant across every such state,
+and would detect nothing whatever. On this branch all fourteen areas enumerate and all 108 files are
+readable, so every one of them contributes its own bytes.
 
 ### What a retained cell workspace holds
 
@@ -2634,7 +2789,7 @@ the recorded divergence reproduced, nothing differed, or one side never ran at a
 | Path | What it holds |
 | --- | --- |
 | [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) | The expected-divergence register, machine-checked against the markers in both directions |
-| `FINDINGS.md` | **PLANNED, not present on this branch** — the findings register, indexing every curated reproducer. Named rather than linked |
+| [`FINDINGS.md`](FINDINGS.md) | The findings register, indexing every curated reproducer. Committed and empty of entries on this branch, which is the accurate statement that no finding has been curated |
 | [`../conformance.rs`](../conformance.rs) | The suite driver: 14 area tests and 4 infrastructure tests |
 | [`../conformance_harness/`](../conformance_harness/) | The harness modules — oracle discovery, workspace isolation, record parsing, compilation, execution, comparison, classification, findings, reporting, the flag probe and the audit gate |
 | `docs/testing/differential-conformance.md` | **PLANNED, not present on this branch** — the documentation-site page: methodology, oracle definitions, the build matrix, the verdict taxonomy and the summary format. Named rather than linked |
@@ -2754,29 +2909,27 @@ produced either:
   extension inventory (the documented set enumerates `__attribute__`, statement expressions,
   `typeof`, computed goto and inline assembly, and omits case ranges). The program is written
   regardless, with all three oracles enabled on all four targets at all three optimization levels.
-  **A marker is attached, and it is the corpus's one knowing exception** to the rule stated under
-  [The optional marker block](#the-optional-marker-block): the specification for this suite names
-  that marker by identifier and mandates it, so it is minted on an omission from an inventory rather
-  than on an explicitly documented limitation, and it anticipates a rejection rather than recording
-  one that was observed. Its scope is `oracle_a` and its class is `compile_failure`, so it
-  reclassifies **only** a refusal by the frontend on that arm: if `bcc` instead accepts case ranges
-  and computes a wrong answer, that is a `stdout_mismatch`, the marker does not cover it, and the
-  divergence is reported as a **FINDING** — which is the correct outcome and the reason the narrow
-  scope is worth keeping. Nothing is excluded and nothing is excused beyond that one class on that
-  one arm; the marker changes how a divergence is *classified*, never whether the construct is
-  *exercised*. The ambiguity between an implementation gap and a documentation gap, the cost of the
-  exception and the two-file retirement that settles it are all recorded in
-  [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.1 and §8.5, so a maintainer can settle it
-  from a real run rather than from a guess written in advance.
-- **`13_floating_point/004_long_double_target_restricted.c`** (planned with the floating-point area)
+  **No marker is attached, and that is the rule stated under [The optional marker
+  block](#the-optional-marker-block) applied rather than excepted.** An omission from an inventory
+  is not an explicitly documented limitation — it records that nothing *mentions* the construct, not
+  that the implementation *rejects* it — and no `bcc` verdict has been observed for these cells, so
+  neither of the two conditions a marker requires is met. A refusal by `bcc` is therefore reported as
+  a **FINDING**, with the reproducer and the exact reproduction commands, and so is an accepted-but-
+  wrong answer. Nothing is excluded and nothing is excused: withholding the marker changes only how a
+  divergence would be *classified*, never whether the construct is *exercised*.
+  [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.1 carries the full analysis — the five
+  inventories, the ambiguity between an implementation gap and a documentation gap, what shape of
+  basis would suffice, and why a build-refusal marker would have to scope **every** oracle rather
+  than one arm — so a maintainer settles it from a real run rather than from a guess written in
+  advance.
+- **[`13_floating_point/004_long_double_target_restricted.c`](13_floating_point/004_long_double_target_restricted.c)**
   — `long double` was measured to have three different representations across the four targets (16,
   12, 16 and 16 bytes; x87 80-bit against IEEE binary128), so cross-backend *value* equality is
-  genuinely meaningless for it. The program is still to be written and still run on all four targets
-  at all three levels; it is compared against the same-target reference compiler and against its
-  golden record, and **only** cross-backend value equality is switched off — a **recorded exclusion**
-  carrying its measured reason in the record's own `impl_defined_notes`, not a marker, because a
-  marker scoped to an oracle the record has switched off would be dormant and the record format
-  refuses it at parse time.
+  genuinely meaningless for it. The program is **committed with its record**; it runs on all four targets at all three levels,
+  compared against the same-target reference compiler and against its golden record, with **only** cross-backend value
+  equality switched off — a **recorded exclusion** carrying its measured reason in the record's own
+  `impl_defined_notes`, not a marker, because a marker scoped to an oracle the record has switched
+  off would be dormant and the record format refuses it at parse time.
 
 Two other measured differences are handled **by construction** rather than by marker, because a
 marker implies a test that diverges and these do not: plain-`char` signedness is avoided by using
@@ -2791,13 +2944,12 @@ checkable.
 
 **Corpus-authoring policy** is what keeps the *programs* contained. Every input is a literal in the
 program source: **no corpus program opens a socket, calls `fopen`, or reads `argv` or `getenv`**.
-That is a property established by **reading the sources**, not something the harness enforces at run
-time — so it is claimed here for exactly the **92 sources committed on this branch**, which are the
-ones that could be read. It is a standing obligation on the remaining 16, to be verified the same way
-when their three areas land, and not a claim already made about them. It is why the whole folder has
-**exactly one** fixture file, and why the determinism rules above are what they are — a program that
-read the clock, the environment or an external file would not be reproducible, which would make
-byte-exact comparison meaningless.
+That is a property established by **reading the sources**, not something the harness enforces at
+run time — so it is claimed here for exactly the **108 sources committed on this branch**, which is
+all of them, and it remains a standing obligation on any program added later, to be verified the
+same way. It is why the whole folder has **exactly one** fixture file, and why the determinism
+rules above are what they are — a program that read the clock, the environment or an external file
+would not be reproducible, which would make byte-exact comparison meaningless.
 
 **Path discipline** is what keeps the *harness* contained. Every path the harness constructs is
 resolved and re-checked against a root beneath the Cargo build directory before it is written: each

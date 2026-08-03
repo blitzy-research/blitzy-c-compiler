@@ -5,13 +5,103 @@
  * That is sixteen integer-class consumers and ten floating-class consumers, so
  * BOTH register files are exhausted on System V AMD64, AAPCS64 and LP64D, while
  * System V i386 cdecl marshals all twenty-six on the stack.  Interleaving is
- * the point: it forces each ABI to advance its integer and floating allocators
- * independently and in step, which is exactly where the four conventions
- * disagree.
+ * the point: it forces each ABI to advance both of its allocators through one
+ * parameter list, which is exactly where the four conventions disagree - and
+ * they disagree on the allocators' relationship, not merely on their contents.
+ * On System V AMD64 and AAPCS64 the two advance INDEPENDENTLY: exhausting the
+ * floating file has no effect on which integer register comes next, and the
+ * reverse.  LP64D does not work that way.  There the two are COUPLED in one
+ * direction: once fa0-fa7 are spent, a further floating argument is passed in an
+ * INTEGER argument register if one is still free, and only falls to the stack when
+ * none is.  So on RISC-V 64 a floating parameter can consume an integer slot that a
+ * later integer parameter then does not get, and the crossover point has to be
+ * exactly right.
+ *
+ * What that means for THIS program was measured rather than assumed -
+ * `riscv64-linux-gnu-gcc -O0 -S -o - 003_mixed_parameter_classes.c`, reading
+ * take_mixed26's prologue.  Sixteen integer-class parameters fill a0-a7 and ten
+ * floating parameters fill fa0-fa7, so both files are already exhausted when the
+ * ninth and tenth doubles are allocated: they arrive on the stack, and the prologue
+ * contains no fmv.d.x at all.  The coupling itself - excess doubles crossing into
+ * a0-a5 with the trailing tag pushed to a6 - is exercised by
+ * 002_many_float_parameters.c, which leaves integer registers free precisely so
+ * that it can be.  This program's job is the interleaving: both allocators are
+ * driven to exhaustion through one parameter list, and every parameter is printed
+ * back individually, so a backend that advanced one counter for both, or crossed
+ * over one slot early, prints a wrong value rather than merely emitting different
+ * instructions.  The documented rows are docs/technical-specifications.md line 546
+ * (x86-64), line 553 (i686 cdecl), line 559 (AAPCS64) and line 565 (LP64D).
+ *
+ * THE CALL BARRIER, AND WHY THE ABI BOUNDARY WOULD OTHERWISE NOT EXIST.  A
+ * twenty-six parameter boundary is only under test if the call actually happens.
+ * Measured with gcc 13.4.0 at -O2, a direct call to a static function whose
+ * arguments are all known lets the optimizer specialise the callee -- the only
+ * function emitted was take_mixed26.constprop.0, a clone with the constants
+ * folded in, so the documented boundary was never crossed at that level and the
+ * program silently tested less than it claimed at two of its three optimization
+ * levels.  Every call below therefore goes through a FILE-SCOPE volatile
+ * FUNCTION POINTER.  A volatile lvalue must be re-read on every access, so no
+ * conforming compiler may assume which function the pointer designates: it can
+ * neither inline the callee nor clone it, and it must marshal the arguments
+ * exactly as the ABI prescribes because it cannot know what will receive them.
+ * This is plain standard C rather than a compiler attribute, so both sides of
+ * oracle (a) honour it for the same reason and neither needs to support an
+ * extension for the barrier to hold.  Verified in the generated assembly of all
+ * four targets at -O2: take_mixed26 is emitted unmodified, with no .constprop
+ * and no .isra clone, and the call site is a genuine indirect call.
+ *
+ * EVALUATION-ORDER DISCIPLINE.  An access to a volatile object is an observable
+ * side effect and argument evaluation order is unspecified, so every volatile
+ * datum is read exactly once, in a statement of its own, and only the snapshots
+ * are passed -- at most one side-effecting argument per call, which here means
+ * the function-pointer load and nothing else.  The snapshots do not weaken the
+ * runtime variant: each is itself a load from volatile storage the optimizer may
+ * not fold, so the callee still receives values materialised at run time.
  *
  * Pointer discipline: pointers are passed but no pointer value is ever printed.
  * Only the pointed-to int is printed.  Aggregate discipline: only named members
  * are read back; no padding byte is printed, compared or memcmp'd.
+ *
+ * THE CALL BOUNDARY IS ENFORCED, NOT HOPED FOR.  The callee is reached through a
+ * volatile-qualified function pointer rather than by name.  An ordinary static
+ * callee may legally be inlined at -O1 and -O2, and an inlined callee marshals
+ * nothing: the interleaved allocator advance this program exists to exercise
+ * would then never happen, and its assertions would describe code that was never
+ * emitted.  Measured with gcc 13.4.0 at -O2 across this area before the
+ * indirection was added: whole groups of callees vanished into their callers, and
+ * the survivors survived only by exceeding the inliner's size budget - an
+ * accident of a heuristic rather than a property of the test.  A volatile pointer
+ * must be re-read at the point of call, so the designated function is unknown and
+ * the call is genuinely indirect; because the address escapes into storage, the
+ * signature may not be cloned or scalarised either, which matters especially here
+ * because scalar replacement of the aggregate parameters would dissolve exactly
+ * the classification the program is testing.  The mechanism is pure ISO C: a
+ * function attribute would have been shorter, but the documented attribute set
+ * for the compiler under test is packed, aligned, section, unused, deprecated,
+ * visibility and format (docs/technical-specifications.md line 506), so an
+ * inlining attribute would risk a divergence caused by the test and would import
+ * an extension into an area whose subject is the calling convention.
+ *
+ * BOTH VARIANTS ARE GENUINELY TWO VARIANTS, POINTERS INCLUDED.  The folded call
+ * passes literal integers, literal doubles, addresses of a static const array and
+ * aggregates built from constants.  The runtime call passes values that all
+ * originate in volatile storage - the pointers among them.  A pointer taken
+ * directly as &ptgt[i] would be a link-time constant that the compiler can
+ * materialise without ever loading anything, so the pointer class would have a
+ * folded spelling and no runtime spelling at all: the one argument class whose
+ * transport was never actually exercised.  The runtime pointers are therefore
+ * read out of a volatile array of pointers, so each one arrives through a load
+ * the optimizer cannot fold, and the pointer-class slot of the ABI is marshalled
+ * for real.
+ *
+ * ONE VOLATILE READ PER FULL STATEMENT.  No argument list contains a volatile
+ * lvalue.  Every runtime value - integer, double, pointer and aggregate member -
+ * is copied out of volatile storage into a plain local in a statement of its own,
+ * and the call then reads only those plain locals.  The order in which a compiler
+ * evaluates the arguments of a call is unspecified, so an argument list holding
+ * twenty-odd volatile reads would have an unspecified order of side effects, and
+ * a suite whose premise is that a divergence means a defect needs the program to
+ * have exactly one defined behaviour.
  */
 
 int printf(const char *, ...);
@@ -42,6 +132,32 @@ static volatile double vdbe[5] = { -6.75, 7.875, -8.1875, 9.25, -10.5 };
 static volatile int vslo[5] = { 41, 43, 45, 47, 49 };
 static volatile int vshi[5] = { -42, -44, -46, -48, -50 };
 static volatile int vtag = 1;
+
+/* Runtime sources for the pointer class.  The elements are the same five
+   addresses the folded call passes as &ptgt[i], but reaching them through
+   volatile storage means each one arrives at the call through a load the
+   optimizer may not fold, so the pointer class has a genuine runtime spelling
+   instead of a second folded one.  The pointed-to objects are the same static
+   const array, so what is dereferenced is identical in both variants and only
+   the transport differs. */
+static const int *volatile vptr[5] = {
+    &ptgt[0], &ptgt[1], &ptgt[2], &ptgt[3], &ptgt[4]
+};
+
+/* The enforced call boundary: a volatile-qualified pointer to the callee, so the
+   call is indirect at every optimization level and the aggregate parameters
+   cannot be scalarised away.  Both variants travel through it. */
+static void (*volatile take_mixed26_p)(int, double, double, const int *,
+                                       struct pair2,
+                                       int, double, double, const int *,
+                                       struct pair2,
+                                       int, double, double, const int *,
+                                       struct pair2,
+                                       int, double, double, const int *,
+                                       struct pair2,
+                                       int, double, double, const int *,
+                                       struct pair2,
+                                       int) = take_mixed26;
 
 static const char *variant_tag(int variant)
 {
@@ -100,13 +216,35 @@ int main(void)
     struct pair2 r3;
     struct pair2 r4;
     struct pair2 r5;
+    /* Plain destinations for every runtime operand: integers, both double
+       columns, the pointers and the tag.  Only these are read at the runtime call
+       site, so its argument list holds no side effect at all. */
+    int plain_int[5];
+    double plain_dbl[5];
+    double plain_dbe[5];
+    const int *plain_ptr[5];
+    int plain_tag;
+    int k;
 
-    take_mixed26(201, 1.5, -6.75, &ptgt[0], c1,
-                 -202, -2.25, 7.875, &ptgt[1], c2,
-                 203, 3.125, -8.1875, &ptgt[2], c3,
-                 -204, -4.0625, 9.25, &ptgt[3], c4,
-                 205, 5.5, -10.5, &ptgt[4], c5,
-                 0);
+    take_mixed26_p(201, 1.5, -6.75, &ptgt[0], c1,
+                   -202, -2.25, 7.875, &ptgt[1], c2,
+                   203, 3.125, -8.1875, &ptgt[2], c3,
+                   -204, -4.0625, 9.25, &ptgt[3], c4,
+                   205, 5.5, -10.5, &ptgt[4], c5,
+                   0);
+
+    /* One volatile read per full statement, each separated from the next by a
+       sequence point.  The loop body performs five reads in five statements, and
+       the aggregate members are staged the same way, so no two volatile accesses
+       share an expression and nothing depends on an unspecified order. */
+    for (k = 0; k < 5; k++) {
+        plain_int[k] = vint[k];
+        plain_dbl[k] = vdbl[k];
+        plain_dbe[k] = vdbe[k];
+        plain_ptr[k] = vptr[k];
+    }
+    plain_tag = vtag;
+
 
     r1.lo = vslo[0];
     r1.hi = vshi[0];
@@ -119,11 +257,11 @@ int main(void)
     r5.lo = vslo[4];
     r5.hi = vshi[4];
 
-    take_mixed26(vint[0], vdbl[0], vdbe[0], &ptgt[0], r1,
-                 vint[1], vdbl[1], vdbe[1], &ptgt[1], r2,
-                 vint[2], vdbl[2], vdbe[2], &ptgt[2], r3,
-                 vint[3], vdbl[3], vdbe[3], &ptgt[3], r4,
-                 vint[4], vdbl[4], vdbe[4], &ptgt[4], r5,
-                 vtag);
+    take_mixed26_p(plain_int[0], plain_dbl[0], plain_dbe[0], plain_ptr[0], r1,
+                   plain_int[1], plain_dbl[1], plain_dbe[1], plain_ptr[1], r2,
+                   plain_int[2], plain_dbl[2], plain_dbe[2], plain_ptr[2], r3,
+                   plain_int[3], plain_dbl[3], plain_dbe[3], plain_ptr[3], r4,
+                   plain_int[4], plain_dbl[4], plain_dbe[4], plain_ptr[4], r5,
+                   plain_tag);
     return 0;
 }

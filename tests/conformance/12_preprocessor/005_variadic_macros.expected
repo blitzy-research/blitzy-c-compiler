@@ -1,0 +1,106 @@
+# Expectation record for 12_preprocessor/005_variadic_macros.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 005_variadic_macros
+area               = 12_preprocessor
+description        = Variadic macros: forwarding a variadic list at three arities, forwarding it through a second variadic macro, the empty variadic list reached by two strictly conforming routes, and stringizing an empty, a single-token and a multi-token list
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined and no unspecified behaviour. Every arithmetic operand is a small
+int constant and the largest value computed is 18, so no signed overflow is reachable. No shift
+operator appears. There is no cast, no union and no pointer arithmetic beyond indexing a string
+literal up to and including its terminator, so no aliasing rule and no bound is stressed. No object is
+read before it is written. No object is modified twice between sequence points. No call receives a
+side-effecting argument.
+
+Every variadic macro invocation is strictly conforming. C11 6.10.3p4 requires an invocation of a
+macro whose parameter list ends in an ellipsis to supply more arguments than there are parameters, so
+every invocation of the two forwarding macros supplies at least one variadic argument. The empty
+variadic list is reached only through spellings that satisfy that rule: a bare `#define M(...)`
+invoked as `M()`, which supplies one empty argument, and the stringize operator applied to an empty
+list, whose result C11 6.10.3.2p2 fixes as the empty string.
+
+Stringizing is deterministic rather than incidental. 6.10.3.2p2 deletes white space before the first
+token and after the last and collapses each remaining run to a single space, so the two-token list
+stringizes to the same text under every conforming implementation.
+
+DETERMINISM. Every printed value is an int printed with %d or a string constant written in this
+source, so nothing target-varying, address-derived, time-derived, random or locale-dependent can
+reach stdout. No plain char value is printed: char signedness was measured as signed on x86_64 and
+i686 and unsigned on aarch64 and riscv64, so a plain-char value would diverge for a reason that is
+not a defect. No raw type width is printed: sizeof(long) and sizeof(void *) were measured as 4 on
+i686 and 8 on the other three targets. Iteration order is fixed by literal bounds. main returns 0,
+inside the 0-125 range the suite requires so that no exit status is truncated.
+
+HERMETICITY. Every input is a literal in this source. Nothing is opened, nothing is read from the
+environment, the command line, the clock or the file system, and no storage is allocated, so a cell
+is reproducible from this source and this record alone.
+
+GATE. The default warning gate applies unmodified and no `ub_audit_flags` key appears:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. The program was verified
+clean under that gate with all four reference drivers and with the alternate reference compiler, and
+it builds and runs clean under -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
+
+NO HEADER IS INCLUDED and printf is declared by hand as `int printf(const char *, ...);`. bcc bundles
+only freestanding headers and ships no standard I/O header, so naming one would fail on the bcc side
+of oracle (a) while succeeding on the reference side -- a spurious divergence caused by the test
+rather than by a compiler.
+END
+impl_defined_notes <<END
+THREE SPELLINGS ARE EXCLUDED, EACH NARROWLY AND EACH FOR A STATED REASON. No target, no optimization
+level and no oracle is narrowed, and no expected-divergence marker is attached.
+
+THE GNU COMMA SWALLOW, `, ##__VA_ARGS__`, IS EXCLUDED. An earlier form of this program used it to
+reach the zero-argument case. Pasting a comma with __VA_ARGS__ has no meaning in C11 -- it is a GNU
+extension -- and the alternate reference compiler this suite may legitimately select as its oracle
+rejects it outright under the audit gate this area declares: seven -Wgnu-zero-variadic-macro-arguments
+errors, measured with clang 20.1.8. A construct that cannot survive the audit gate of a compiler that
+may serve as the oracle cannot be the subject of a comparison, because the failure would be the
+test's rather than the compiler's. Per constraint C3 the exclusion is stated rather than left silent,
+and it is narrow: the zero-variadic-argument case, which is the property that spelling existed to
+reach, is still exercised twice by strictly conforming means. The extension belongs with the other GCC
+extensions in area 08, whose programs declare a gate suited to non-standard constructs.
+
+THE C2X OPTIONAL-COMMA VARIADIC OPERATOR IS EXCLUDED because no repository document enumerates support
+for it, so a compile failure arising from it would be attributable to this test rather than to the
+compiler under test.
+
+AN EXPLICIT EMPTY TRAILING MACRO ARGUMENT IS EXCLUDED because the reference compiler itself rejects
+that spelling with a syntax error, so it could not form the basis of a comparison between two
+compilers in the first place.
+
+WIDTH NORMALIZATION. Every printed value is an int or a string constant written in this source, so no
+target-varying width and no plain-char signedness can influence a byte of stdout.
+END
+expected_stdout    <<END
+all_variadic_one=ok
+all_variadic_two=7
+all_variadic_three=3 4
+named_plus_one=11
+named_plus_two=5 6
+nested_named_plus_one=13
+nested_all_variadic_one=ok
+nested_all_variadic_three=8 9
+bare_noarg_macro=3
+bare_noarg_add=0
+va_str_empty_len=0
+va_str_list=a, b
+va_str_single=alpha
+fixed_arity_one=5
+fixed_arity_two=11
+fixed_arity_three=18
+END

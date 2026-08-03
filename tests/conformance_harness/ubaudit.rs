@@ -2,15 +2,13 @@
 //!
 //! Every program in the corpus passes through two gates before any divergence it produces may be
 //! read as evidence about a compiler. Both gates are driven by the **reference compiler alone**.
+//! This module is the machine enforcement; the `ub_notes` argument recorded in each program's own
+//! `.expected` file is the human half, and it is required to be present for every program.
 //!
-//! # Why this module exists at all
-//!
-//! If a program contains undefined or unspecified behaviour, two compilers disagreeing about it
-//! proves nothing about either of them, because both are permitted to do anything. Freedom from
-//! undefined behaviour is therefore not a stylistic preference here — it is the precondition that
-//! makes all three oracles sound, and it is **machine-enforced rather than asserted**. This module
-//! is that enforcement; the `ub_notes` argument recorded in each program's own `.expected` file is
-//! the human half, and it is required to be present for every program.
+//! The authoring rulebook the gates check, the determinism rules, and the reason freedom from
+//! undefined behaviour is a precondition rather than a preference are stated once in
+//! `tests/conformance/README.md`, under "The undefined-behaviour-freedom rulebook" and
+//! "Determinism", and are not restated here.
 //!
 //! # The two gates
 //!
@@ -20,10 +18,8 @@
 //! | Sanitizer | [`SANITIZER_GATE_FLAGS`] | dynamically linked, native only, then **executed** |
 //!
 //! The warning gate is `-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror`.
-//! Because `-Werror` promotes every warning to an error, **any** diagnostic fails the gate. The
-//! gate was measured to genuinely bite rather than decorate — it rejected a probe program on a
-//! real diagnostic during design — so a failure here should be believed and treated as a defect in
-//! the test program.
+//! Because `-Werror` promotes every warning to an error, **any** diagnostic fails the gate, and a
+//! failure is a defect in the test program rather than a matter of taste.
 //!
 //! The sanitizer gate is `-fsanitize=undefined,address -fno-sanitize-recover=all`. Compiling alone
 //! would prove nothing about undefined behaviour, so the instrumented artifact is **run**, and its
@@ -37,27 +33,22 @@
 //! compiler discovery vetted, and refuses any argument outside the small permitted set for that
 //! gate.
 //!
-//! Two independent reasons make this non-negotiable:
-//!
-//! - **Shared-flag discipline (requirement 3).** A differential invocation may carry only flags
-//!   both compilers honour with the same meaning. Every warning flag and every sanitizer flag is
-//!   reference-only, so letting one reach the compiler under test would breach that discipline. The
-//!   harness root records the same fact structurally: every member of the audit gate is also an
-//!   entry of `FORBIDDEN_IN_DIFFERENTIAL`.
-//! - **Sanitizers are documented as out of scope for the compiler under test.** The repository's
-//!   technical specification lists "Sanitizers (ASan, TSan, UBSan) | Not supported" among its
-//!   explicit exclusions, so `-fsanitize=` is not merely inadmissible in a shared invocation, it is
-//!   unimplemented on that side.
+//! Two independent reasons make this non-negotiable. Requirement 3's shared-flag discipline admits
+//! only flags both compilers honour with the same meaning, and every warning flag and every
+//! sanitizer flag here is reference-only; the harness root records the same fact structurally, since
+//! every member of the audit gate is also an entry of `FORBIDDEN_IN_DIFFERENTIAL`. And sanitizers
+//! are documented as out of scope for the compiler under test — the repository's technical
+//! specification lists them among its explicit exclusions — so `-fsanitize=` is not merely
+//! inadmissible in a shared invocation, it is unimplemented on that side.
 //!
 //! ## The sanitizer gate never renders a verdict about the compiler under test
 //!
-//! This is the single most important thing to understand about this module. A sanitizer diagnostic
-//! means the **test program** is defective and must be rewritten by a human, in the corpus. It is
-//! never a finding against the compiler under test, is never reported as one, and cannot be: the
-//! compiler under test is not involved in either gate. The audit is a suite-authoring gate that
-//! establishes the precondition under which a divergence is meaningful at all, which is why its
-//! outcomes use the vocabulary in [`GateStatus`] rather than the oracle verdicts in
-//! `super::Verdict`.
+//! A sanitizer diagnostic means the **test program** is defective and must be rewritten by a human,
+//! in the corpus. It is never a finding against the compiler under test, is never reported as one,
+//! and cannot be: the compiler under test is not involved in either gate. The audit is a
+//! suite-authoring gate that establishes the precondition under which a divergence is meaningful at
+//! all, which is why its outcomes use the vocabulary in [`GateStatus`] rather than the oracle
+//! verdicts in `super::Verdict`.
 //!
 //! # Two deliberate exceptions, which must not be "harmonized" away
 //!
@@ -91,38 +82,21 @@
 //! in one place. The gate is never weakened globally to make a stubborn program pass: that would
 //! quietly re-admit the undefined behaviour this suite depends on excluding.
 //!
-//! # The authoring rulebook this gate enforces
+//! ## Implementation-defined facts, and the one that cannot be normalized
 //!
-//! Every corpus program is written to obey all of the following, and the two gates are what make
-//! the obedience checkable rather than claimed:
+//! Plain-`char` signedness is signed on x86-64 and i686 and **unsigned** on AArch64 and RISC-V 64,
+//! and `sizeof(long)` and `sizeof(void *)` are 4 on i686 and 8 on the other three, so the corpus
+//! uses explicit `signed char` and `unsigned char` and normalizes widths. A program that ignored
+//! either would produce a spurious cross-backend divergence rather than a gate failure, which is why
+//! both are handled by construction rather than left to these gates.
 //!
-//! - no signed overflow;
-//! - shift counts strictly within range;
-//! - no aliasing violations;
-//! - no reads of uninitialized storage;
-//! - one-past-end pointers may be formed but never dereferenced;
-//! - no object modified twice between sequence points;
-//! - at most one side-effecting argument per call;
-//! - no dependence on padding bytes or on the relative addresses of unrelated objects.
-//!
-//! ## Determinism rules, which a violation would surface here first
-//!
-//! No addresses or pointer values are printed; no timestamps; no randomness; no locale-dependent
-//! formatting; iteration order is fixed; floating-point values are printed at fixed precision with
-//! margin; and an expected exit code lies within 0 to 125, because the operating system truncates
-//! larger values — `return 300` was measured as status 44.
-//!
-//! ## Implementation-defined facts the corpus normalizes away
-//!
-//! A program that ignored one of these would produce a spurious cross-backend divergence rather
-//! than a gate failure, so they are handled by construction in the corpus:
-//!
-//! - plain-`char` signedness is signed on x86-64 and i686 and **unsigned** on AArch64 and RISC-V
-//!   64, hence explicit `signed char` and `unsigned char`;
-//! - `sizeof(long)` and `sizeof(void *)` are 4 on i686 and 8 on the other three, hence width
-//!   normalization;
-//! - `sizeof(long double)` was measured at 16, 12, 16 and 16 bytes (x87 80-bit versus IEEE
-//!   binary128), hence the per-oracle exclusion recorded by the long-double program itself.
+//! `sizeof(long double)` was measured at 16, 12, 16 and 16 bytes (x87 80-bit versus IEEE binary128),
+//! and that difference cannot be normalized away, so the long-double program's own record is where a
+//! per-oracle exclusion belongs. **No such exclusion is in force on this branch**:
+//! `13_floating_point/004_long_double_target_restricted.c` is committed, but its `.expected` record
+//! is one of the sixteen not yet written, so nothing yet records the exclusion. Neither gate is
+//! affected either way — the warning gate compiles without linking and the sanitizer gate is native
+//! only, so neither compares one target against another.
 //!
 //! ## Headers, and why a program declares `printf` by hand
 //!
@@ -130,14 +104,28 @@
 //! additionally declares `_Noreturn void exit(int);`, and no program includes a hosted header,
 //! because the compiler under test bundles only freestanding headers and ships no `stdio.h`: an
 //! `#include <stdio.h>` would fail on that side while succeeding on the reference side, which is a
-//! spurious divergence caused by the test rather than by a compiler. The one sanctioned inclusion is
-//! area 07's `<stdarg.h>` — freestanding, shipped by both compilers, and unavoidable, since a
-//! variadic function cannot be written without it — and every program taking it records the exception
-//! and its reason in its own `ub_notes`. A hand-declared prototype is also what published
-//! output-comparison experience identifies as the fix for the most common portability problem in this
-//! class of suite. Should a bare declaration ever provoke a diagnostic under the strict gate, the
-//! correct resolution is a recorded per-program deviation, never a silent relaxation of the gate for
-//! every program.
+//! spurious divergence caused by the test rather than by a compiler. A hand-declared prototype is
+//! also what published output-comparison experience identifies as the fix for the most common
+//! portability problem in this class of suite.
+//!
+//! Exactly two inclusions are sanctioned, and both are of **bundled freestanding** headers that each
+//! compiler ships, so neither can produce a divergence caused by the test:
+//!
+//! - area 07's `<stdarg.h>`, in each of its six variadic programs and nothing else in that area,
+//!   because a variadic function cannot be written without `va_list`, `va_start`, `va_arg` and
+//!   `va_end`;
+//! - `12_preprocessor/003_bundled_header_inclusion.c`, the dedicated probe for the bundled set,
+//!   which includes all **nine required** freestanding headers — `stddef.h`, `stdint.h`,
+//!   `stdarg.h`, `stdbool.h`, `limits.h`, `float.h`, `stdalign.h`, `stdnoreturn.h` and `iso646.h` —
+//!   because restricting it to one would leave eight of the nine shipped headers never included by
+//!   anything, which is a coverage hole rather than a discipline. The bonus `stdatomic.h` is
+//!   excluded from both exceptions.
+//!
+//! A program taking either exception owes the exception and its reason to its own `ub_notes`: the six
+//! area 07 records state it today, and the preprocessor probe's record is one of the sixteen not yet
+//! committed. Should a bare declaration ever provoke a diagnostic under the strict gate, the correct
+//! resolution is a recorded per-program deviation, never a silent relaxation of the gate for every
+//! program.
 //!
 //! # Coverage, and the absence of a silent skip
 //!
@@ -149,10 +137,13 @@
 //! reported, by [`AuditReport::gate_result_count`] and [`AuditReport::invocations_expected`]
 //! respectively; conflating them understates what the audit does.
 //!
-//! A program that cannot be audited because the reference compiler is absent is reported
-//! [`GateStatus::Unavailable`] — loudly, in the summary, and escalated to a failure under the
-//! strict setting intended for continuous integration, where the toolchain is installed
-//! deliberately. There is no path through this module by which a program is quietly not audited.
+//! A program whose record cannot be read is a reported defect rather than a program left out: its
+//! warning gate carries that record's defects, and its sanitizer gate still runs, because that
+//! gate's flags are fixed and can still answer their own question. A program that cannot be audited
+//! because the reference compiler is absent is reported [`GateStatus::Unavailable`] — loudly, in the
+//! summary, and escalated to a failure under the strict setting intended for continuous integration,
+//! where the toolchain is installed deliberately. There is no path through this module by which a
+//! program is quietly not audited.
 //!
 //! # Workspace discipline, bounded execution, and parallel safety
 //!
@@ -164,15 +155,13 @@
 //! and treats the corpus as strictly read-only: a program is read and copied *into* a workspace,
 //! never modified.
 //!
-//! The children it spawns are not confined by any of that. No namespace, `chroot`, syscall filter or
-//! network restriction is applied, so the reference driver that hard-codes intermediates under the
+//! The children it spawns are not confined by any of that: no namespace, `chroot`, syscall filter or
+//! network restriction is applied, so a reference driver that hard-codes intermediates under the
 //! system temporary directory keeps putting them there. Their **environment**, though, is not
-//! inherited: the shared spawn path clears it, installs a vetted search path, points `TMPDIR`, `TMP`,
-//! `TEMP` and `HOME` at the gate's own workspace, and — the part that matters most in this module —
-//! forces `ASAN_OPTIONS` and `UBSAN_OPTIONS` to their strictest values, so an inherited setting
-//! cannot weaken the diagnostic a gate exists to observe. The claim is therefore about the paths this
-//! module builds, about what every child is told, and — for the program being audited — about the
-//! corpus-authoring policy that gives every program its whole input as literals in its own source.
+//! inherited — the shared spawn path clears it and points `TMPDIR`, `TMP`, `TEMP` and `HOME` at the
+//! gate's own workspace — and the part that matters most in this module is that it forces
+//! `ASAN_OPTIONS` and `UBSAN_OPTIONS` to their strictest values, so an inherited setting cannot
+//! weaken the diagnostic a gate exists to observe.
 //!
 //! Every invocation is bounded by the shared timed-wait facility in
 //! [`run_command_captured_with`], using the discovered `timeout` utility when there is one
@@ -187,11 +176,9 @@
 //! but the audit holds **five** of them per program: two for the warning gate, and three for the
 //! sanitizer gate, whose build and run are captured separately so neither overwrites the other. The
 //! report-safe rendering can then expand a stream several-fold, because a byte that is not printable
-//! becomes a visible escape. Across a hundred programs, and then again for the rendered report, an
-//! audit of a toolchain that fails on every program would hold gigabytes of text in memory to say
-//! what a few hundred lines already say.
+//! becomes a visible escape.
 //!
-//! Three ceilings, therefore, and not one of them silent:
+//! Four ceilings, therefore, and not one of them silent:
 //!
 //! - **Per gate result** — at most [`MAX_GATE_DIAGNOSTIC_LINES`] lines and
 //!   [`MAX_GATE_DIAGNOSTIC_BYTES`] rendered bytes, taken from the **head** of the capture, because a
@@ -203,8 +190,8 @@
 //!   capture is taken rather than swept afterwards, so the bound holds throughout rather than
 //!   eventually.
 //! - **One buffer for the report** — [`AuditReport::render`] streams every section into a single
-//!   string. The alternative it replaced concatenated five section strings, which held a second
-//!   complete copy of the largest thing in the module at the moment of concatenation.
+//!   string rather than concatenating section strings, which would hold a second complete copy of the
+//!   largest thing in the module for the duration of the concatenation.
 //!
 //! A gate that **passed** retains nothing at all, because the failure section is the only place this
 //! module renders captured output and a passing gate never appears in it. That is not merely a saving:
@@ -352,14 +339,12 @@ pub const MAX_GATE_DIAGNOSTIC_LINE_BYTES: usize = 2 * 1024;
 
 /// Most bytes of rendered output every gate result of one run retains together.
 ///
-/// This is the ceiling the review's resource-management finding is really about. The audit holds
-/// five sanitized streams per program — two for the warning gate, three for the sanitizer gate,
-/// whose build and run are captured separately — and each is already capped by the execute layer at
-/// a size the report-safe rendering can then expand several-fold. Across a corpus of a hundred
-/// programs, an audit of a toolchain that fails on every one of them would otherwise hold gigabytes
-/// of text to say what a few hundred lines already say. Four megabytes is more diagnostic text than
-/// any single investigation reads, and it is charged continuously at the moment of retention rather
-/// than swept afterwards, so the bound holds throughout the run rather than eventually.
+/// The per-result and per-line ceilings bound one gate result; this one bounds the whole run, which
+/// holds five sanitized streams per program. Without it, an audit of a toolchain that fails on every
+/// program in the corpus would accumulate gigabytes of text to say what a few hundred lines already
+/// say. Four megabytes is more diagnostic text than any single investigation reads, and it is charged
+/// at the moment of retention rather than swept afterwards, so the bound holds throughout the run
+/// rather than eventually.
 pub const RUN_DIAGNOSTIC_BYTES_MAX: usize = 4 * 1024 * 1024;
 
 /// Capacity the rendered report starts with, before the per-program and per-diagnostic allowance.
@@ -3161,7 +3146,7 @@ fn spawn_guarded(
     run_command_captured_with(
         command,
         budget_for(caps),
-        caps.timeout_tool().path(),
+        caps.outer_net_tool(),
         Some(workspace.root()),
     )
 }
@@ -3207,7 +3192,7 @@ fn spawn_guarded_artifact(
     run_command_captured_with(
         command,
         budget_for(caps),
-        caps.timeout_tool().path(),
+        caps.outer_net_tool(),
         Some(workspace.root()),
     )
 }

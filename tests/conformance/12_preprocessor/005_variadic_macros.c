@@ -1,5 +1,5 @@
 /*
- * Area 12 / program 005 - variadic macros, INCLUDING the zero-argument case.
+ * Area 12 / program 005 - variadic macros, INCLUDING the empty variadic list.
  *
  * WHAT IS UNDER TEST
  *
@@ -8,6 +8,13 @@
  * it onward through a second variadic macro, invoking a bare variadic macro with
  * no arguments at all, and applying the stringize operator `#` to the variadic
  * list when that list is empty, a single token, and several tokens.
+ *
+ * Every construct here is ISO C. Nothing in this program depends on a GNU
+ * extension, and the one extension spelling that would have been the obvious
+ * shortcut is excluded deliberately and for a stated reason - see TWO SPELLINGS
+ * DELIBERATELY AVOIDED below. That matters because a divergence must be
+ * attributable: a construct the standard defines is one both compilers have
+ * agreed to, so a difference in it is a difference in the compilers.
  *
  * Nothing here touches the runtime argument-retrieval machinery. That belongs to
  * area 07 and, within this area, to program 003; conflating the two would blur a
@@ -21,51 +28,90 @@
  * "stringification (`#`), token pasting (`##`), variadic macros
  * (`__VA_ARGS__`)", and docs/project-guide.md line 79 lists "macro expansion
  * (object-like, function-like, variadic, stringification, token pasting)".
- * Because the feature is documented as supported, a divergence this program
- * provokes - the zero-argument case emphatically included - is a genuine FINDING
- * rather than an expected divergence. No marker belongs in the sibling
- * expectation record, and the register admits none for this area.
+ * Every construct below is the ISO C form of exactly that documented capability,
+ * which is what makes the citation load-bearing: the documentation covers what is
+ * tested, rather than something adjacent to it. A divergence this program provokes
+ * - the empty variadic list emphatically included - is therefore a genuine FINDING
+ * rather than an expected divergence. No marker belongs in the sibling expectation
+ * record, and the register admits none for this area.
  *
- * THE ZERO-ARGUMENT CASE, AND WHY IT IS EXERCISED FOUR TIMES
+ * THE EMPTY VARIADIC LIST, AND WHY IT IS EXERCISED FIVE TIMES OVER FOUR SHAPES
  *
- * A macro of the form `LOG(fmt, ...)` whose body forwards the variadic list
- * after a comma leaves that comma dangling when the list is empty. That
- * trailing-comma problem is what makes the zero-argument case the one
- * preprocessor implementations most often get wrong, so it is exercised through
- * two mutually independent techniques - a divergence in one then still leaves
- * the other reporting, which localises a defect instead of merely announcing it:
+ * An empty variadic list is the case preprocessor implementations most often get
+ * wrong, so it is not dropped - it is reached the way ISO C actually allows,
+ * through a macro whose parameter list is nothing BUT an ellipsis. `#define
+ * M(...)` invoked as `M()` supplies one empty argument to `__VA_ARGS__`, and the
+ * standard imposes no minimum there because there is no named parameter for the
+ * variadic part to follow. Four independent shapes appear in main, the last of
+ * them twice, so a divergence in one still leaves the others reporting, which
+ * localises a defect instead of merely announcing it:
  *
- *   1. the GNU comma-swallowing form `, ##__VA_ARGS__`, in which the paste
- *      operator deletes the preceding comma when the variadic list is empty
- *      (LOG and WRAP_LOG below);
- *   2. a bare `#define M(...)` invoked as `M()`, which expands to a call whose
- *      argument list is empty, applied to a function declared to take `void`
- *      (NOARG and ADD_NONE below).
+ *   1. NOARG(), whose body calls a function declared to take `void`, so an
+ *      expansion that failed to produce an empty argument list would be a
+ *      diagnosable error rather than a silently different call;
+ *   2. ADD_NONE(), a second, independent instance of that same shape, returning
+ *      a different value so the two lines cannot be confused;
+ *   3. VA_STR(), which stringizes the empty list and whose result must have
+ *      length zero;
+ *   4. LOG0("...\n") and, one level of expansion deeper, WRAP0("...\n"), where
+ *      the WHOLE argument list is variadic and nothing follows it, so no comma is
+ *      left dangling anywhere.
  *
- * Four distinct zero-variadic-argument invocations therefore appear in main:
- * one through the comma swallow, one through the comma swallow at a second level
- * of expansion, and two through the bare form. Constraint C3 forbids dropping a
- * construct because it is difficult, and this is the construct that rule exists
- * to protect.
+ * The fourth shape is the standard answer to the dangling-comma problem, and
+ * it is what lets this program keep the capability - a log-style macro invoked
+ * with no arguments beyond its format - while writing only ISO C. Constraint C3
+ * forbids dropping a construct because it is difficult; the construct is kept and
+ * only one non-standard SPELLING of it is set aside, with the reason recorded.
  *
  * NESTED FORWARDING
  *
- * WRAP_LOG is a variadic macro whose body invokes another variadic macro. It is
- * the second-highest-yield construct here: an implementation that special-cases
- * the comma swallow at one level of expansion but not through a second will
- * break exactly there, and testing it at both zero and one variadic argument is
- * what distinguishes a broken swallow from a broken forward.
+ * WRAP_LOG and WRAP0 are variadic macros whose bodies invoke another variadic
+ * macro. They are the second-highest-yield construct here: an implementation that
+ * forwards `__VA_ARGS__` correctly at one level of expansion but not through a
+ * second breaks exactly there. Both the named-parameter form and the wholly
+ * variadic form are forwarded, and the wholly variadic one at two arities, which
+ * is what distinguishes a broken forward from a broken argument count.
  *
- * TWO SPELLINGS DELIBERATELY AVOIDED
+ * THREE SPELLINGS DELIBERATELY AVOIDED
  *
  * The C2x optional-comma variadic operator is not used anywhere in this program.
  * No repository document enumerates support for it, so a compile failure arising
  * from it would be attributable to this test rather than to the compiler under
  * test - the one kind of divergence a differential suite must never manufacture.
  *
+ * THE GNU COMMA-SWALLOWING FORM `, ##__VA_ARGS__` IS NOT USED EITHER, and this is
+ * the one exclusion in this program that has to be stated rather than assumed.
+ * It is excluded for two independent reasons, both of which would make a
+ * divergence in it uninterpretable rather than informative:
+ *
+ *   1. It is a GNU extension, not ISO C, and no repository inventory enumerates
+ *      it. The documented extension set is __attribute__, __builtin_*
+ *      intrinsics, inline assembly with operand constraints, statement
+ *      expressions, typeof and __typeof__, computed goto and __extension__
+ *      (docs/technical-specifications.md lines 13, 107 and 761); the documented
+ *      preprocessor capability is "stringification (#), token pasting (##),
+ *      variadic macros (__VA_ARGS__)" (line 491), which names the standard
+ *      feature and not the comma-deletion behaviour. A divergence would
+ *      therefore have neither a documented basis to be an expected divergence
+ *      nor a documented capability to be a finding against.
+ *   2. Reaching it requires invoking a macro that HAS a named parameter with an
+ *      empty variadic list, which ISO C forbids: measured with gcc 13.4.0,
+ *      `-std=c17 -pedantic` reports "ISO C99 requires at least one argument for
+ *      the \"...\" in a variadic macro", and clang 20.1.8 reports "token pasting
+ *      of ',' and __VA_ARGS__ is a GNU extension". -pedantic is a member of this
+ *      area's warning gate, from which area 12 sanctions no deviation, so the
+ *      construct could not clear the suite's own undefined-behaviour gate.
+ *
+ * The exclusion is one spelling wide. The capability it spells is exercised above
+ * through the wholly variadic form, the empty variadic list is exercised four
+ * times, and no oracle, target or optimization level is switched off anywhere in
+ * this program.
+ *
  * An explicit empty trailing macro argument is not used either. The reference
  * compiler itself rejects that spelling with a syntax error, so it could not
  * form the basis of a comparison between two compilers in the first place.
+ *
+ * The GNU comma swallow is the third, for the reason set out above.
  *
  * STRINGIZING A VARIADIC LIST
  *
@@ -86,7 +132,7 @@
  * exactly two header exceptions, area 07 and program 003 of this area; this
  * program is neither of them, and needs neither.
  *
- * Output is a fixed sequence of thirteen `key=value` lines, one per semantic
+ * Output is a fixed sequence of sixteen `key=value` lines, one per semantic
  * property claimed, so a single divergent line localises the defect to one
  * construct. No address or pointer value is printed, no value whose plain-char
  * signedness would matter, and no width-dependent quantity, so all four targets
@@ -185,34 +231,53 @@ static int no_arg_probe(void)
 }
 
 /*
- * LOG      - the GNU comma-swallowing form: the paste operator deletes the
- *            preceding comma when the variadic list is empty, so the zero,
- *            one and two argument invocations all travel one code path.
- * WRAP_LOG - a variadic macro expanding into another variadic macro, so the
- *            comma swallow is exercised through a second level of expansion.
- * NOARG    - a bare variadic macro invoked with no arguments at all.
- * ADD_NONE - a second, independent instance of the same bare form.
- * VA_STR   - the stringizing macro, itself variadic so that it may legally
- *            receive an empty list, a single token, or several.
+ * LOG      - a named parameter followed by an ellipsis, forwarding the variadic
+ *            list after a comma.  ISO C requires the list to be non-empty here,
+ *            so every invocation of LOG below supplies at least one argument for
+ *            it; the empty case is reached through the wholly variadic forms
+ *            instead, for the reason recorded in the header.
+ * WRAP_LOG - the same shape expanding into another variadic macro, so forwarding
+ *            is exercised through a second level of expansion.
+ * LOG0     - a WHOLLY variadic macro: the format itself travels in
+ *            __VA_ARGS__, so nothing follows the list and no comma can be left
+ *            dangling.  This is the standard spelling of a log-style macro
+ *            invoked with no arguments beyond its format.
+ * WRAP0    - LOG0 forwarded through a second wholly variadic macro.
+ * NOARG    - a wholly variadic macro invoked with no argument at all.
+ * ADD_NONE - a second, independent instance of the same shape.
+ * VA_STR   - the stringizing macro, itself wholly variadic so that it may
+ *            legally receive an empty list, a single token, or several.
  */
-#define LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)
-#define WRAP_LOG(fmt, ...) LOG(fmt, ##__VA_ARGS__)
+#define LOG(fmt, ...) printf(fmt, __VA_ARGS__)
+#define WRAP_LOG(fmt, ...) LOG(fmt, __VA_ARGS__)
+#define LOG0(...) printf(__VA_ARGS__)
+#define WRAP0(...) LOG0(__VA_ARGS__)
 #define NOARG(...) no_arg_probe(__VA_ARGS__)
 #define ADD_NONE(...) add0(__VA_ARGS__)
 #define VA_STR(...) #__VA_ARGS__
 
 int main(void)
 {
-    /* Comma swallow at zero, one and two variadic arguments. */
-    LOG("zero_args_forwarded=ok\n");
-    LOG("one_arg=%d\n", 7);
-    LOG("two_args=%d %d\n", 3, 4);
+    /* The wholly variadic form at one, two and three arguments.  The first is
+       the empty-trailing-list case written the way ISO C allows: everything the
+       call needs is inside __VA_ARGS__, so there is no comma to delete. */
+    LOG0("all_variadic_one=ok\n");
+    LOG0("all_variadic_two=%d\n", 7);
+    LOG0("all_variadic_three=%d %d\n", 3, 4);
 
-    /* The same swallow, reached through a second variadic macro. */
-    WRAP_LOG("nested_zero_args=ok\n");
-    WRAP_LOG("nested_one_arg=%d\n", 11);
+    /* A named parameter plus a non-empty variadic list, at one and at two. */
+    LOG("named_plus_one=%d\n", 11);
+    LOG("named_plus_two=%d %d\n", 5, 6);
 
-    /* The bare-form zero-argument path, twice and independently. */
+    /* Both forms forwarded through a second variadic macro: the named form at
+       one variadic argument, and the wholly variadic form at one argument - the
+       empty-trailing-list case again, now two levels deep - and at three. */
+    WRAP_LOG("nested_named_plus_one=%d\n", 13);
+    WRAP0("nested_all_variadic_one=ok\n");
+    WRAP0("nested_all_variadic_three=%d %d\n", 8, 9);
+
+    /* The empty variadic list through a wholly variadic macro, twice and
+       independently, each expanding to a call on a function declared void. */
     printf("bare_noarg_macro=%d\n", NOARG());
     printf("bare_noarg_add=%d\n", ADD_NONE());
 

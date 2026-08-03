@@ -18,15 +18,25 @@ repository could verify.
 
 ## 1. What a finding is, and what it is not
 
-Three verdicts sit next to one another, and telling them apart *is* the point of this file. All
-three begin with an observed difference; they differ in whether the difference is **explained**, and
-by what.
+Three verdicts sit next to one another, and telling them apart *is* the point of this file. **Two of
+the three classify an observed difference; the third does not classify a difference at all.**
+`FINDING` and `XFAIL` are both **divergence classifications** — a comparison ran, the two sides
+disagreed, and the verdict says whether the disagreement is *explained* and by what. `FAIL` is a
+different kind of thing: it is what the suite reports when it cannot honestly classify anything.
 
-| Verdict | The divergence is … | Where it is recorded | Fails the run? |
+| Verdict | What it says | Where it is recorded | Fails the run? |
 |---|---|---|---|
-| **FINDING** | **not** traceable to any limitation this repository documents | a self-contained artifact directory under [`findings/`](findings/), indexed here | **No** — it is a deliverable |
-| **XFAIL** | traceable to a limitation this repository **does** document, cited by a marker | the marker in the program's own `.expected` record, mirrored in [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) | No |
-| **FAIL** | neither of the above — unexplained: harness breakage, an internal inconsistency, a corpus defect | the area report and the run summary | **Yes** |
+| **FINDING** | *A divergence was observed*, and it is **not** traceable to any limitation this repository documents | a self-contained artifact directory under [`findings/`](findings/), indexed here | **No** — it is a deliverable |
+| **XFAIL** | *A divergence was observed*, and it **is** traceable to a limitation this repository documents, cited by a marker. Also used for a comparison the record deliberately declines to make, citing its own recorded reason | the marker in the program's own `.expected` record, mirrored in [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md); or, for a declined comparison, that record's `impl_defined_notes` | No |
+| **FAIL** | **Not a divergence classification.** Either a hard error — harness breakage, an internal inconsistency, a corpus defect, a record that cannot be resolved — or a comparison the corpus *requires* that could not be performed or whose result contradicts itself. Nothing was established either way | the area report and the run summary | **Yes** |
+
+**Do not read a `FAIL` as a difference in behaviour.** It frequently arises with **no comparison
+having run at all** — a `.c` file with no sibling record, a corpus that could not be enumerated, an
+oracle the record *enables* while the cell reports it as excluded, or a gate whose own machinery
+could not be performed. In each of those the suite has observed nothing about the compiler; it has
+observed that it could not ask the question. Treating such a result as evidence about `bcc` is
+exactly the mistake the three-way split exists to prevent, and curating a finding on one is the
+wrong response — repair the material so the question can be asked (§6.3).
 
 The full six-verdict space, of which these are three, is defined once in
 [`README.md`](README.md#the-verdict-taxonomy) and implemented in
@@ -82,25 +92,64 @@ row pointing at a directory that does not exist is a **broken deliverable**, bec
 who follows the pointer finds nothing, and reproducibility is the one property that makes a finding
 worth having.
 
-| ID | Slug / short title | Program (area / reproducer) | Divergence class | Oracle(s) affected | Target(s) | Opt level(s) | Artifact directory | Status |
-|---|---|---|---|---|---|---|---|---|
+| ID | Slug / short title | Program (area / reproducer) | Divergence class | Oracle(s) affected | Target(s) | Opt level(s) | Artifact directory | Status | Superseded by |
+|---|---|---|---|---|---|---|---|---|---|
 
-Two notes on reading the table once it has rows. **One row per finding**, so a divergence observed
-by two oracles at the same cell is two rows if the two were investigated separately and one row
-naming both oracles if they were not — the artifact directory decides, because the directory is the
-finding. And the columns are deliberately narrow, factual fields: the *explanation* lives in the
-directory's `MANIFEST.txt`, never here, so that this file stays an index a reader can scan.
+Two notes on reading the table once it has rows.
+
+**One row per generated finding identity — and a generated identity is exactly one cell, one oracle
+and one divergence class.** A run names each transient finding directory from those three things
+together, injectively (§2.3), and curation carries that name forward as the `finding_id` and
+`identity_digest` lines of the curated `MANIFEST.txt`. So one curated directory — and therefore one
+`F-NNNN-<slug>` row — stands for exactly **one** generated identity. The consequence is arithmetic
+rather than editorial: a divergence observed by **two** oracles at the same cell is two generated
+identities, two sets of evidence and therefore **two rows**, whether or not a maintainer
+investigated them together. Likewise two divergence classes at one cell, or one class at two
+optimization levels, or one class at two targets. The reverse also holds: every directory under
+[`findings/`](findings/) must have exactly one row and every row exactly one directory, so the index
+and the evidence enumerate the same set in both directions.
+
+**A row may not stand for several generated identities.** `Oracle(s) affected`, `Target(s)` and
+`Opt level(s)` are plural in the header because a *curated, minimized* reproducer may legitimately
+have been reduced from a wider observation and the row should say what was seen — but the row's
+identity, and the evidence it points at, remain the single generated identity recorded in its
+manifest. If a maintainer ever wants one row to *replace* several, that requires a **merge schema
+defined here first**: a stated rule for which fields may hold a list, a stated rule for which of the
+several generated identities the curated manifest records, a stated rule for how the evidence of the
+others is still reachable, and a check that audits all three. Until such a schema exists, merging is
+prohibited — an unaudited merge silently loses the pointer to every set of evidence it did not name,
+and a lost pointer is a lost deliverable.
+
+And the columns are deliberately narrow, factual fields: the *explanation* lives in the directory's
+`MANIFEST.txt`, never here, so that this file stays an index a reader can scan.
 
 ### 2.1 The `Status` vocabulary
 
 A closed set of three values. Anything else is not a status but a comment, and belongs in the
 finding's `MANIFEST.txt`.
 
-| Status | Meaning |
-|---|---|
-| `open` | Recorded and reproducible; not yet triaged by a maintainer. This is what every finding starts as |
-| `acknowledged` | A maintainer has confirmed the finding — read the evidence, reproduced or accepted it, and taken ownership of what happens next |
-| `superseded` | A later finding subsumes this one; the row stays, naming the finding that replaced it, because deleting it would erase the history a reader needs |
+| Status | Meaning | `Superseded by` |
+|---|---|---|
+| `open` | Recorded and reproducible; not yet triaged by a maintainer. This is what every finding starts as | must be `—` |
+| `acknowledged` | A maintainer has confirmed the finding — read the evidence, reproduced or accepted it, and taken ownership of what happens next | must be `—` |
+| `superseded` | A later finding subsumes this one; the row stays, because deleting it would erase the history a reader needs | **required**: the `F-NNNN-<slug>` identifier of the finding that replaced it |
+
+**`superseded` is only meaningful with its replacement named, so the `Superseded by` column is
+mandatory for it and must be `—` for the other two.** A row saying only that something newer
+subsumed it sends a reader looking for a successor the register never identifies — which is the same
+broken deliverable as a row pointing at a directory that does not exist, one step removed. Three
+rules make the pointer trustworthy:
+
+- The named identifier must be a row **in this same table**, so the successor is reachable by
+  reading rather than by searching version control.
+- The named identifier must **not** itself be `superseded` by the row that names it. A cycle of two
+  rows each deferring to the other identifies no live finding at all.
+- A superseded row keeps its own `Artifact directory` and its own evidence. Superseding is a
+  statement about which investigation to read *first*, never a licence to delete the earlier
+  directory — §5.2's completeness check applies to it exactly as to a live one.
+
+Record the supersession in §7.4 by date and description as well, so the reason one finding replaced
+another survives outside a single table cell.
 
 **There is deliberately no `fixed` status.** Fixing is out of scope for this work by requirement 6
 and constraint C1, so a fix is something this suite can neither perform nor witness. A maintainer
@@ -156,15 +205,23 @@ the rendered table.
 
 **The generated directory name is a different thing, on purpose.** A run does not allocate register
 identifiers: it names each transient directory from the divergence itself — a stable digest together
-with the cell's own identity, the oracle letter and the divergence class — so that the same
-divergence always names the same directory, two different divergences can never collide and
-overwrite one another's evidence, and no counter is consulted. That last property is a correctness
-requirement rather than a preference: the fourteen feature-area tests run concurrently in one
-process, so a shared counter would be a data race *and* would make a name depend on thread
-scheduling. The exact spelling of the generated name is documented once, in
-[`README.md`](README.md#the-finding-identifier) and
+with the cell's own identity and the divergence class — so that the same divergence always names the
+same directory, two different divergences can never collide and overwrite one another's evidence,
+and no counter is consulted. That last property is a correctness requirement rather than a
+preference: the fourteen feature-area tests run concurrently in one process, so a shared counter
+would be a data race *and* would make a name depend on thread scheduling. The exact spelling of the
+generated name is documented once, in [`README.md`](README.md#the-finding-identifier) and
 [`findings.rs`](../conformance_harness/findings.rs), and is deliberately not restated here so the
 two cannot disagree.
+
+**One divergence is filed once, however many oracles saw it.** The oracle is deliberately *not*
+part of that name. A cell whose build was refused is refused for oracle (a), for oracle (b) and for
+oracle (c) alike — one root cause seen through three windows — and naming per oracle gave each
+window its own directory holding another copy of the same reproducer, record, commands, fingerprint
+and diagnostics (measured: 33 directories for 12 divergences). The set of oracles that observed it
+is recorded *inside* the manifest instead, on its `observed_by` line, and the single directory then
+holds the **union** of their authority captures: more evidence, in one place, at a third of the
+size.
 
 The two are tied together by the artifact itself: curation keeps the generated
 `finding_id` and `identity_digest` lines in `MANIFEST.txt` intact, so a curated directory can always
@@ -179,32 +236,72 @@ reproducer, `commands.sh` and `environment.txt` are sufficient on their own.
 
 Seven artifacts, and all seven are required. A directory missing one is not a finding; it is a
 half-recorded observation, and the suite treats a finding whose artifacts could not be written as a
-FAIL rather than downgrading it to a silent pass.
+FAIL rather than downgrading it to a silent pass. Seven is also the **complete** set: nothing else
+belongs in a curated directory, which is what makes a stray file visible in review (§5.3).
+
+**Every one of the seven is committed, so every one is read for disclosure before it lands.** A
+transient finding directory is git-ignored and describes its machine freely; a curated one is public
+and permanent. §5.3 is the mandatory review that stands between the two, and §5.2 is the check that
+the artifacts describe the program actually in the directory.
+
+**All seven are re-checked against disk immediately before a report advertises them, and a shortfall
+fails the run.** Completeness is established twice, at two different instants, because they are two
+different claims. The findings writer proves it at the moment of publication — that is the claim that
+the directory *was* written completely. The reporting path proves it again immediately before the bytes
+that name the directory are written, for both the per-area report and the run summary — that is the
+claim the artifact itself makes to a reader who opens it later. Every one of the seven names is checked
+without following a symbolic link, since a finding's directory name is derived deterministically from
+the divergence and is therefore predictable to anything that might plant one, and `outputs/` is
+additionally required to hold at least one capture: an empty captures directory satisfies every
+existence test and delivers nothing. A shortfall is reported in the artifact's own diagnostics **and**
+fails the area or the summary that would have advertised it, so a row reading `FINDING` can never be an
+empty promise. It is a defect in the **suite**, never an observation about the compiler, so the
+correction is never a compiler source change.
 
 | Artifact | Content | Why it exists |
 |---|---|---|
 | `reproducer.c` | The program, **minimized as far as practical** while still provoking the divergence | The divergence has to be *in* something. A reproducer no larger than the difference needs is what makes the observation readable in one sitting |
 | `reproducer.expected` | Its expectation record, in the standard `.expected` format, keeping the **corpus** program's identity rather than the copy's path (§5.2) | Keeps the finding **runnable by the harness**, so it can be re-checked over time instead of becoming a static curiosity that nobody can tell is still true |
 | `MANIFEST.txt` | The finding identifier, the affected area and program, the divergence class, **which oracles and which cells diverged**, and a one-paragraph description of the observed difference | The one file to read first. Everything else in the directory is evidence; this is the account of what the evidence shows |
-| `commands.sh` | **Exact, copy-pasteable compile and run lines for every cell involved**, runnable as `sh commands.sh` | This is the artifact that satisfies requirement 6's *"the exact reproduction commands"* — and it does so **without the harness, without Cargo and without a Rust toolchain** |
-| `outputs/<oracle>-<target>-<opt>.{stdout,exit,stderr}` | The captured output from each compiler and each backend involved | Evidence, byte for byte. A description of a difference is not the difference; the captures are what a second reader checks the description against |
-| `environment.txt` | The fingerprint: the `bcc` version, the reference compiler version, each cross-driver version, each emulator version, and the kernel identification | Lets a divergence be attributed to **toolchain drift rather than to the compiler** — see §3.3 |
+| `commands.sh` | **Exact, copy-pasteable compile and run lines for every cell involved**, runnable as `sh commands.sh` from inside the finding directory, with **relative paths only** (§5.3) | This is the artifact that satisfies requirement 6's *"the exact reproduction commands"* — and it does so **without the harness, without Cargo and without a Rust toolchain** |
+| `outputs/<side>-<target>-<opt>.{stdout,exit,stderr}` and, whenever there was a build, `outputs/<side>-<target>-<opt>.compile.{stdout,stderr,exit}` | The captured output from each side involved — the **program's** three streams in the first group and the **compiler's** own three in the second, all **produced from the reproducer this directory contains** (§5.2). `<side>` is `bcc` for the compiler under test or the oracle's letter `a`, `b` or `c` for the authority it was judged against (§3.1) | Evidence, byte for byte. A description of a difference is not the difference; the captures are what a second reader checks the description against. The runtime and compile groups are kept apart so that opening a `.stderr` never requires working out first whether that side's build succeeded |
+| `environment.txt` | The fingerprint: the `bcc` version, the reference compiler version, each cross-driver version, each emulator version, and the kernel identification — the last written **without the host's node name** (§5.3) | Lets a divergence be attributed to **toolchain drift rather than to the compiler** — see §3.3 |
+
 | `diff.txt` | The computed difference, with the **first divergent line and byte offset** highlighted | Turns "these two outputs differ" into "they part company here", which is where investigation actually starts |
 
 `reproducer.c` is still a corpus program and every corpus authoring rule still binds it. In
-particular it must hand-declare `int printf(const char *, ...);` and **include no header** — the
-sanctioned exception being `<stdarg.h>` for a variadic program — print a fixed, deterministic,
-multi-line sequence, print no addresses or pointer values, and be free of undefined and unspecified
-behaviour. Those rules are stated in full under
-[Corpus authoring rules](README.md#corpus-authoring-rules); the reason the header rule exists is
-that `bcc` ships no `stdio.h`, so an `#include <stdio.h>` would fail against `bcc` while succeeding
+particular it must hand-declare `int printf(const char *, ...);` and **include no header** beyond the
+two sanctioned exceptions, print a fixed, deterministic, multi-line sequence, print no addresses or
+pointer values, and be free of undefined and unspecified behaviour. Those rules are stated in full
+under [Corpus authoring rules](README.md#corpus-authoring-rules).
+
+An exception travels with the corpus program the reproducer was minimized from, and a reproducer may
+never claim one its corpus program did not hold:
+
+- **`<stdarg.h>`, and nothing else**, when the corpus program is in `07_variadics` — a variadic
+  function cannot be written at all without `va_list` and its macros.
+- **The nine required bundled freestanding headers** — `stddef.h`, `stdint.h`, `stdarg.h`,
+  `stdbool.h`, `limits.h`, `float.h`, `stdalign.h`, `stdnoreturn.h` and `iso646.h` — when the corpus
+  program is
+  [`12_preprocessor/003_bundled_header_inclusion.c`](12_preprocessor/003_bundled_header_inclusion.c),
+  the suite's dedicated probe for the bundled header set and the only program that exercises
+  `include/` at all. A divergence in that probe is very likely to be *about* a header, so a reproducer
+  forbidden from including one could not exhibit it. Minimization may narrow the set to the headers
+  the divergence actually needs; it may not widen it, and it may not reach for a header the probe
+  itself does not include.
+
+Both exceptions, their reasons and their shared obligations are stated under
+[The two sanctioned header exceptions](README.md#the-two-sanctioned-header-exceptions), and a
+reproducer taking either must state the exception and its reason in its own `ub_notes` exactly as the
+corpus program does. Everything else stays forbidden, `stdio.h` first among them and without
+exception: `bcc` ships none, so an `#include <stdio.h>` would fail against `bcc` while succeeding
 against the reference compiler — a spurious divergence caused by the test rather than by the
-compiler, which is the worst possible thing to find in a finding.
+compiler, which is the worst possible thing to find in a finding. The bonus `stdatomic.h` is excluded
+from both exceptions for the reason given there.
 
 ### 3.1 Reading an `outputs/` name
 
-Every entry is `<side>-<target>-<opt>` plus an extension, where `<side>` is the leading token
-written `<oracle>` in the table above:
+Every entry is `<side>-<target>-<opt>` plus an extension, spelled the same way in the table above:
 
 - **`<side>`** is `bcc` for the compiler under test — the *subject* of every comparison — or the
   oracle's own letter `a`, `b` or `c` for the *authority* it was judged against. A name therefore
@@ -259,9 +356,27 @@ mitigated* with *"version pinning recommended for stability"*. A finding that tu
 an emulator upgrade is a finding correctly *closed*, and it can only be closed that way if somebody
 wrote down which emulator it was.
 
-`environment.txt` is also one of exactly two artifacts that legitimately differ between two runs of
-one unchanged divergence — it is a fact about the run, not about the divergence — which is why
-everything else in the directory can be diffed across runs and any difference read as real.
+`environment.txt` is also one of exactly two artifact classes that legitimately differ between two
+runs of one unchanged divergence, and both name them:
+
+| Differs | Why it is kept anyway |
+|---|---|
+| `environment.txt` | The tool versions and this run's own token are precisely what lets a later reader tell a toolchain change from a compiler change |
+| The `duration_ms` field of the `.exit` and `.compile.exit` records under `outputs/` | A duration is part of a capture, and for a timeout it *is* the evidence. Timing telemetry is confined to these two records and kept out of every other artifact |
+
+Everything else is a pure function of the divergence: for one unchanged divergence, two runs produce
+the same identifier, the same file set, and byte-identical `reproducer.c`, `reproducer.expected`,
+`MANIFEST.txt`, `commands.sh`, `diff.txt` and `.stdout`/`.stderr` captures. That is why the rest of
+the directory can be diffed across runs and any difference read as real — and it is the same
+statement [`README.md`](README.md) makes about the two-run diff, kept in step here deliberately.
+
+**The curated copy identifies the kernel without identifying the machine.** The generated
+fingerprint takes its kernel line from a full `uname -a` banner, whose second field is the host's
+node name; a curated `environment.txt` must not carry it. Every fact this artifact exists for — the
+kernel release and version, the machine architecture, and each tool's version — survives the
+substitution, so dropping the node name costs the fingerprint nothing and is not a redaction of
+evidence. The exact form to use, and the rest of the disclosure review that governs a committed
+finding, are in §5.3.
 
 ## 4. The transient-versus-curated split
 
@@ -271,7 +386,7 @@ deliverable.
 | Set | Location | Written by | Committed? |
 |---|---|---|---|
 | **Curated** | `tests/conformance/findings/F-NNNN-<slug>/`, indexed by this file | a **human**, after review | Yes — this is the durable deliverable |
-| **Transient** | `target/conformance-findings/`, one directory per finding of the current run | the harness, on every run | No — git-ignored, beneath the build directory |
+| **Transient** | `target/conformance-findings/`, one directory per divergence of the current run — per cell and class, not per oracle (§2) | the harness, on every run | No — git-ignored, beneath the build directory |
 
 Two further transient trees belong to the same run and are named here because a maintainer
 investigating a finding will want them:
@@ -287,6 +402,32 @@ reading only, every write a run performs is beneath the build directory and re-c
 root immediately before the bytes are published, and the report and generated-finding roots are
 emptied whole at the start of every run so that one run's summary can never aggregate another's
 results.
+
+That guarantee rests on the build root being somewhere a run may legitimately empty, which is not
+something the environment can be trusted to arrange: `CARGO_TARGET_DIR` is an ordinary variable, and
+pointed at `tests/` it would make "beneath the build directory" and "inside the committed corpus"
+the same place — at which point emptying a root whole would delete committed test material rather
+than last run's output. **The build root is therefore validated before anything is created or
+removed under it**: its existing prefix is canonicalized, so no symlink or `..` component can
+redirect it after the check, and the result is rejected outright if it *is* the package root, if it
+contains the package root, or if it is or contains the committed test tree or the curated finding
+set. A build root *inside* the package is fine and is the default — `<package>/target` — because
+`target` is git-ignored; what is refused is a build root that overlaps something committed. A
+rejected configuration fails the run with the offending path named, rather than being silently
+substituted, because a maintainer who set the variable deliberately needs to know it was refused.
+
+**A run's finding artifacts are bounded, and the bound refuses rather than prunes.** The matrix has
+1,296 cells and a compiler that diverges everywhere files a directory for every divergence, so three
+ceilings apply: one artifact, one finding directory, and everything one run files — plus a ceiling
+on the number of directories, set above the number of cells so a wholly-diverging run still files
+all of them. The policy is deliberately the opposite of the one the per-cell workspaces use. A
+retained workspace is *optional* evidence, so exceeding its ceiling prunes and says so; a finding's
+artifacts **are** the deliverable, and a directory missing its captures is not a smaller finding but
+one that cannot be acted on. Exceeding a findings ceiling therefore **fails that cell loudly**,
+naming the ceiling and the run's totals, and writes nothing — a refused finding leaves no partial
+directory behind. Every run states the accounting in `target/conformance-report/summary.md`, so a
+run that came anywhere near a ceiling says so before a maintainer has to work it out from the
+filesystem.
 
 **Curating a finding is therefore a deliberate human act**, and that is the payoff: copy the
 relevant artifacts out of `target/conformance-findings/` into `tests/conformance/findings/`,
@@ -309,7 +450,7 @@ survives the run — the place a reader goes to ask *"what has this suite ever f
 
 ## 5. Curating a finding
 
-Eight steps. Every one is required, and skipping any of them produces a register row that cannot be
+Ten steps. Every one is required, and skipping any of them produces a register row that cannot be
 trusted.
 
 1. **Run the suite and read the verdicts.** `cargo test --test conformance` and then
@@ -326,25 +467,60 @@ trusted.
    rewritten rather than filed.
 3. **Check it is genuinely undocumented.** Search `docs/technical-specifications.md` and
    `docs/project-guide.md` for a limitation that actually covers the observation. **If one exists,
-   this is an expected divergence and not a finding**: add the five-key marker to the program's own
+   this is an expected divergence and not a finding**: add the seven-key marker to the program's own
    `.expected` record and register it in
    [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) instead, then stop. Note the asymmetry
    carefully, because it is the step most easily got wrong in the other direction too: an
    **omission** from a documented inventory is *not* a documented limitation. It records that
    nothing mentions the construct, not that the implementation rejects it — so an omission leaves
    the observation exactly where it was, a finding.
-4. **Minimize the reproducer** as far as practical while it still provokes the divergence, keeping
-   every corpus authoring rule intact (§5.1).
-5. **Allocate the next `F-NNNN-<slug>` identifier** — the next unused four-digit number, ascending,
-   never a reused one — and create `tests/conformance/findings/F-NNNN-<slug>/`.
-6. **Populate all seven artifacts** from §3. Copy the captures, the fingerprint and the diff out of
-   the transient directory rather than reconstructing them; keep `MANIFEST.txt`'s generated
-   `finding_id` and `identity_digest` lines so the curated directory stays traceable to the run that
-   produced it; and update its description if minimization changed what the reproducer does.
-7. **Add one row to the register** in §2, with `Status` = `open`.
-8. **Do not modify the compiler.** Requirement 6 and constraint C1 both forbid it (§1.1). If the
-   finding suggests a fix, that suggestion belongs in the manifest's description, where a maintainer
-   will read it.
+
+   **There is no exception to that asymmetry, and the one that used to be claimed is now the
+   worked counter-example.** A marker was once minted for
+   [`08_gcc_extensions/004_case_ranges.c`](08_gcc_extensions/004_case_ranges.c) on an **omission**
+   from the documented extension inventory and in **anticipation** of a rejection nobody had
+   observed. It has been retired, and the marker contract now refuses both of those shapes at parse
+   time: a basis must quote a sentence that states the limitation, and the evidence must be a
+   captured observation. **No marker may be minted on an omission, and none in anticipation of a
+   divergence** — that a specification names an identifier in advance is not one of the two
+   conditions and cannot substitute for either. The full analysis, including what shape of basis and
+   what oracle scope a future marker on that program would have to carry, is in
+   [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.1.
+
+**The regeneration rule, stated once and applying to every curated finding.** *Minimization changes
+the program, so every artifact derived from the program must be produced again from the minimized
+copy — never copied forward from the transient directory.* A transient capture was produced from the
+**corpus** program; once step 4 has edited a byte, that capture is evidence about a different
+program than the one in the directory, and a directory whose `outputs/` describe a program it does
+not contain is worse than one with no captures at all, because it reads as evidence and is not.
+
+Concretely, after any minimization:
+
+- **Regenerate `commands.sh`** so its compile and run lines name `reproducer.c`, and confirm it runs
+  as `sh commands.sh` in a clean shell (§5.2).
+- **Regenerate every `outputs/` capture by re-running those exact commands.** That means **both**
+  producers on each oracle-(a) cell — the compiler under test *and* the reference compiler — and
+  both their program streams and their `.compile.*` streams. Capturing one side and copying the
+  other forward is the specific mistake this paragraph exists to prevent: the two would then
+  describe different programs, and the diff between them would be an artifact of curation rather
+  than an observation about a compiler. The same applies cell by cell to an oracle-(b) finding,
+  where the baseline capture and the diverging target's capture must both come from the minimized
+  program.
+- **Recompute `diff.txt`** from the regenerated captures, so its first divergent line and byte
+  offset refer to bytes that are actually in the directory.
+- **Regenerate `reproducer.expected`'s `expected_stdout`** from the minimized program's real output,
+  and re-check every other key against §5.2. A golden left over from the original program makes the
+  finding unloadable or, worse, loadable and wrong.
+- **Regenerate `environment.txt`** on the machine where you re-ran the commands, so the fingerprint
+  describes the run that produced the captures now in the directory.
+- **Re-confirm the minimized program still passes both undefined-behaviour gates (§6.3).** Reduction
+  very readily introduces undefined behaviour — removing a bound, an initializer or a `volatile` is
+  exactly what a reducer does — and a reduced program with undefined behaviour is not a smaller
+  finding, it is not a finding at all.
+
+If a minimized reproducer no longer provokes the divergence, **keep the verbatim copy** and record
+the minimization status as verbatim in the manifest. A larger reproducer that reproduces beats a
+smaller one that does not.
 
 ### 5.1 Minimization guidance
 
@@ -375,12 +551,38 @@ little left to remove.
 
 ### 5.2 Verify after curating
 
-Two checks, both cheap, both catching a class of broken deliverable that is otherwise found by the
-next reader.
+Three checks, all cheap, each catching a class of broken deliverable that is otherwise found by the
+next reader. The third runs itself.
+
+**The suite still passes.** `cargo test --test conformance infra_expected_divergence_register`
+audits every directory in the curated set on every run and fails if any of four things is wrong: an
+artifact from §3 is **missing** (or is a symlink, which is never followed); the directory name and
+the manifest's `finding_id` **disagree**, which is how a copied-and-renamed directory is caught;
+the reproducer no longer matches the digest recorded for it in `MANIFEST.txt`, which is how a
+**minimization that was not followed by refreshing the rest of the directory** is caught; or a text
+artifact **discloses** an absolute root or a secret (step 7). Each failure names the directory, the
+artifact and what to do about it, so this check is a proofreader rather than a gate to argue with.
 
 **The finding still reproduces from `commands.sh` alone**, in a clean shell, with no harness, no
 Cargo and no Rust toolchain on the path. If it does not, the curated directory is not a reproducer —
 it is a story about one.
+
+**Every artifact describes the program that is in the directory.** This is the check that catches a
+missed regeneration (step 6), and it is worth running mechanically rather than by eye, because a
+stale capture looks exactly like a fresh one:
+
+- `commands.sh` names `reproducer.c` and nothing else, and every path it mentions is relative to the
+  finding directory;
+- re-running `commands.sh` reproduces each `outputs/*.stdout` and each `outputs/*.exit`
+  **byte for byte** — for every side of every cell, not a sampled one;
+- `diff.txt`'s quoted bytes and its first-divergence offset are present in the captures beside it;
+- `reproducer.expected`'s `expected_stdout` equals the minimized program's real output on the
+  baseline cell;
+- `MANIFEST.txt`'s description describes the minimized program, and its minimization status says
+  which of verbatim or minimized the directory actually holds.
+
+A mismatch in any of these means an artifact was carried forward from the transient directory after
+the program changed. Regenerate it — do not adjust the description to fit.
 
 **`reproducer.expected` parses**, through the harness's replay loader for a finding artifact. Every
 rule of the record format applies unchanged; the ones most easily broken while copying a record into
@@ -411,6 +613,73 @@ a finding directory are:
 The full list of hard errors the parser enforces is in
 [`README.md`](README.md#every-validation-the-parser-enforces).
 
+### 5.3 Disclosure review — mandatory before committing
+
+**A curated finding is committed, public and durable; a transient one is neither.** Everything under
+`target/conformance-findings/` is git-ignored and describes the machine that produced it as freely
+as it likes. The moment a directory is copied into `tests/conformance/findings/` that stops being
+acceptable, and there is no later step at which it can be undone: a commit is history. This review
+is therefore **step 7 of §5 and is required**, not advisory, and it is required even when the
+finding came from a machine the curator believes to be uninteresting.
+
+**Read every file in the directory, not a sample.** The seven artifacts differ in how likely they
+are to carry something, and two carry it almost every time:
+
+| Artifact | What to look for |
+|---|---|
+| `environment.txt` | The **host name** — the kernel line is the usual carrier, because a full `uname -a` banner begins with the node name; also account names and absolute home or build paths inside a tool's version banner |
+| `commands.sh` | **Absolute paths** into a home directory, a workspace root, a CI checkout path, or a temporary directory whose name encodes a run or job identifier; also any tool invoked by an absolute path that reveals where it was installed |
+| `outputs/*.compile.stderr` | Diagnostics quote **include paths and source paths verbatim**, and a rejected build usually quotes several |
+| `outputs/*.stderr`, `outputs/*.stdout` | A corpus program prints only literals, so anything path-like here is a signal that the reproducer broke a corpus rule and should be re-read against §3 |
+| `MANIFEST.txt` | Prose a curator wrote by hand — the one artifact where a ticket number, an internal host name or a colleague's name can arrive without any tool putting it there |
+| `reproducer.c`, `reproducer.expected` | Comments and notes added during minimization |
+| `diff.txt` | Quotes bytes from the captures, so it inherits whatever they carry |
+
+**Three things must never be committed, in any artifact:** a credential of any kind — a token, key,
+password or session identifier; personal data — an account name, a real name, an email address, or
+anything else identifying a person; and an infrastructure identifier that is not needed to reproduce
+the finding — a node or host name, a container or pod name, an internal address, a job or run
+identifier, or an absolute path that encodes any of them.
+
+**Redact by replacing, never by deleting, and never in a way that changes what the evidence says.**
+The evidence is the deliverable, so a redaction that removes a byte a comparison depended on has
+destroyed the finding to protect the machine:
+
+- Replace a removed value with a **stable, obviously-substituted placeholder** — `<redacted-host>`,
+  `<redacted-path>` — so a reader can tell that something was removed rather than that nothing was
+  there. A silently deleted line reads as evidence of absence.
+- **Never redact inside `outputs/*.stdout` or `outputs/*.exit`.** Those are the compared bytes: the
+  divergence *is* the difference between them, and editing either makes the finding unfalsifiable.
+  If a program's own stdout carries something that cannot be published, the reproducer violates a
+  corpus authoring rule and the correct fix is to rewrite the program and re-capture, not to edit
+  the capture.
+- When a path must go from `commands.sh`, replace it with a **relative path that still runs** — the
+  script has to work as `sh commands.sh` from inside the finding directory, and §5.2 re-checks
+  exactly that. A redaction that breaks the script fails the check rather than passing quietly.
+- Record in `MANIFEST.txt` that a redaction was made and which artifacts it touched. A reader
+  comparing two curated findings needs to know that a placeholder is a curation act and not a tool's
+  output.
+
+**Write the kernel line nodename-free in the first place.** The generated fingerprint identifies the
+host with the full `uname -a` banner, whose second field is the node name, so a copied line
+publishes it. When regenerating `environment.txt` during curation (step 6), take the kernel
+identification from a form that does not include the node name at all:
+
+```sh
+uname -srvmo          # system, release, version, machine, operating system — no nodename
+```
+
+That keeps every fact the fingerprint exists for — the kernel release and version, the machine
+architecture — while carrying nothing that identifies the machine, which is why it is a substitution
+rather than a redaction. The transient fingerprint is untouched by this: it is git-ignored, it is
+what the harness needs for its own reconciliation, and a full banner there costs nothing.
+
+**Before committing, re-read the diff rather than the directory.** `git diff --cached` over the
+finding directory is the last artifact anyone sees, and it is the one place a stray file — an editor
+backup, a `.orig` from a failed patch, a scratch capture from a run you no longer remember — becomes
+visible. §3's seven artifacts are the complete set; anything else in the directory is not part of
+the deliverable and should not be committed.
+
 ## 6. Where the corpus concentrates divergence surface
 
 This section is **triage orientation, not prediction.** It does not claim these constructs are
@@ -423,18 +692,28 @@ observable behaviour has the most room to differ:
 
 | Program | Why it is high-yield |
 |---|---|
-| [`04_bitfields/005_straddling_and_zero_width.c`](04_bitfields/005_straddling_and_zero_width.c) | Fields straddling a storage-unit boundary, and zero-width separators. See the measurement note below — this is the clearest case in the corpus where a cross-backend divergence is a **genuine finding** rather than an implementation-defined difference |
+| [`04_bitfields/005_straddling_and_zero_width.c`](04_bitfields/005_straddling_and_zero_width.c) | Fields straddling a storage-unit boundary, and zero-width separators. Bitfield layout is implementation-defined, yet the four target toolchains were **measured** to agree on size, alignment and byte image — so a cross-backend divergence here is unusually informative and must not be waved away as a layout choice. §6.1 gives the triage order, which starts with the same-target reference comparison rather than with a conclusion |
 | [`07_variadics/006_many_args_stack_spill.c`](07_variadics/006_many_args_stack_spill.c) | Enough arguments to exhaust every argument register on every target and force stack spill |
 | [`08_gcc_extensions/003_computed_goto.c`](08_gcc_extensions/003_computed_goto.c) | An indirect jump through an array of label addresses — the construct most likely to interact with indirect-branch hardening |
 | [`10_declarations_and_types/005_struct_copy_and_return.c`](10_declarations_and_types/005_struct_copy_and_return.c) | By-value aggregate copy, parameter passing and return, where calling conventions differ most visibly between architectures |
-| `14_abi_calling_convention/` — the whole area | The densest concentration of divergence surface in the corpus: register-exhausting parameter counts, aggregates on both sides of every by-register versus by-memory threshold, by-value aggregate return, and deep call chains forcing callee-saved spill and restore. **Planned, not present on this branch**, so it is named rather than linked |
+| [`14_abi_calling_convention/`](14_abi_calling_convention/) — the whole area | The densest concentration of divergence surface in the corpus: register-exhausting parameter counts ([001](14_abi_calling_convention/001_many_integer_parameters.c), [002](14_abi_calling_convention/002_many_float_parameters.c), [003](14_abi_calling_convention/003_mixed_parameter_classes.c)), aggregates on both sides of every by-register versus by-memory threshold ([004](14_abi_calling_convention/004_small_and_large_struct_passing.c)), by-value aggregate return ([005](14_abi_calling_convention/005_struct_return_by_value.c)), and deep call chains forcing callee-saved spill and restore ([006](14_abi_calling_convention/006_nested_calls_callee_saved.c)). All six programs are committed with their expectation records — six programs, 198 comparisons |
+| [`14_abi_calling_convention/006_nested_calls_callee_saved.c`](14_abi_calling_convention/006_nested_calls_callee_saved.c) | Nine nested frames, each keeping ten values live across its nested call and printing them only afterwards — the shape that detects a clobbered callee-saved register and localises it to the exact frame |
+| [`14_abi_calling_convention/005_struct_return_by_value.c`](14_abi_calling_convention/005_struct_return_by_value.c) | Aggregate return by value across seven shapes and three consumption paths, in both variants — 42 shape-path-variant combinations, where the four ABIs' return mechanisms differ most |
+| [`14_abi_calling_convention/004_small_and_large_struct_passing.c`](14_abi_calling_convention/004_small_and_large_struct_passing.c) | Aggregates on both sides of every target's by-register versus by-memory threshold, every member of every shape read back |
+| [`14_abi_calling_convention/003_mixed_parameter_classes.c`](14_abi_calling_convention/003_mixed_parameter_classes.c) | Twenty-six interleaved integer, floating, pointer and aggregate parameters, forcing each ABI to advance both allocators independently and in step |
 
 Three more worth naming, for different reasons:
 
 - [`01_integer_conversions/004_narrowing_conversions.c`](01_integer_conversions/004_narrowing_conversions.c)
   — narrowing at the destination range edge, in both a folded and a `volatile`-runtime variant. It
-  is also the one program in the corpus that declares a warning-gate deviation, so a divergence
-  here should be read together with its `impl_defined_notes`.
+  is the one program outside `08_gcc_extensions` that declares a warning-gate deviation — it drops the
+  two conversion diagnostics, because a narrowing conversion is the behaviour under test — so a
+  divergence here should be read together with its `impl_defined_notes`.
+- [`13_floating_point/004_long_double_target_restricted.c`](13_floating_point/004_long_double_target_restricted.c)
+  — the one program in the corpus that switches an oracle off. Oracle (b) is disabled with the measured
+  reason recorded in its `impl_defined_notes`, because `long double` has no single representation across
+  the four backends, so its nine cross-backend cells are reported `XFAIL` with that reason rather than
+  compared. Oracles (a) and (c) are fully in force, so a divergence there is a finding like any other.
 - [`04_bitfields/003_compound_assignment.c`](04_bitfields/003_compound_assignment.c) — compound
   assignment applied to bitfields, a construct requirement 2 names explicitly and one that combines
   a read-modify-write with a non-byte-aligned field.
@@ -444,14 +723,42 @@ Three more worth naming, for different reasons:
 
 ### 6.1 The bitfield measurement, and why it matters here
 
-Bitfield layout looks like the archetypal implementation-defined difference, and for this corpus it
-is not. Bitfield **size, alignment and the exact byte image** of a straddling three-, five- and
-nine-bit sequence were **measured identical on all four targets**, as were the read-back values and
-the minimum value of a narrow signed field.
+Bitfield layout **is** implementation-defined, and nothing in this section claims otherwise. C11
+6.7.2.1p11 leaves the allocation order of bitfields within a storage unit implementation-defined,
+and leaves it implementation-defined whether a field that does not fit in the remainder of a unit
+straddles into the next one or moves to a fresh one. Endianness fixes the byte order of a storage
+unit but not which end of it fields are allocated from, so little-endianness alone derives nothing
+about a byte image, and neither does a common `int` width.
 
-Bitfields therefore need **no target restriction at all**, and the consequence for triage is direct:
-a cross-backend bitfield divergence is a **genuine finding**, not something to be waved away as a
-layout choice. That inversion is exactly why area `04_bitfields` earns two entries above.
+What makes the area unusually informative is a **measurement**, not a derivation. Bitfield **size,
+alignment and the exact byte image** of a straddling three-, five- and nine-bit sequence were
+measured **identical across all four target toolchains**, as were the read-back values and the
+minimum value of a narrow signed field. That is agreement between four independently specified ABIs,
+observed rather than inherited from the language — which is why the corpus applies **no target
+restriction** here and leaves all three oracles enabled, and why the expectations in
+[`04_bitfields/005_straddling_and_zero_width.expected`](04_bitfields/005_straddling_and_zero_width.expected)
+are stated as measured target-toolchain expectations rather than as language invariants.
+
+**The consequence for triage is a procedure, not a verdict.** A cross-backend bitfield divergence is
+worth investigating and must not be waved away as a layout choice — but on its own it is not yet a
+defect in `bcc`, because the property the backends are being held to is an ABI convention. Work
+through it in this order:
+
+1. **Compare the diverging target against its own reference compiler — oracle (a).** If `bcc` and
+   the same-target reference toolchain agree, and only the cross-target comparison differs, the
+   observation is about the two ABIs rather than about `bcc`, and there is no finding against the
+   compiler.
+2. **Read the diverging target's psABI** for the bitfield allocation order and straddling rule it
+   actually specifies. The ABI, not this register and not the expectation record, is authoritative
+   for the target.
+3. **Only a divergence that survives both** — `bcc` disagreeing with its own target's reference
+   compiler, or with the order that target's ABI specifies — is a finding against `bcc`. Record
+   which of the two it was in the manifest, because the two lead a maintainer to different code.
+
+Should a toolchain in the set ever change its bitfield layout, the measured basis stops holding and
+the record's expectations must be re-derived for that target rather than read as a regression. That
+possibility is why the basis is stated as measurement in the first place, and it is why area
+`04_bitfields` earns two entries above.
 
 ### 6.2 Repository open items a finding may substantiate
 
@@ -463,12 +770,18 @@ finding landing in either one is evidence for a question the project has already
 | Remaining-work item *"C11 Standard Corner Case Compliance Testing"*, 5 hours, Medium priority | `docs/project-guide.md` line 111 |
 | Open risk *"C11 corner case non-compliance"* — *"edge cases in complex declarators and type conversions may remain"*, status *Open — Requires targeted testing* | `docs/project-guide.md` line 248 |
 
-Worth knowing while triaging, and easy to get wrong from memory: **no expected-divergence marker is
-active anywhere in the corpus on this branch.** Constructs a reader might expect to be excused are
-not — GCC case ranges carry no marker (one was minted on an inventory omission and then withdrawn
-without the divergence it described ever having been observed), and neither do the wide and Unicode
-literal prefixes. A divergence in any of them is therefore a **FINDING**, not an XFAIL. The analysis
-behind each of those decisions is in [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.
+Worth knowing while triaging, and easy to get wrong from memory: **no expected-divergence marker
+is active anywhere in the corpus**, and the register's own audit re-establishes that on every run,
+reporting zero markers and zero registered identifiers in both directions. Three constructs a reader
+might expect to be excused are not. GCC case ranges carry no marker — one was minted on an inventory
+omission, in anticipation of a rejection nobody had observed, and it has been retired
+([`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §8.3); a refusal there is a **FINDING**, and so
+is a wrong answer. The wide and Unicode literal prefixes carry no marker either. And `long double`
+carries none: its record instead disables **oracle (b) alone**, for a measured and recorded reason,
+so its nine cross-backend comparisons are not attempted rather than excused, while oracles (a) and
+(c) still judge it on all twelve cells. A divergence anywhere in the corpus is therefore a
+**FINDING**, not an XFAIL. The analysis behind each of those decisions is in
+[`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.
 
 ### 6.3 The precondition: a divergence is only meaningful if the program is UB-free
 
@@ -506,14 +819,21 @@ where an author states why the construct is safe — which is the fastest way to
 not.
 
 **Confirm the gate was actually *performed*, not merely that it exists.** The audit enumerates the
-corpus **globally**, across all fourteen declared feature areas, precisely so that a program can
-never be dropped from it quietly — and three of those directories have not landed yet, so on this
-branch the enumeration fails before the first program is gated and the audit is recorded
-`UNPERFORMED`. While it is unperformed, no area completes, and a divergence observed under those
-conditions is arithmetic that ran rather than evidence that holds. The correct response is to land
-the missing material so the gate can run, not to curate a finding on an unaudited program. The audit
-prints its expected and performed figures side by side and reconciles them, so a degraded run stays
-visible rather than looking complete.
+corpus **globally**, across all fourteen declared feature areas and every program in them, precisely
+so that a program can never be dropped from it quietly — and it is the per-program **`.expected`
+record**, not the area directory, that decides whether a program can be gated: a source without its
+same-stem record leaves the warning gate undecidable, which the audit records as a **defect** rather
+than passing it. On this branch all fourteen areas are present and all 108 programs are paired, so
+the enumeration completes and the gate runs to its full 216 results. Earlier on this branch it did
+not — sixteen sources had landed without their records, so the enumeration failed before the first
+program was gated and the audit was recorded `UNPERFORMED`.
+
+That distinction is what to check, and it is not a historical footnote: while the audit is
+unperformed, **no area completes**, and a divergence observed under those conditions is arithmetic
+that ran rather than evidence that holds. The correct response is to land the missing record so the
+gate can run, **not** to curate a finding on an unaudited program. The audit prints its expected and
+performed figures side by side and reconciles them, so a degraded run stays visible rather than
+looking complete — read that reconciliation in the run summary before curating anything.
 
 ## 7. Provenance, constraints and maintenance
 
@@ -558,7 +878,7 @@ publishing one would be fabrication, and it is the same discipline that keeps §
 rather than illustrated. Where the suite's breadth has to be referenced, it is referenced as an
 **enumerable matrix**, which anyone can count from the committed file set:
 
-| Quantity | Final planned target |
+| Quantity | Design target, and present on this branch |
 |---|---:|
 | Feature areas | 14 |
 | Programs, each paired with its `.expected` record | 108 |
@@ -567,23 +887,27 @@ rather than illustrated. Where the suite's breadth has to be referenced, it is r
 | **`bcc` compile-and-run cells** | **1,296** |
 | **Differential and golden assertions across the three oracles** | **≈ 3,564** |
 
-Those are the **design target**, not a claim about what this branch has established: three of the
-fourteen area directories are not present yet, and the undefined-behaviour audit gate enumerates the
-corpus globally across all fourteen, so it cannot complete while any is missing. The suite's own
-reports carry the present and admitted figures alongside the planned ones, and
-[`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §8.2 states all three side by side with the
-commands to check them. Quoting the planned figure as though it described the present state would be
-exactly the unverifiable claim this paragraph refuses to make.
+The design target and the committed file set now agree: all fourteen area directories are present,
+all 108 sources are paired with a record, and the undefined-behaviour audit — which enumerates the
+corpus globally across all fourteen — performs to its full 216 gate results, so every area can
+complete. That agreement is an **observation about the files**, not a claim about the compiler: one
+source landing without its record would make the audit unperformable again and take the admitted
+figure to zero in the same commit, which is why [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md)
+§8.2 keeps the commands to re-check it rather than only the numbers. **Nothing in this table is
+evidence about `bcc`.** The suite has been run on this branch only against a *surrogate* compiler
+under test, which establishes that the machinery, the records and the golden records agree with one
+another and nothing more; judging `bcc` requires the real binary and the merge described in
+[`README.md`](README.md#the-cargo-integration-precondition).
 
 ### 7.3 Cross-links
 
 | Document | What it holds |
 |---|---|
 | [`README.md`](README.md) | The suite contract: the three oracles, the verdict taxonomy, the `.expected` record format, the environment variables, the artifact locations, and the procedure for reproducing any cell by hand |
-| [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) | The companion register: **documented** divergences, the five-key marker mechanism, and the bidirectional audit that keeps markers and records from drifting apart |
+| [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) | The companion register: **documented** divergences, the seven-key marker mechanism — including the affirmative-basis, quoted-authority and captured-evidence rules that a marker must satisfy — and the bidirectional audit that keeps markers and records from drifting apart |
 | [`../conformance.rs`](../conformance.rs) | The suite driver: 14 feature-area tests and 4 infrastructure tests |
 | [`../conformance_harness/`](../conformance_harness/) | The harness modules — oracle discovery, workspace isolation, record parsing, compilation, execution, comparison, classification, **finding-artifact writing** and reporting |
-| `docs/testing/differential-conformance.md` (**planned**, not yet committed — named as plain text for that reason) | The documentation-site page: methodology, oracle definitions, the build matrix, the verdict taxonomy and the deliverable summary format |
+| `docs/testing/differential-conformance.md` (**planned**, not present on this branch — named as plain text for that reason) | The documentation-site page: methodology, oracle definitions, the build matrix, the verdict taxonomy and the deliverable summary format |
 
 Those links are relative — the first two are siblings of this file, the next two sit one level up —
 so they resolve when this document is read in place. The same five, spelled from the repository root
@@ -602,4 +926,7 @@ identifier in a register is a promise that the evidence exists.
 
 | Date | Change |
 |---|---|
+| 2026-08-03 | Triage guidance and the curation rule reconciled with the corpus as it now stands, still **empty**: no register row was added or removed. The corpus is complete — fourteen areas, 108 programs, 108 expectation records, no unpaired source and no orphan record — so §6, §6.3 and §7.2 no longer describe sixteen records as outstanding and the runnable count is 108, not 92. And **no expected-divergence marker is active anywhere**: the case-range marker described in the entry below was retired, because its basis was an omission and its observation was an anticipation, and the marker contract now refuses both shapes at parse time. §5 step 3 therefore states the omission rule with **no exception**, and §6.2 records zero active markers, so a case-range divergence of any class is triaged as a **FINDING**. `long double` is unchanged: a recorded oracle-(b) exclusion in its own record, never a marker. |
+| 2026-08-02 | Contract corrections, still **empty**: the artifact table in §3 now spells the captured-output dimension `<side>` — matching §3.1 and the writer — and names the `.compile.*` compiler-capture group alongside the runtime one; the curated-reproducer rule in §3 now defers to the canonical README rule and restates **both** sanctioned header exceptions rather than only the variadic one; and the branch-state statements in §6 and §7.2 are aligned with the corpus as committed — all fourteen areas and all 108 programs present, sixteen records still to land, runnable count 92, and no expected-divergence marker active anywhere |
 | 2026-08-02 | Register created, **empty**. The curated finding set holds no directory, and the suite has recorded no undocumented divergence. The artifact contract (§3), the transient-versus-curated split (§4) and the curation procedure (§5) are established so that the first finding has a defined home and a defined shape before it is needed, rather than after |
+| 2026-08-02 | Triage guidance reconciled with the corpus. **No register row was added or removed — the curated set is still empty.** §6.2 now records that **one** marker is active — `XD-GCCEXT-CASE-RANGES-001`, class `compile_failure`, scope `all oracles; all targets; all opt levels` — rather than none, so a case-range **build refusal** is no longer triaged as a finding, while a case-range wrong answer still is. §5 step 3 now names that one mandated exception to the rule that an omission from a documented inventory is not a documented limitation, so the rule and the register can no longer read as contradicting each other; the rule itself is unchanged for every other observation. §3 now carries **both** sanctioned header exceptions a reproducer may inherit — `<stdarg.h>` for a variadic program, and the nine required bundled headers for the bundled-header probe — with `stdio.h` still forbidden without exception. And the present-state statements in §6, §6.3 and §7.2 now read *sixteen expectation records pending across three areas* rather than *three area directories absent*, which is what the file set holds |

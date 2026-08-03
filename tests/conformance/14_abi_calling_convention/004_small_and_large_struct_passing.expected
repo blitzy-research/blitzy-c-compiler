@@ -1,0 +1,213 @@
+# Expectation record for 14_abi_calling_convention/004_small_and_large_struct_passing.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 004_small_and_large_struct_passing
+area               = 14_abi_calling_convention
+description        = Aggregates passed by value on both sides of every target's by-register versus by-memory threshold: an 8-byte struct passed ten times over, four different 16-byte layouts (all-int, mixed, all-double, all-float) passed five times each, a 24-byte struct and a 40-byte struct, in a folded and a volatile-runtime variant
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction:
+- Every floating value is a dyadic rational exactly representable in binary32 and binary64
+  alike, printed with an explicit precision with room to spare, so no rounding decision is
+  taken and i686's x87 extended intermediate precision cannot perturb a result. Each float
+  member is cast to double explicitly where it is printed. No non-finite value, no negative
+  zero and no division appears.
+- No signed integer overflow; every integer member is within +/-9210 and none is
+  arithmetically combined.
+- No shift operator appears, so no shift count can be out of range.
+- PADDING DISCIPLINE, which is the central hazard for this program. sizeof is never printed
+  and no aggregate is ever memcmp'd or inspected byte-wise. Only NAMED MEMBERS are read
+  back, so the fact that the mixed int-and-double aggregate is 12 bytes on i686 (where
+  double has four-byte alignment) and 16 bytes on the other three targets cannot affect the
+  output, and no padding byte is ever read.
+- Array members are indexed only with constant indices strictly inside their bounds, so no
+  one-past-end pointer is formed and none is dereferenced.
+- No aliasing violation: every aggregate is copied whole by assignment between objects of
+  the same type, never through a converted pointer.
+- No read of uninitialized storage: every static aggregate has an initializer and every
+  staged local is assigned from its volatile counterpart before it is passed.
+- No object is modified twice between sequence points.
+- NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and this is enforced structurally
+  rather than argued. An access to a volatile object IS an observable side effect and the
+  order in which a call's arguments are evaluated is unspecified, so every volatile datum
+  is read exactly once, in a statement of its own, and only the resulting plain locals are
+  passed. Machine-checked on this branch: flattening the program into statements and
+  counting references to its volatile objects finds NO statement with more than one. The
+  snapshots cost nothing in coverage, because each is itself a load from volatile storage
+  that the optimizer may neither fold nor elide, so every value the callee receives was
+  genuinely materialised at run time and marshalled through the ABI; what changed is only
+  that the loads are now SEQUENCED rather than unordered.
+- Hermetic, as constraint C4 requires: every input is a literal in the source. Nothing is
+  opened, no socket is created, no environment variable and no program argument is read,
+  and no storage is obtained from the heap.
+- main returns 0, inside the 0-125 range the suite requires.
+- Verified empirically on this branch: the default strict warning gate
+  (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
+  diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
+  -fno-sanitize-recover=all runs to completion with empty stderr and exit status 0.
+END
+impl_defined_notes <<END
+WHICH REGISTER FILE EACH SHAPE ACTUALLY EXHAUSTS, stated per function rather than as one
+blanket claim, because the shapes do not behave alike and a single sentence about
+"exhausting the register files" would be false for two of them. Every reading below was
+MEASURED in the reference compiler's -O0 assembly for each target with a purpose-built
+probe. Slot counts are for the aggregates only; the trailing int tag is counted separately.
+System V i386 cdecl marshals every argument of every one of these calls on the stack, so it
+is not repeated per row.
+
+  take_s8x10   10 x 8-byte two-int aggregate. One integer slot each on all three 64-bit
+               ABIs, so 10 plus the tag = 11: EXHAUSTS the integer file on all three (6 on
+               AMD64, 8 on AAPCS64, 8 on LP64D) and spills. No floating slot used.
+  take_s16ix5   5 x 16-byte four-int aggregate. Two integer slots each = 10 plus the tag:
+               EXHAUSTS the integer file on all three and spills. No floating slot used.
+  take_s16mx5   5 x mixed int-and-double. The shape that makes a blanket claim wrong. AMD64
+               classifies each INTEGER + SSE, so 5 integer slots plus the tag fills EXACTLY
+               the six integer registers while using only 5 of 8 SSE -- the floating file is
+               NOT exhausted. AAPCS64 sees a non-homogeneous 16-byte aggregate and uses two
+               integer slots each = 10 plus the tag, exhausting x0-x7 and using no floating
+               ARGUMENT register at all. LP64D splits each into one integer plus one
+               floating slot, so 6 of 8 integer with the tag and 5 of 8 floating: NEITHER
+               file is exhausted there, and what the call exercises is the independent
+               advance of the two allocators.
+  take_s16dx5   5 x two-double aggregate. Two floating slots each = 10, so the FLOATING file
+               is exhausted on all three. The overflow differs, and that difference is part
+               of the point: AMD64 and AAPCS64 stack the fifth aggregate and use one integer
+               register for the tag, whereas LP64D spills the two remaining doubles into
+               INTEGER argument registers before the tag, so there the integer file carries
+               floating data as well.
+  take_s16fx5   5 x four-float aggregate. AMD64 packs each into two SSE registers = 10, so
+               the floating file is exhausted. AAPCS64 treats each as a four-float
+               homogeneous aggregate = 20 floating slots, exhausted far past the threshold.
+               LP64D declines the floating path for a 16-byte four-member aggregate and uses
+               two integer slots each = 10 plus the tag, so there it is the INTEGER file
+               that is exhausted. The same source shape exhausts different files on
+               different targets, which is exactly the disagreement worth testing.
+  take_s24x4    4 x 24-byte aggregate. Memory on every target -- AMD64 by the MEMORY class,
+               AAPCS64 and LP64D by an indirect reference -- so no file is exhausted; the
+               by-memory path itself is the subject.
+  take_sbigx2   2 x 40-byte aggregate. Unambiguously memory everywhere, for the same reason.
+
+COVERAGE OF THE BY-MEMORY SHAPES. For the 40-byte aggregate every one of the ten members is
+read back rather than a sample of three, because a copy that corrupted only an interior
+member would otherwise leave no trace in stdout and the by-memory path would be exercised
+without being observed.
+
+THE CALL BARRIER. Every call this program makes to the function whose ABI boundary is
+under test goes through a FILE-SCOPE volatile FUNCTION POINTER, and that is load-bearing
+rather than stylistic. A C11 volatile lvalue must be re-read on every access, so no
+conforming compiler may assume which function the pointer designates: it can neither
+inline the callee nor clone it, and it must marshal the arguments exactly as the ABI
+prescribes because it cannot know what will receive them. This is plain standard C rather
+than a compiler attribute, so both sides of oracle (a) honour it for the same reason and
+neither needs to support an extension for the barrier to hold. It also makes the
+function-pointer load the ONLY volatile access in each call expression, which is what
+keeps the one-side-effecting-argument rule satisfied. Measured before-state on this branch: with direct calls, gcc 13.4.0 at
+-O2 left only take_s8x10 standing -- the other six were inlined away, so six of the seven
+documented boundaries were not crossed at that level. Measured after: all seven callees are
+emitted unmodified at -O1 and -O2 on all four targets, with no .constprop and no .isra
+clone anywhere.
+
+Plain char signedness is implementation-defined and was measured as signed on x86_64 and
+i686 and unsigned on aarch64 and riscv64; no plain-char value is printed. sizeof(long) and
+sizeof(void *) were measured as 4 on i686 and 8 on x86_64, aarch64 and riscv64
+(docs/technical-specifications.md lines 457-462); no long, size_t, ptrdiff_t, intptr_t or
+pointer value is printed and no long or pointer conversion specification is used. long
+double has three different representations across the four targets (measured 16, 12, 16 and
+16 bytes; x87 80-bit versus IEEE binary128) and is absent from this program entirely --
+using it would import a difference that has nothing to do with parameter passing. That
+type is covered by 13_floating_point/004_long_double_target_restricted, whose record
+disables oracle (b) alone with the measured reason recorded and carries NO marker.
+
+No target is dropped, no oracle is disabled and this record carries no expected-divergence
+marker: a cross-backend divergence here is a GENUINE FINDING rather than an
+implementation-defined difference, because nothing implementation-defined reaches the
+output. Measured on this branch with gcc 13.4.0 and the matching i686, aarch64 and riscv64
+cross drivers, executed natively and under QEMU user-mode 10.1.0: stdout is byte-identical
+and the exit status is 0 in all twelve target-and-optimization-level cells.
+END
+expected_stdout    <<END
+s8_folded_p01 a=11 b=-12
+s8_folded_p02 a=21 b=-22
+s8_folded_p03 a=31 b=-32
+s8_folded_p04 a=41 b=-42
+s8_folded_p05 a=51 b=-52
+s8_folded_p06 a=61 b=-62
+s8_folded_p07 a=71 b=-72
+s8_folded_p08 a=81 b=-82
+s8_folded_p09 a=91 b=-92
+s8_folded_p10 a=101 b=-102
+s16i_folded_p1 a=101 b=-102 c=103 d=-104
+s16i_folded_p2 a=201 b=-202 c=203 d=-204
+s16i_folded_p3 a=301 b=-302 c=303 d=-304
+s16i_folded_p4 a=401 b=-402 c=403 d=-404
+s16i_folded_p5 a=501 b=-502 c=503 d=-504
+s16m_folded_p1 a=201 b=1.5000
+s16m_folded_p2 a=401 b=2.5000
+s16m_folded_p3 a=601 b=3.5000
+s16m_folded_p4 a=801 b=4.5000
+s16m_folded_p5 a=1001 b=5.5000
+s16d_folded_p1 x=1.2500 y=-1.7500
+s16d_folded_p2 x=2.2500 y=-2.7500
+s16d_folded_p3 x=3.2500 y=-3.7500
+s16d_folded_p4 x=4.2500 y=-4.7500
+s16d_folded_p5 x=5.2500 y=-5.7500
+s16f_folded_p1 x=1.5000 y=-1.2500 z=1.1250 w=-1.0625
+s16f_folded_p2 x=2.5000 y=-2.2500 z=2.1250 w=-2.0625
+s16f_folded_p3 x=3.5000 y=-3.2500 z=3.1250 w=-3.0625
+s16f_folded_p4 x=4.5000 y=-4.2500 z=4.1250 w=-4.0625
+s16f_folded_p5 x=5.5000 y=-5.2500 z=5.1250 w=-5.0625
+s24_folded_p1 a=1001 b=-1002 c=1003 d=-1004 e=1005 f=-1006
+s24_folded_p2 a=2001 b=-2002 c=2003 d=-2004 e=2005 f=-2006
+s24_folded_p3 a=3001 b=-3002 c=3003 d=-3004 e=3005 f=-3006
+s24_folded_p4 a=4001 b=-4002 c=4003 d=-4004 e=4005 f=-4006
+sbig_folded_p1 v0=9100 v1=9101 v2=9102 v3=9103 v4=9104 v5=9105 v6=9106 v7=9107 v8=9108 v9=9109
+sbig_folded_p2 v0=9200 v1=9201 v2=9202 v3=9203 v4=9204 v5=9205 v6=9206 v7=9207 v8=9208 v9=9209
+s8_runtime_p01 a=11 b=-12
+s8_runtime_p02 a=21 b=-22
+s8_runtime_p03 a=31 b=-32
+s8_runtime_p04 a=41 b=-42
+s8_runtime_p05 a=51 b=-52
+s8_runtime_p06 a=61 b=-62
+s8_runtime_p07 a=71 b=-72
+s8_runtime_p08 a=81 b=-82
+s8_runtime_p09 a=91 b=-92
+s8_runtime_p10 a=101 b=-102
+s16i_runtime_p1 a=101 b=-102 c=103 d=-104
+s16i_runtime_p2 a=201 b=-202 c=203 d=-204
+s16i_runtime_p3 a=301 b=-302 c=303 d=-304
+s16i_runtime_p4 a=401 b=-402 c=403 d=-404
+s16i_runtime_p5 a=501 b=-502 c=503 d=-504
+s16m_runtime_p1 a=201 b=1.5000
+s16m_runtime_p2 a=401 b=2.5000
+s16m_runtime_p3 a=601 b=3.5000
+s16m_runtime_p4 a=801 b=4.5000
+s16m_runtime_p5 a=1001 b=5.5000
+s16d_runtime_p1 x=1.2500 y=-1.7500
+s16d_runtime_p2 x=2.2500 y=-2.7500
+s16d_runtime_p3 x=3.2500 y=-3.7500
+s16d_runtime_p4 x=4.2500 y=-4.7500
+s16d_runtime_p5 x=5.2500 y=-5.7500
+s16f_runtime_p1 x=1.5000 y=-1.2500 z=1.1250 w=-1.0625
+s16f_runtime_p2 x=2.5000 y=-2.2500 z=2.1250 w=-2.0625
+s16f_runtime_p3 x=3.5000 y=-3.2500 z=3.1250 w=-3.0625
+s16f_runtime_p4 x=4.5000 y=-4.2500 z=4.1250 w=-4.0625
+s16f_runtime_p5 x=5.5000 y=-5.2500 z=5.1250 w=-5.0625
+s24_runtime_p1 a=1001 b=-1002 c=1003 d=-1004 e=1005 f=-1006
+s24_runtime_p2 a=2001 b=-2002 c=2003 d=-2004 e=2005 f=-2006
+s24_runtime_p3 a=3001 b=-3002 c=3003 d=-3004 e=3005 f=-3006
+s24_runtime_p4 a=4001 b=-4002 c=4003 d=-4004 e=4005 f=-4006
+sbig_runtime_p1 v0=9100 v1=9101 v2=9102 v3=9103 v4=9104 v5=9105 v6=9106 v7=9107 v8=9108 v9=9109
+sbig_runtime_p2 v0=9200 v1=9201 v2=9202 v3=9203 v4=9204 v5=9205 v6=9206 v7=9207 v8=9208 v9=9209
+END

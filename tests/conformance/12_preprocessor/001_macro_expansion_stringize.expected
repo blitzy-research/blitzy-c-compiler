@@ -1,0 +1,89 @@
+# Expectation record for 12_preprocessor/001_macro_expansion_stringize.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_macro_expansion_stringize
+area               = 12_preprocessor
+description        = Function-like and object-like macro expansion, the stringize operator on a token, on an expanded macro and on an expression, token pasting in three forms, nested and self-referential expansion, and a folded/volatile-runtime pair
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction:
+- Every printed integer is a small non-negative int far from INT_MIN and INT_MAX, so no
+  signed overflow can arise; the largest arithmetic performed is a multiplication whose
+  result is well inside int on every target.
+- No shift operator appears, so no shift count can be out of range.
+- The only pointer arithmetic is walking a string literal to its terminator inside slen,
+  which stops AT the terminator: the one-past-end pointer is never formed by
+  dereference, and no index beyond the terminator is read. Every string walked is a
+  literal in this file, so its length is fixed at translation time.
+- No string literal is modified; every literal is read only.
+- No aliasing violation and no read of uninitialised storage: every object is
+  initialised at its declaration, and the volatile objects have static initialisers.
+- No object is modified twice between sequence points, and no argument of any call has a
+  side effect, so nothing depends on unspecified evaluation order. Each volatile object
+  is read in a statement of its own before its value reaches an argument list.
+- Nothing depends on padding bytes or on the relative addresses of unrelated objects.
+- The two-variant rule is applied: the same function-like macro is expanded once over a
+  literal, where the constant folder answers, and once over an operand read from
+  volatile storage, which the optimizer may not fold and which therefore forces the
+  backend to emit a genuine multiply. Without the second variant, optimisation would
+  substitute the folder's answer for the backend's at -O1 and -O2 and a code-generation
+  defect would escape entirely.
+- No translation-date, translation-time or source-file-name macro is referenced, there is
+  no randomness and no locale-dependent formatting, and main returns 0, inside the 0-125
+  range the suite requires.
+
+Verified empirically on this branch with gcc 13.4.0 and qemu-user 10.1.0: the default
+strict warning gate (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
+-Werror) produces zero diagnostics at -O0, -O1 and -O2; the sanitizer gate
+(-fsanitize=undefined,address -fno-sanitize-recover=all) runs to completion with no
+output and exit status 0; and all twelve cells of the declared matrix produce
+byte-identical stdout with exit status 0 and an empty standard error.
+END
+impl_defined_notes <<END
+Every construct exercised here is documented as supported - docs/technical-specifications.md
+lines 92 and 491 name stringification (#), token pasting (##) and the recursive expansion
+guard, and docs/project-guide.md line 79 lists the same - so this program carries no
+expected-divergence marker and a divergence under any oracle is a genuine finding.
+
+The measured target differences are handled by construction, so this program needs no
+target restriction and no marker:
+
+1. sizeof(long) and sizeof(void *) are 4 on i686 and 8 on x86_64, aarch64 and riscv64
+   (docs/technical-specifications.md lines 457-462). No long, no size_t, no ptrdiff_t
+   and no pointer value is printed anywhere, and no length modifier for any of them is
+   used, so the difference cannot reach the output.
+2. Plain char signedness is implementation-defined and was measured signed on x86_64 and
+   i686 and unsigned on aarch64 and riscv64. No plain char value is printed.
+3. long double has three representations across the four targets (measured 16, 12, 16 and
+   16 bytes, x87 80-bit against IEEE binary128). No long double appears in this program;
+   that type is covered by 13_floating_point/004_long_double_target_restricted, which is
+   the only program permitted to narrow a comparison on its account.
+4. All four targets are little-endian, and no byte-order-sensitive value is printed.
+END
+expected_stdout    <<END
+stringize_direct=WIDTH
+stringize_expanded=32
+stringize_expression=a + b * 2
+stringize_length=5
+paste_identifier=55
+paste_both_expanded=55
+paste_number=12
+stringize_of_paste=32
+funclike_folded=25
+funclike_runtime=16
+funclike_nested=14
+empty_object_macro=8
+self_reference_guard=9
+END

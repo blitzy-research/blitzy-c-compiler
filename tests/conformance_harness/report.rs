@@ -73,15 +73,21 @@
 //! # Once-only finalization, without ordering and without an extra test
 //!
 //! [`try_finalize`] is called by **every** area test at the end of its run. It is a
-//! check-and-write: if all fourteen machine-readable area files exist **and every one of them
-//! belongs to this run** it aggregates them and writes the summary, and otherwise it does nothing
-//! and reports that it did nothing — [`finalization_pending`] then states which of the two it was,
-//! so a summary that did not appear is never left unexplained. Whichever area finishes last
-//! therefore produces the summary, no ordering between tests is required, and no fifteenth test
-//! has to exist to do it — which matters because the suite's test count is itself a mechanical
-//! check that no existing test was skipped or removed. If two areas finish at once and both see a
-//! complete set, both may write; the write is idempotent and atomic, so the outcome is identical
-//! either way. Losing that race is never an error.
+//! check-and-write: if the machine-readable area file of every area this invocation can publish
+//! exists **and every one of them belongs to this run** it aggregates them and writes the summary,
+//! and otherwise it does nothing and reports that it did nothing — [`finalization_pending`] then
+//! states which of the two it was, so a summary that did not appear is never left unexplained.
+//! Whichever area finishes last therefore produces the summary, no ordering between tests is
+//! required, and no fifteenth test has to exist to do it — which matters because the suite's test
+//! count is itself a mechanical check that no existing test was skipped or removed.
+//!
+//! Only **one** caller ever writes it, and that is enforced rather than hoped for. The check and the
+//! claim happen together inside one critical section: [`claim_finalization`] takes the run registry's
+//! `Mutex`, tests completeness against the areas this invocation selected, and sets the registry's
+//! `finalized` flag before releasing the guard, so two areas finishing at the same instant cannot
+//! both see an unclaimed complete set. The loser is told nothing was written and treats that as the
+//! ordinary answer it is. A claim taken by a caller that then fails to publish is released again, so
+//! the next caller can try rather than leaving the run with no summary and no way to produce one.
 //!
 //! # The report session — why a summary can never blend two runs
 //!
@@ -229,18 +235,18 @@ use super::env::{
     Capabilities, VAR_ALLOW_MISSING_ORACLES, VAR_ALLOW_XPASS, VAR_KEEP_WORK, VAR_ONLY, VAR_QUICK,
     VAR_STRICT, VAR_TIMEOUT_SECS,
 };
-use super::findings::{FindingId, COMMANDS_NAME};
+use super::findings::{self, FindingId, COMMANDS_NAME};
 use super::manifest::{self, ExpectedDivergence};
 use super::sandbox::{claim_ownership, live_foreign_owner_identity, RUN_OWNER_ENTRY};
 use super::{
     create_directory_chain_below, escape_markdown_inline, posix_quote, read_file_bounded,
     redact_secrets, remove_entry, report_root, require_directory_chain_below, require_replaceable,
-    run_generation, sanitize_text_for_report, shown_path, stable_digest, stage_bytes_no_follow,
-    AreaSpec, DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Outcome, Replaceable,
-    Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT, MAX_INSPECTED_FILE_BYTES,
-    MIN_PROGRAMS_PER_MANDATED_AREA, ORACLE_A_COMPARISON_COUNT, ORACLE_B_COMPARISON_COUNT,
-    ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT, REFERENCE_CROSS_CELL_COUNT_MAX,
-    REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
+    resolve_shown_path, run_generation, sanitize_text_for_report, shown_path, stable_digest,
+    stage_bytes_no_follow, AreaSpec, DivergenceClass, HarnessError, HarnessResult, OptLevel,
+    Oracle, Outcome, Replaceable, Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT,
+    MAX_INSPECTED_FILE_BYTES, MIN_PROGRAMS_PER_MANDATED_AREA, ORACLE_A_COMPARISON_COUNT,
+    ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT,
+    REFERENCE_CROSS_CELL_COUNT_MAX, REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
 };
 
 /// Directory beneath [`report_root`] that holds the per-area reports.
@@ -248,6 +254,13 @@ pub const AREAS_DIR_NAME: &str = "areas";
 
 /// File stem of the two run-summary artifacts.
 pub const SUMMARY_STEM: &str = "summary";
+
+/// Scope name under which the run summary's own revalidation is recorded.
+///
+/// Not a feature area's directory name, and deliberately unable to collide with one: every area's
+/// name is a bare directory component, so the space this contains is the one thing that keeps the two
+/// namespaces apart in [`artifact_shortfalls`].
+pub const SUMMARY_SCOPE: &str = "run summary";
 
 /// Extension of the human-readable half of every report.
 pub const MARKDOWN_EXTENSION: &str = "md";
@@ -369,19 +382,6 @@ const TRUNCATION_MARK: &str = "…";
 /// Rendered in a Markdown table cell that has no value, so an empty cell is visibly empty
 /// rather than ambiguously blank.
 const ABSENT_CELL: &str = "—";
-
-/// A finding row names an artifact directory that does not exist.
-///
-/// Phrased as the tail of "the finding for X under Y is reported but ...", so the diagnostic reads
-/// as a sentence, and named as a constant so [`finding_artifact_defect`] and
-/// [`finding_artifact_state`] answer the same question from the same source.
-const FINDING_DEFECT_NO_DIRECTORY: &str = "its artifact directory does not exist";
-
-/// A finding's artifact directory exists but holds no reproduction script, which is the artifact
-/// that makes a finding reproducible without the harness at all.
-const FINDING_DEFECT_NO_COMMANDS: &str =
-    "its artifact directory holds no reproduction script, so the finding cannot be reproduced \
-     without the harness";
 
 /// Separator of the machine-readable reports. A field may never contain one, which is what
 /// [`tsv_field`] guarantees.
@@ -724,11 +724,19 @@ pub fn summary_tsv_path() -> PathBuf {
 
 /// The provenance stamped into every persisted row and checked when one is read back.
 ///
-/// `run` distinguishes this process from every other; `identity` distinguishes this *configuration*
-/// from another — the matrix that was swept, the tools that were discovered, the corpus that was
-/// read. A row is aggregated only when both match, so neither a file left behind by a differently
-/// configured run nor one written against a different tool set or corpus can contribute to a total
-/// without being named.
+/// Both halves are digests of *what a report means* rather than of when it was produced. `run`
+/// identifies the run in the sense a reader cares about — the matrix, the policy and the corpus it
+/// was taken over — and `identity` identifies the *configuration* underneath it: the tools that were
+/// discovered and the corpus that was read. A row is aggregated only when both match, so neither a
+/// file left behind by a differently configured run nor one written against a different tool set or
+/// corpus can contribute to a total without being named.
+///
+/// Neither half distinguishes this **process** from another that is configured identically, and
+/// deliberately so: both are derived from configuration and corpus content alone, never from a clock,
+/// a process identifier or a counter, which is what makes an artifact's provenance reproducible. The
+/// per-process discriminator is [`Generation`]'s own token, and that is the value which catches a row
+/// left behind by a previous run of the very same configuration — see [`RunIdentity::compute`] for
+/// why the division is drawn here rather than by making these values unique per process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunIdentity {
     run: String,
@@ -986,10 +994,13 @@ fn ensure_report_namespace(context: &str) -> HarnessResult<()> {
 /// then is the stamp written, so a crash midway leaves a directory this run will clear again rather
 /// than one another run believes is owned.
 ///
-/// Clearing is what makes aggregation honest. `try_finalize` writes the summary once all fourteen
-/// area files exist, and without clearing, thirteen files from an earlier run plus one from this run
-/// would be a complete-looking set. It also means a filtered run reports a *pending* summary rather
-/// than a falsely complete one, which is the honest answer.
+/// Clearing is what makes aggregation honest. `try_finalize` writes the summary once the area file of
+/// every area this invocation selected exists, so without clearing, files from an earlier run
+/// standing beside one from this run would be a complete-looking set — thirteen stale plus one fresh
+/// in a full run, and fewer than that in a filtered one, where the selected set is smaller and
+/// therefore easier to complete by accident. A filtered run publishes a summary over the areas it
+/// selected and stamps it **partial**, listing every area that did not contribute; what clearing
+/// guarantees is that those contributions are all this run's own.
 fn prepare_report_namespace() -> HarnessResult<()> {
     let context = "preparing the report directory for this run";
     let root = report_root();
@@ -1199,9 +1210,14 @@ fn write_report_pair(
 //   an issue or uploads from continuous integration, and captured text is the one thing in it the
 //   suite did not write: a compiler that echoes an environment variable back in a diagnostic, a tool
 //   banner that prints a licence key, a path assembled from a variable that holds one.
-//   [`redact_secrets`] removes what the environment says is a credential, and is applied to
-//   *everything*, in both artifacts, for the same reason sanitization is — a rule applied at some
-//   sinks is a rule a new sink will be written without.
+//   [`redact_secrets`] is applied to *everything*, in both artifacts, for the same reason
+//   sanitization is — a rule applied at some sinks is a rule a new sink will be written without.
+//   What it recognises is bounded, and worth stating exactly: values this process can read in its own
+//   environment under a credential-bearing name, in the `NAME=value` form at any length and bare only
+//   from `BARE_REDACTION_MIN_CHARS` characters up. A secret the suite never saw, one embedded in a
+//   tool's own configuration file, and a short bare value are each outside that. So this bounds an
+//   ordinary hazard rather than proving a report carries no credential, and a maintainer publishing
+//   one still reads it.
 //
 // All three are applied at the same three funnels, and the order between them is fixed and
 // load-bearing: **redact, then sanitize, then escape for Markdown**. Redaction must come first
@@ -1216,9 +1232,11 @@ fn write_report_pair(
 // byte. And a finding's `commands.sh` holds exact paths, because a redacted command is not a runnable
 // command and the script's whole purpose is to be run. The trade is therefore bounded rather than
 // absent: exact bytes and exact commands only inside a finding directory beneath the build directory,
-// redacted text in everything the suite renders as a report. Nothing a *corpus program* prints can
-// carry a credential in any case — the authoring rules forbid reading the environment, and the child
-// environment those programs receive is cleared before they run.
+// redacted text in everything the suite renders as a report. A *corpus program* is not a plausible
+// source of a credential either — the authoring rules forbid it from reading the environment at all,
+// and the child environment those programs receive is cleared before they run — so what remains
+// exposed is what a *tool* chose to print, which is exactly what the bounded rule above covers, and
+// where that rule stops is where a maintainer's own reading of the artifact takes over.
 //
 // The rule the whole module follows, stated once so it can be checked: *untrusted text is escaped
 // for Markdown exactly once, at the moment it is placed into a Markdown-bearing string, and never
@@ -1374,8 +1392,17 @@ fn md_code(raw: &str) -> String {
 ///
 /// Paths are the sink this module renders most often and trusts least: a path can carry a byte from
 /// an environment variable, from a discovered tool location or from a corpus entry.
+///
+/// Rendered through [`shown_path`], so the package and build roots appear as their symbolic tokens
+/// rather than as this machine's absolute locations. A report is read by whoever receives it, which is
+/// routinely not whoever produced it, and a table of finding directories that spelled out a
+/// continuous-integration workspace or an agent clone in every row disclosed the run's own location
+/// without telling a reader anything they could act on.
+///
+/// [`reproduce_command`] is the deliberate exception and states its own reason: a line a reader is
+/// told to paste has to name the directory exactly.
 fn md_path(path: &Path) -> String {
-    md_code(&path.to_string_lossy())
+    md_code(&shown_path(path))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1448,19 +1475,22 @@ impl Row {
     /// Build a row from an accumulated outcome.
     ///
     /// A finding's artifact directory is *derived* rather than looked up: [`FindingId::derive`] is
-    /// a pure function of the cell, the oracle and the divergence class, and the directory is that
-    /// identifier beneath the findings root. The report can therefore name the artifacts of a
-    /// finding without being handed anything by the module that wrote them, and the name it prints
-    /// is the same one that module chose. A finding carrying no divergence class is the one case
-    /// where no directory can be derived; it is left empty here and reported as a diagnostic by
+    /// a pure function of the cell and the divergence class, and the directory is that identifier
+    /// beneath the findings root. The report can therefore name the artifacts of a finding without
+    /// being handed anything by the module that wrote them, and the name it prints is the same one
+    /// that module chose. A finding carrying no divergence class is the one case where no directory
+    /// can be derived; it is left empty here and reported as a diagnostic by
     /// [`AreaReport::from_outcomes`], because a finding without a class is an internal
     /// inconsistency rather than a fact about the compiler.
+    ///
+    /// The oracle is deliberately not part of that derivation, so two rows for the same cell and
+    /// class observed through different oracles name the **same** directory. That is not a
+    /// duplicate: one root cause is filed once, its manifest lists every oracle that observed it,
+    /// and each row points at the whole of the evidence rather than at one oracle's slice of it.
     fn from_outcome(outcome: &Outcome) -> Row {
         let key = outcome.key();
         let identifier = match (outcome.verdict(), outcome.class()) {
-            (Verdict::Finding, Some(class)) => {
-                Some(FindingId::derive(key, outcome.oracle(), class))
-            }
+            (Verdict::Finding, Some(class)) => Some(FindingId::derive(key, class)),
             _ => None,
         };
         Row {
@@ -1612,7 +1642,17 @@ impl Row {
                 class,
                 marker_id: optional_field(fields[7]),
                 finding_id: optional_field(fields[8]),
-                finding_dir: optional_field(fields[9]).map(PathBuf::from),
+                // Through `resolve_shown_path`, not `PathBuf::from`. The field was written by
+                // `to_tsv` through `shown_path`, which elides the build root so a published report
+                // discloses nothing about the machine that produced it — so the recorded text is
+                // `<build>/conformance-findings/…` rather than a path. The summary is aggregated by
+                // parsing these files back and then asks the file system whether each finding's
+                // artifacts are really there, so taking the rendered text at face value would
+                // answer "not there" for every finding in the run while the artifacts sat beside
+                // it, and fail the run on a defect of the suite rather than deliver the
+                // observation. Expanding the token restores the path without weakening the
+                // elision: what is written still discloses nothing.
+                finding_dir: optional_field(fields[9]).as_deref().map(resolve_shown_path),
                 detail: String::from(fields[12]),
             },
             RunIdentity {
@@ -1763,20 +1803,8 @@ impl AreaReport {
             // directory is checked here, against disk, while the run that produced the row is still
             // able to say so — rather than left for whoever later opens the register and finds
             // nothing there.
-            if row.verdict == Verdict::Finding {
-                if let Some(defect) = row.finding_dir.as_deref().and_then(finding_artifact_defect) {
-                    report.diagnostics.push(format!(
-                        "⚠️ the finding for {} under {} is reported but {}; a finding is a \
-                         deliverable — the reproducer, the exact reproduction commands, the \
-                         captured outputs, the environment fingerprint and the computed difference \
-                         are the whole point of recording one — so a row naming artifacts that are \
-                         not there is a defect in the suite rather than an observation about the \
-                         compiler",
-                        row.cell_label(),
-                        row.oracle,
-                        defect
-                    ));
-                }
+            if let Some(shortfall) = finding_shortfall(&row) {
+                report.diagnostics.push(format!("⚠️ {shortfall}"));
             }
             report.absorb(row, &mut seen);
         }
@@ -1861,6 +1889,36 @@ impl AreaReport {
             .copied()
             .filter(|level| self.opt_levels.contains(level))
             .collect()
+    }
+
+    /// Programs that produced a comparison and were **runnable**, so the count describes the sweep.
+    ///
+    /// A program whose expectation record could not be read still produces one row — a corpus defect
+    /// is reported, never skipped — and that row lands in `programs` and in `cells` like any other.
+    /// Counting it as a swept program is what let a run report the full corpus while part of it had no
+    /// record at all. The row is still in the table, still fails the run and is still tallied; it is
+    /// only excluded from the counts that claim something was *swept*.
+    fn swept_programs(&self, facts: &CorpusFacts) -> usize {
+        self.programs
+            .iter()
+            .filter(|program| facts.is_runnable(self.spec.directory(), program))
+            .count()
+    }
+
+    /// Cells that were actually executed, excluding the synthetic cell a corpus defect is filed under.
+    fn executed_cells(&self, facts: &CorpusFacts) -> usize {
+        self.cells
+            .iter()
+            .filter(|(program, _, _)| facts.is_runnable(self.spec.directory(), program))
+            .count()
+    }
+
+    /// Rows that exist to report a corpus defect rather than to record a comparison.
+    fn corpus_defect_rows(&self, facts: &CorpusFacts) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| !facts.is_runnable(self.spec.directory(), &row.program))
+            .count()
     }
 }
 
@@ -1966,6 +2024,19 @@ struct Narrowing {
 struct CorpusFacts {
     programs: Vec<ProgramFacts>,
     diagnostics: Vec<String>,
+    /// How many `.c` sources were **discovered**, whether or not their records could be read.
+    ///
+    /// Held separately from `programs` because the two answer different questions and conflating them
+    /// is what let the summary claim a full corpus while a sixth of it had no readable record. A
+    /// source is discovered by existing; a program becomes *runnable* only when its own expectation
+    /// record parses, because the record is what supplies the matrix, the golden stdout and the
+    /// reproduction commands.
+    discovered: usize,
+    /// `area/program` for every discovered source whose record could not be read.
+    ///
+    /// The complement of `programs` within `discovered`, kept as labels so the summary can name them
+    /// rather than only count them.
+    unreadable: Vec<String>,
 }
 
 impl CorpusFacts {
@@ -1983,6 +2054,7 @@ impl CorpusFacts {
                 return facts;
             }
         };
+        facts.discovered = sources.len();
         for source in sources {
             match manifest::load_for_source(&source) {
                 Ok(record) => facts.programs.push(ProgramFacts {
@@ -2000,10 +2072,22 @@ impl CorpusFacts {
                     },
                     marker: record.marker().cloned(),
                 }),
-                Err(error) => facts.diagnostics.push(format!(
-                    "⚠️ the expectation record beside {} could not be read: {error}",
-                    shown_path(&source)
-                )),
+                Err(error) => {
+                    facts.unreadable.push(format!(
+                        "{}/{}",
+                        spec.directory(),
+                        sanitize_text_for_report(
+                            source
+                                .file_stem()
+                                .and_then(|stem| stem.to_str())
+                                .unwrap_or_default()
+                        )
+                    ));
+                    facts.diagnostics.push(format!(
+                        "⚠️ the expectation record beside {} could not be read: {error}",
+                        shown_path(&source)
+                    ));
+                }
             }
         }
         facts
@@ -2016,8 +2100,23 @@ impl CorpusFacts {
             let mut area = CorpusFacts::for_area(spec);
             facts.programs.append(&mut area.programs);
             facts.diagnostics.append(&mut area.diagnostics);
+            facts.discovered += area.discovered;
+            facts.unreadable.append(&mut area.unreadable);
         }
         facts
+    }
+
+    /// Whether this program could take part in the sweep at all.
+    ///
+    /// True exactly when its expectation record parsed. A program without one produces no cell: there
+    /// is no declared matrix to sweep, no golden stdout to compare against and no command template to
+    /// reproduce, so the single row it does produce is a *statement about the corpus* rather than an
+    /// observation of the compiler — and counting that row as a swept program or an executed cell is
+    /// what made the summary overstate a run.
+    fn is_runnable(&self, area: &str, program: &str) -> bool {
+        self.programs
+            .iter()
+            .any(|facts| facts.area == area && facts.program == program)
     }
 
     /// The record of one program, when its area's records could be read.
@@ -2141,14 +2240,59 @@ impl RunReport {
             .sum()
     }
 
-    /// How many distinct programs produced at least one comparison.
+    /// How many distinct **runnable** programs produced at least one comparison.
+    ///
+    /// Reads the run's own corpus facts, so a program whose record could not be read is not counted as
+    /// swept — see [`AreaReport::swept_programs`] for why that distinction is the whole of this
+    /// finding. The facts are populated before any matrix or table is assembled.
     fn observed_programs(&self) -> usize {
-        self.areas.iter().map(|area| area.programs.len()).sum()
+        self.areas
+            .iter()
+            .map(|area| area.swept_programs(&self.facts))
+            .sum()
     }
 
-    /// How many distinct cells produced at least one comparison.
+    /// How many distinct cells were actually executed.
     fn observed_cells(&self) -> usize {
-        self.areas.iter().map(|area| area.cells.len()).sum()
+        self.areas
+            .iter()
+            .map(|area| area.executed_cells(&self.facts))
+            .sum()
+    }
+
+    /// How many rows exist to report a corpus defect rather than to record a comparison.
+    fn corpus_defect_rows(&self) -> usize {
+        self.areas
+            .iter()
+            .map(|area| area.corpus_defect_rows(&self.facts))
+            .sum()
+    }
+
+    /// Every target that at least one recorded row was observed at, in canonical order.
+    ///
+    /// The *observed* set, never the configured one. A run can be configured for four targets and
+    /// record rows at one — an emulator absent from the environment does exactly that — and reporting
+    /// the configuration in the recorded column would answer "what did this run sweep?" with what it
+    /// intended to sweep.
+    fn observed_targets(&self) -> Vec<Target> {
+        Target::ALL
+            .iter()
+            .copied()
+            .filter(|target| self.areas.iter().any(|area| area.targets.contains(target)))
+            .collect()
+    }
+
+    /// Every optimization level at least one recorded row was observed at, in canonical order.
+    fn observed_opt_levels(&self) -> Vec<OptLevel> {
+        OptLevel::ALL
+            .iter()
+            .copied()
+            .filter(|level| {
+                self.areas
+                    .iter()
+                    .any(|area| area.opt_levels.contains(level))
+            })
+            .collect()
     }
 
     /// How many recorded outcomes fail the run under the policy in force.
@@ -2203,20 +2347,42 @@ impl MatrixDimension {
         }
     }
 
-    /// How far short of its plan this dimension fell, or `None` when it met it.
-    ///
-    /// Recording more than was planned is not a shortfall and is not silently corrected either: it
-    /// shows in the table as a recorded count above the planned one, which is a real fact about the
-    /// run — a duplicate comparison does exactly that, and the area report already diagnoses it.
+    /// How far short of its plan this dimension fell, or `None` when it did not fall short.
     fn shortfall(&self) -> Option<usize> {
         self.planned.checked_sub(self.actual).filter(|gap| *gap > 0)
     }
 
-    /// The status cell: met, or short by how much.
+    /// How far *past* its plan this dimension went, or `None` when it did not exceed it.
+    ///
+    /// # Why an excess is a warning rather than a success
+    ///
+    /// It used to render as `✅ complete`, on the reading that recording more than was planned cannot
+    /// be a coverage gap. That reading is right about coverage and wrong about the report: nothing in
+    /// this suite plans to record more comparisons than the matrix contains, so an excess is always
+    /// one of a small number of defects — a duplicated comparison, which inflates every tally it
+    /// touches; a synthetic row counted as though a cell had run; or a corpus that has grown past the
+    /// count the tables still declare. Every one of those makes the recorded number untrustworthy,
+    /// and a tick beside it told a reader the opposite. The count states are therefore three rather
+    /// than two, and the excess is named with the same prominence as a shortfall.
+    fn excess(&self) -> Option<usize> {
+        self.actual.checked_sub(self.planned).filter(|gap| *gap > 0)
+    }
+
+    /// The status cell: exactly met, short by how much, or over by how much.
     fn status(&self) -> String {
-        match self.shortfall() {
-            None => String::from("✅ complete"),
-            Some(gap) => format!("⚠️ short by {gap}"),
+        match (self.shortfall(), self.excess()) {
+            (Some(gap), _) => format!("⚠️ short by {gap}"),
+            (_, Some(gap)) => format!("⚠️ over by {gap}"),
+            (None, None) => String::from("✅ complete"),
+        }
+    }
+
+    /// The status as it appears in the machine-readable summary, where no glyph is used.
+    fn machine_status(&self) -> String {
+        match (self.shortfall(), self.excess()) {
+            (Some(gap), _) => format!("short by {gap}; {}", self.note),
+            (_, Some(gap)) => format!("over by {gap}; {}", self.note),
+            (None, None) => format!("complete; {}", self.note),
         }
     }
 
@@ -2240,6 +2406,22 @@ impl MatrixDimension {
             )
         })
     }
+
+    /// This dimension's excess stated as a coverage reason, or `None` when it did not exceed its plan.
+    ///
+    /// An excess keeps a report from calling itself full for the same reason a shortfall does: the
+    /// recorded count and the planned count disagree, and until the cause is known the table cannot be
+    /// read as a description of one clean sweep. The wording says "recorded more than planned" rather
+    /// than naming a cause, because the causes differ — a duplicate, a synthetic row, or a corpus that
+    /// outgrew its declared count — and the diagnostics list is where each is named.
+    fn excess_reason(&self) -> Option<String> {
+        self.excess().map(|gap| {
+            format!(
+                "{}: {} planned, {} recorded — {gap} more than planned ({}).",
+                self.heading, self.planned, self.actual, self.note
+            )
+        })
+    }
 }
 
 /// The run's matrix: the nine dimensions the coverage requirement enumerates.
@@ -2249,6 +2431,7 @@ impl MatrixDimension {
 /// should show the narrowing here rather than redefine the target it is measured against.
 fn run_matrix(run: &RunReport, caps: &Capabilities) -> Vec<MatrixDimension> {
     let (targets, levels) = caps.config().effective_matrix();
+    let runnable = run.facts.programs.len();
     vec![
         MatrixDimension::new(
             "feature_areas",
@@ -2257,33 +2440,77 @@ fn run_matrix(run: &RunReport, caps: &Capabilities) -> Vec<MatrixDimension> {
             run.areas.len(),
             "nine mandated by the coverage requirement, five supplementary",
         ),
+        // Five program-and-cell dimensions where there used to be two, because "the corpus holds
+        // 108 programs", "108 of them have a readable record" and "108 of them were swept" are three
+        // different claims and only the last is evidence about the compiler. Reporting the last as
+        // though it followed from the first is what let a summary claim the full corpus while a sixth
+        // of it had no expectation record at all.
         MatrixDimension::new(
-            "programs",
-            "Programs",
+            "programs_discovered",
+            "Programs (sources discovered)",
             PROGRAM_COUNT,
+            run.facts.discovered,
+            "`.c` files found in the areas this run aggregated",
+        ),
+        MatrixDimension::new(
+            "programs_runnable",
+            "Programs (runnable pairs)",
+            run.facts.discovered,
+            runnable,
+            "a source is runnable only once its own `.expected` record parses",
+        ),
+        MatrixDimension::new(
+            "programs_swept",
+            "Programs (produced a comparison)",
+            runnable,
             run.observed_programs(),
-            "one semantic concern per program",
+            "every runnable pair is expected to be judged",
         ),
         MatrixDimension::new(
             "targets",
             "Targets swept",
             Target::ALL.len(),
-            targets.len(),
-            "x86-64 is the cross-backend baseline and executes natively",
+            run.observed_targets().len(),
+            "recorded rows, not the configuration — x86-64 is the baseline and runs natively",
         ),
         MatrixDimension::new(
             "opt_levels",
             "Optimization levels swept",
             OptLevel::ALL.len(),
+            run.observed_opt_levels().len(),
+            "recorded rows, not the configuration — -O0, -O1, -O2 mean the same to both compilers",
+        ),
+        // The configuration stated as its own dimension rather than substituted for the sweep. Both
+        // facts matter and they answer different questions: this one is what the run set out to do,
+        // the two above are what it did. A quick run shows the narrowing here, and an environment
+        // missing an emulator shows it above.
+        MatrixDimension::new(
+            "targets_configured",
+            "Targets configured for this run",
+            Target::ALL.len(),
+            targets.len(),
+            "the effective matrix this invocation was configured to sweep",
+        ),
+        MatrixDimension::new(
+            "opt_levels_configured",
+            "Optimization levels configured for this run",
+            OptLevel::ALL.len(),
             levels.len(),
-            "-O0, -O1, -O2 — the levels both compilers honour identically",
+            "the effective matrix this invocation was configured to sweep",
         ),
         MatrixDimension::new(
             "bcc_cells",
-            "Compile-and-run cells",
+            "Compile-and-run cells executed",
             BCC_CELL_COUNT,
             run.observed_cells(),
-            "one program, one target, one optimization level",
+            "one program, one target, one optimization level — synthetic rows excluded",
+        ),
+        MatrixDimension::new(
+            "corpus_defect_rows",
+            "Corpus-defect rows",
+            0,
+            run.corpus_defect_rows(),
+            "rows filed for a source with no readable record; each is a failure, never a cell",
         ),
         MatrixDimension::new(
             "oracle_a_comparisons",
@@ -2352,13 +2579,22 @@ fn area_matrix(
         })
         .count();
 
-    let mut dimensions = vec![MatrixDimension::new(
-        "programs_discovered",
-        "Programs (expectation records read)",
-        spec.program_count(),
-        discovered,
-        "the corpus table declares the count; the records are what could be read",
-    )];
+    let mut dimensions = vec![
+        MatrixDimension::new(
+            "programs_discovered",
+            "Programs (sources discovered)",
+            spec.program_count(),
+            facts.discovered,
+            "`.c` files found in this area's directory",
+        ),
+        MatrixDimension::new(
+            "programs_runnable",
+            "Programs (runnable pairs)",
+            facts.discovered,
+            discovered,
+            "a source is runnable only once its own `.expected` record parses",
+        ),
+    ];
     if spec.mandated() {
         dimensions.push(MatrixDimension::new(
             "mandated_floor",
@@ -2373,8 +2609,8 @@ fn area_matrix(
             "programs_compared",
             "Programs that produced a comparison",
             discovered,
-            report.programs.len(),
-            "every readable record is expected to be judged",
+            report.swept_programs(facts),
+            "every runnable pair is expected to be judged",
         ),
         MatrixDimension::new(
             "targets_swept",
@@ -2392,10 +2628,17 @@ fn area_matrix(
         ),
         MatrixDimension::new(
             "cells_compared",
-            "Compile-and-run cells",
+            "Compile-and-run cells executed",
             facts.planned_cells(&targets, &levels),
-            report.cells.len(),
+            report.executed_cells(facts),
             "each record's own target and level lists, intersected with this run's matrix",
+        ),
+        MatrixDimension::new(
+            "corpus_defect_rows",
+            "Corpus-defect rows",
+            0,
+            report.corpus_defect_rows(facts),
+            "rows filed for a source with no readable record; each is a failure, never a cell",
         ),
     ]);
     dimensions
@@ -3020,6 +3263,14 @@ fn note_matrix_shortfalls(
             coverage.note_partial(reason);
         }
     }
+    // An excess is always *partial*, never *reduced*, and the asymmetry is deliberate. A reduced run
+    // explains a smaller number — quick mode and a program filter both ask for one — but nothing in
+    // any configuration asks for a number **larger** than the matrix contains, so a configuration
+    // cannot excuse one. It means a duplicate, a synthetic row counted as a cell, or a corpus that has
+    // outgrown its declared count, and none of the three is something a filter did.
+    for reason in dimensions.iter().filter_map(MatrixDimension::excess_reason) {
+        coverage.note_partial(reason);
+    }
 }
 
 /// Record the reductions the run configuration itself imposes.
@@ -3210,35 +3461,16 @@ fn true_false(value: bool) -> &'static str {
 
 /// Why a finding's artifact directory falls short of being a deliverable, or `None` when it does not.
 ///
-/// The single authority on that question, so the table cell a reader sees and the diagnostic that
-/// makes the run notice cannot disagree about whether a finding is complete.
-///
-/// # Why neither test follows a final symbolic link
-///
-/// A finding directory's name is derived deterministically from the divergence, so both of the names
-/// checked here are predictable before the run that will publish them — which is exactly the
-/// precondition a planted link needs. [`Path::is_dir`] and [`Path::is_file`] answer about a link's
-/// *target*, so a link at either name would be certified as a present artifact, and this row sits
-/// beside [`reproduce_command`], which tells a reader to **execute** the script named. Metadata is
-/// therefore read without following, exactly as the findings writer's own completeness check does at
-/// the moment of publication: [`fs::symlink_metadata`] reports a link as a link, so `is_dir` and
-/// `is_file` on its result are false for one. The writer publishes a directory and regular files and
-/// nothing else, so anything else at one of these names was not published by this run and is reported
-/// as absent rather than as the artifact it is standing in for.
-fn finding_artifact_defect(directory: &Path) -> Option<&'static str> {
-    let published_directory = fs::symlink_metadata(directory)
-        .map(|metadata| metadata.is_dir())
-        .unwrap_or(false);
-    if !published_directory {
-        return Some(FINDING_DEFECT_NO_DIRECTORY);
-    }
-    let published_commands = fs::symlink_metadata(directory.join(COMMANDS_NAME))
-        .map(|metadata| metadata.is_file())
-        .unwrap_or(false);
-    if !published_commands {
-        return Some(FINDING_DEFECT_NO_COMMANDS);
-    }
-    None
+/// Delegates to [`findings::artifact_defect`], which is the **writer's own** completeness check: the
+/// same list of required artifacts, the same refusal to follow a final symbolic link, and the same
+/// requirement that the reproducer pair genuinely load. Sharing it is the point. This function
+/// previously asked a narrower question — is the directory there, and is `commands.sh` in it — so a
+/// finding that had lost its reproducer, its record, its manifest, its environment fingerprint, its
+/// computed difference or its whole `outputs/` directory was still rendered as `present`. A row that
+/// reads as a recorded observation with the observation missing is the one shape of report that is
+/// actively misleading, and two implementations of "complete" is how that shape comes back.
+fn finding_artifact_defect(directory: &Path) -> Option<String> {
+    findings::artifact_defect(directory)
 }
 
 /// The state of a finding's artifact directory, checked rather than assumed.
@@ -3246,16 +3478,64 @@ fn finding_artifact_defect(directory: &Path) -> Option<&'static str> {
 /// A report that named a directory nobody could open would be worse than one that admitted the
 /// artifacts are missing, because the reproduction commands are the whole point of a finding.
 ///
-/// The question itself is answered in exactly one place, [`finding_artifact_defect`], which is also
-/// where the reason the checks do not follow a final symbolic link is recorded. This function only
-/// puts that answer into the words the table uses, so the cell a reader sees and the diagnostic that
-/// makes the run notice can never describe different states.
-fn finding_artifact_state(directory: &Path) -> &'static str {
+/// The question itself is answered in exactly one place, [`findings::artifact_defect`], so the cell a
+/// reader sees, the diagnostic that makes the run notice, and the writer's check at the moment of
+/// publication can never describe different states. The defect's own words are carried into the cell
+/// rather than collapsed to a fixed phrase, because "missing `outputs`" and "missing
+/// `reproducer.expected`" send a reader to different places.
+fn finding_artifact_state(directory: &Path) -> String {
     match finding_artifact_defect(directory) {
-        None => "✅ present",
-        Some(FINDING_DEFECT_NO_DIRECTORY) => "⚠️ directory absent",
-        Some(_) => "⚠️ commands.sh absent",
+        None => String::from("✅ present"),
+        Some(defect) => format!("⚠️ {defect}"),
     }
+}
+
+/// What is wrong with one row's finding artifacts, as a full sentence, or `None` when nothing is.
+///
+/// Answers for rows of every verdict, and answers `None` for all but [`Verdict::Finding`], so a
+/// caller may hand it any row without first deciding which ones are eligible. A finding whose
+/// divergence class is absent has no derivable directory and is reported by its own diagnostic in
+/// [`AreaReport::from_outcomes`]; there is nothing on disk this check could ask about, so it is not
+/// restated here.
+fn finding_shortfall(row: &Row) -> Option<String> {
+    if row.verdict != Verdict::Finding {
+        return None;
+    }
+    let defect = row
+        .finding_dir
+        .as_deref()
+        .and_then(finding_artifact_defect)?;
+    Some(format!(
+        "the finding for {} under {} is reported but {}; a finding is a deliverable — the \
+         reproducer, the exact reproduction commands, the captured outputs, the environment \
+         fingerprint and the computed difference are the whole point of recording one — so a row \
+         naming artifacts that are not there is a defect in the suite rather than an observation \
+         about the compiler",
+        row.cell_label(),
+        row.oracle,
+        defect
+    ))
+}
+
+/// Revalidate the artifacts of every finding these rows report, immediately before a publication.
+///
+/// # Why the same question is asked twice
+///
+/// [`AreaReport::from_outcomes`] already asks it while the rows are being assembled, and records the
+/// answer as a diagnostic. That is not the same claim as this one. A report is an artifact a reader
+/// opens later, and what it asserts is that the directories it names hold deliverables *as
+/// published* — so the instant that matters is the one just before the bytes making that assertion
+/// are written, not an earlier instant during assembly. Between the two, a concurrent run's cleanup,
+/// a stray `rm`, or an interrupted write can empty a directory the report is about to advertise. The
+/// window cannot be closed — the artifacts are separate files and the platform offers no way to
+/// publish a report atomically with them — so it is *narrowed* to the smallest one available and the
+/// result is turned into a failure rather than a note.
+///
+/// Returned as sentences rather than raised as an error, because the caller writes the report first
+/// and fails afterwards. A report withheld on account of an incomplete finding would destroy the
+/// evidence for the very failure being reported, which is the opposite of what a deliverable is for.
+fn finding_artifact_shortfalls(rows: &[Row]) -> Vec<String> {
+    rows.iter().filter_map(finding_shortfall).collect()
 }
 
 /// The command that reproduces a finding with no harness, no Cargo and no Rust toolchain.
@@ -3267,6 +3547,13 @@ fn finding_artifact_state(directory: &Path) -> &'static str {
 /// character is special to the shell. The result is only ever rendered through [`md_code`], which is
 /// what makes it inert in the document, so the safety of the report does not depend on this
 /// function's output being safe on a line.
+///
+/// This is therefore also the one place an area report still states an absolute location, and the
+/// trade is made knowingly: a per-run report lives beneath the build directory and is not committed,
+/// while a command that has been elided is a command that does not run. The committed side of the same
+/// question is answered the other way — `findings::curated_finding_defects` refuses to let a curated
+/// artifact carry an absolute checkout path at all, and `commands.sh` parameterizes every tool path as
+/// a shell variable for exactly that reason.
 fn reproduce_command(directory: &Path) -> String {
     format!(
         "sh {}",
@@ -3415,7 +3702,7 @@ fn render_finding_table(rows: &[&Row]) -> Vec<String> {
                     None => String::from(ABSENT_CELL),
                 },
                 match &directory {
-                    Some(path) => String::from(finding_artifact_state(path)),
+                    Some(path) => finding_artifact_state(path),
                     None => String::from(ABSENT_CELL),
                 },
                 match &directory {
@@ -3518,24 +3805,51 @@ fn render_coverage_reasons(coverage: &Coverage) -> Vec<String> {
 /// outcome but is declared nowhere in the records this report could read is listed too, with a
 /// warning: an expected divergence with no traceable basis is precisely what the marker mechanism
 /// exists to prevent.
+///
+/// # A marker-less `XFail` is a recorded exclusion, not an untraceable marker
+///
+/// `XFail` is reached three ways, and exactly one of them carries no marker identifier: a
+/// narrowing the program's own record documents with its recorded reason, which `classify.rs`
+/// builds in `xfail_recorded_exclusion_outcome` — the case the record format refuses to accept
+/// without a reason, so the basis is present by construction. A marker there would be
+/// *unfalsifiable*: an oracle a record switches off performs no comparison, so it can never
+/// produce the captured observation a marker is required to carry.
+///
+/// Those rows are therefore separated out rather than swept into a synthetic
+/// `(no marker identifier recorded)` group. Grouping them with genuinely untraceable identifiers
+/// would attach the strongest warning this section can print — *"an expected divergence whose
+/// basis cannot be traced is not an expected divergence"* — to the one shape whose basis is
+/// guaranteed to exist, and the warning would fire on every run for as long as the corpus kept a
+/// single reasoned exclusion. Nothing is hidden by the separation: each row is enumerated here
+/// with its recorded reason, and the recorded-exclusions table later in the summary lists the same
+/// narrowings program by program. The warning is kept for what it was written for — an identifier
+/// that came back on an outcome and is declared in no record this report could read.
 fn render_expected_divergence_section(facts: &CorpusFacts, xfail: &[&Row]) -> Vec<String> {
     let mut grouped: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
+    let mut recorded_exclusions: Vec<&Row> = Vec::new();
     for row in xfail {
-        let identifier = row
-            .marker_id
-            .clone()
-            .unwrap_or_else(|| String::from("(no marker identifier recorded)"));
-        grouped.entry(identifier).or_default().push(row);
+        match row.marker_id.clone() {
+            Some(identifier) => grouped.entry(identifier).or_default().push(row),
+            None => recorded_exclusions.push(row),
+        }
     }
 
     let declared = facts.markers();
     let mut lines = Vec::new();
-    if declared.is_empty() && grouped.is_empty() {
+    if declared.is_empty() && grouped.is_empty() && recorded_exclusions.is_empty() {
         lines.push(String::from(
-            "None — no expected-divergence marker applies here, so every divergence would be a \
-             finding or a failure.",
+            "None — no expected-divergence marker applies here and no record narrowed an oracle, \
+             so every divergence would be a finding or a failure.",
         ));
         return lines;
+    }
+    if declared.is_empty() && grouped.is_empty() {
+        lines.push(String::from(
+            "**No expected-divergence marker applies here**, so a divergence of any class would be \
+             a finding or a failure. What follows is not a marker: it is every comparison a \
+             program's own record declined to make, documented by that record's recorded reason.",
+        ));
+        lines.push(String::new());
     }
 
     for (owner, marker) in &declared {
@@ -3555,6 +3869,37 @@ fn render_expected_divergence_section(facts: &CorpusFacts, xfail: &[&Row]) -> Ve
         ));
         lines.push(String::new());
         for cell in cells {
+            lines.push(format!(
+                "- {} under `oracle_{}`: {}",
+                md_code(&cell.cell_label()),
+                cell.oracle.letter(),
+                table_cell(&cell.detail)
+            ));
+        }
+        lines.push(String::new());
+    }
+    if !recorded_exclusions.is_empty() {
+        lines.push(String::from(
+            "### Narrowings documented by the record's own recorded reason, not by a marker",
+        ));
+        lines.push(String::new());
+        lines.push(format!(
+            "{} comparison(s) were not attempted, because the program's own expectation record \
+             narrows its oracle coverage. Each is `XFAIL` rather than a pass — nothing was \
+             compared, so no equality is claimed — and each carries the reason its record states, \
+             which the record format requires before it will accept any narrowing at all. **No \
+             marker is involved, and none could be:** an oracle a record switches off performs no \
+             comparison, so it can never produce the captured observation a marker must carry, and \
+             a marker scoped to it would be unfalsifiable. The basis is the recorded reason, quoted \
+             per cell below and listed program by program in the recorded-exclusions table further \
+             down. The oracles each of these programs keeps still judge every one of its cells, \
+             which is how a property whose value legitimately differs between architectures stays \
+             under test instead of being dropped for being difficult — `{EXPECTED_DIVERGENCE_REGISTER}` \
+             §4 works through the reasoning for each one.",
+            recorded_exclusions.len()
+        ));
+        lines.push(String::new());
+        for cell in &recorded_exclusions {
             lines.push(format!(
                 "- {} under `oracle_{}`: {}",
                 md_code(&cell.cell_label()),
@@ -4018,7 +4363,9 @@ fn render_area_overview_table(run: &RunReport) -> Vec<String> {
             .areas
             .iter()
             .find(|candidate| candidate.spec.directory() == spec.directory());
-        let observed = report.map(|area| area.programs.len());
+        // The swept count rather than the row count, so this column and the run total below it mean the
+        // same thing: a program whose record could not be read produced a row and swept nothing.
+        let observed = report.map(|area| area.swept_programs(&run.facts));
         let comparisons = report.map(|area| area.tally.total());
         let verdicts = match report {
             Some(area) => area.tally.compact(),
@@ -4065,7 +4412,7 @@ fn render_area_overview_table(run: &RunReport) -> Vec<String> {
             "Feature area",
             "Classification",
             "Programs planned",
-            "Programs observed",
+            "Programs swept",
             "Comparisons",
             "Verdicts",
         ],
@@ -4309,7 +4656,12 @@ fn render_summary_markdown(
          — and classification happens at the first terminal outcome or the completed \
          comparison, so nothing short-circuits a phase because a marker exists. Every marker \
          cites a limitation this repository already documents, and the set is cross-referenced \
-         by `{EXPECTED_DIVERGENCE_REGISTER}`."
+         by `{EXPECTED_DIVERGENCE_REGISTER}`. `XFAIL` has a second form that carries no marker \
+         and needs none: a comparison a program's own record declines to make, documented by \
+         that record's recorded reason, which the record format will not accept without one. The \
+         two are reported separately below, because a marker asserts a divergence was OBSERVED \
+         while a recorded exclusion states that a comparison was deliberately NOT MADE, and \
+         reading either as the other would misstate what the run established."
     ));
     lines.push(String::new());
     lines.extend(render_expected_divergence_section(
@@ -4542,6 +4894,45 @@ fn render_summary_markdown(
             super::sandbox::RETAINED_WORKSPACE_COUNT_MAX.to_string(),
         ),
     ]));
+    lines.push(String::new());
+    // The findings budget is stated beside the retention budget because they bound the same disk from
+    // two directions — and it is deliberately a *different* policy, which is worth a reader knowing
+    // before they go looking for a directory that is not there. A retained workspace is optional
+    // evidence, so exceeding its ceiling prunes and reports the pruning. A finding's artifacts are the
+    // deliverable, so exceeding one of these ceilings refuses the write and fails the cell instead:
+    // nothing here is ever silently shortened, and there is no pruning note to look for.
+    let (finding_bytes, finding_directories) = super::findings::artifact_totals();
+    lines.extend(property_table(&[
+        (
+            String::from("Finding directories published"),
+            format!(
+                "{finding_directories} of {} permitted for the run",
+                super::findings::FINDING_RUN_COUNT_MAX
+            ),
+        ),
+        (
+            String::from("Finding artifact bytes"),
+            format!(
+                "{finding_bytes} of {} permitted for the run",
+                super::findings::FINDING_RUN_BYTES_MAX
+            ),
+        ),
+        (
+            String::from("Per-finding ceiling"),
+            super::findings::FINDING_DIRECTORY_BYTES_MAX.to_string(),
+        ),
+        (
+            String::from("Per-artifact ceiling"),
+            super::findings::FINDING_ARTIFACT_BYTES_MAX.to_string(),
+        ),
+    ]));
+    lines.push(String::new());
+    lines.push(String::from(
+        "One divergence is filed once. A cell whose build was refused is refused for every oracle \
+         watching it, so the directory is named from the cell and the divergence class rather than \
+         from the oracle, its manifest names every oracle that observed it, and every affected row \
+         above points at that one directory instead of at a near-identical sibling per oracle.",
+    ));
     lines.push(String::new());
     let pruning = super::sandbox::retention_pruning_notes();
     if pruning.is_empty() {
@@ -4937,13 +5328,7 @@ fn render_summary_tsv(
                 .set(COL_LABEL, dimension.label)
                 .set(COL_COUNT, dimension.actual.to_string())
                 .set(COL_REFERENCE, dimension.planned.to_string())
-                .set(
-                    COL_DETAIL,
-                    match dimension.shortfall() {
-                        None => format!("complete; {}", dimension.note),
-                        Some(gap) => format!("short by {gap}; {}", dimension.note),
-                    },
-                ),
+                .set(COL_DETAIL, dimension.machine_status()),
         );
     }
     rows.push(
@@ -5208,9 +5593,13 @@ fn render_summary_tsv(
 //
 // Two mechanisms close that gap, and both are needed:
 //
-// - [`super::sandbox::ensure_roots`] retires the previous run's `areas/` directory once per process,
-//   before this run publishes anything. It is a precondition of [`write_area`] rather than an
-//   assumption about call order, so an area report can never be published beside a stale neighbour.
+// - This module's own namespace preparation retires the previous run's `areas/` directory once per
+//   process, before this run publishes anything: [`prepare_report_namespace`], reached through
+//   [`ensure_report_namespace`] from [`write_area`] and [`try_finalize`]. It is a precondition of
+//   both rather than an assumption about call order, so an area report can never be published beside
+//   a stale neighbour. [`super::sandbox::ensure_roots`] only *creates* the three artifact roots and
+//   publishes the run manifest; it clears nothing, because it runs before any ownership question has
+//   been asked.
 // - The registry below records which areas *this process* published. It is the set the summary
 //   aggregates from, so a file this run did not write cannot enter a total even if something else
 //   put one there — the completeness check consults memory, not the directory listing.
@@ -5236,6 +5625,16 @@ struct RunRegistry {
     published: BTreeSet<&'static str>,
     /// Whether the one finalization of this run has been claimed.
     finalized: bool,
+    /// Finding-artifact shortfalls observed immediately before a publication, keyed by the scope
+    /// that observed them: a feature area's directory name, or [`SUMMARY_SCOPE`] for the run
+    /// summary.
+    ///
+    /// Kept here rather than returned from [`write_area`] because the caller that must fail is the
+    /// area test, and the caller that must fail on the summary's account is whichever area happened
+    /// to finalize — two different callers reached through the one function each of them already
+    /// calls. Recording the answer where both can read it is what lets the report be published
+    /// first and the run be failed afterwards, which is this module's standing discipline.
+    shortfalls: BTreeMap<String, Vec<String>>,
 }
 
 /// This process's registry, created on first use.
@@ -5256,6 +5655,35 @@ fn registry() -> std::sync::MutexGuard<'static, RunRegistry> {
 /// Called only after a successful publication, so membership implies both files are on disk.
 fn register_published_area(spec: &'static AreaSpec) {
     registry().published.insert(spec.directory());
+}
+
+/// Record the finding-artifact shortfalls one scope observed, replacing any earlier answer for it.
+///
+/// Replacement rather than accumulation, so that a scope re-entered — a summary re-finalized after a
+/// released claim — reports what its own last revalidation found rather than the union of every
+/// attempt. An empty list is recorded as an empty list, which is what makes "this scope was checked
+/// and was sound" distinguishable from "this scope was never checked".
+fn record_artifact_shortfalls(scope: &str, shortfalls: Vec<String>) {
+    registry()
+        .shortfalls
+        .insert(String::from(scope), shortfalls);
+}
+
+/// The finding-artifact shortfalls recorded for one scope by the publication that checked it.
+///
+/// `scope` is a feature area's directory name, or [`SUMMARY_SCOPE`] for the run summary. An empty
+/// result means either that the scope was checked and every finding it reports is complete, or that
+/// the scope has not published yet — the caller asks after the publication it performed, so the two
+/// are never confused at a call site.
+///
+/// The driver asserts this is empty, which is what turns an incomplete deliverable into a failed run
+/// rather than a warning inside an artifact nobody is obliged to read.
+pub fn artifact_shortfalls(scope: &str) -> Vec<String> {
+    registry()
+        .shortfalls
+        .get(scope)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Claim the single finalization of this run, if every feature area has filed its report.
@@ -5375,6 +5803,25 @@ pub fn write_area(area: &str, outcomes: &[Outcome], caps: &Capabilities) -> Harn
     let dimensions = area_matrix(&report, &facts, caps);
     let coverage = assess_area_coverage(caps, &report, &facts, &dimensions);
     let generation = Generation::current(caps);
+
+    // The last thing done before the bytes that advertise these findings are written, and recorded
+    // where the area test can read it. Every finding this report names is revalidated against disk —
+    // the whole artifact set, and the captures inside it, without following a link — so that the
+    // interval between "checked" and "published" is as short as this platform allows. The answer is
+    // recorded rather than raised: the report is published either way, and the area test then fails
+    // on it. Withholding the report would delete the evidence for the failure.
+    let shortfalls = finding_artifact_shortfalls(&report.rows);
+    record_artifact_shortfalls(spec.directory(), shortfalls.clone());
+    for shortfall in &shortfalls {
+        // Also stated inside the artifact, in the same words, so a reader who opens the report sees
+        // exactly what made the run fail rather than having to correlate it with a panic message.
+        // `from_outcomes` already recorded the state it observed during assembly; this line records
+        // the state at publication, which is the one the report asserts.
+        let restated = format!("⚠️ at publication: {shortfall}");
+        if !report.diagnostics.contains(&restated) {
+            report.diagnostics.push(restated);
+        }
+    }
 
     write_report_pair(
         &format!("writing the report of feature area `{area}`"),
@@ -5692,15 +6139,18 @@ fn read_area(spec: &'static AreaSpec, current: &Generation, identity: &RunIdenti
 /// the other and never a blend of the two.
 ///
 /// Returns whether the summary was written. A `false` is not a failure — it is the ordinary answer
-/// for thirteen of the fourteen calls, and also the answer while another area's report is still
-/// missing or still belongs to an earlier run.
+/// for every call but the last one of the run, and also the answer while a selected area's report is
+/// still missing or still belongs to an earlier run.
 ///
-/// # A filtered run still gets a summary, clearly labelled
+/// # Completeness is measured against the areas this invocation selected
 ///
-/// When a test-name filter means some areas were never going to run in this process, waiting for all
-/// fourteen would withhold the deliverable indefinitely. Such a run therefore publishes a summary
-/// from the areas that did report, stamped partial, with every area that did not contribute listed
-/// as absent or stale. What it never does is fill those gaps from another run's files.
+/// Not against all fourteen. [`libtest_filter_selection`]'s `expected_areas` is the set this process
+/// can ever publish, and it is what [`claim_finalization`] and [`finalize`] both test against:
+/// waiting for an area a test-name filter excluded would withhold the deliverable indefinitely, and
+/// writing before the selected areas have all reported would publish a subset of a subset. A run
+/// whose selection is narrower than the whole table publishes a summary over what it selected and
+/// stamps it **partial**, listing every area that did not contribute as absent or stale. What it
+/// never does is fill those gaps from another run's files.
 ///
 /// # Errors
 ///
@@ -5708,8 +6158,8 @@ fn read_area(spec: &'static AreaSpec, current: &Generation, identity: &RunIdenti
 /// later caller can try again rather than leaving the run with no summary and no way to produce one.
 /// A damaged or unreadable area file does not fail the run: it becomes a diagnostic, the summary is
 /// stamped partial, and the outcomes it would have contributed are reported as missing. Losing the
-/// whole summary because one file of fourteen was unreadable would hide thirteen areas' worth of
-/// results to punish one.
+/// whole summary because one area file was unreadable would hide every other area's results to
+/// punish one.
 pub fn try_finalize(caps: &Capabilities) -> HarnessResult<bool> {
     // The same ownership-aware preparation `write_area` performs, and for the same reason: this
     // function *reads* the report root, so it must not read it before an earlier run's artifacts
@@ -5877,6 +6327,21 @@ fn finalize(caps: &Capabilities, specs: &[&'static AreaSpec]) -> HarnessResult<b
         }
     }
 
+    // The summary is the deliverable that promises every finding with its reproducer and its
+    // reproduction commands, so the promise is checked against disk immediately before it is made —
+    // not inherited from the area reports this summary aggregated. Those checks ran when each area
+    // published, which for the first of fourteen areas is the whole length of the run ago, and the
+    // artifacts are separate files that nothing has held since. Re-asking here is what stops the
+    // run's final artifact from advertising a directory that was emptied while the rest of the
+    // matrix executed. The recorded answer is what the finalizing area test fails on, after the
+    // summary has been written.
+    let shortfalls = finding_artifact_shortfalls(&rows);
+    record_artifact_shortfalls(SUMMARY_SCOPE, shortfalls.clone());
+    for shortfall in shortfalls {
+        run.diagnostics
+            .push(format!("⚠️ at summary publication: {shortfall}"));
+    }
+
     let dimensions = run_matrix(&run, caps);
     let coverage = assess_run_coverage(caps, &run, &dimensions);
     write_report_pair(
@@ -5893,10 +6358,18 @@ fn finalize(caps: &Capabilities, specs: &[&'static AreaSpec]) -> HarnessResult<b
 ///
 /// [`try_finalize`] answers whether the summary was written; this answers why not, which is the
 /// question the answer `false` actually raises. It distinguishes the two reasons, because they call
-/// for opposite responses from a reader: areas still awaited are the ordinary state of thirteen of
-/// the fourteen calls and need no action at all, whereas a refused artifact means a file of another
-/// run's configuration is sitting in the report root and the summary will not appear until the
-/// current configuration has replaced it.
+/// for opposite responses from a reader: areas still awaited are the ordinary state of every call but
+/// the last one of the run and need no action at all, whereas a refused artifact means a file of
+/// another run's configuration is sitting in the report root and the summary will not appear until
+/// the current configuration has replaced it.
+///
+/// The scan covers the **whole** area table rather than only the areas this invocation selected, so
+/// under a name filter the areas that were never going to run appear here among the awaited. That is
+/// deliberate — the sentence is an explanation of a report directory's state, and an area with no file
+/// is worth naming either way — but it is not the completeness test: [`claim_finalization`] and
+/// [`finalize`] measure completeness against `expected_areas`, so a filtered run's summary is written
+/// as soon as its **selected** areas have filed, and is stamped partial with the rest listed as
+/// absent. The sentences below say which of the two a reader is looking at.
 ///
 /// Reads the same files [`try_finalize`] read, so a set completed by another thread in between is
 /// reported as exactly that rather than as a contradiction. Never fails: an unreadable file is
@@ -5938,10 +6411,12 @@ pub fn finalization_pending(caps: &Capabilities) -> String {
     let mut sentences: Vec<String> = Vec::new();
     if !awaited.is_empty() {
         sentences.push(format!(
-            "it is written once all {AREA_COUNT} area reports exist and belong to this run; {} \
-             have not filed yet ({}). A name filter or a single-area invocation leaves this \
-             permanently outstanding, which is expected and is not a failure — each area's own \
-             report was still written.",
+            "it is written once every area this invocation selected has filed a report belonging \
+             to this run; of the {AREA_COUNT} areas in the table, {} have no such report yet ({}). \
+             Under a name filter or a single-area invocation the areas that were never going to run \
+             stay listed here permanently, which is expected and is not a failure: such a run's \
+             summary is published over the areas it did select and stamped partial, and each area's \
+             own report was written regardless.",
             awaited.len(),
             awaited.join(", ")
         ));

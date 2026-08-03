@@ -137,8 +137,9 @@ width is ever printed, so the MEASURED 16, 12, 16 and 16-byte representations ac
 i686, AArch64 and RISC-V 64 -- x87 80-bit against IEEE binary128 -- cannot reach stdout, whereas
 the suffix's type-selection behaviour is fully cross-comparable. The type is therefore covered
 here rather than dropped for being awkward, and cross-backend value comparison for it is owned by
-13_floating_point/004_long_double_target_restricted.c as a recorded exclusion under marker
-XD-TYPE-LONGDOUBLE-001.
+13_floating_point/004_long_double_target_restricted.c as a RECORDED EXCLUSION -- oracle_b
+disabled, with the measured representations as its basis -- and not as a marker, because an
+implementation-defined representation difference is not a divergence attributable to bcc.
 WIDTH NORMALIZATION IN THE OUTPUT ITSELF. Every printed value is an int printed with %d -- a
 _Generic result or a comparison result, cast where needed -- except the two long long products
 printed with %lld, and long long is 64 bits on all four targets. No plain long, no size_t, no

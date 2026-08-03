@@ -781,20 +781,19 @@ impl SectionTable {
 //
 // Every question the probe asks of an artifact — its class, its type field, whether it carries a
 // program interpreter header, whether it contains a named section — is a method on `ElfImage`, and
-// the only way to obtain an `ElfImage` is `ElfImage::read`. A convenience function taking a path
-// per fact used to sit here, and it was removed rather than kept, for two reasons.
+// the only way to obtain an `ElfImage` is `ElfImage::read`. One read, one snapshot, every question
+// answered from it. That is a correctness property before it is a performance one.
 //
-// The first is cost. Several checks want two or three facts about one artifact, and a
-// path-per-fact shorthand read the whole file once per fact. A statically linked probe program is
-// a couple of megabytes, so the `-static` check alone read four megabytes to answer two questions
-// that one read answers.
+// Agreement is the property. Two reads of a path are two different observations, and nothing
+// guarantees they see the same bytes: an artifact replaced between them would let one report line
+// describe the file that was inspected and the next describe a different file, with no indication
+// in the report that the subject had changed. Reading once and asking the resulting image every
+// question makes a whole check's conclusion describe one file, by construction.
 //
-// The second, and the reason this is a correctness property rather than a performance one, is
-// agreement. Two reads of a path are two different observations, and nothing guarantees they see
-// the same bytes: an artifact replaced between them would let one report line describe the file
-// that was inspected and the next describe a different file, with no indication in the report that
-// the subject had changed. Reading once and asking the resulting image every question makes a
-// whole check's conclusion describe one file, by construction.
+// It is cheaper too, which is why nothing is given up by insisting on it. Several checks want two
+// or three facts about one artifact, and a statically linked probe program is a couple of
+// megabytes, so a path-per-fact shorthand would read four megabytes to answer the two questions
+// the `-static` check asks.
 
 /// Name an `e_type` value in words, for a report a reader should not have to decode.
 ///
@@ -927,6 +926,102 @@ int main(void)
 /// header rather than by this module.
 const HEADER_STDOUT: &str = "flagprobe_header=4242 probe_header\n";
 
+/// The default-language-mode probe.
+///
+/// # Why a *flag* probe verifies something that is not a flag
+///
+/// Every other row here answers "does this flag mean the same thing to both compilers?". This one
+/// answers the question that makes those answers worth having: *which language are the two compilers
+/// speaking?* The two questions are inseparable here for one specific reason — this suite passes **no**
+/// standard-selection flag, because the compiler under test has none and passing one to the reference
+/// compiler alone would put a flag in a differential invocation that only one side honours. The
+/// language is therefore decided entirely by each compiler's own default mode, and nothing about a
+/// flag's behaviour could reveal a mismatch in it.
+///
+/// It is not a hypothetical mismatch. Measured on the reference host: the unsuffixed `gcc` is a release
+/// whose default is C23, the version-suffixed `gcc-13` beside it defaults to C17, and both report the
+/// same target triple. With the same driver and only the mode changed, a `_Generic` selection over a
+/// UTF-8 string literal chooses `char *` under gnu17 and `unsigned char *` under gnu23 — a construct
+/// the corpus contains.
+///
+/// # What the program asserts, and how
+///
+/// The preprocessor gate is the assertion: a mode outside the window makes the translation unit
+/// **fail to compile**, with the reason in the compiler's own words. The printed relation is the same
+/// fact stated as an observable, which is this suite's house style and also covers the one case the
+/// gate cannot — a preprocessor that mishandles a diagnostic directive in a branch it did not take.
+///
+/// GNU-extension availability is proved by *compiling an extension* rather than by a macro's absence,
+/// deliberately: no clause obliges an implementation to define or omit a strict-conformance macro, so
+/// requiring one would be a false oracle. Discovery reads that macro too, as a cheap early refusal for
+/// the driver families that do define it; this is the authoritative check.
+const PROGRAM_LANGUAGE_MODE: &str = r#"/*
+ * Flag-capability probe: default language mode.
+ *
+ * This suite passes no standard-selection flag, so each compiler's own default mode decides the
+ * language every comparison is judged in.  The preprocessor gate below fails the translation unit
+ * when that mode is outside the window this corpus is written for, and the printed relation states
+ * the same fact as an observable.  The statement expression proves the GNU extensions requirement 2
+ * mandates are actually on offer, by using one rather than by inspecting a macro.
+ */
+int printf(const char *, ...);
+
+#if !defined(__STDC_VERSION__)
+#  error "the default language mode defines no __STDC_VERSION__, so it is not a revision of C this suite can compare against"
+#elif __STDC_VERSION__ < 201112L
+#  error "the default language mode is older than C11, which is the revision this corpus is written in"
+#elif __STDC_VERSION__ > 201710L
+#  error "the default language mode is newer than C17, and C23 changes the meaning of constructs this corpus contains"
+#endif
+
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && (__STDC_VERSION__ <= 201710L)
+#  define BCC_FLAG_PROBE_WINDOW 1
+#else
+#  define BCC_FLAG_PROBE_WINDOW 0
+#endif
+
+static int gnu_statement_expression(void)
+{
+    return ({ int probe = 40; probe + 2; });
+}
+
+int main(void)
+{
+    printf("flagprobe_language_window=%d\n", BCC_FLAG_PROBE_WINDOW);
+    printf("flagprobe_language_gnu=%d\n", gnu_statement_expression());
+    return 0;
+}
+"#;
+
+/// The exact bytes [`PROGRAM_LANGUAGE_MODE`] must print.
+const LANGUAGE_MODE_STDOUT: &str = "flagprobe_language_window=1\nflagprobe_language_gnu=42\n";
+
+/// The negative control of the language-mode probe: a window no compiler can satisfy.
+///
+/// Without it, the positive half would be satisfied by a compiler that ignores a diagnostic directive
+/// entirely — the compilation would succeed for a reason having nothing to do with the mode, and the
+/// row would report a verification it never performed. This program must fail for both compilers, so
+/// the mechanism the positive half relies on is proved live rather than assumed.
+const PROGRAM_LANGUAGE_MODE_CONTROL: &str = r#"/*
+ * Flag-capability probe: negative control for the default language mode.
+ *
+ * Requires a revision of C that does not exist, so it must fail to compile for every compiler.  Its
+ * purpose is to prove that the diagnostic directive the positive probe depends on is honoured: if
+ * this compiled, the positive probe's success would say nothing about the language mode at all.
+ */
+int printf(const char *, ...);
+
+#if !defined(__STDC_VERSION__) || (__STDC_VERSION__ < 999999L)
+#  error "negative control: this translation unit must never compile"
+#endif
+
+int main(void)
+{
+    printf("flagprobe_language_control=0\n");
+    return 0;
+}
+"#;
+
 /// The fixture macro carrying the value the include probe prints.
 const FIXTURE_VALUE_MACRO: &str = "BCC_PROBE_HEADER_VALUE";
 
@@ -948,6 +1043,19 @@ const SOURCE_MACRO: &str = "probe_macro.c";
 
 /// Workspace entry name of the include-path program.
 const SOURCE_HEADER: &str = "probe_include.c";
+
+/// Workspace entry name of the default-language-mode program.
+const SOURCE_LANGUAGE_MODE: &str = "probe_language.c";
+
+/// Workspace entry name of the language-mode negative control.
+const SOURCE_LANGUAGE_MODE_CONTROL: &str = "probe_language_control.c";
+
+/// Subject text of the default-language-mode row.
+///
+/// Named rather than spelled at the call site because the row's whole point is the clause in the
+/// parenthesis: without it a reader could take the row for a `-std` check, which is the one thing this
+/// suite must never do.
+const SUBJECT_LANGUAGE_MODE: &str = "the default language mode (no -std flag is ever passed)";
 
 /// The output-naming flag, whose own observable is that the file it names exists.
 const FLAG_OUTPUT: &str = "-o";
@@ -1895,7 +2003,7 @@ impl<'a> Probe<'a> {
         Ok(Probe {
             caps,
             budget: budget_for(caps),
-            timeout_tool: caps.timeout_tool().path(),
+            timeout_tool: caps.outer_net_tool(),
             under_test_binary: bcc.to_path_buf(),
             target,
             secondary_target: if target == Target::I686 {
@@ -2885,6 +2993,95 @@ impl Probe<'_> {
                 &workspace,
                 &argv,
                 "the fixture header is unreachable without the include search path",
+            )?;
+        }
+
+        Probe::settle(workspace, &mut evidence);
+        Ok(evidence.finish())
+    }
+
+    /// The default language mode: both compilers compile the revision of C this corpus is written
+    /// in, and both offer the GNU extensions requirement 2 mandates.
+    ///
+    /// See [`PROGRAM_LANGUAGE_MODE`] for why a flag probe verifies something that is not a flag, and
+    /// [`PROGRAM_LANGUAGE_MODE_CONTROL`] for why the negative half is load-bearing rather than
+    /// decorative.
+    fn check_language_mode(&self) -> HarnessResult<FlagCheck> {
+        let party = self.participants(self.target);
+        let mut evidence = Evidence::new(
+            SUBJECT_LANGUAGE_MODE,
+            party.scope.as_str(),
+            CheckKind::Semantic,
+            "both compilers compile C11 or C17 by default with the GNU extensions available, and a \
+             program requiring a revision that does not exist is rejected by both",
+        );
+        if let Some(reason) = &party.absence {
+            evidence.mark_unavailable(reason.clone());
+        }
+        evidence.note(String::from(
+            "no standard-selection flag is passed to either compiler here or anywhere else in this \
+             suite: the compiler under test has none, so passing one to the reference compiler alone \
+             would put a flag in a differential invocation that only one side honours. The language \
+             is therefore whatever each compiler's own default mode is, which is why it is proved \
+             rather than assumed",
+        ));
+        evidence.note(String::from(
+            "measured on the reference host: the unsuffixed driver name follows the distribution's \
+             current default and was a release defaulting to C23, while the version-suffixed driver \
+             beside it defaulted to C17 — and both report the same target triple, so no target check \
+             could have told them apart",
+        ));
+        evidence.note(String::from(
+            "the GNU extensions are proved by compiling a statement expression rather than by a \
+             strict-conformance macro being absent: no clause obliges an implementation to define or \
+             to omit such a macro, so requiring one would be a false oracle",
+        ));
+
+        let (workspace, source) = self.stage(
+            SUBJECT_LANGUAGE_MODE,
+            SOURCE_LANGUAGE_MODE,
+            PROGRAM_LANGUAGE_MODE,
+        )?;
+        let control =
+            workspace.write_text(SOURCE_LANGUAGE_MODE_CONTROL, PROGRAM_LANGUAGE_MODE_CONTROL)?;
+        let control = path_text(&control)?;
+
+        for compiler in &party.compilers {
+            let artifact = compiler.artifact(&workspace, "language_mode.bin")?;
+            let artifact_text = path_text(&artifact)?;
+            let argv = args(&[FLAG_STATIC, FLAG_OUTPUT, &artifact_text, &source]);
+            if self.expect_compile(
+                &mut evidence,
+                compiler,
+                &workspace,
+                &argv,
+                "compile a program that requires the default language mode to be C11 or C17 with \
+                 the GNU extensions available",
+            )? {
+                evidence.observe(format!(
+                    "the {} compiles a revision of C inside the window this corpus is written for, \
+                     and accepted a GNU statement expression with no flag enabling it",
+                    compiler.label()
+                ));
+                self.expect_output(
+                    &mut evidence,
+                    compiler,
+                    &workspace,
+                    &artifact,
+                    LANGUAGE_MODE_STDOUT,
+                )?;
+            }
+
+            let refused = compiler.artifact(&workspace, "language_control.bin")?;
+            let refused_text = path_text(&refused)?;
+            let argv = args(&[FLAG_STATIC, FLAG_OUTPUT, &refused_text, &control]);
+            self.expect_compile_failure(
+                &mut evidence,
+                compiler,
+                &workspace,
+                &argv,
+                "a program requiring a revision of C that does not exist must not compile, which is \
+                 what proves the gate the positive half depends on is honoured",
             )?;
         }
 
@@ -4248,6 +4445,7 @@ pub fn run(caps: &Capabilities) -> HarnessResult<FlagProbeReport> {
         probe.check_static_linkage_other_class()?,
         probe.check_debug_information()?,
         probe.check_include_path()?,
+        probe.check_language_mode()?,
     ];
     checks.extend(probe.check_macro_flags()?);
     checks.extend(probe.check_optimization_levels()?);

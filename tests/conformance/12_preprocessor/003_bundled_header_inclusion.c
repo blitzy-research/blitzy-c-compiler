@@ -12,9 +12,13 @@
  *
  * THE HEADER EXCEPTION, AND ITS LIMITS.  The corpus rule is that a program includes
  * no header and hand-declares the single libc prototype it needs.  Exactly two
- * exceptions are sanctioned, and this program is the second of them
- * (tests/conformance/README.md lines 824-835): it may include the nine REQUIRED
- * bundled freestanding headers and nothing else.  Those nine -- stddef.h, stdint.h,
+ * exceptions are sanctioned, and this program is the second of them -- see
+ * tests/conformance/README.md, section "The two sanctioned header exceptions",
+ * under the bolded paragraph beginning "Exception 2".  Citing the heading rather
+ * than a line number is deliberate: a line range goes stale on the next edit of a
+ * 2,900-line document, and an authority a reader cannot find is no authority at
+ * all.  Under that exception this program may include the nine REQUIRED bundled
+ * freestanding headers and nothing else.  Those nine -- stddef.h, stdint.h,
  * stdarg.h, stdbool.h, limits.h, float.h, stdalign.h, stdnoreturn.h and iso646.h --
  * are exactly the set bcc ships (docs/technical-specifications.md line 19, with the
  * per-header contents tabulated at lines 202-214), and every one of them is ALSO a
@@ -38,9 +42,12 @@
  * atomics header is excluded deliberately even though bcc ships it: it is not among
  * the nine required headers, no requirement mandates it, and atomics can require
  * -latomic, which is not in the shared flag set -- so using it would risk a link
- * failure attributable to the test.  tests/conformance/README.md lines 843-845 is
- * the authority on the prohibited set; this banner names no member of it verbatim,
- * so a mechanical audit of the file for a forbidden header stays free of a comment
+ * failure attributable to the test.  The authority on the prohibited set is
+ * tests/conformance/README.md, section "The two sanctioned header exceptions",
+ * under the bolded paragraph "Obligations and limits that apply to both
+ * exceptions" -- again cited by heading rather than by line number, for the reason
+ * given above.  This banner names no member of the prohibited set verbatim, so a
+ * mechanical audit of the file for a forbidden header stays free of a comment
  * that would otherwise read as a hit.
  *
  * WIDTH DISCIPLINE -- the central design constraint of this program.  The four
@@ -60,8 +67,12 @@
  * fixed by a fixed-width type or by a constant identical on all four targets.  The
  * extended-precision floating type is absent entirely: its representation was
  * measured at 16, 12, 16 and 16 bytes across the four targets (x87 80-bit versus IEEE
- * binary128), which is area 13's subject and its recorded per-oracle exclusion, never
- * this program's.
+ * binary128), which is area 13's subject rather than this program's.  Area 13 holds the
+ * source that exercises the type; the per-oracle exclusion that will scope its
+ * cross-backend comparison lives in that program's expectation record, and no area 13
+ * record is committed on this branch yet, so no exclusion is in force anywhere today.
+ * Either way it is not this program's business: what matters here is that naming the
+ * type would forfeit the byte-identical output the nine-header probe depends on.
  *
  * OFFSETOF DISCIPLINE.  struct Fixed carries only int8_t and int32_t members.  That
  * is deliberate and measured: the i386 System V ABI aligns int64_t to 4 inside a
@@ -70,10 +81,25 @@
  * into an apparent divergence.  With int32_t members the offsets are 4 and 8 on
  * every target, so offsetof is asserted as an exact value rather than hedged.
  *
- * DETERMINISM AND UNDEFINED-BEHAVIOUR FREEDOM.  Output is a fixed 18-line sequence,
+ * WHY THE ALIGNMENT CHECK USES NO POINTER.  An earlier form of this program converted
+ * the address of an alignas-qualified array to uintptr_t and asserted that the residue
+ * modulo the requested alignment was zero.  That assertion is unsound as an oracle: the
+ * mapping between a pointer and the integer it converts to is IMPLEMENTATION-DEFINED
+ * (C11 6.3.2.3p6), and a conforming implementation whose mapping is tagged, biased or
+ * otherwise not the plain byte address can preserve every round trip the standard
+ * requires while still producing a non-zero residue for a correctly aligned object.  A
+ * divergence there would accuse the compiler of a defect the standard permits, which is
+ * the opposite of what an oracle is for.  The alignment request is therefore observed
+ * with INTEGER CONSTANT EXPRESSIONS only -- alignof and offsetof, both of which the
+ * translator must fold and neither of which involves a conversion -- and the
+ * alignas-qualified OBJECT is exercised separately by a defined byte round trip through
+ * an unsigned char lvalue, which reads and writes storage without observing an address.
+ *
+ * DETERMINISM AND UNDEFINED-BEHAVIOUR FREEDOM.  Output is a fixed 21-line sequence,
  * one line per semantic property claimed, so a single divergent line localizes the
- * defect to one header fact.  No address is printed: the alignas check appears only
- * as an alignment RESIDUE relation, and the NULL check only as a pointer COMPARISON.
+ * defect to one header fact.  No address is printed and no pointer value is ever
+ * converted to an integer: the alignas checks are integer constant expressions and a
+ * byte round trip, and the NULL check only a pointer COMPARISON.
  * No plain char is used where signedness could matter -- signedness is signed on
  * x86-64 and i686 and unsigned on AArch64 and RISC-V 64 -- so limits are read
  * through SCHAR_MIN/SCHAR_MAX and fixed-width values through int8_t.  No translation
@@ -82,10 +108,12 @@
  * read from a file, a network endpoint, the environment or the program arguments, and
  * no storage is obtained from the heap: every input is a literal in this file, so a
  * cell is hermetic.
- * No signed overflow, no shift, no aliasing violation, no pointer arithmetic beyond
- * the alignment cast, no object modified twice between sequence points, and at most
- * one side-effecting argument per call.  main returns 0, inside the permitted 0-125
- * exit range.
+ * No signed overflow, no shift, no aliasing violation, no pointer arithmetic and no
+ * pointer-to-integer conversion at all, no object modified twice between sequence
+ * points, and at most one side-effecting argument per call.  The only object written
+ * after its declaration is aligned_block, whose two byte stores are separate
+ * statements and are read back afterwards, never in the same expression that wrote
+ * them.  main returns 0, inside the permitted 0-125 exit range.
  */
 
 #include <stddef.h>
@@ -128,9 +156,24 @@ struct Fixed {
     int32_t c;
 };
 
-/* stdalign.h's alignas, applied to static storage and checked in main through an
- * alignment residue.  16 bytes is more than the requested alignment needs, so the
- * declaration cannot be satisfied accidentally by the object's size alone. */
+/* stdalign.h's alignas, in the two grammar positions the macro can occupy, so that
+ * neither is left untested.
+ *
+ * On a MEMBER, where the effect is observable with integer constant expressions alone:
+ * a struct's alignment is at least the strictest alignment of its members, so
+ * alignof(struct AlignedHolder) must be 8; the member must then begin at the first
+ * multiple of 8 that follows the single leading byte, so offsetof must be exactly 8;
+ * and a type's size must be a multiple of its alignment, so sizeof must divide by 8.
+ * Three independent consequences of one request, none of them a pointer conversion.
+ *
+ * On an OBJECT, where the request is exercised by using the storage rather than by
+ * observing where it sits.  16 bytes is more than the requested alignment needs, so
+ * the declaration cannot be satisfied accidentally by the object's size alone. */
+struct AlignedHolder {
+    unsigned char lead;
+    alignas(8) unsigned char body[8];
+};
+
 alignas(8) static unsigned char aligned_buf[16];
 
 /* stdarg.h exercised end to end: va_list, va_start, va_arg, va_end and va_copy all
@@ -212,11 +255,20 @@ int main(void)
      * a property the corpus does not print raw. */
     printf("flt_radix=%d dbl_dig_ge_10=%d\n", FLT_RADIX, (int)(DBL_DIG >= 10));
 
-    /* alignas verified as a residue relation.  The cast target uintptr_t comes from
-     * stdint.h and is exactly pointer width on every target, so the conversion
-     * crosses no width boundary; the modulus is unsigned throughout, which is what
-     * keeps -Wsign-conversion satisfied. */
-    printf("alignas_residue_ok=%d\n", (int)(((uintptr_t)aligned_buf % 8u) == 0u));
+    /* stdalign.h's alignas, observed three ways with integer constant expressions and
+     * once by using the storage.  alignof and offsetof come from stdalign.h and
+     * stddef.h respectively, both of which this program includes, so the assertions
+     * exercise the bundled headers as well as the alignment machinery.  Each operand
+     * is unsigned throughout, which is what keeps -Wsign-conversion satisfied. */
+    printf("alignas_type_alignment=%d\n", (int)(alignof(struct AlignedHolder) == 8u));
+    printf("alignas_member_offset=%d\n",
+           (int)(offsetof(struct AlignedHolder, body) == 8u));
+    printf("alignas_size_multiple=%d\n",
+           (int)((sizeof(struct AlignedHolder) % 8u) == 0u));
+    aligned_buf[0] = 0x5au;
+    aligned_buf[15] = 0xa5u;
+    printf("alignas_object_roundtrip=%d\n",
+           (int)(aligned_buf[0] == 0x5au && aligned_buf[15] == 0xa5u));
 
     /* stdnoreturn.h, by presence. */
     printf("noreturn_macro_present=%d\n", NORETURN_MACRO_PRESENT);

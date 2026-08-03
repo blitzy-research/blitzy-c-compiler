@@ -74,12 +74,33 @@
  * THE ASYMMETRY THAT IS EASIEST TO GET WRONG.  An out-of-range conversion
  * between INTEGER types is well defined for an unsigned destination -- the
  * value is reduced modulo one plus the destination maximum (C11 6.3.1.3p2) --
- * but that modular rule does NOT extend to a FLOATING source.  Converting a
- * negative floating value to any unsigned integer type is undefined for every
- * magnitude, however small.  No negative floating value is converted to an
- * unsigned type anywhere in this program: every source feeding unsigned int,
- * unsigned short, unsigned char or unsigned long long above is non-negative,
- * and that is a requirement rather than a tidiness.
+ * but that modular rule does NOT extend to a FLOATING source.  C11 6.3.1.4p1
+ * states the floating-to-integer rule in two steps, and both steps matter: the
+ * fractional part is discarded first, and the behaviour is undefined only if
+ * THE VALUE OF THE INTEGRAL PART, the value that survives that truncation,
+ * cannot be represented by the destination type.  Nothing is reduced modulo
+ * anything.
+ *
+ * Reading that rule precisely is what keeps this program's own analysis honest,
+ * because the two steps do not draw the line where a hasty reading would put
+ * it.  A negative source is NOT automatically undefined against an unsigned
+ * destination: any value strictly between -1 and 0 truncates to a zero that
+ * every unsigned type represents, so the conversion is defined and yields
+ * zero.  What is undefined is a negative value of magnitude one or more,
+ * whose integral part is negative and therefore outside every unsigned range;
+ * and, symmetrically, a positive value whose integral part exceeds the
+ * destination maximum, which is undefined for a signed and an unsigned
+ * destination alike.  The dangerous region is "integral part out of range",
+ * not "source negative".
+ *
+ * This program stays clear of the whole question rather than relying on the
+ * narrow defined case: no negative floating value is converted to an unsigned
+ * type anywhere in it.  Every source feeding unsigned int, unsigned short,
+ * unsigned char or unsigned long long above is non-negative, and every integral
+ * part converted anywhere sits inside its destination by the margins tabulated
+ * earlier.  That is a requirement rather than a tidiness -- a conversion whose
+ * definedness depended on a truncation happening to land on zero would be a
+ * fragile subject for an oracle even though it is well defined.
  *
  * INTEGER -> FLOATING is the safer direction but has one hazard of its own: an
  * integer not exactly representable in the destination floating type is
@@ -91,9 +112,13 @@
  * binary64 carries 53, so integers up to 2^53 = 9007199254740992 are exact.
  * 12345, 1024, 16777216, 250 and -125 are exact in both formats; 4000000000 is
  * exact in both as well (it is 2^11 * 5^9, needing 21 significand bits);
- * 9007199254740992 is exactly 2^53 and 4000000000000 and 1234567890123 need 42
- * and 41 significand bits, so all three are exact in binary64 -- and precisely
- * because the last two are NOT exact in binary32, neither is ever converted to
+ * 9007199254740992 is exactly 2^53, 4000000000000 is 2^14 * 5^12 and so needs
+ * only the 28 significand bits its odd part 5^12 = 244140625 occupies, and
+ * 1234567890123 is odd and needs 41, so all three are exact in binary64.  The
+ * count that matters for exactness is the width of the ODD PART, not the width of
+ * the whole integer: trailing factors of two are absorbed by the exponent and
+ * cost no significand at all.  Neither 4000000000000 nor 1234567890123 fits
+ * binary32's 24 bits, and precisely for that reason neither is ever converted to
  * float, only to double.
  *
  * EVERY FLOATING VALUE HERE IS A DYADIC RATIONAL -- an integer, or an integer
@@ -117,8 +142,11 @@
  * unsigned long long appear, every one of them the same width on all four
  * targets.  The widest floating type is likewise absent, its representation
  * having been measured to differ across the targets; it belongs to
- * 004_long_double_target_restricted.c, which carries the marker for it.  Plain
- * char never appears either, its signedness having been measured as signed on
+ * 004_long_double_target_restricted.c, which handles it with a recorded
+ * oracle-(b) exclusion and no marker -- that program's record disables the
+ * cross-backend arm alone and carries the measurement as its recorded reason,
+ * which is the mechanism EXPECTED_DIVERGENCES.md section 4.2 provisions for it.
+ * Plain char never appears either, its signedness having been measured as signed on
  * x86-64 and i686 and unsigned on AArch64 and RISC-V 64, so the two character
  * conversions here name signed char and unsigned char explicitly.  No address
  * or pointer value is printed.
@@ -230,6 +258,18 @@ int main(void)
     signed char fold_d2schar = (signed char)100.75;     /* -> 100            */
     unsigned char fold_d2uchar = (unsigned char)200.25; /* -> 200            */
 
+    /* NEGATIVE floating source -> unsigned destination, in the one range where
+       C11 6.3.1.4p1 defines it: strictly between -1 and 0, whose integral part
+       is zero and is representable everywhere.  Three destination widths, so a
+       defect confined to one width cannot hide behind the others.  A saturating
+       conversion would print the destination maximum, the modular integer rule
+       applied by mistake would print it too, and rounding away from zero would
+       print 1; only truncation toward zero prints 0. */
+    unsigned int fold_negfrac2u = (unsigned int)(-0.75);          /* -> 0     */
+    unsigned char fold_negfrac2uchar = (unsigned char)(-0.5f);    /* -> 0     */
+    unsigned long long fold_negfrac2ull =
+        (unsigned long long)(-0.25);                              /* -> 0     */
+
     /* float -> integer.  Every source is exact in binary32: 16777216 is
        exactly 2^24, the largest integer for which every integer below it is
        representable, and 3.75, 1000000, -32000 and 250.75 all need far fewer
@@ -255,7 +295,7 @@ int main(void)
     float fold_i2f_pow2 = (float)16777216;              /* exactly 2^24      */
     double fold_sc2d = (double)(signed char)(-125);     /* exact in binary64 */
     float fold_uc2f = (float)(unsigned char)250;        /* exact in binary32 */
-    double fold_ull2d = (double)4000000000000ULL;       /* 42 bits, exact    */
+    double fold_ull2d = (double)4000000000000ULL;       /* 28 bits, exact    */
 
     /* Round trips: out to a floating type and back to the integer type it
        came from.  Each source is exact in the floating type it passes
@@ -326,6 +366,24 @@ int main(void)
     unsigned short rt_d2ushort = (unsigned short)snap_d2ushort;  /* -> 65000 */
     signed char rt_d2schar = (signed char)snap_d2schar; /* -> 100            */
     unsigned char rt_d2uchar = (unsigned char)snap_d2uchar;      /* -> 200   */
+
+    /* Runtime sources for the three negative-fraction conversions.  The folder
+       cannot answer these, so the backend has to emit the genuine
+       floating-to-unsigned conversion for a negative operand -- which is the
+       instruction sequence the folded group above can never reach, and the one
+       where a saturating or wrongly-rounded lowering actually lives.  The float
+       source is held in float so the single-precision form is selected too. */
+    volatile double vol_negfrac2u = -0.75;
+    volatile float vol_negfrac2uchar = -0.5f;
+    volatile double vol_negfrac2ull = -0.25;
+    double snap_negfrac2u = vol_negfrac2u;
+    float snap_negfrac2uchar = vol_negfrac2uchar;
+    double snap_negfrac2ull = vol_negfrac2ull;
+    unsigned int rt_negfrac2u = (unsigned int)snap_negfrac2u;     /* -> 0     */
+    unsigned char rt_negfrac2uchar =
+        (unsigned char)snap_negfrac2uchar;                        /* -> 0     */
+    unsigned long long rt_negfrac2ull =
+        (unsigned long long)snap_negfrac2ull;                     /* -> 0     */
 
     /* Runtime sources for float -> integer.  Held in float rather than
        double, so the backend must select the single-precision conversion
@@ -401,7 +459,7 @@ int main(void)
      * The folded and runtime spellings of every conversion must agree.  One
      * flag per mirrored pair of printed lines, each the conjunction of that
      * line's field comparisons, in the order the lines are printed.  Every
-     * field is also printed individually above, so these seven flags are a
+     * field is also printed individually above, so these eight flags are a
      * summary on top of the per-property lines rather than a substitute for
      * them: a divergence shows up on its own field first and here second.
      * Each comparison is between two values of the same type, so no usual
@@ -420,6 +478,9 @@ int main(void)
         && (fold_d2ushort == rt_d2ushort)
         && (fold_d2schar == rt_d2schar)
         && (fold_d2uchar == rt_d2uchar);
+    int agree_negfrac = (fold_negfrac2u == rt_negfrac2u)
+        && (fold_negfrac2uchar == rt_negfrac2uchar)
+        && (fold_negfrac2ull == rt_negfrac2ull);
     int agree_f2int = (fold_f2i == rt_f2i)
         && (fold_f2i_trunc == rt_f2i_trunc)
         && (fold_f2u == rt_f2u)
@@ -439,7 +500,7 @@ int main(void)
         && (fold_roundtrip_u_d_u == rt_roundtrip_u_d_u);
 
     /* ----------------------------------------------------------------------
-     * Output.  Seven folded lines, then their seven runtime mirrors in the
+     * Output.  Eight folded lines, then their eight runtime mirrors in the
      * same order and with the same field order, then the agreement summary.
      * Values narrower than int are widened with an explicit (int) and floats
      * with an explicit (double), so every default argument promotion is
@@ -454,6 +515,8 @@ int main(void)
     printf("d2u=%u d2short=%d d2ushort=%d d2schar=%d d2uchar=%d\n",
            fold_d2u, (int)fold_d2short, (int)fold_d2ushort,
            (int)fold_d2schar, (int)fold_d2uchar);
+    printf("negfrac2u=%u negfrac2uchar=%d negfrac2ull=%llu\n",
+           fold_negfrac2u, (int)fold_negfrac2uchar, fold_negfrac2ull);
     printf("f2i=%d f2i_trunc=%d f2u=%u f2short=%d f2uchar=%d\n",
            fold_f2i, fold_f2i_trunc, fold_f2u, (int)fold_f2short,
            (int)fold_f2uchar);
@@ -476,6 +539,8 @@ int main(void)
            " rt_d2uchar=%d\n",
            rt_d2u, (int)rt_d2short, (int)rt_d2ushort, (int)rt_d2schar,
            (int)rt_d2uchar);
+    printf("rt_negfrac2u=%u rt_negfrac2uchar=%d rt_negfrac2ull=%llu\n",
+           rt_negfrac2u, (int)rt_negfrac2uchar, rt_negfrac2ull);
     printf("rt_f2i=%d rt_f2i_trunc=%d rt_f2u=%u rt_f2short=%d"
            " rt_f2uchar=%d\n",
            rt_f2i, rt_f2i_trunc, rt_f2u, (int)rt_f2short, (int)rt_f2uchar);
@@ -488,9 +553,8 @@ int main(void)
            rt_roundtrip_i_d_i, rt_roundtrip_i_f_i, rt_roundtrip_ll_d_ll,
            rt_roundtrip_u_d_u);
 
-    printf("folded_matches_runtime=%d %d %d %d %d %d %d\n",
-           agree_d2i, agree_wide, agree_d2narrow, agree_f2int, agree_int2fp,
-           agree_int2fp_wide, agree_roundtrip);
+    printf("folded_matches_runtime=%d %d %d %d %d %d %d %d\n",
+           agree_d2i, agree_wide, agree_d2narrow, agree_negfrac, agree_f2int,
+           agree_int2fp, agree_int2fp_wide, agree_roundtrip);
     return 0;
 }
-

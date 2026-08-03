@@ -91,9 +91,11 @@
 //!
 //! # Read-only with respect to the corpus
 //!
-//! There is deliberately no writer, fixer or update-in-place helper here. Golden records are
-//! regenerated only through the maintenance script under `tests/conformance/tools/`, never during
-//! a test run, so a wrong answer cannot quietly become the new expectation.
+//! There is deliberately no writer, fixer or update-in-place helper here, and that is what keeps a
+//! wrong answer from quietly becoming the new expectation: nothing on a test run's path can rewrite a
+//! golden record. Regeneration is a maintenance action performed outside a run, by a script planned
+//! for `tests/conformance/tools/` — a directory that does not exist on this branch yet, so today the
+//! only way a record changes is a deliberate hand edit.
 
 use std::fmt;
 use std::fs;
@@ -106,8 +108,8 @@ use super::{
     require_contained_corpus_file, require_regular_file, sanitize_text_for_report, shown_path,
     stable_digest, ub_audit_gate_required, AreaSpec, CellKey, CompilerSide, DivergenceClass,
     HarnessError, HarnessResult, OptLevel, Oracle, Target, AREAS, BCC_TARGET_FLAG,
-    BCC_TARGET_SELECTORS, DIFFERENTIAL_FLAGS_MINIMAL, DIGEST_HEX_DIGITS, EXTENSION_AREA,
-    MAX_INSPECTED_FILE_BYTES, SHARED_FLAGS_VERIFIED, UB_AUDIT_GATE_DEFAULT,
+    BCC_TARGET_SELECTORS, CURATED_FINDINGS_DIR_NAME, DIFFERENTIAL_FLAGS_MINIMAL, DIGEST_HEX_DIGITS,
+    EXTENSION_AREA, MAX_INSPECTED_FILE_BYTES, SHARED_FLAGS_VERIFIED, UB_AUDIT_GATE_DEFAULT,
     UB_AUDIT_GATE_MANDATORY, UB_AUDIT_GATE_REMOVABLE, UB_GATE_DEFAULT, UB_GATE_WITHOUT_CONVERSION,
     UB_GATE_WITHOUT_PEDANTIC,
 };
@@ -125,14 +127,6 @@ const SOURCE_EXTENSION: &str = "c";
 
 const RECORD_EXTENSION: &str = "expected";
 
-/// The corpus directory holding committed, curated finding artifacts.
-///
-/// A sibling of the feature-area directories rather than a child of one, which is why
-/// [`AREA_COMPANION_EXTENSIONS`] can stay as narrow as it is. [`load_replay`] reads beneath it so a
-/// reviewed, committed reproducer can be replayed by the harness exactly like a freshly generated
-/// one; nothing in the suite writes there.
-const CURATED_FINDINGS_DIR_NAME: &str = "findings";
-
 /// Extensions a regular file may carry inside a feature-area directory without being a program.
 ///
 /// Exactly one: the expectation record. A feature-area directory holds programs and the records
@@ -144,18 +138,31 @@ const CURATED_FINDINGS_DIR_NAME: &str = "findings";
 /// its record alone — that is what makes "source file, build commands, and expected output
 /// recorded together" literally true — and every program therefore hand-declares the libc
 /// prototypes it needs rather than including a hosted header: `printf` in nearly every program,
-/// and `_Noreturn void exit(int);` as well in the `_Noreturn` program. The single sanctioned
-/// inclusion is area 07's `<stdarg.h>`, which is freestanding, is shipped by both compilers, and
-/// cannot be worked around at all, because a variadic function cannot be written without it. A
-/// header beside the programs is an invitation to break that, and a shared header would
-/// additionally fail against a compiler under test that bundles no `stdio.h`, producing a
-/// divergence caused by the test rather than by the compiler. A script beside the programs is
+/// and `_Noreturn void exit(int);` as well in the `_Noreturn` program.
+///
+/// Two inclusions are sanctioned, and both are of **bundled freestanding** headers that each
+/// compiler ships, so neither can produce a divergence caused by the test:
+///
+/// * area 07's `<stdarg.h>`, which cannot be worked around at all, because a variadic function
+///   cannot be written without `va_list`, `va_start`, `va_arg` and `va_end`;
+/// * `12_preprocessor/003_bundled_header_inclusion.c`, the dedicated probe for the bundled set,
+///   which includes all **nine required** freestanding headers — `stddef.h`, `stdint.h`,
+///   `stdarg.h`, `stdbool.h`, `limits.h`, `float.h`, `stdalign.h`, `stdnoreturn.h` and
+///   `iso646.h` — because restricting it to one would leave eight of the nine shipped headers
+///   never included by anything, which is a coverage hole rather than a discipline.
+///
+/// Each program taking either exception records the exception and its reason in its own
+/// `ub_notes`. Nothing else may include anything: a header placed *beside* the programs is an
+/// invitation to break the single-file rule, and a shared header would additionally fail against a
+/// compiler under test that bundles no `stdio.h`, producing a divergence caused by the test rather
+/// than by the compiler. A script beside the programs is
 /// worse still: the area directory is scanned, and something that looks like a per-area build step
 /// is the beginning of a corpus that no longer builds the way its records say it does.
 ///
-/// The corpus's genuine companions — the fixture support tree, the tooling tree, the findings tree
-/// and the two registers — are siblings of the area directories rather than children, so nothing
-/// legitimate is displaced by this rule.
+/// The corpus's genuine companions are siblings of the area directories rather than children, so
+/// nothing legitimate is displaced by this rule: the fixture support tree, the findings tree and the
+/// two registers, all committed, plus the maintenance tooling tree, which is planned for
+/// `tests/conformance/tools/` and absent on this branch.
 ///
 /// Any other extension is a hard error, which also catches a `.rs` file dropped into the top level
 /// of an area directory: the corpus has to stay invisible to the build system for the suite to
@@ -263,15 +270,17 @@ const FLAGS_WITHOUT_EXECUTABLE: &[&str] = &["-c", "-S", "-E"];
 /// Largest expectation record the parser will read, in bytes.
 ///
 /// A record holds a small set of scalar fields, its written notes, and a golden stdout. Measured
-/// across the committed corpus: the largest golden stdout is 2,220 bytes over 126 lines, the
-/// largest single notes field a few kilobytes, and the largest whole record roughly ten kilobytes
-/// — an order of magnitude below this bound, so the limit costs the corpus nothing while denying
-/// an adversarial or corrupt file the ability to exhaust memory. The exact figures for the notes
-/// and the whole record are deliberately given as an order rather than a byte count, because
-/// prose is edited and a stated byte count would go stale; the golden-stdout figures are exact,
-/// because a golden record is immutable except through the regeneration tool. The size is checked
-/// against the file's metadata *before* it is opened and enforced again on the reader, because a
-/// file can grow between the two.
+/// across the 92 records committed on this branch: the largest golden stdout is 2,589 bytes over
+/// 113 lines, the largest heredoc of any field is 11,918 bytes over 135 lines — an
+/// `impl_defined_notes` block — and the largest whole record is 22,494 bytes. All three maxima are
+/// in `02_constant_expressions/007_string_literal_constants.expected`, and the largest of them is an
+/// order of magnitude below this bound, so the limit costs the corpus nothing while denying an
+/// adversarial or corrupt file the ability to exhaust memory. Every figure here is exact and dated
+/// to the committed corpus rather than given as an order of magnitude, which means it can go stale
+/// as prose is edited; re-measure with a pass over `tests/conformance/*/*.expected` before relying
+/// on one. The bound itself is deliberately far enough above them that a stale figure cannot make it
+/// wrong. The size is checked against the file's metadata *before* it is opened and enforced again on
+/// the reader, because a file can grow between the two.
 const RECORD_BYTES_MAX: u64 = 256 * 1024;
 
 /// Longest single line the parser accepts, in bytes.
@@ -411,17 +420,107 @@ const KEY_MARKER_BASIS: &str = "expected_divergence.basis";
 
 const KEY_MARKER_OBSERVED: &str = "expected_divergence.observed";
 
-/// The five marker keys. Either all of them are present or none of them is.
+/// The documenting sentence, quoted verbatim from the document the basis cites.
+///
+/// The key that makes a basis an *affirmative* documented limitation rather than an inference
+/// from silence. A path and a resolvable locator prove only that a document exists and that a
+/// section can be found in it; they say nothing about whether that section documents the
+/// limitation being excused. A quotation does, and it cannot be fabricated: the register audit
+/// requires this text to occur in the cited document verbatim, and an omission cannot be quoted,
+/// because there is no sentence to quote.
+const KEY_MARKER_DOCUMENTED: &str = "expected_divergence.documented";
+
+/// The captured observation, in structured sub-fields rather than prose.
+///
+/// The key that makes a marker a record of something *seen* rather than something expected. Every
+/// sub-field named in [`EVIDENCE_FIELDS`] must be present and non-empty, so a marker cannot be
+/// minted before the divergence it describes has actually been reproduced and its command, exit
+/// status, output, toolchain and capture date written down.
+const KEY_MARKER_EVIDENCE: &str = "expected_divergence.evidence";
+
+/// The seven marker keys. Either all of them are present or none of them is.
 const MARKER_KEYS: &[&str] = &[
     KEY_MARKER_ID,
     KEY_MARKER_CLASS,
     KEY_MARKER_SCOPE,
     KEY_MARKER_BASIS,
+    KEY_MARKER_DOCUMENTED,
+    KEY_MARKER_EVIDENCE,
     KEY_MARKER_OBSERVED,
 ];
 
+/// The sub-fields a captured observation must carry, each as a `name: value` line.
+///
+/// Chosen so that the five together answer the only question that matters about an expected
+/// divergence — did anyone actually see this? — in a form the next reader can re-run:
+///
+/// * `command` — the exact invocation that produced the divergence;
+/// * `exit` — the status it exited with, so a refusal is distinguishable from a wrong answer;
+/// * `output` — what it printed, so the divergence is recognisable without re-running it;
+/// * `toolchain` — which compiler under test produced it, so a later run can tell whether it is
+///   still the same subject;
+/// * `captured` — when, so a stale observation is visible as stale.
+const EVIDENCE_FIELDS: &[&str] = &["command", "exit", "output", "toolchain", "captured"];
+
+/// Wording that betrays a basis resting on a document's SILENCE rather than on its statements.
+///
+/// An omission is not a documented limitation. "The inventory does not list this feature" is
+/// compatible with the feature being supported and the inventory being incomplete, with the
+/// feature being unsupported, and with nobody having considered the question — so it authorises
+/// nothing, while looking exactly like authority. This list is deliberately about the shape of the
+/// claim rather than about any one feature, so it keeps working as the corpus changes.
+const OMISSION_WORDING: &[&str] = &[
+    "omit",
+    "absent from",
+    "absent in",
+    "not documented",
+    "undocumented",
+    "does not appear",
+    "do not appear",
+    "does not list",
+    "do not list",
+    "not listed",
+    "not enumerated",
+    "no mention",
+    "not mentioned",
+    "missing from",
+    "silence",
+    "silent on",
+    "nowhere in",
+    "fails to name",
+    "never names",
+];
+
+/// Wording that betrays an observation that has not actually been made.
+///
+/// A marker reclassifies a real failure as expected. Doing that on the strength of a prediction
+/// inverts the burden of proof: the run stops reporting the divergence precisely because someone
+/// guessed it would happen. These phrases are the ones an honest author reaches for when writing
+/// down a guess, which is exactly why they are refused rather than tolerated.
+const ANTICIPATORY_WORDING: &[&str] = &[
+    "is expected to",
+    "are expected to",
+    "expected to reject",
+    "expected to fail",
+    "anticipat",
+    "will reject",
+    "will fail",
+    "would reject",
+    "would fail",
+    "should reject",
+    "should fail",
+    "presum",
+    "no verdict",
+    "not yet been observed",
+    "has not been observed",
+    "not been recorded",
+    "no bcc result",
+    "stated as anticipated",
+    "rather than as already seen",
+];
+
 /// Every recognised key, in the order the reference record writes them.
-const KEYS: [KeySpec; 22] = [
+const KEYS: [KeySpec; 24] = [
     KeySpec::new("program", FieldKind::Scalar, Presence::Required),
     KeySpec::new("area", FieldKind::Scalar, Presence::Required),
     KeySpec::new("description", FieldKind::Scalar, Presence::Required),
@@ -447,6 +546,12 @@ const KEYS: [KeySpec; 22] = [
     KeySpec::new(KEY_MARKER_CLASS, FieldKind::Scalar, Presence::Optional),
     KeySpec::new(KEY_MARKER_SCOPE, FieldKind::Scalar, Presence::Optional),
     KeySpec::new(KEY_MARKER_BASIS, FieldKind::Scalar, Presence::Optional),
+    KeySpec::new(
+        KEY_MARKER_DOCUMENTED,
+        FieldKind::Heredoc,
+        Presence::Optional,
+    ),
+    KeySpec::new(KEY_MARKER_EVIDENCE, FieldKind::Heredoc, Presence::Optional),
     KeySpec::new(KEY_MARKER_OBSERVED, FieldKind::Heredoc, Presence::Optional),
 ];
 
@@ -678,9 +783,9 @@ fn require_field_within_size(origin: &Path, field: &RawField, key: &str) -> Harn
         key,
         format!(
             "the value is {} bytes, above the {FIELD_BYTES_MAX}-byte limit for a single field; \
-             the largest golden stdout in the corpus is 2,220 bytes and the largest notes field \
-             a few kilobytes, so a value this large is a corrupt or adversarial record rather \
-             than one the corpus could contain",
+             the largest field in the committed corpus is an impl_defined_notes block of 11,918 \
+             bytes and the largest golden stdout is 2,589 bytes, so a value this large is a \
+             corrupt or adversarial record rather than one the corpus could contain",
             field.value.len()
         ),
     ))
@@ -1586,6 +1691,8 @@ pub struct ExpectedDivergence {
     basis: String,
     basis_path: PathBuf,
     basis_citation: String,
+    documented: String,
+    evidence: String,
     observed: String,
     program_path: PathBuf,
 }
@@ -1593,8 +1700,9 @@ pub struct ExpectedDivergence {
 impl ExpectedDivergence {
     /// Marker identifier, by convention `XD-<AREA>-<TOPIC>-<NNN>`. Unique across the corpus. No
     /// concrete identifier is named here on purpose: the register is the only place a marker
-    /// exists, and quoting a real one in a doc comment would outlive its retirement. The corpus
-    /// carries markers, and the register is where they are enumerated.
+    /// exists, and quoting a real one in a doc comment would outlive its retirement. Whichever
+    /// markers are active — none, one, or several — the register is where they are enumerated, and
+    /// the audit resolves that set in both directions on every run.
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -1631,6 +1739,24 @@ impl ExpectedDivergence {
     /// check, which is the one thing a documented basis may not be.
     pub fn basis_citation(&self) -> &str {
         &self.basis_citation
+    }
+
+    /// The documenting sentence, quoted verbatim from the document the basis cites.
+    ///
+    /// Split out so the register cross-check can assert the quotation occurs in that document — the
+    /// property that distinguishes a limitation the repository *states* from one a reader inferred
+    /// from what it does not say. A basis whose authority is an omission cannot produce this text,
+    /// because there is no sentence to quote.
+    pub fn documented(&self) -> &str {
+        &self.documented
+    }
+
+    /// The captured observation, as the structured sub-fields [`EVIDENCE_FIELDS`] names.
+    ///
+    /// Retained verbatim so a report or a finding artifact can reproduce the command, the status and
+    /// the output that were actually seen, rather than a description of them.
+    pub fn evidence(&self) -> &str {
+        &self.evidence
     }
 
     /// The divergence as observed, so a reader can recognise it without reproducing the run.
@@ -3017,12 +3143,13 @@ fn parse_scope(origin: &Path, raw: &RawField) -> HarnessResult<MarkerScope> {
     let mut explicit_clauses = 0usize;
 
     for (position, clause) in text.split(';').map(str::trim).enumerate() {
-        // An empty clause is rejected at its position rather than filtered away. Filtering it was
-        // the defect: a scope of `;;;` produced no clause at all, every dimension then fell back
-        // to "all", and the marker silently covered every oracle, every target and every
-        // optimization level — the widest possible scope, reached by writing nothing. A marker's
-        // scope decides which divergences are excused, so widening it by accident is how a real
-        // defect on a target the marker was never meant to cover gets classified as expected.
+        // An empty clause is rejected at its position rather than filtered away, and the difference
+        // is load-bearing. Filtering would make a scope of `;;;` produce no clause at all, every
+        // dimension would fall back to "all", and the marker would silently cover every oracle,
+        // every target and every optimization level — the widest possible scope, reached by writing
+        // nothing. A marker's scope decides which divergences are excused, so widening it by
+        // accident is how a real defect on a target the marker was never meant to cover gets
+        // classified as expected.
         if clause.is_empty() {
             return Err(key_error(
                 origin,
@@ -3164,24 +3291,31 @@ fn parse_scope(origin: &Path, raw: &RawField) -> HarnessResult<MarkerScope> {
     })
 }
 
-/// Reject a marker whose scope cannot match a single cell of the record that carries it.
+/// Refuse a marker whose scope names a dimension this record never exercises.
 ///
-/// A scope is written independently of the matrix, so the two can disagree, and a disagreement is
-/// invisible at run time in the worst possible way: the marker is never consulted, so nothing
-/// reports it as unused. It sits in the register as documented knowledge about a comparison this
-/// program never makes, and if the divergence it describes ever appears in a cell the scope
-/// excludes, the run fails as an unexplained divergence with the explanation sitting unread two
-/// lines above.
+/// A marker reclassifies a divergence observed in a comparison the record actually makes. A scope
+/// naming an oracle the record disables, a target it never builds, or an optimization level it never
+/// sweeps therefore describes an experiment this program does not run, and the record and the marker
+/// would be documenting two different things while appearing to agree.
 ///
-/// Because a scope defaults each unmentioned dimension to all of its members, a disagreement can
-/// only arise where the scope constrains a dimension explicitly — a target the record does not
-/// build, an optimization level it does not sweep, or an oracle it has switched off. Each is
-/// checked and each is named individually, because "the scope does not intersect" is not
-/// actionable whereas "the scope names aarch64 but the record builds x86_64 only" is.
+/// # Why the oracle dimension is refused rather than treated as dormant
 ///
-/// The unexpected-success policy is the reason this must be an error rather than a warning: a
-/// marker whose divergence has disappeared already fails the run, so a marker that could never be
-/// consulted at all must not be allowed to look healthy.
+/// It is tempting to allow it on the reasoning that a marker scoped to a disabled oracle is
+/// "dormant by construction" — nothing is compared on that arm, so it can never reach `XPASS` and
+/// cannot mask a regression. The reason that is not enough is the marker contract's other half: a
+/// marker must carry a **captured observation** of the divergence it excuses ([`EVIDENCE_FIELDS`]),
+/// and an arm that is never compared can never produce one. A marker there would be unfalsifiable
+/// by construction, which is precisely the shape the basis and evidence rules exist to refuse.
+///
+/// Nothing is lost by refusing it, because a narrowing does not need a marker to be auditable. A
+/// disabled oracle is a **recorded exclusion**: it is still enumerated, still counted and still
+/// reported, and [`classify`](super::classify) reports it `XFAIL` citing the record's own
+/// `impl_defined_notes` reason. That is one of the two `XFAIL` forms the register documents, and it
+/// is how a construct whose value legitimately differs between architectures — the widest floating
+/// type, whose representation was measured to differ across the four targets — keeps a named,
+/// reasoned exclusion without an excuse nobody can test. A narrowing carrying no recorded reason is
+/// refused outright, and the register audit resolves every marker identifier against a live marker
+/// and every live marker against a register entry, in both directions.
 fn validate_marker_scope_intersects(
     origin: &Path,
     divergence: &ExpectedDivergence,
@@ -3371,11 +3505,33 @@ fn parse_basis(origin: &Path, raw: &RawField) -> HarnessResult<(String, PathBuf,
 
 /// Parse the optional expected-divergence marker block.
 ///
-/// Either all five marker keys are present or none is. A partial marker is a hard error because
+/// Either all seven marker keys are present or none is. A partial marker is a hard error because
 /// each part carries weight the others cannot: without an identifier the register cannot be
 /// cross-checked, without a class the classifier cannot match the divergence, without a scope it
-/// cannot tell which cells are covered, without a basis there is no documented authority, and
-/// without the observation a reader cannot tell whether what they are seeing is what was marked.
+/// cannot tell which cells are covered, without a basis there is no documented authority, without
+/// the quoted documenting sentence that authority cannot be shown to say anything, without the
+/// captured evidence nobody has established the divergence exists, and without the observation a
+/// reader cannot tell whether what they are seeing is what was marked.
+///
+/// # What this function refuses, and why refusing it here is the point
+///
+/// A marker is the one mechanism in the suite that turns a failure into a pass. Everything else can
+/// be wrong and the run still reports something true; a marker that should not exist makes the run
+/// report a compiler defect as an expected divergence, which is worse than any missing test. Four
+/// admission rules therefore hold, and each closes a way a marker could be minted without anyone
+/// having established anything:
+///
+/// * **The basis must be an affirmative documented limitation.** A basis whose own wording rests on
+///   a document's silence is refused (see [`OMISSION_WORDING`]) — an inventory that fails to list a
+///   feature is equally consistent with the feature working, and authorises nothing.
+/// * **The documenting sentence must be quoted.** The register audit resolves this quotation against
+///   the cited document's bytes, so the authority has to actually say something.
+/// * **The observation must have been made.** The evidence block must carry every sub-field in
+///   [`EVIDENCE_FIELDS`], and neither it nor the observation may be phrased as a prediction (see
+///   [`ANTICIPATORY_WORDING`]).
+/// * **A refusal must be scoped to every oracle it blocks.** A compile or link failure produces no
+///   artifact at all, so it denies all three oracles their subject; a marker covering one of them
+///   would leave the same root cause reported as a finding under the other two.
 fn parse_marker(
     fields: &[(&'static KeySpec, RawField)],
     origin: &Path,
@@ -3457,9 +3613,26 @@ fn parse_marker(
 
     let scope_field = required_field(fields, origin, KEY_MARKER_SCOPE)?;
     let scope = parse_scope(origin, scope_field)?;
+    require_refusal_covers_every_oracle(origin, scope_field, class, &scope)?;
 
     let basis_field = required_field(fields, origin, KEY_MARKER_BASIS)?;
     let (basis, basis_path, basis_citation) = parse_basis(origin, basis_field)?;
+    require_affirmative_basis(origin, basis_field, id, &basis)?;
+
+    let documented_field = required_field(fields, origin, KEY_MARKER_DOCUMENTED)?;
+    require_non_empty(
+        origin,
+        documented_field,
+        KEY_MARKER_DOCUMENTED,
+        "quote the sentence in the cited document that states the limitation, verbatim. The \
+         register audit resolves this quotation against that document's own bytes, which is what \
+         distinguishes a limitation the repository STATES from one a reader inferred from what it \
+         does not say — and an omission cannot be quoted, because there is no sentence to quote",
+    )?;
+    require_quotable(origin, documented_field, id)?;
+
+    let evidence_field = required_field(fields, origin, KEY_MARKER_EVIDENCE)?;
+    require_captured_evidence(origin, evidence_field, id)?;
 
     let observed_field = required_field(fields, origin, KEY_MARKER_OBSERVED)?;
     require_non_empty(
@@ -3470,6 +3643,7 @@ fn parse_marker(
          seeing is what was marked and so that an unexpected success is recognisable when the \
          divergence disappears",
     )?;
+    require_not_anticipatory(origin, observed_field, KEY_MARKER_OBSERVED, id)?;
 
     Ok(Some(ExpectedDivergence {
         id: String::from(id),
@@ -3478,9 +3652,215 @@ fn parse_marker(
         basis,
         basis_path,
         basis_citation,
+        documented: documented_field.value.clone(),
+        evidence: evidence_field.value.clone(),
         observed: observed_field.value.clone(),
         program_path: program_path.to_path_buf(),
     }))
+}
+
+/// Refuse a refusal-class marker whose scope does not cover every oracle the refusal blocks.
+///
+/// A compile failure or a link failure produces no artifact, so there is nothing for ANY oracle to
+/// compare: the reference comparison, the cross-backend comparison and the golden record are all
+/// denied their subject by the same root cause. A marker naming one of them therefore excuses one
+/// symptom of a single event and leaves the other two reported as findings — three verdicts for one
+/// cause, two of them wrong, and a reader with no way to tell that they belong together.
+fn require_refusal_covers_every_oracle(
+    origin: &Path,
+    field: &RawField,
+    class: DivergenceClass,
+    scope: &MarkerScope,
+) -> HarnessResult<()> {
+    if !matches!(
+        class,
+        DivergenceClass::CompileFailure | DivergenceClass::LinkFailure
+    ) {
+        return Ok(());
+    }
+    let missing: Vec<&str> = Oracle::ALL
+        .iter()
+        .filter(|oracle| !scope.oracles.contains(oracle))
+        .map(|oracle| oracle.label())
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(key_error(
+        origin,
+        field.line,
+        KEY_MARKER_SCOPE,
+        format!(
+            "this marker is class {}, which means no artifact is produced at all, yet its scope \
+             leaves out {}. A translation or link that does not happen denies EVERY oracle its \
+             subject at once — there is no program for the reference comparison to run, none for \
+             the cross-backend comparison to run, and none to compare against the golden record — \
+             so a scope covering only some of them excuses one symptom of a single event and leaves \
+             the others reported as separate findings. Widen the scope to name every oracle, here \
+             and in the register entry together",
+            class.label(),
+            comma_separated(&missing)
+        ),
+    ))
+}
+
+/// Refuse a basis whose own wording rests on a document's silence.
+///
+/// The distinction this enforces is not stylistic. "The documented inventory does not list this
+/// feature" is equally consistent with three different worlds — the feature works and the inventory
+/// is incomplete, the feature does not work, or nobody has considered it — so it establishes nothing
+/// while reading exactly like authority. A marker built on it converts a real compiler defect into an
+/// expected divergence on the strength of a document that never addressed the question.
+fn require_affirmative_basis(
+    origin: &Path,
+    field: &RawField,
+    id: &str,
+    basis: &str,
+) -> HarnessResult<()> {
+    let Some(phrase) = matched_wording(basis, OMISSION_WORDING) else {
+        return Ok(());
+    };
+    Err(key_error(
+        origin,
+        field.line,
+        KEY_MARKER_BASIS,
+        format!(
+            "the basis of marker {id} rests on what a document does NOT say: it reads \
+             {:?}, and {phrase:?} makes the claim one about the document's silence. An omission is \
+             not a documented limitation — an inventory that fails to name a feature is equally \
+             consistent with the feature working and the inventory being incomplete, so it \
+             authorises nothing while looking exactly like authority. Cite a section that STATES the \
+             limitation and quote its sentence in {KEY_MARKER_DOCUMENTED}; if no such sentence \
+             exists anywhere in the repository, then the divergence is not documented and belongs in \
+             the findings register as the deliverable it is, not here",
+            sanitize_text_for_report(basis)
+        ),
+    ))
+}
+
+/// Refuse a documenting quotation that could not be a quotation of anything.
+///
+/// Two ways it could not be. A quotation that is only a few characters long is not a sentence a
+/// reader could check — every document contains "the" — and one whose own wording is about an
+/// omission is the omission-based basis arriving through a different key.
+fn require_quotable(origin: &Path, field: &RawField, id: &str) -> HarnessResult<()> {
+    const MINIMUM_QUOTATION_BYTES: usize = 24;
+    let text = field.value.trim();
+    if text.len() < MINIMUM_QUOTATION_BYTES {
+        return Err(key_error(
+            origin,
+            field.line,
+            KEY_MARKER_DOCUMENTED,
+            format!(
+                "the documenting quotation of marker {id} is {} byte(s) long, and at least \
+                 {MINIMUM_QUOTATION_BYTES} are required. A fragment short enough to occur anywhere \
+                 proves nothing about what the cited section says: quote the whole sentence that \
+                 states the limitation, so that resolving it against the document establishes the \
+                 authority rather than merely finding a common word",
+                text.len()
+            ),
+        ));
+    }
+    if let Some(phrase) = matched_wording(text, OMISSION_WORDING) {
+        return Err(key_error(
+            origin,
+            field.line,
+            KEY_MARKER_DOCUMENTED,
+            format!(
+                "the documenting quotation of marker {id} is itself about an omission — it contains \
+                 {phrase:?} — so it describes what the repository does not say rather than \
+                 reproducing what it does. Quote the sentence that states the limitation; a marker \
+                 whose authority is silence is refused whichever key that silence is written into"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Require the captured observation to carry every sub-field, and none of it to be a prediction.
+///
+/// The sub-fields are parsed rather than merely counted, so a block that names one of them without
+/// giving it a value fails in the same way an absent one does: the point is that somebody ran the
+/// command, saw the status and the output, and wrote down which toolchain and when.
+fn require_captured_evidence(origin: &Path, field: &RawField, id: &str) -> HarnessResult<()> {
+    require_non_empty(
+        origin,
+        field,
+        KEY_MARKER_EVIDENCE,
+        "record the observation that was actually made, as the sub-fields the marker contract \
+         names",
+    )?;
+    let mut missing: Vec<&str> = Vec::new();
+    for name in EVIDENCE_FIELDS {
+        let prefix = format!("{name}:");
+        let present = field.value.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed
+                .strip_prefix(prefix.as_str())
+                .is_some_and(|rest| !rest.trim().is_empty())
+        });
+        if !present {
+            missing.push(name);
+        }
+    }
+    if !missing.is_empty() {
+        return Err(key_error(
+            origin,
+            field.line,
+            KEY_MARKER_EVIDENCE,
+            format!(
+                "the captured observation of marker {id} is missing {}, each of which must appear \
+                 as a `name: value` line with a value. A marker is the one mechanism that turns a \
+                 failure into a pass, so it may only record a divergence somebody has SEEN: the \
+                 exact command, the status it exited with, what it printed, which compiler under \
+                 test produced it, and when. Reproduce the divergence, write down what happened, \
+                 and mint the marker from that — never the other way round. Every sub-field \
+                 required: {}",
+                comma_separated(&missing),
+                comma_separated(EVIDENCE_FIELDS)
+            ),
+        ));
+    }
+    require_not_anticipatory(origin, field, KEY_MARKER_EVIDENCE, id)
+}
+
+/// Refuse text that describes a divergence as predicted rather than as seen.
+fn require_not_anticipatory(
+    origin: &Path,
+    field: &RawField,
+    key: &'static str,
+    id: &str,
+) -> HarnessResult<()> {
+    let Some(phrase) = matched_wording(&field.value, ANTICIPATORY_WORDING) else {
+        return Ok(());
+    };
+    Err(key_error(
+        origin,
+        field.line,
+        key,
+        format!(
+            "the {key} of marker {id} describes the divergence as predicted rather than as seen: it \
+             contains {phrase:?}. A marker reclassifies a real failure as expected, so minting one \
+             from a prediction inverts the burden of proof — the run would stop reporting the \
+             divergence precisely because somebody guessed it would happen, and a guess that turns \
+             out to be right is indistinguishable in the report from one that was never tested. \
+             Reproduce the divergence first and record what was observed; until then the program \
+             stays under test with no marker, and any divergence it provokes is reported as the \
+             finding it is, which is the correct outcome"
+        ),
+    ))
+}
+
+/// The first phrase from `wording` that occurs in `text`, compared without regard to case.
+///
+/// Case folding is ASCII-only and deliberately so: every phrase in both lists is ASCII, and an
+/// ASCII fold cannot mangle the non-ASCII text a record may legitimately contain.
+fn matched_wording(text: &str, wording: &[&'static str]) -> Option<&'static str> {
+    let haystack = text.to_ascii_lowercase();
+    wording
+        .iter()
+        .copied()
+        .find(|phrase| haystack.contains(*phrase))
 }
 
 fn known_area_names() -> String {
@@ -4403,6 +4783,37 @@ pub fn parse_standalone_str(
     assemble(fields, origin, RecordIdentity::Declared { area, program })
 }
 
+/// The `area` and `program` a record text declares, without validating anything else.
+///
+/// # Why a caller ever needs the identity before the record
+///
+/// [`parse_standalone_str`] validates a finding's copied record against an identity the caller
+/// already knows, because a finding directory's paths carry none. That is right for the writer, which
+/// derived the finding from a cell. It is unusable for a caller inspecting a **published** directory
+/// on disk — a report checking a row, or the register audit validating a curated finding — because
+/// such a caller has no cell to derive an identity from, and taking one from the directory's name
+/// would check the name rather than the record.
+///
+/// So the two declared scalars are read first and then used as the expected identity. That is not a
+/// weakening: it still proves the record parses under every rule of the format, that it is internally
+/// consistent, and that its sibling source resolves to the reproducer filed beside it — which is
+/// exactly what "this pair remains runnable" means. What it deliberately does not do is claim the
+/// pair belongs to some *particular* cell; the manifest's own identifier line carries that, and the
+/// curated-finding check compares it against the directory name separately.
+///
+/// # Errors
+///
+/// Reports a record whose text does not parse into fields at all, or which declares neither scalar.
+pub fn declared_identity(text: &str, origin: &Path) -> HarnessResult<(String, String)> {
+    let fields = parse_fields(text, origin)?;
+    let area = required_field(&fields, origin, "area")?;
+    let program = required_field(&fields, origin, "program")?;
+    Ok((
+        String::from(area.value.trim()),
+        String::from(program.value.trim()),
+    ))
+}
+
 /// Read, parse and validate a record from disk.
 ///
 /// A record that cannot be read is a hard error. It is never a skip: a program whose expectations
@@ -4584,9 +4995,9 @@ fn read_record_text(path: &Path) -> HarnessResult<String> {
             context,
             format!(
                 "the record is {} bytes, above the {RECORD_BYTES_MAX}-byte limit; the largest \
-                 record in the committed corpus is roughly ten kilobytes, so a file this large is \
-                 corrupt or adversarial rather than one the corpus could contain, and reading it \
-                 would let a data file decide how much memory the suite uses",
+                 record in the committed corpus is 22,494 bytes, so a file this large is corrupt \
+                 or adversarial rather than one the corpus could contain, and reading it would \
+                 let a data file decide how much memory the suite uses",
                 metadata.len()
             ),
         ));

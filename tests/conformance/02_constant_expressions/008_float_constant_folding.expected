@@ -116,9 +116,10 @@ long double IS NEVER USED, NEVER COMPUTED WITH AND NEVER PRINTED. Its representa
 at 16, 12, 16 and 16 bytes across x86-64, i686, AArch64 and RISC-V 64 -- x87 80-bit against IEEE
 binary128 -- so it is the one floating type whose value-level cross-backend comparison is not
 sound, and a printed value of that type could not be compared across backends at all. That
-comparison is owned by 13_floating_point/004_long_double_target_restricted.c, which carries the
-recorded exclusion and marker XD-TYPE-LONGDOUBLE-001, so nothing is lost by keeping the type out
-of a program whose subject is the constant folder. Also deliberately elsewhere, so this program
+comparison is owned by 13_floating_point/004_long_double_target_restricted.c, which carries a
+RECORDED EXCLUSION for it -- oracle_b disabled, with the measured representations as its basis,
+and no marker, because an implementation-defined representation difference is not a bcc defect --
+so nothing is lost by keeping the type out of a program whose subject is the constant folder. Also deliberately elsewhere, so this program
 does not duplicate them: general float and int conversion boundaries (13_floating_point/002),
 finite ordering breadth (13_floating_point/003), sizeof and _Alignof facts (004_sizeof_alignof.c
 in this area), and the f suffix's typing effect observed through _Generic

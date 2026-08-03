@@ -1,0 +1,176 @@
+# Expectation record for 14_abi_calling_convention/005_struct_return_by_value.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 005_struct_return_by_value
+area               = 14_abi_calling_convention
+description        = Aggregates returned by value across the same size thresholds: an 8-byte, four 16-byte layouts, a 24-byte and a 40-byte struct, each returned twice, plus a returned aggregate consumed directly as a member access and one forwarded straight into another call, in a folded and a volatile-runtime variant
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction:
+- Every floating value is a dyadic rational exactly representable in binary32 and binary64
+  alike, printed with an explicit precision with room to spare, so no rounding decision is
+  taken and i686's x87 extended intermediate precision cannot perturb a result. Each float
+  member is cast to double explicitly where it is printed. No non-finite value, no negative
+  zero and no division appears.
+- No signed integer overflow. The 40-byte producer's loop adds a loop counter bounded by 10
+  to a base of at most 7200, and every other member is a small literal or a snapshot.
+- No shift operator appears, so no shift count can be out of range.
+- PADDING DISCIPLINE. sizeof is never printed and no aggregate is ever memcmp'd or inspected
+  byte-wise; only NAMED MEMBERS are read back, so no padding byte is ever read and the
+  per-target layout of the mixed aggregate cannot affect the output.
+- Every array index is a bounded loop counter or a constant strictly inside bounds, so no
+  one-past-end pointer is formed and none is dereferenced. The four snapshot loops each run
+  exactly as many iterations as their source array has elements.
+- No aliasing violation: every aggregate is returned by value and copied whole between
+  objects of the same type, never through a converted pointer.
+- No read of uninitialized storage: each producer assigns every member of its result before
+  returning it, and every staged local is assigned before use.
+- No object is modified twice between sequence points.
+- Reading a member directly off a call expression -- one of the three consumption paths --
+  is well defined: the returned value is an object with temporary lifetime and the member
+  access happens within that lifetime, in the same full expression.
+- NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and this is enforced structurally
+  rather than argued. An access to a volatile object IS an observable side effect and the
+  order in which a call's arguments are evaluated is unspecified, so every volatile datum
+  is read exactly once, in a statement of its own, and only the resulting plain locals are
+  passed. Machine-checked on this branch: flattening the program into statements and
+  counting references to its volatile objects finds NO statement with more than one. The
+  snapshots cost nothing in coverage, because each is itself a load from volatile storage
+  that the optimizer may neither fold nor elide, so every value the callee receives was
+  genuinely materialised at run time and marshalled through the ABI; what changed is only
+  that the loads are now SEQUENCED rather than unordered.
+- Hermetic, as constraint C4 requires: every input is a literal in the source. Nothing is
+  opened, no socket is created, no environment variable and no program argument is read,
+  and no storage is obtained from the heap.
+- main returns 0, inside the 0-125 range the suite requires.
+- Verified empirically on this branch: the default strict warning gate
+  (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
+  diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
+  -fno-sanitize-recover=all runs to completion with empty stderr and exit status 0.
+END
+impl_defined_notes <<END
+WHY RETURN IS A SEPARATE MECHANISM FROM PASSING on every one of the four supported ABIs,
+which is why this program exists alongside 004: an 8-byte aggregate comes back in one
+general-purpose register on the 64-bit targets; a 16-byte all-integer aggregate in a
+register pair, the exact boundary; the mixed int-and-double aggregate in rax + xmm0 on
+System V AMD64, x0 + x1 on AAPCS64 and a0 + fa0 on LP64D, which is the highest-yield return
+shape in the corpus; a two-double aggregate in xmm0 + xmm1 on AMD64, as a homogeneous
+floating aggregate on AAPCS64 and in fa0 + fa1 on LP64D; a four-float aggregate as an
+AAPCS64 homogeneous aggregate return, two packed SSE registers on AMD64 and a
+general-purpose pair on LP64D; and the 24-byte and 40-byte aggregates through a hidden
+pointer everywhere. System V i386 cdecl returns every aggregate through a caller-supplied
+hidden pointer, which is a fifth distinct mechanism.
+
+THREE CONSUMPTION PATHS are exercised for each variant, because they can lower differently:
+storing the returned aggregate in a local and reading its members, reading a member
+directly off the call expression without storing it, and forwarding the returned aggregate
+straight into another function as an argument.
+
+COVERAGE OF THE BY-MEMORY SHAPE. For the 40-byte aggregate every one of the ten members is
+read back rather than a sample of three, because a return path that corrupted only an
+interior member would otherwise leave no trace in stdout.
+
+THE CALL BARRIER. Every call this program makes to the function whose ABI boundary is
+under test goes through a FILE-SCOPE volatile FUNCTION POINTER, and that is load-bearing
+rather than stylistic. A C11 volatile lvalue must be re-read on every access, so no
+conforming compiler may assume which function the pointer designates: it can neither
+inline the callee nor clone it, and it must marshal the arguments exactly as the ABI
+prescribes because it cannot know what will receive them. This is plain standard C rather
+than a compiler attribute, so both sides of oracle (a) honour it for the same reason and
+neither needs to support an extension for the barrier to hold. It also makes the
+function-pointer load the ONLY volatile access in each call expression, which is what
+keeps the one-side-effecting-argument rule satisfied. Measured before-state on this branch: with direct calls, gcc 13.4.0 at
+-O2 left only make_sbig standing -- every small, mixed and homogeneous-float return and both
+forwarding consumers were inlined away, so six of the seven documented return mechanisms and
+both forwarding paths were not exercised at that level. Measured after: all seven producers
+and both consumers are emitted unmodified at -O1 and -O2 on all four targets, with no
+.constprop and no .isra clone anywhere.
+
+Plain char signedness is implementation-defined and was measured as signed on x86_64 and
+i686 and unsigned on aarch64 and riscv64; no plain-char value is printed. sizeof(long) and
+sizeof(void *) were measured as 4 on i686 and 8 on x86_64, aarch64 and riscv64
+(docs/technical-specifications.md lines 457-462); no long, size_t, ptrdiff_t, intptr_t or
+pointer value is printed and no long or pointer conversion specification is used. long
+double has three different representations across the four targets (measured 16, 12, 16 and
+16 bytes; x87 80-bit versus IEEE binary128) and is absent from this program entirely --
+using it would import a difference that has nothing to do with parameter passing. That
+type is covered by 13_floating_point/004_long_double_target_restricted, whose record
+disables oracle (b) alone with the measured reason recorded and carries NO marker.
+
+No target is dropped, no oracle is disabled and this record carries no expected-divergence
+marker: a cross-backend divergence here is a GENUINE FINDING rather than an
+implementation-defined difference, because nothing implementation-defined reaches the
+output. Measured on this branch with gcc 13.4.0 and the matching i686, aarch64 and riscv64
+cross drivers, executed natively and under QEMU user-mode 10.1.0: stdout is byte-identical
+and the exit status is 0 in all twelve target-and-optimization-level cells.
+END
+expected_stdout    <<END
+ret_s8_folded_1 a=11 b=-12
+ret_s8_folded_2 a=21 b=-22
+ret_s16i_folded_1 a=101 b=-102 c=103 d=-104
+ret_s16i_folded_2 a=201 b=-202 c=203 d=-204
+ret_s16m_folded_1 a=201 b=1.5000
+ret_s16m_folded_2 a=401 b=2.5000
+ret_s16d_folded_1 x=1.2500 y=-1.7500
+ret_s16d_folded_2 x=2.2500 y=-2.7500
+ret_s16f_folded_1 x=1.5000 y=-1.2500 z=1.1250 w=-1.0625
+ret_s16f_folded_2 x=2.5000 y=-2.2500 z=2.1250 w=-2.0625
+ret_s24_folded_1 a=1001 b=-1002 c=1003 d=-1004 e=1005 f=-1006
+ret_s24_folded_2 a=2001 b=-2002 c=2003 d=-2004 e=2005 f=-2006
+ret_sbig_folded_1 v0=7100 v1=7101 v2=7102 v3=7103 v4=7104 v5=7105 v6=7106 v7=7107 v8=7108 v9=7109
+ret_sbig_folded_2 v0=7200 v1=7201 v2=7202 v3=7203 v4=7204 v5=7205 v6=7206 v7=7207 v8=7208 v9=7209
+direct_s8_folded a=11 b=-12
+direct_s16i_folded a=101 b=-102 c=103 d=-104
+direct_s16m_folded a=201 b=1.5000
+direct_s16d_folded x=1.2500 y=-1.7500
+direct_s16f_folded x=1.5000 y=-1.2500 z=1.1250 w=-1.0625
+direct_s24_folded a=1001 b=-1002 c=1003 d=-1004 e=1005 f=-1006
+direct_sbig_folded v0=7100 v1=7101 v2=7102 v3=7103 v4=7104 v5=7105 v6=7106 v7=7107 v8=7108 v9=7109
+fwd_s8_folded a=11 b=-12
+fwd_s16i_folded a=101 b=-102 c=103 d=-104
+fwd_s16m_folded a=201 b=1.5000
+fwd_s16d_folded x=1.2500 y=-1.7500
+fwd_s16f_folded x=1.5000 y=-1.2500 z=1.1250 w=-1.0625
+fwd_s24_folded a=1001 b=-1002 c=1003 d=-1004 e=1005 f=-1006
+fwd_sbig_folded v0=7100 v1=7101 v2=7102 v3=7103 v4=7104 v5=7105 v6=7106 v7=7107 v8=7108 v9=7109
+ret_s8_runtime_1 a=11 b=-12
+ret_s8_runtime_2 a=21 b=-22
+ret_s16i_runtime_1 a=101 b=-102 c=103 d=-104
+ret_s16i_runtime_2 a=201 b=-202 c=203 d=-204
+ret_s16m_runtime_1 a=201 b=1.5000
+ret_s16m_runtime_2 a=401 b=2.5000
+ret_s16d_runtime_1 x=1.2500 y=-1.7500
+ret_s16d_runtime_2 x=2.2500 y=-2.7500
+ret_s16f_runtime_1 x=1.5000 y=-1.2500 z=1.1250 w=-1.0625
+ret_s16f_runtime_2 x=2.5000 y=-2.2500 z=2.1250 w=-2.0625
+ret_s24_runtime_1 a=1001 b=-1002 c=1003 d=-1004 e=1005 f=-1006
+ret_s24_runtime_2 a=2001 b=-2002 c=2003 d=-2004 e=2005 f=-2006
+ret_sbig_runtime_1 v0=7100 v1=7101 v2=7102 v3=7103 v4=7104 v5=7105 v6=7106 v7=7107 v8=7108 v9=7109
+ret_sbig_runtime_2 v0=7200 v1=7201 v2=7202 v3=7203 v4=7204 v5=7205 v6=7206 v7=7207 v8=7208 v9=7209
+direct_s8_runtime a=11 b=-12
+direct_s16i_runtime a=101 b=-102 c=103 d=-104
+direct_s16m_runtime a=201 b=1.5000
+direct_s16d_runtime x=1.2500 y=-1.7500
+direct_s16f_runtime x=1.5000 y=-1.2500 z=1.1250 w=-1.0625
+direct_s24_runtime a=1001 b=-1002 c=1003 d=-1004 e=1005 f=-1006
+direct_sbig_runtime v0=7100 v1=7101 v2=7102 v3=7103 v4=7104 v5=7105 v6=7106 v7=7107 v8=7108 v9=7109
+fwd_s8_runtime a=11 b=-12
+fwd_s16i_runtime a=101 b=-102 c=103 d=-104
+fwd_s16m_runtime a=201 b=1.5000
+fwd_s16d_runtime x=1.2500 y=-1.7500
+fwd_s16f_runtime x=1.5000 y=-1.2500 z=1.1250 w=-1.0625
+fwd_s24_runtime a=1001 b=-1002 c=1003 d=-1004 e=1005 f=-1006
+fwd_sbig_runtime v0=7100 v1=7101 v2=7102 v3=7103 v4=7104 v5=7105 v6=7106 v7=7107 v8=7108 v9=7109
+END

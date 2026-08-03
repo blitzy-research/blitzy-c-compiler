@@ -1,0 +1,162 @@
+# Expectation record for 14_abi_calling_convention/002_many_float_parameters.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_many_float_parameters
+area               = 14_abi_calling_convention
+description        = Floating parameter lists long enough to exhaust every target's floating argument registers and force stack spill: fifteen double parameters and fifteen float parameters, each in a folded and a volatile-runtime variant, with every parameter printed individually
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction:
+- Fourteen floating parameters plus a trailing integer tag are passed to each callee, which
+  exhausts the widest floating argument register file of the four supported ABIs - eight on
+  System V AMD64 (xmm0-xmm7), AAPCS64 (v0-v7) and LP64D (fa0-fa7) - and continues past that
+  threshold, so every target marshals part of the list beyond its floating registers. On the
+  three 64-bit targets the trailing integer also passes through the integer allocator while
+  the floating allocator is already full. Where the six excess floating values go differs
+  between the four ABIs: three spill them to the stack, while RISC-V LP64D passes them in the
+  INTEGER argument registers, which is a distinct and more error-prone path - and a reason
+  every parameter is printed back individually and in order rather than summarised.
+- Every literal is a dyadic rational with a denominator of at most 16, so it is exactly
+  representable in both floating types and prints exactly at four decimal places with no
+  rounding tie and no rounding decision anywhere.
+
+- No signed integer overflow: every integer value passed or printed is a small constant or a
+  value read from initialised storage, far from INT_MIN and INT_MAX; the long long values are
+  likewise far inside their range.
+- No shift operator appears, so no shift count can be out of range.
+- No floating operation can overflow, underflow, divide by zero or produce a not-a-number or
+  an infinity: every floating value is a small dyadic rational and the only operations
+  performed on them are copying and printing.
+- No read of uninitialised storage: every object is initialised at its declaration or by an
+  assignment that precedes every read of it, and every volatile object has a static
+  initialiser.
+- No object is modified twice between sequence points.
+- Nothing depends on padding bytes: sizeof is never printed, no aggregate is compared
+  byte-wise, and only named members are ever read.
+- Nothing depends on the relative addresses of unrelated objects, and no address or pointer
+  value is printed.
+- Every float value reaching printf is cast to double explicitly, so the default argument
+  promotion is visible rather than implicit, and every conversion specification matches its
+  argument's type after promotion.
+- The two-variant rule is applied throughout: a folded variant whose arguments are
+  compile-time constants, and a runtime variant whose arguments are read from volatile
+  storage so the values are genuinely materialised and marshalled rather than folded into the
+  callee. Without the second variant, optimisation would substitute the folder's answer for
+  the backend's at -O1 and -O2 and an argument-marshalling defect would escape entirely.
+- Nothing is allocated, nothing outside the translation unit is read, and main returns 0.
+
+- Nothing depends on unspecified evaluation order in a way that can reach the output. The
+  runtime variants read several volatile objects while assembling one call, and the relative
+  order of those reads is unspecified; the printed result cannot depend on it, because each
+  volatile object is read exactly once per call, no volatile object is written anywhere in
+  the program after its initialisation, and no read has a side effect any other read can
+  observe. Every value is therefore the same whichever order the reads occur in.
+
+Verified empirically on this branch with gcc 13.4.0 and qemu-user 10.1.0: the default
+strict warning gate (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
+-Werror) produces zero diagnostics at -O0, -O1 and -O2; the sanitizer gate
+(-fsanitize=undefined,address -fno-sanitize-recover=all) runs to completion with no
+output and exit status 0; and all twelve cells of the declared matrix produce
+byte-identical stdout with exit status 0 and an empty standard error.
+END
+impl_defined_notes <<END
+This area exists because the four backends implement four different application binary
+interfaces, and it is the densest concentration of cross-backend divergence surface in the
+corpus. The parameter and aggregate counts are sized against the WIDEST register file rather
+than the narrowest - eight integer registers on AAPCS64 (x0-x7) and LP64D (a0-a7), six on
+System V AMD64 (rdi, rsi, rdx, rcx, r8, r9), and none on System V i386 cdecl, which marshals
+everything on the stack - so every target genuinely spills and no target is left exercising
+only its register path.
+
+The measured target differences are handled by construction, so no target restriction and no
+marker is needed:
+
+1. sizeof(long) and sizeof(void *) are 4 on i686 and 8 on x86_64, aarch64 and riscv64
+   (docs/technical-specifications.md lines 457-462). Only int, long long and double are
+   passed or printed as values; no long, no size_t and no pointer value appears in the
+   output.
+2. Plain char signedness is implementation-defined and was measured signed on x86_64 and
+   i686 and unsigned on aarch64 and riscv64. No plain char is passed or printed.
+3. long double has three representations across the four targets (measured 16, 12, 16 and 16
+   bytes). None is used here; that type belongs to
+   13_floating_point/004_long_double_target_restricted.
+4. Aggregate SIZE and LAYOUT are never printed and no aggregate is ever compared byte-wise:
+   sizeof is never printed and no padding byte is read, so the fact that a mixed int-and-
+   double aggregate is 12 bytes on i686, where double has four-byte alignment, and 16 bytes
+   on the other three targets cannot affect the output. Only named members are read back.
+5. Every floating literal is a dyadic rational with a denominator of at most 16, so it is
+   exactly representable in both binary32 and binary64 and prints exactly at four decimal
+   places with no rounding tie. That is what keeps the output byte-identical even on i686,
+   whose reference compiler evaluates with x87 80-bit intermediates (FLT_EVAL_METHOD 2).
+6. All four targets are little-endian, and no byte-order-sensitive value is printed.
+END
+expected_stdout    <<END
+dbl_folded_d01=1.5000
+dbl_folded_d02=-2.2500
+dbl_folded_d03=3.1250
+dbl_folded_d04=-4.0625
+dbl_folded_d05=5.5000
+dbl_folded_d06=-6.7500
+dbl_folded_d07=7.8750
+dbl_folded_d08=-8.1875
+dbl_folded_d09=9.2500
+dbl_folded_d10=-10.5000
+dbl_folded_d11=11.1250
+dbl_folded_d12=-12.3125
+dbl_folded_d13=13.7500
+dbl_folded_d14=-14.9375
+flt_folded_f01=0.5000
+flt_folded_f02=-1.2500
+flt_folded_f03=2.3750
+flt_folded_f04=-3.0625
+flt_folded_f05=4.5000
+flt_folded_f06=-5.7500
+flt_folded_f07=6.8750
+flt_folded_f08=-7.1875
+flt_folded_f09=8.2500
+flt_folded_f10=-9.5000
+flt_folded_f11=10.1250
+flt_folded_f12=-11.3125
+flt_folded_f13=12.7500
+flt_folded_f14=-13.9375
+dbl_runtime_d01=1.5000
+dbl_runtime_d02=-2.2500
+dbl_runtime_d03=3.1250
+dbl_runtime_d04=-4.0625
+dbl_runtime_d05=5.5000
+dbl_runtime_d06=-6.7500
+dbl_runtime_d07=7.8750
+dbl_runtime_d08=-8.1875
+dbl_runtime_d09=9.2500
+dbl_runtime_d10=-10.5000
+dbl_runtime_d11=11.1250
+dbl_runtime_d12=-12.3125
+dbl_runtime_d13=13.7500
+dbl_runtime_d14=-14.9375
+flt_runtime_f01=0.5000
+flt_runtime_f02=-1.2500
+flt_runtime_f03=2.3750
+flt_runtime_f04=-3.0625
+flt_runtime_f05=4.5000
+flt_runtime_f06=-5.7500
+flt_runtime_f07=6.8750
+flt_runtime_f08=-7.1875
+flt_runtime_f09=8.2500
+flt_runtime_f10=-9.5000
+flt_runtime_f11=10.1250
+flt_runtime_f12=-11.3125
+flt_runtime_f13=12.7500
+flt_runtime_f14=-13.9375
+END

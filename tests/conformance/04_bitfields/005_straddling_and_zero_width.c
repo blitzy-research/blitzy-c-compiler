@@ -108,6 +108,24 @@ int main(void)
 {
     union image32 x;
     union image64 y;
+    /* Plain destinations for the volatile runtime variant.  An access to a volatile
+     * object is an observable side effect, and the relative order of side effects
+     * within one argument list is unspecified, so reading four volatile bit-fields
+     * inside a single printf call would make the order of four side effects depend on
+     * the unspecified order of argument evaluation.  Each field is therefore read in
+     * a full expression of its own, separated from the next by a sequence point, and
+     * only these plain objects appear at the call sites below, which leaves every
+     * argument list free of side effects altogether.  It costs the test nothing: the
+     * snapshots are loads from volatile storage, so the values are still unavailable
+     * for compile-time substitution and every bit-field extraction is still emitted
+     * by the backend. */
+    unsigned int sc_a;
+    unsigned int sc_b;
+    unsigned int sc_c;
+    unsigned int sc_d;
+    int ss_a;
+    int ss_b;
+    int ss_c;
 
     printf("size_cover32=%u align_cover32=%u\n",
            (unsigned)sizeof(struct cover32), (unsigned)_Alignof(struct cover32));
@@ -183,20 +201,32 @@ int main(void)
            (int)ss.a, (int)ss.b, (int)ss.c);
 
     /* Volatile runtime variant: every access below happens at run time rather than
-     * being folded. */
+     * being folded.  One volatile field is read per full expression, and only the
+     * plain snapshots reach a call. */
     vc32.a = 5u; vc32.b = 21u; vc32.c = 300u; vc32.d = 20000u;
-    printf("volatile_cover32 a=%u b=%u c=%u d=%u\n",
-           (unsigned)vc32.a, (unsigned)vc32.b, (unsigned)vc32.c, (unsigned)vc32.d);
+    sc_a = (unsigned)vc32.a;
+    sc_b = (unsigned)vc32.b;
+    sc_c = (unsigned)vc32.c;
+    sc_d = (unsigned)vc32.d;
+    printf("volatile_cover32 a=%u b=%u c=%u d=%u\n", sc_a, sc_b, sc_c, sc_d);
     vc32.c = 511u;
+    sc_a = (unsigned)vc32.a;
+    sc_b = (unsigned)vc32.b;
+    sc_c = (unsigned)vc32.c;
+    sc_d = (unsigned)vc32.d;
     printf("volatile_cover32_after_c a=%u b=%u c=%u d=%u\n",
-           (unsigned)vc32.a, (unsigned)vc32.b, (unsigned)vc32.c, (unsigned)vc32.d);
+           sc_a, sc_b, sc_c, sc_d);
 
     vss.a = -256; vss.b = -4096; vss.c = -512;
-    printf("volatile_signedstraddle a=%d b=%d c=%d\n",
-           (int)vss.a, (int)vss.b, (int)vss.c);
+    ss_a = (int)vss.a;
+    ss_b = (int)vss.b;
+    ss_c = (int)vss.c;
+    printf("volatile_signedstraddle a=%d b=%d c=%d\n", ss_a, ss_b, ss_c);
     vss.b = 4095;
-    printf("volatile_signedstraddle_after_b a=%d b=%d c=%d\n",
-           (int)vss.a, (int)vss.b, (int)vss.c);
+    ss_a = (int)vss.a;
+    ss_b = (int)vss.b;
+    ss_c = (int)vss.c;
+    printf("volatile_signedstraddle_after_b a=%d b=%d c=%d\n", ss_a, ss_b, ss_c);
 
     return 0;
 }

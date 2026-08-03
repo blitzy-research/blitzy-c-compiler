@@ -1,0 +1,155 @@
+# Expectation record for 13_floating_point/004_long_double_target_restricted.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 004_long_double_target_restricted
+area               = 13_floating_point
+description        = long double arithmetic, conversions and comparisons in a folded and a volatile-runtime variant, restricted to same-target comparison because the type's representation was measured to differ across the four backends
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = disabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined and no unspecified behaviour.
+
+EVERY VALUE IS EXACTLY REPRESENTABLE IN double, AND THAT IS THE PRECONDITION THE WHOLE PROGRAM RESTS
+ON. Every operand and every result is a dyadic rational whose significand fits in 53 bits, so it is
+exact in binary64 and therefore exact in the 64-bit x87 significand and the 113-bit binary128
+significand alike. That is what allows one golden record to hold for four backends whose long double
+formats differ, and it is asserted on the target rather than assumed: the exact_in_double line prints,
+per value, whether the result survives a round trip through double unchanged, and every field is 1. A
+carelessly chosen value would print 0 and announce itself on the first run instead of silently
+invalidating the record. Measured, for contrast: the non-dyadic quotient 1.0L / 3.0L printed at 25
+fractional digits gives a different value on the two x87 targets than on the two binary128 targets.
+
+THE FORMAT THE ROUND TRIP RELIES ON IS ESTABLISHED, NOT ASSERTED BY WIDTH. sizeof(double) == 8
+establishes that the type occupies eight bytes and nothing more; it does not establish the radix or the
+significand width, and an earlier form of this program's commentary wrongly claimed it did. The
+documented basis for the format is each target's own ABI -- the System V i386 and x86-64 psABIs,
+AAPCS64 and the RISC-V calling convention all specify IEEE binary64 for double -- and the property is
+CHECKED at run time by the double_significand line, because a floating comparison is not an integer
+constant expression and C11 6.6p6 keeps it out of a static assertion. The probe adds 1/2^52 and 1/2^53
+to 1.0 through a volatile double staging object: the first increment must be resolved and the second,
+which lies exactly half-way below it, must be absorbed by round-to-nearest-even, and together they pin
+the significand at 53 radix-2 bits. The staging object is volatile and of type double for one reason
+each and both are essential -- C11 6.3.1.8p2 removes extra range and precision on assignment, and the
+volatile qualification makes the store and the reload actually happen -- without which the two x87
+targets would evaluate the sums in wider registers and report a different answer from the other two,
+a difference in the test rather than in any compiler.
+
+NO NON-FINITE VALUE, NO NEGATIVE ZERO AND NO SUBNORMAL APPEARS. The exponent ranges of the x87 and
+binary128 formats differ enormously, and identity properties of those values are not what this program
+tests. No division has a zero divisor. The conversions to an integer type truncate 6.25, -6.25 and
+12.5, so each integral part sits far inside its destination range on every target, which is what keeps
+a floating-to-integer conversion defined under C11 6.3.1.4p1.
+
+NO OBJECT REPRESENTATION IS INSPECTED. A 12-byte or 16-byte object of this type carries padding beyond
+its significant bytes, and reading it byte-wise would be both undefined behaviour and target-dependent,
+so no long double object is examined byte by byte, copied into an object of another type, or
+reinterpreted through overlapping storage or a pointer cast.
+
+No signed integer overflow is possible. No shift appears. No object is read before it is written and no
+object is modified twice between sequence points. Every volatile read is staged into a plain local in a
+full expression of its own before the call that prints it -- the significand probe included -- so no
+call receives a side-effecting argument and nothing depends on the unspecified order in which a call's
+arguments are evaluated.
+
+DETERMINISM. Every floating value printed is printed at a fixed precision with margin, and every
+value in the program is a dyadic rational -- an integer, or an integer plus a quarter, a half or three
+quarters -- so it is exactly representable in binary32 and binary64 alike and no rounding decision is
+ever taken. No non-finite value, no negative zero and no subnormal appears anywhere, so no identity
+property of those values is relied on. No address, no pointer value, no plain char value and no
+target-varying width is printed. Iteration order is fixed by literal bounds. main returns 0, inside
+the 0-125 range the suite requires so that no exit status is truncated.
+
+HERMETICITY. Every input is a literal in this source. Nothing is opened, nothing is read from the
+environment, the command line, the clock or the file system, and no storage is allocated.
+
+GATE. The default warning gate applies unmodified and no `ub_audit_flags` key appears:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. Verified clean under that
+gate with all four reference drivers and with the alternate reference compiler, and clean under
+-fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are reference-compiler-only.
+
+NO HEADER IS INCLUDED and printf is declared by hand, because bcc ships no standard I/O header.
+END
+impl_defined_notes <<END
+ORACLE (b) IS DISABLED FOR THIS PROGRAM, AND THE MEASURED REASON IS THE POINT OF THE PROGRAM.
+
+`long double` has no single representation across the four supported backends. MEASURED:
+sizeof(long double) is 16 on x86_64, 12 on i686, 16 on aarch64 and 16 on riscv64; the two x86 targets
+carry the x87 80-bit extended format inside that storage while the two others carry IEEE binary128.
+Those are different formats with different significand widths, different exponent ranges and different
+rounding boundaries. A value difference between two backends over this type is therefore an
+IMPLEMENTATION-DEFINED difference, which is exactly the carve-out the requirements name -- a
+cross-backend divergence not attributable to type widths, char signedness or the ABI is a defect, and
+one that IS so attributable is not. Comparing the backends' long double values against one another
+would report a permitted difference as a compiler defect, so cross-backend value equality is disabled
+here and nowhere else in the corpus.
+
+THE EXCLUSION IS AS NARROW AS THE MECHANISM ALLOWS, AND THE FEATURE IS NOT DROPPED. Constraint C3
+forbids excluding a language feature because it is difficult, and nothing is excluded: the program is
+written, compiled and executed on ALL FOUR targets at ALL THREE optimization levels, exactly like every
+other program in the corpus. Oracle (a) remains enabled, so each backend's output is compared against
+the SAME-TARGET reference compiler, which is the comparison that can actually judge it -- a reference
+compiler for a given target uses that target's own long double format. Oracle (c) remains enabled, so
+every cell is still asserted against the golden record, which catches drift and regression on every
+target. What is given up is exactly one of nine comparisons for exactly one of 108 programs, and it is
+given up because that one comparison has no meaning rather than because it is inconvenient.
+
+THE GOLDEN RECORD HOLDS ON FOUR TARGETS ANYWAY, WHICH IS WHY ORACLE (c) IS NOT NARROWED TOO. Every
+printed value is exactly representable in double and is printed at fixed precision with margin, so all
+twelve cells were MEASURED to produce these bytes identically. The exclusion above is therefore about
+what the comparison would MEAN, not about a difference this program actually exhibits: the same values
+printed by two different formats agree here because they were chosen to, and a program that printed a
+non-dyadic long double result would not agree. Recording the restriction on the meaning rather than on
+today's measurement is what keeps it correct if a later maintainer adds a value.
+
+WHAT IS DELIBERATELY NOT PRINTED. sizeof(long double) never appears as an absolute value -- it is 16,
+12, 16 and 16, so printing it would break the shared record on i686 immediately -- and exactly one
+target-invariant relation about the type's width is printed instead. No long double characteristic
+appears either: no significand digit count, no epsilon, no maximum and no exponent range, because every
+one of them differs by target. For the same reason no float.h macro is referenced; that header is
+bundled, but every long-double characteristic macro it defines is target-dependent, and exercising the
+bundled set is the job of 12_preprocessor/003_bundled_header_inclusion.c.
+
+NO EXPECTED-DIVERGENCE MARKER IS ATTACHED, and that is deliberate. A marker records a divergence that
+has been OBSERVED and that a documented limitation explains; what this record states is a scoped
+exclusion of one oracle, which is the mechanism the suite provides for a comparison that cannot be
+meaningful. The two are not interchangeable: a marker would claim a divergence exists, and none does --
+all twelve cells agree today. The distinction is recorded in tests/conformance/EXPECTED_DIVERGENCES.md
+alongside the other analysed candidates that carry no marker.
+
+WIDTH NORMALIZATION ELSEWHERE. The only integer conversions printed are to int and to long long, both
+of which have the same width on all four targets, so no target-varying integer width reaches the output
+either.
+END
+expected_stdout    <<END
+ld_add=3.750000 ld_sub=1.250000 ld_mul=3.125000 ld_div=1.250000
+ld_neg=-2.500000 ld_chain=4.500000 ld_accum=15.875000
+ld2d=3.125000 ld2f=2.500000 d2ld=1.500000 i2ld=42.000000
+ld2i=6 ld2i_neg=-6 ld2ll=12 ll2ld=1234567.000000
+ld_lt=1 ld_gt=1 ld_le_equal=1 ld_ge_equal=1
+ld_lt_equal=0 ld_eq=1 ld_ne_equal=0 ld_ne_diff=1
+rt_add=3.750000 rt_sub=1.250000 rt_mul=3.125000 rt_div=1.250000
+rt_neg=-2.500000 rt_chain=4.500000 rt_accum=15.875000
+rt_ld2d=3.125000 rt_ld2f=2.500000 rt_d2ld=1.500000 rt_i2ld=42.000000
+rt_ld2i=6 rt_ld2i_neg=-6 rt_ld2ll=12 rt_ll2ld=1234567.000000
+rt_lt=1 rt_gt=1 rt_le_equal=1 rt_ge_equal=1
+rt_lt_equal=0 rt_eq=1 rt_ne_equal=0 rt_ne_diff=1
+folded_matches_runtime=1 1 1 1 1 1 1
+folded_matches_runtime_conv=1 1 1 1 1 1 1 1
+folded_matches_runtime_cmp=1 1 1 1 1 1 1 1
+conversions_folded_match_runtime=1 1 1 1 1 1 1 1
+comparisons_folded_match_runtime=1 1 1 1 1 1 1 1
+exact_in_double=1 1 1 1 1 1 1
+double_significand=1 1
+ld_at_least_double=1
+END

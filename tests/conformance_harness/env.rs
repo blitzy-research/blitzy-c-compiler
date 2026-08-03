@@ -177,6 +177,7 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::execute::TIMEOUT_UTILITY_OUTER_MARGIN;
 use super::manifest::Execution;
 use super::{
     build_root, digest_hex, isolate_child_environment, own_process_group, redact_secrets, run_id,
@@ -218,13 +219,40 @@ pub const VAR_TIMEOUT_SECS: &str = "BCC_CONFORMANCE_TIMEOUT_SECS";
 
 pub const VAR_KEEP_WORK: &str = "BCC_CONFORMANCE_KEEP_WORK";
 
+/// Whether the external `timeout` utility is wrapped around a launch as an outer net.
+///
+/// Three values, and the default is the middle one:
+///
+/// - `off` — never wrap. `execute.rs`'s watchdog is the whole bound, which it already is
+///   authoritatively.
+/// - `auto` (the default, and what an unset variable means) — wrap only when the discovered
+///   implementation passes the behavioural qualification in [`qualify_outer_net`], which measures
+///   what an engaged outer net actually costs per invocation.
+/// - `on` — wrap whenever an implementation was discovered, without qualifying it. For a maintainer
+///   who has installed one they trust and would rather not pay for the probe.
+///
+/// The variable exists because the alternative is worse in both directions. Wrapping
+/// unconditionally charged a measured 103 milliseconds to every one of at least 5,508 invocations
+/// for a net that never fires in a healthy run; refusing to wrap at all would discard a real reach
+/// the utility has when this process's own watchdog thread is starved. Qualifying by behaviour keeps
+/// the reach where it is cheap, drops it where it is not, and says which it did.
+pub const VAR_OUTER_TIMEOUT: &str = "BCC_CONFORMANCE_OUTER_TIMEOUT";
+
 /// Native reference compilers, probed in order.
 ///
-/// `gcc` is the reference compiler of record. Its default language mode was measured as
-/// gnu17, which already enables the GNU extensions the corpus exercises, and that is why no
-/// standard-selection flag is ever passed to either compiler — bcc has none to match.
-/// `clang` is probed last so that a second, genuinely independent oracle is available
-/// wherever it is installed without a single line of code changing.
+/// `gcc` is the reference compiler of record, and the suite passes **no** standard-selection flag to
+/// either compiler, because bcc has none to match — so the reference driver's *default* language
+/// mode is the one that has to be right. The mode the corpus is written against is gnu17, and that
+/// is the default of the **GCC 13 series**, which is therefore what an environment has to provide
+/// under one of these names. It is not a property of the name: a newer driver installed as bare
+/// `gcc` defaults to a later mode — GCC 15 defaults to gnu23 — and the two differ in ways a corpus
+/// program can observe. An environment pins the 13 series either by installing it under one of the
+/// names probed here or by naming it explicitly through [`VAR_REF_CC`], and the version each
+/// candidate reports is captured into the pre-flight report and every finding's fingerprint so the
+/// mode actually used is auditable rather than assumed.
+///
+/// `clang` is probed last so that a second, genuinely independent oracle is available wherever it is
+/// installed without a single line of code changing.
 pub const DEFAULT_REF_CC: &[&str] = &["gcc", "cc", "clang"];
 
 /// i686 reference cross drivers, probed in order.
@@ -282,6 +310,58 @@ const VERSION_ARGUMENTS: &[&str] = &["--version", "--help"];
 /// that only flags both compilers honour with the same meaning may be passed to both compilers is
 /// not engaged by it.
 const DUMP_MACHINE_FLAG: &str = "-dumpmachine";
+
+/// Reference-compiler arguments that make a driver state the language mode it compiles in by default.
+///
+/// `-dM -E` prints every macro the driver predefines and compiles nothing; `-x c -` gives it an empty
+/// C translation unit on standard input, so the answer describes C rather than whatever language a
+/// file name would have implied.
+///
+/// Standard input rather than a path, deliberately. [`run_bounded_probe`] already gives every probe an
+/// empty standard input, so the empty translation unit costs nothing and the argument list names no
+/// file at all — which keeps the probe independent of any path existing, and keeps its rendered command
+/// line free of a path that the report's credential redaction could legitimately rewrite. (Measured:
+/// on a host where an environment variable whose name marks it as credential-bearing happens to hold
+/// the value `/dev/null`, that spelling is redacted out of every diagnostic, and a refusal quoting a
+/// partly redacted command line is a refusal nobody can act on.)
+///
+/// Like [`DUMP_MACHINE_FLAG`], these are probe arguments against the reference compiler and appear in
+/// no differential invocation, so the rule that only flags both compilers honour with the same meaning
+/// may be passed to both compilers is not engaged by them — which matters here specifically, because
+/// `-E` is one of the flags the shared set is asserted *not* to contain.
+const LANGUAGE_MODE_ARGUMENTS: &[&str] = &["-dM", "-E", "-x", "c", "-"];
+
+/// The macro whose value states which revision of C a driver compiles by default.
+const STDC_VERSION_MACRO: &str = "__STDC_VERSION__";
+
+/// The macro a driver predefines when its default mode rejects the GNU extensions.
+const STRICT_ANSI_MACRO: &str = "__STRICT_ANSI__";
+
+/// Oldest revision of C a reference driver may compile by default: C11.
+///
+/// The corpus is C11 material by construction — `_Static_assert`, `_Generic`, `_Alignof`, `_Alignas`,
+/// `_Noreturn`, anonymous aggregates and the UTF-8 and 16- and 32-bit string literals all arrive with
+/// that revision — and the compiler under test is a C11 compiler. A driver defaulting to an earlier
+/// revision would reject much of the corpus, and every such rejection would be recorded as a
+/// divergence attributable to the oracle rather than to the compiler.
+const MIN_STDC_VERSION: u64 = 201_112;
+
+/// Newest revision of C a reference driver may compile by default: C17.
+///
+/// C17 is a defect-fix revision of C11 with no new features, so C11 and C17 are the same language for
+/// every construct this corpus contains — which is why the range spans both rather than pinning one.
+///
+/// C23 is not, and the difference is measurable **on this corpus**. Measured with the same driver,
+/// changing only the mode: a `_Generic` selection over `u8"A"` chooses `char *` under gnu17 and
+/// `unsigned char *` under gnu23, because C23 gives a UTF-8 literal the type `unsigned char[]`. The
+/// corpus contains both constructs. C23 also makes `bool`, `true` and `false` keywords and redefines
+/// an empty parameter list, each of which the corpus relies on the older meaning of. Since **no
+/// standard-selection flag is ever passed** — the compiler under test has none to match, so passing
+/// one to the reference compiler alone would break the shared-flag discipline the comparison rests
+/// on — the mode is decided entirely by *which driver was selected*, and there is no way to correct a
+/// wrong one after the fact. An oracle speaking a different language than the corpus was written in
+/// is a false authority rather than a weaker one.
+const MAX_STDC_VERSION: u64 = 201_710;
 
 /// Architecture spellings that all denote the suite's 32-bit x86 target.
 ///
@@ -351,19 +431,64 @@ const PROBE_OUTPUT_BYTES_MAX: u64 = 64 * 1024;
 /// delayed, and long enough that polling costs nothing.
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Most an engaged outer net may add to one invocation, in milliseconds.
+///
+/// The external `timeout` utility is an **outer net** and nothing more: `execute.rs`'s own watchdog
+/// is the authoritative bound on every path, so in a healthy run the utility never fires and its
+/// entire contribution is the cost of supervising a child that finished on time. That cost is
+/// therefore the whole of what qualification measures, and this is the ceiling.
+///
+/// The number is set from measurement rather than taste. An implementation that supervises with a
+/// tight loop or a signal costs single-digit milliseconds; the implementation installed in the
+/// environment this suite was developed against (`timeout (uutils coreutils) 0.2.2`) polls its child
+/// on a 100 millisecond granularity and was measured at roughly 103 milliseconds *per invocation
+/// whatever the budget*. Twenty-five milliseconds sits an order of magnitude above the former and a
+/// quarter of the way to the latter, so the two are separated with margin on both sides rather than
+/// by a hair.
+///
+/// The scale is what makes this worth measuring at all. A full matrix spawns at least 5,508 bounded
+/// invocations, so 103 milliseconds each is roughly 569 seconds of wall time added to a suite whose
+/// own measured budget is about 188 seconds — an outer net that never fires costing three times the
+/// work it supervises.
+const OUTER_NET_OVERHEAD_MAX: Duration = Duration::from_millis(25);
+
+/// How many times the qualification probe is run before its cost is judged.
+///
+/// The estimator is the **minimum** of these samples rather than the mean, because the quantity
+/// being estimated is the implementation's own floor and every source of noise on a shared machine —
+/// scheduling, page cache, another test's compiler — adds to a sample and never subtracts from it.
+/// Three samples cost a few milliseconds against a qualifying implementation and about a third of a
+/// second against one that will be declined, which is paid once per run rather than once per cell.
+const OUTER_NET_PROBE_SAMPLES: usize = 3;
+
+/// The budget handed to the qualification probe, in seconds.
+///
+/// A whole second, because the utility's budget argument is a whole number of seconds and the probe
+/// must not be measuring an expiry: the child it supervises exits immediately, so a one-second budget
+/// is never reached and what is measured is purely the supervision overhead.
+const OUTER_NET_PROBE_BUDGET_SECS: u64 = 1;
+
 /// Static archives and start files whose presence indicates a usable C runtime for a
 /// target.
 ///
-/// This is the complete set the suite's static links consume, and it is complete on purpose.
-/// The archive supplies the library, and the three start files are the C runtime's
-/// initialization sequence: `crt1.o` carries the entry stub that calls `main`, while `crti.o`
-/// and `crtn.o` are the prologue and epilogue halves that bracket the initialization and
-/// finalization sections. A link is satisfied only when all four are present, which is the
-/// linkage contract the project's own technical specification states for every one of the four
-/// architectures.
+/// These four are the inputs a **target's C library development package** supplies, and they are
+/// what this probe exists to find, because they are the ones an unprovisioned target is missing. The
+/// archive supplies the library, and the three start files are the C runtime's initialization
+/// sequence: `crt1.o` carries the entry stub that calls `main`, while `crti.o` and `crtn.o` are the
+/// prologue and epilogue halves that bracket the initialization and finalization sections. All four
+/// are required, which is the linkage contract the project's own technical specification states for
+/// every one of the four architectures.
 ///
-/// Checking a subset would be worse than checking nothing, because it would report a runtime as
-/// usable while a link against it fails: a missing `crti.o` or `crtn.o` produces an
+/// They are **not** the whole of what a static link consumes. Measured with `gcc -static -v`, the
+/// link line also carries `crtbeginT.o` and `crtend.o` and links `-lgcc -lgcc_eh` alongside `-lc`.
+/// Those four ship with the **compiler driver** rather than with the target's C library, so they are
+/// present whenever the driver that would use them is present, and looking for them would test the
+/// wrong thing: the question this probe answers is whether the target's runtime package was
+/// installed, not whether the driver is internally complete. A driver missing its own support files
+/// fails with a stage-execution or missing-file diagnostic that `compile.rs` attributes separately.
+///
+/// Checking a subset of the four would be worse than checking nothing, because it would report a
+/// runtime as usable while a link against it fails: a missing `crti.o` or `crtn.o` produces an
 /// unresolved-symbol or malformed-initialization failure at link time, and a capability report
 /// that had already called the runtime healthy would send the reader looking for a compiler
 /// defect instead of an absent package. Reporting a gap is cheap; misreporting one is expensive.
@@ -1415,10 +1540,14 @@ const SHEBANG: &[u8] = b"#!";
 /// # Why this is worth doing at all
 ///
 /// Oracle (a) is only an oracle while the two compilers are different implementations, and a
-/// wrapper hides which implementation a name denotes. This suite's own reference toolchain is a
-/// live example: five separate wrapper scripts, five distinct inodes, and two of them — the `gcc`
-/// and `cc` spellings — `exec` the very same driver. A launcher-only comparison declares that pair
-/// independent. Reading the `exec` line is what turns "different file" into "different compiler".
+/// wrapper hides which implementation a name denotes. A provisioned reference toolchain routinely
+/// reaches this case, because pinning a particular driver series under a plain name — `gcc`, `cc` or
+/// a cross-driver name — is most simply done with a one-line `exec` script, and two such names can
+/// perfectly well `exec` the same driver. How many of the names on a given machine are scripts and
+/// how many are real binaries is a property of that machine, not of this suite; both are accepted.
+/// What matters is that a launcher-only comparison would declare a pair independent whenever their
+/// launchers differ, even when one driver stands behind both. Reading the `exec` line is what turns
+/// "different file" into "different compiler".
 ///
 /// # What is accepted as an answer
 ///
@@ -1442,21 +1571,21 @@ const SHEBANG: &[u8] = b"#!";
 ///    after it and nothing it does can be conditional on anything;
 /// 4. its program word is an absolute path.
 ///
-/// An earlier form took the **last** `exec` line and ignored everything else in the file, on the
-/// reasoning that a wrapper commonly `exec`s inside a conditional branch and falls through to its
-/// real target. That is unsound in the direction that matters: a script can `exec` a decoy on its
-/// final line while an earlier conditional — `if [ -n "$SOMETHING" ]; then exec /other/cc "$@"; fi`
-/// — is the branch that actually runs. Reading the trailing line then reports a compiler that never
-/// executed, and oracle independence is decided on that report. Two names could hand their work to
+/// Requiring *the* `exec` line to be the only executable statement, rather than reading whichever
+/// `exec` comes last, is what makes the answer trustworthy. A script can `exec` a decoy on its final
+/// line while an earlier conditional — `if [ -n "$SOMETHING" ]; then exec /other/cc "$@"; fi` — is
+/// the branch that actually runs. Reading the trailing line would then report a compiler that never
+/// executed, and oracle independence is decided on that report: two names could hand their work to
 /// one driver and be recorded as distinct, in which case a differential comparison compares a
 /// compiler with itself and agrees by construction.
 ///
-/// The narrow grammar is *deliberately* unable to describe such a script, and the reference
-/// toolchain of this environment satisfies it exactly — each of its five wrapper scripts is a
-/// shebang, four comment lines, and one trailing unconditional `exec` of an absolute driver path.
-/// Anything more complicated yields [`WrapperTarget::Unreadable`]: not a claim that the file runs
-/// itself, but a refusal to guess, which now refuses the tool in **every** mode rather than only
-/// under strict.
+/// The grammar is *deliberately* unable to describe such a script. Comment and blank lines carry no
+/// statement and are not counted — any number of them is accepted, up to
+/// [`WRAPPER_SCRIPT_BYTES_MAX`] for the file as a whole — so an ordinary pinning wrapper, a shebang
+/// plus however many lines explain which driver series it selects and why plus one trailing
+/// unconditional `exec` of an absolute path, satisfies it as written. Anything more complicated yields [`WrapperTarget::Unreadable`]: not a
+/// claim that the file runs itself, but a refusal to guess, and that refusal rejects the tool in
+/// **every** mode rather than only under strict.
 ///
 /// Following conditionals, expanding variables or honouring `$@` placement would mean interpreting
 /// shell, and a partial shell interpreter reaching a confident wrong conclusion is precisely the
@@ -2048,7 +2177,8 @@ impl ProbeCapture {
 /// pre-flight — before any cell exists for the per-cell execution budget to govern — so the suite's
 /// own runaway protection cannot engage on its behalf. This bound is the only thing standing there.
 ///
-/// Five properties hold together, and each closes a distinct way a probe can fail to return:
+/// Six properties hold together, and each closes a distinct way a probe can fail to return or a
+/// process can be left behind:
 ///
 /// - **Standard input is the null device**, so any read of it sees end of file immediately and a
 ///   tool that waits for a maintainer to type cannot block.
@@ -2063,10 +2193,19 @@ impl ProbeCapture {
 /// - **The wait is bounded** by polling [`std::process::Child::try_wait`] until the deadline,
 ///   because the standard library offers no timed wait.
 /// - **The direct child is always reaped.** On the deadline it is killed and then waited on, so no
-///   zombie of it is left behind. The signal reaches that one process: no process group is created
-///   and no group-wide signal is sent, so a probe that started something of its own — a wrapper
-///   script's `sleep` is the ordinary case — leaves that descendant running, which is exactly the
-///   situation the next property exists to survive.
+///   zombie of it is left behind. That much is unconditional.
+/// - **The child's process group is swept, best effort.** Each probe is placed in a group of its own
+///   before it is spawned, and [`terminate_group_of`] sweeps that group on every exit path — the
+///   ordinary one included — so a descendant the probe started of its own accord, a wrapper script's
+///   `sleep` being the ordinary case, is cleaned up rather than left running. It is best effort for a
+///   concrete reason: the standard library cannot signal a group, so the sweep needs a vetted `kill`
+///   utility, and on a machine where none can be trusted it degrades to terminating the immediate
+///   child. Its result is deliberately **discarded at this layer** rather than reported: a leaked
+///   descendant of a `--version` invocation is untidy, not a fact about any compiler, and failing
+///   pre-flight over cleanup would be the wrong trade. `execute.rs` does report the same condition,
+///   because there a survivor holds the pipes a verdict is computed from. So a descendant can outlive
+///   a probe on a degraded machine, which is exactly the situation the next property exists to
+///   survive.
 /// - **Collecting the output is bounded by the same deadline as the wait**, and this is the
 ///   property that is easy to omit and fatal to omit. Terminating a child does not close the pipe
 ///   it was writing to: any process that inherited the write end still holds it open, and a shell
@@ -2337,6 +2476,221 @@ fn probe_version(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether the external `timeout` utility is wrapped around a launch, and why.
+///
+/// # What this decides, and what it deliberately does not
+///
+/// It decides one thing: whether the discovered utility is wrapped around a spawned command as an
+/// **outer net**, a fixed margin beyond the per-cell budget. It decides nothing about how a timeout
+/// is *established*. `execute.rs`'s own watchdog remains the authoritative bound on every path, a
+/// timeout remains a fact this process observed rather than a status read back out of somebody
+/// else's exit code, and every child remains in a process group of its own that is swept and
+/// verified empty on every exit path. Declining the outer net therefore changes no verdict, which is
+/// exactly why it can be decided on cost.
+///
+/// # Why the decision is behavioural rather than a bare presence test
+///
+/// An outer net that never fires still charges for supervising every child it wraps, and that charge
+/// is the whole of what it costs a healthy run. Measured: the implementation installed in the
+/// environment this suite was developed against polls its child on a 100 millisecond granularity and
+/// costs roughly 103 milliseconds per invocation whatever the budget, which across a matrix of at
+/// least 5,508 bounded invocations is about 569 seconds — roughly three times the suite's own
+/// measured work. An implementation that supervises tightly costs single-digit milliseconds and is
+/// worth engaging. Presence cannot tell those two apart; a measurement can, so
+/// [`qualify_outer_net`] measures.
+///
+/// Either way the outcome is **reported**, never silent: the pre-flight capability report and the
+/// environment fingerprint both state which decision was taken and the evidence for it, because a
+/// reader comparing two runs' timings needs to know which of them was wrapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OuterNet {
+    /// The utility is wrapped around every bounded launch, with the evidence that qualified it.
+    Engaged {
+        /// Absolute path of the vetted utility, as `execute.rs` and `compile.rs` will spawn it.
+        path: PathBuf,
+        /// Why it was engaged: the measured per-invocation cost, or the explicit request.
+        evidence: String,
+    },
+    /// No wrapping happens, with the reason. The watchdog is the whole bound, as it always is.
+    Declined {
+        /// Why: no utility, an explicit `off`, or a measured cost above the ceiling.
+        reason: String,
+    },
+}
+
+impl OuterNet {
+    /// The utility to wrap with, or `None` when nothing is wrapped.
+    ///
+    /// This is the single value every spawning site reads, which is what keeps the decision in one
+    /// place: a caller cannot reach past it to the raw discovery result, because
+    /// [`Capabilities::timeout_tool`] hands out the *record* — for reporting and fingerprinting —
+    /// while only this returns a path to spawn.
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            OuterNet::Engaged { path, .. } => Some(path.as_path()),
+            OuterNet::Declined { .. } => None,
+        }
+    }
+
+    /// One line stating the decision and its evidence, for a report or a fingerprint.
+    pub fn summary(&self) -> String {
+        let text = match self {
+            OuterNet::Engaged { path, evidence } => format!(
+                "engaged: {} wraps every bounded launch as an outer net {} second(s) beyond the \
+                 per-cell budget ({evidence}). The watchdog in execute.rs remains the authoritative \
+                 bound and no exit status of this utility is ever interpreted",
+                shown_path(path),
+                TIMEOUT_UTILITY_OUTER_MARGIN.as_secs(),
+            ),
+            OuterNet::Declined { reason } => format!(
+                "declined: no external wrapper is spawned ({reason}). The watchdog in execute.rs is \
+                 the whole bound, which it is authoritatively in either case, so no verdict changes \
+                 — set {VAR_OUTER_TIMEOUT}=on to wrap regardless"
+            ),
+        };
+        sanitize_text_for_report(&text)
+    }
+}
+
+/// What [`VAR_OUTER_TIMEOUT`] asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OuterNetRequest {
+    /// Never wrap.
+    Off,
+    /// Wrap only an implementation that passes qualification. The default.
+    Auto,
+    /// Wrap whatever was discovered, without measuring it.
+    On,
+}
+
+impl OuterNetRequest {
+    /// Read the request from the environment, defaulting to [`OuterNetRequest::Auto`].
+    ///
+    /// An unrecognised value reads as `auto` rather than failing the run: this variable selects a
+    /// performance policy that cannot change a verdict, so refusing to start over a typo would be a
+    /// worse outcome than proceeding with the default. The pre-flight report states which policy is
+    /// in force, so a typo is visible there rather than silent.
+    fn from_environment() -> OuterNetRequest {
+        match env::var(VAR_OUTER_TIMEOUT) {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "off" | "0" | "false" | "no" => OuterNetRequest::Off,
+                "on" | "1" | "true" | "yes" | "require" => OuterNetRequest::On,
+                _ => OuterNetRequest::Auto,
+            },
+            Err(_) => OuterNetRequest::Auto,
+        }
+    }
+}
+
+/// Decide whether the discovered `timeout` utility is engaged as an outer net.
+///
+/// Runs during discovery, once per process, so its cost is paid once rather than per cell.
+///
+/// # The measurement
+///
+/// The utility is asked to supervise a child that exits immediately — itself, printing its own
+/// banner — under a one-second budget it therefore never reaches. What is measured is consequently
+/// the supervision overhead alone and nothing else: no expiry is involved, no signal is sent, and no
+/// exit status is interpreted. The child is the utility itself because that is the one program
+/// qualification is already guaranteed to have: it is vetted, absolute, and known to answer a banner
+/// argument promptly, so the probe introduces no dependency on any tool discovery has not cleared.
+///
+/// [`OUTER_NET_PROBE_SAMPLES`] samples are taken and the **minimum** is judged against
+/// [`OUTER_NET_OVERHEAD_MAX`], because the estimator wanted is the implementation's floor and noise
+/// on a shared machine only ever adds.
+///
+/// # What is not measured, and why that is sound
+///
+/// Whether the utility actually terminates a child that *does* outlive its budget is not probed.
+/// Three reasons, in order of weight. The watchdog is authoritative, so a net that failed to fire
+/// would cost the run nothing that the watchdog does not already cover. Probing expiry needs a child
+/// that outlives a whole second, which needs a sleeping program this module has not vetted, and
+/// vetting one to test a net would be a larger dependency than the net is worth. And the expiry
+/// defects actually measured in the installed implementation — a signal that is never sent under
+/// `--signal=KILL`, and an indefinite hang under `--kill-after` — are in spellings this suite never
+/// passes; the plain spelling it does pass measured correct.
+fn qualify_outer_net(tool: &ToolRecord) -> OuterNet {
+    let request = OuterNetRequest::from_environment();
+    if request == OuterNetRequest::Off {
+        return OuterNet::Declined {
+            reason: format!("{VAR_OUTER_TIMEOUT} is set to `off`"),
+        };
+    }
+    let Some(path) = tool.path() else {
+        return OuterNet::Declined {
+            reason: format!(
+                "no per-cell timeout utility was discovered ({})",
+                tool.diagnosis()
+            ),
+        };
+    };
+    if request == OuterNetRequest::On {
+        return OuterNet::Engaged {
+            path: path.to_path_buf(),
+            evidence: format!(
+                "{VAR_OUTER_TIMEOUT} is set to `on`, so it was engaged without measuring its \
+                 per-invocation cost"
+            ),
+        };
+    }
+    match measure_outer_net_overhead(path) {
+        None => OuterNet::Declined {
+            reason: format!(
+                "{} could not be measured supervising a child that exits immediately, so its \
+                 per-invocation cost is unknown and it is not engaged",
+                shown_path(path)
+            ),
+        },
+        Some(floor) if floor > OUTER_NET_OVERHEAD_MAX => OuterNet::Declined {
+            reason: format!(
+                "{} charges at least {} ms per invocation supervising a child that exits \
+                 immediately, above the {} ms ceiling; an outer net that never fires in a healthy \
+                 run would add roughly {} s across the matrix's 5,508 bounded invocations",
+                shown_path(path),
+                floor.as_millis(),
+                OUTER_NET_OVERHEAD_MAX.as_millis(),
+                floor.as_millis().saturating_mul(5_508) / 1_000,
+            ),
+        },
+        Some(floor) => OuterNet::Engaged {
+            path: path.to_path_buf(),
+            evidence: format!(
+                "measured at {} ms per invocation supervising a child that exits immediately, \
+                 within the {} ms ceiling",
+                floor.as_millis(),
+                OUTER_NET_OVERHEAD_MAX.as_millis(),
+            ),
+        },
+    }
+}
+
+/// The floor of what this utility costs to supervise a child that exits immediately.
+///
+/// `None` when the probe could not be spawned at all, or when the utility did not report success
+/// supervising a trivially successful child — either way its behaviour has not been established, and
+/// an unestablished implementation is not engaged.
+fn measure_outer_net_overhead(tool: &Path) -> Option<Duration> {
+    let mut floor: Option<Duration> = None;
+    for _ in 0..OUTER_NET_PROBE_SAMPLES {
+        let started = Instant::now();
+        let capture = run_bounded_probe(
+            Command::new(tool)
+                .arg(OUTER_NET_PROBE_BUDGET_SECS.to_string())
+                .arg(tool)
+                .arg(VERSION_ARGUMENTS[0]),
+        )?;
+        let elapsed = started.elapsed();
+        if !capture.exited_successfully() {
+            return None;
+        }
+        floor = Some(match floor {
+            Some(previous) if previous <= elapsed => previous,
+            _ => elapsed,
+        });
+    }
+    floor
 }
 
 /// How a tool came to be located, or why it could not be.
@@ -2956,7 +3310,7 @@ fn vet_resolved_tool(
         let Some(target) = expected_target else {
             return (None, Some(note));
         };
-        let (refusal, target_note) = vet_declared_target(path, &shown, target);
+        let (refusal, target_note) = vet_reference_driver(path, &shown, target);
         return (
             refusal,
             Some(match target_note {
@@ -2968,7 +3322,38 @@ fn vet_resolved_tool(
     let Some(target) = expected_target else {
         return (None, None);
     };
-    vet_declared_target(path, &shown, target)
+    vet_reference_driver(path, &shown, target)
+}
+
+/// Every question a reference driver must answer about itself, asked in one place.
+///
+/// Two properties, and each on its own is insufficient. [`vet_declared_target`] establishes *what the
+/// driver builds for*, and [`vet_language_mode`] establishes *what language it compiles*. A driver can
+/// satisfy either while failing the other: two releases of the same compiler report an identical
+/// triple and default to different revisions of C, and a driver for the wrong architecture may default
+/// to exactly the right revision. Both are asked, in that order — the target first, because a driver
+/// serving the wrong architecture is the more fundamental mistake and its refusal reads more usefully
+/// than a language complaint about a compiler that was never the right one.
+///
+/// The notes are joined rather than one replacing the other, so the capability report states both
+/// facts about every accepted arm: the target it declared and the language mode that was proven for
+/// it. A report that showed only one would leave the other looking unchecked.
+fn vet_reference_driver(
+    path: &Path,
+    shown: &str,
+    target: Target,
+) -> (Option<String>, Option<String>) {
+    let (target_refusal, target_note) = vet_declared_target(path, shown, target);
+    if target_refusal.is_some() {
+        return (target_refusal, target_note);
+    }
+    let (mode_refusal, mode_note) = vet_language_mode(path, shown, target);
+    let note = match (target_note, mode_note) {
+        (Some(first), Some(second)) => Some(format!("{first}, {second}")),
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    };
+    (mode_refusal, note)
 }
 
 /// Ask a cross driver which target it builds for, and refuse it if the answer is wrong or absent.
@@ -3023,6 +3408,195 @@ fn vet_declared_target(
             unanswered(String::from("it exited successfully but printed no target"))
         }
     }
+}
+
+/// Ask a reference driver which language it compiles by default, and refuse it if that is the wrong
+/// language.
+///
+/// # Why the language mode has to be proved rather than assumed
+///
+/// The oracle's authority rests on it compiling *the same language* the corpus was written in. Nothing
+/// else in discovery establishes that. A driver's name does not: `gcc` is whichever version the
+/// distribution made the default, and distributions advance that default — measured on the reference
+/// host, `/usr/bin/gcc` is a release whose default is C23 while the pinned `gcc-13` beside it defaults
+/// to C17. Its `-dumpmachine` answer does not either: both report the same triple. And the suite
+/// cannot repair a wrong answer afterwards, because it passes **no** standard-selection flag: the
+/// compiler under test has none, so passing one to the reference compiler alone would put a flag in a
+/// differential invocation that only one side honours — precisely the discipline requirement 3 sets.
+///
+/// So the mode is asked for, and a driver that answers wrongly is refused. Refused, rather than noted:
+/// an oracle compiling a different revision of C produces verdicts that look exactly like ordinary
+/// ones, and a comparison against a false authority is worse than a missing arm, because a missing arm
+/// is reported and this would not be.
+///
+/// Two conditions, each the failure of a real defect:
+///
+/// 1. `__STDC_VERSION__` must be stated and lie between [`MIN_STDC_VERSION`] and
+///    [`MAX_STDC_VERSION`]. Below the range the driver would reject the corpus's C11 constructs;
+///    above it, C23 changes the meaning of constructs the corpus contains — the constant's own
+///    documentation records the measurement.
+/// 2. [`STRICT_ANSI_MACRO`] must be absent. Requirement 2 mandates GNU extensions — statement
+///    expressions, `typeof`, computed goto, case ranges — and a driver whose default mode is strictly
+///    conforming rejects them. Measured: `-std=c11` predefines that macro while the default mode of
+///    every driver this suite selects does not, so the macro genuinely distinguishes the two.
+///
+/// Split out of [`vet_resolved_tool`] for the same reason [`vet_declared_target`] is, and called from
+/// the same two places, so a driver accepted with a recorded weaker guarantee is still checked.
+fn vet_language_mode(path: &Path, shown: &str, target: Target) -> (Option<String>, Option<String>) {
+    let unanswered = |cause: String| {
+        (
+            Some(format!(
+                "{shown} was found but did not state which language it compiles by default: asked \
+                 with `{}`, {cause}. It is refused rather than trusted, because this suite passes no \
+                 standard-selection flag — the compiler under test has none to match — so the \
+                 driver's own default mode *is* the language every comparison on the {target} arm is \
+                 judged against, and an unproven language makes each of those comparisons \
+                 unattributable. Point {} at a driver whose default mode is C11 or C17 with the GNU \
+                 extensions enabled, or unset it to probe the documented defaults",
+                LANGUAGE_MODE_ARGUMENTS.join(" "),
+                reference_variable_for(target)
+            )),
+            Some(format!("language mode not stated ({cause})")),
+        )
+    };
+    match probe_language_mode(path) {
+        LanguageModeAnswer::Stated { version, strict } => {
+            let mut faults: Vec<String> = Vec::new();
+            if version < MIN_STDC_VERSION {
+                faults.push(format!(
+                    "it compiles {STDC_VERSION_MACRO} {version}L by default, older than the \
+                     C11 ({MIN_STDC_VERSION}L) this corpus is written in, so it would reject the \
+                     corpus rather than judge it"
+                ));
+            }
+            if version > MAX_STDC_VERSION {
+                faults.push(format!(
+                    "it compiles {STDC_VERSION_MACRO} {version}L by default, newer than the C17 \
+                     ({MAX_STDC_VERSION}L) this corpus is written in, and the difference is \
+                     observable in the corpus itself — a UTF-8 string literal changes type, and \
+                     `bool`, `true` and `false` become keywords"
+                ));
+            }
+            if strict {
+                faults.push(format!(
+                    "it predefines {STRICT_ANSI_MACRO}, so its default mode rejects the GNU \
+                     extensions requirement 2 mandates — statement expressions, `typeof`, computed \
+                     goto and case ranges are all exercised by this corpus"
+                ));
+            }
+            if faults.is_empty() {
+                return (
+                    None,
+                    Some(format!(
+                        "compiles {STDC_VERSION_MACRO} {version}L by default, GNU extensions enabled"
+                    )),
+                );
+            }
+            (
+                Some(format!(
+                    "{shown} was found but does not compile the language this suite compares \
+                     against: {}. No standard-selection flag can correct it, because passing one to \
+                     the reference compiler alone would put a flag in a differential invocation that \
+                     the compiler under test does not honour. Point {} at a driver whose default mode \
+                     is C11 or C17 with the GNU extensions enabled — a version-suffixed driver such \
+                     as `gcc-13` pins that, where the unsuffixed name follows the distribution's \
+                     current default — or unset it to probe the documented defaults",
+                    faults.join("; and "),
+                    reference_variable_for(target)
+                )),
+                Some(format!("compiles {STDC_VERSION_MACRO} {version}L by default")),
+            )
+        }
+        LanguageModeAnswer::NotLaunched => unanswered(String::from("it could not be launched")),
+        LanguageModeAnswer::NoCompletion(completion) => unanswered(completion),
+        LanguageModeAnswer::Declined(completion) => unanswered(completion),
+        LanguageModeAnswer::Unstated => unanswered(format!(
+            "it exited successfully but predefined no {STDC_VERSION_MACRO}, so either it is not a C \
+             driver or its answer was longer than this probe retains"
+        )),
+        LanguageModeAnswer::Unreadable(value) => unanswered(format!(
+            "it defined {STDC_VERSION_MACRO} as {value:?}, which is not a revision number this \
+             suite can compare against a range"
+        )),
+    }
+}
+
+/// What asking a driver which language it compiles by default produced.
+///
+/// Six outcomes rather than an `Option`, on the same reasoning [`MachineAnswer`] records: a driver that
+/// could not be launched, one that hung, one that rejected the arguments, one that answered nothing and
+/// one that answered something unreadable are five different situations, and collapsing them into a
+/// single absence is exactly how a check comes to fail open.
+enum LanguageModeAnswer {
+    /// The driver could not be launched at all.
+    NotLaunched,
+    /// The driver outlived the probe deadline and was terminated, or became unobservable.
+    NoCompletion(String),
+    /// The driver ran to completion and reported failure, so it declined the question.
+    Declined(String),
+    /// The driver reported success but predefined no revision macro.
+    Unstated,
+    /// The driver stated a revision this suite cannot read as a number. Carries the value as printed.
+    Unreadable(String),
+    /// The driver stated its default revision, and whether its default mode is strictly conforming.
+    Stated { version: u64, strict: bool },
+}
+
+/// Ask a compiler driver which language it compiles by default.
+///
+/// Success is required on top of a readable answer, and the two are separate conditions for the same
+/// reason [`probe_dumpmachine`] separates them: a program that exits zero having printed nothing is a
+/// successful non-answer, and only a check that reads both the status and the text can tell it from a
+/// driver that genuinely answered.
+fn probe_language_mode(driver: &Path) -> LanguageModeAnswer {
+    let Some(capture) = run_bounded_probe(Command::new(driver).args(LANGUAGE_MODE_ARGUMENTS))
+    else {
+        return LanguageModeAnswer::NotLaunched;
+    };
+    if capture.timed_out || capture.status.is_none() {
+        return LanguageModeAnswer::NoCompletion(capture.completion_summary());
+    }
+    if !capture.exited_successfully() {
+        return LanguageModeAnswer::Declined(capture.completion_summary());
+    }
+    let text = String::from_utf8_lossy(&capture.stdout);
+    let strict = predefined_macro(&text, STRICT_ANSI_MACRO).is_some();
+    let Some(raw) = predefined_macro(&text, STDC_VERSION_MACRO) else {
+        return LanguageModeAnswer::Unstated;
+    };
+    match revision_number(&raw) {
+        Some(version) => LanguageModeAnswer::Stated { version, strict },
+        None => LanguageModeAnswer::Unreadable(raw),
+    }
+}
+
+/// The value a `-dM` dump gives one macro, or `None` when the dump does not define it.
+///
+/// Matched on the whole `#define <name> ` prefix rather than by searching for the name anywhere, so a
+/// macro whose *value* mentions another macro's name cannot be read as a definition of it — a real
+/// hazard here, since a driver's dump contains hundreds of definitions and several quote others.
+fn predefined_macro(dump: &str, name: &str) -> Option<String> {
+    let prefix = format!("#define {name} ");
+    dump.lines()
+        .find_map(|line| line.strip_prefix(prefix.as_str()))
+        .map(|value| String::from(value.trim()))
+}
+
+/// A C revision macro's value as a number, or `None` when it is not one.
+///
+/// The value is a `long` constant, so it carries an `L` suffix — `201710L`. The suffix is optional in
+/// what is accepted, and anything else is refused rather than salvaged: reading `2017abc` as `2017`
+/// would turn an unreadable answer into a confidently wrong one, which is the failure mode this whole
+/// check exists to remove.
+fn revision_number(raw: &str) -> Option<u64> {
+    let digits = raw
+        .strip_suffix('L')
+        .or_else(|| raw.strip_suffix('l'))
+        .unwrap_or(raw);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// Report why a tool's location cannot be trusted, examining every path that reaches its bytes.
@@ -3152,10 +3726,21 @@ fn probe_dumpmachine(driver: &Path) -> MachineAnswer {
 /// SUSE build their native driver to report `x86_64-redhat-linux` and `x86_64-suse-linux`: three
 /// components, vendor in the middle, and no environment component at all — while being ordinary
 /// glibc Linux systems. The rule is therefore that an environment component, *when stated*, must be
-/// exactly `gnu`. That admits nothing dangerous, because every incompatible family names itself:
-/// musl, android, uclibc and the x32 ABI all appear in that component, and MinGW and bare-metal ELF
-/// are already excluded by the operating-system check above. It rejects everything the stricter rule
-/// rejects, and refuses one thing fewer that is actually legitimate.
+/// exactly `gnu`.
+///
+/// This is a deliberate trade of a little assurance for not refusing legitimate machines, and the
+/// assurance given up should be named rather than glossed over. An unqualified `<arch>-linux` triple
+/// does **not** prove GNU/glibc; it proves only that the driver did not say otherwise. The
+/// incompatible families conventionally do name themselves — musl, android, uclibc and the x32 ABI
+/// all appear in that component, and MinGW and bare-metal ELF are already excluded by the
+/// operating-system check above — so in practice the omission is a packaging habit rather than a
+/// disguise. But a driver that omitted the component *while* targeting a different C library would
+/// be accepted here, and the consequence is a same-target reference arm whose formatted output need
+/// not agree byte for byte with glibc's. Such a driver is therefore accepted with **reduced
+/// assurance**, not with the certainty an explicit `gnu` carries: the rule rejects everything the
+/// stricter rule rejects, refuses one thing fewer that is legitimate, and records the driver's exact
+/// reported machine in the pre-flight report and every finding's fingerprint so a reader can see
+/// which of the two they got.
 fn machine_mismatch(machine: &str, target: Target) -> Option<String> {
     // The spelling the four measured drivers produce, checked first so the ordinary case costs one
     // comparison and cannot be affected by any of the tolerance below.
@@ -3462,6 +4047,13 @@ pub struct Capabilities {
     runner_riscv64: ToolRecord,
     /// External per-cell timeout utility. Optional: execution falls back to a watchdog thread.
     timeout_tool: ToolRecord,
+    /// Whether that utility is wrapped around a launch as an outer net, and why.
+    ///
+    /// Held beside the record rather than derived at each spawning site, so the qualification probe
+    /// runs once per process and every site — compile, execute, the flag probe, the audit gate —
+    /// reads one decision. Two sites deciding independently could wrap differently within one run,
+    /// which would make a timing comparison between two cells meaningless.
+    outer_net: OuterNet,
     reducer: ToolRecord,
     c_runtimes: Vec<CRuntimeStatus>,
     /// Kernel identification, or an explanatory substitute when it could not be obtained.
@@ -3512,8 +4104,26 @@ impl Capabilities {
     /// Its absence changes how execution enforces the budget — a watchdog thread instead of the
     /// utility — and changes no verdict, which is why it degrades silently where a missing oracle
     /// does not.
+    ///
+    /// This is the record, for reporting and fingerprinting. It is deliberately **not** what a
+    /// spawning site reads: whether the utility is actually wrapped around a launch is
+    /// [`Capabilities::outer_net`], because presence and engagement are different questions and a
+    /// site that answered the first would reinstate the per-invocation cost qualification exists to
+    /// avoid.
     pub fn timeout_tool(&self) -> &ToolRecord {
         &self.timeout_tool
+    }
+
+    /// The utility to wrap a bounded launch with, or `None` when nothing is wrapped.
+    ///
+    /// The single authority the four spawning sites consult — `compile.rs`, `execute.rs`, the flag
+    /// probe and the audit gate — so the qualification probe runs once per process and no site can
+    /// reach past the decision to the raw discovery result. See [`OuterNet`] for what the decision
+    /// does and does not affect; in particular, declining it changes no verdict, because
+    /// `execute.rs`'s watchdog is authoritative either way. The decision itself, with its evidence,
+    /// is stated by the pre-flight capability report and by the environment fingerprint.
+    pub fn outer_net_tool(&self) -> Option<&Path> {
+        self.outer_net.path()
     }
 
     /// The test-case reducer used to minimize a finding, which is optional.
@@ -3922,6 +4532,9 @@ impl Capabilities {
                  behavioural change, and this is not an unavailable oracle",
             ));
         }
+        // Stated whichever way the decision went, because a reader comparing two runs' timings has
+        // to know which of them was wrapping, and because an engaged net is a cost worth seeing.
+        lines.push(format!("    outer net {}", self.outer_net.summary()));
         lines.push(format!("  {}", self.reducer.summary()));
         if !self.reducer.is_available() {
             lines.push(String::from(
@@ -4332,6 +4945,10 @@ impl Capabilities {
         lines.push(fingerprint_line("runner-aarch64", &self.runner_aarch64));
         lines.push(fingerprint_line("runner-riscv64", &self.runner_riscv64));
         lines.push(fingerprint_line("timeout-utility", &self.timeout_tool));
+        // Part of the fingerprint because it is part of how a cell was bounded: a finding whose
+        // divergence class is `timeout` was reproduced under one arrangement or the other, and a
+        // maintainer comparing this machine with theirs needs to know which.
+        lines.push(format!("outer-net: {}", self.outer_net.summary()));
         lines.push(fingerprint_line("reducer", &self.reducer));
         lines.push(format!("host-arch: {}", self.host_arch));
         lines.push(format!("host-os: {}", self.host_os));
@@ -4634,6 +5251,11 @@ fn discover_once() -> HarnessResult<Capabilities> {
         strict,
     );
 
+    // Behaviour, not presence: an outer net that never fires still charges for every child it
+    // wraps, so the discovered implementation is measured once here and the decision is carried in
+    // the record. See `qualify_outer_net`.
+    let outer_net = qualify_outer_net(&timeout_tool);
+
     let mut capabilities = Capabilities {
         bcc,
         ref_cc_native,
@@ -4644,6 +5266,7 @@ fn discover_once() -> HarnessResult<Capabilities> {
         runner_aarch64,
         runner_riscv64,
         timeout_tool,
+        outer_net,
         reducer,
         c_runtimes: Vec::new(),
         kernel: probe_kernel(),
@@ -4673,35 +5296,45 @@ fn discover_once() -> HarnessResult<Capabilities> {
     Ok(capabilities)
 }
 
-/// Prove behaviourally that each non-native runner executes the architecture it was selected for.
+/// Check behaviourally that each non-native runner executes the architecture it was selected for.
 ///
 /// # Why a name is not enough
 ///
-/// Before this check, a runner earned its place by resolving: a file called `qemu-aarch64` was found
-/// on a trusted search path and that was the whole of the evidence. Nothing asked it to *do*
-/// anything. An emulator is the program that runs every binary whose stdout becomes a verdict on
+/// Without this check a runner would earn its place by resolving alone: a file called
+/// `qemu-aarch64` found on a trusted search path, with nothing ever asking it to *do* anything. An emulator is the program that runs every binary whose stdout becomes a verdict on
 /// that arm, so a file that merely answers to the name is enough to fabricate an entire arm — a
 /// three-line script that prints the output a maintainer expects and exits zero would make every
 /// cell on that arm pass, and the run would report agreement across four backends while three of
 /// them had never executed at all. That is the failure mode that produces a **pass**, which makes it
 /// strictly more dangerous than a runner that is simply absent.
 ///
-/// # What is proved, and why it cannot be faked
+/// # What is checked, and what the check is and is not
 ///
 /// A program is compiled *for that architecture* and executed *under that runner*, and both its
-/// standard output and its exit status must match exactly. Three properties make the answer
-/// unforgeable:
+/// standard output and its exit status must match exactly. Three properties give that check teeth:
 ///
 /// - **The expected output is unique to this run.** It carries a token derived from [`run_id`], which
-///   differs between every process, so no recorded or hard-coded output can satisfy it. A program
-///   that did not run cannot produce it.
+///   differs between every process, so no output recorded earlier and no value hard-coded in a stub
+///   can satisfy it.
 /// - **The expected exit status is unique to this run** for the same reason, and is kept inside
 ///   0–125 so the operating system does not truncate it and so it cannot collide with the statuses a
 ///   shell reserves for "could not execute".
 /// - **The output states the architecture's own type widths**, taken from the target table rather
-///   than from the program, so a runner that executed a *host* binary instead of the target's would
-///   report the host's widths and be refused. This is what catches the case a nonce alone would miss:
-///   a wrapper that silently ran the binary natively.
+///   than from the program, so a runner that executed a *host* binary would report the host's widths
+///   wherever they differ from the target's. On this host that separates i686, whose pointer and
+///   `long` are 4 bytes, from the three LP64 targets; it does **not** separate x86-64 from AArch64 or
+///   RISC-V 64, all three of which report 8 and 8.
+///
+/// This is a **sanity check against accidental substitution, not an attestation against an
+/// adversary**, and the distinction is worth stating plainly. The token and the required exit
+/// status are both written into the program the runner is handed, so
+/// anything able to read that source, or to run the real emulator, can reproduce them: a determined
+/// forgery is not what this defends against. What it does catch, reliably, is the realistic failure:
+/// a name on the search path that is not an emulator at all, a stale or wrongly targeted runner, a
+/// path pointing at the wrong architecture's emulator, and — where the widths differ — a wrapper that
+/// quietly ran the binary natively. That failure mode produces a **pass** rather than an error, which
+/// is why it is worth a positive check at all; the check is proportionate to it, and the environment
+/// this suite runs in is trusted for everything beyond it.
 ///
 /// # Which compiler builds the attestation program
 ///
@@ -4805,7 +5438,7 @@ impl AttestationBuilder {
             }
             AttestationBuilder::UnderTest(path) => format!(
                 "built by the compiler under test {} because no reference driver for this \
-                 architecture was available; the attestation therefore proves the runner executes \
+                 architecture was available; the attestation therefore says the runner executes \
                  this architecture, not that the compiler under test is correct",
                 shown_path(path)
             ),
@@ -4949,7 +5582,7 @@ fn attestation_exit_status(token: &str) -> i32 {
 
 /// The attestation program's source text.
 ///
-/// Deliberately the smallest program that can prove what is needed. It declares `printf` by hand
+/// Deliberately the smallest program that can carry the check. It declares `printf` by hand
 /// rather than including a header, exactly as every corpus program does and for the same reason: the
 /// compiler under test ships no `stdio.h`, so an include would fail on one side of a comparison for
 /// a reason that has nothing to do with the question being asked. It contains no loop, no branch and
@@ -4957,10 +5590,12 @@ fn attestation_exit_status(token: &str) -> i32 {
 /// the program.
 fn attestation_program(token: &str, exit_status: i32) -> String {
     format!(
-        "/* Generated per run by the differential conformance harness to prove that this\n\
+        "/* Generated per run by the differential conformance harness to check that this\n\
          architecture's execution runner really executes this architecture. The token below is\n\
-         derived from this run's own identity, so a runner that did not execute this program\n\
-         cannot print it. Not part of the committed corpus. */\n\
+         derived from this run's own identity, so no output recorded by an earlier run and no\n\
+         value hard-coded in a stub can satisfy it. A sanity check against a misconfigured or\n\
+         substituted runner, not an attestation against an adversary: the token and the required\n\
+         exit status are both visible here. Not part of the committed corpus. */\n\
          int printf(const char *, ...);\n\
          \n\
          int main(void)\n\

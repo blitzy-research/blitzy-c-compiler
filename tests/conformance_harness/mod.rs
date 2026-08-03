@@ -82,6 +82,7 @@ pub mod report;
 pub mod sandbox;
 pub mod ubaudit;
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -1900,13 +1901,31 @@ impl Outcome {
         } else {
             supplied
         };
+        // Three transformations, in this order, at the one point an outcome comes into existence.
+        //
+        // `redact_secrets` first, because it recognises a credential by its exact characters and an
+        // escape inserted before it would hide the match — a detail assembled from a compiler's
+        // diagnostics or a captured argument vector is exactly where a credential-bearing value can
+        // arrive.
+        //
+        // `symbolize_roots` second, and it is the correction the disclosure finding asks for. An
+        // outcome's own `Display` is what a failing area prints to the console, what a verdict row
+        // carries into a report, and what a finding manifest quotes — three sinks that travel far
+        // beyond the machine that produced them. Every one of them previously carried the absolute
+        // location of this checkout, which names a continuous-integration workspace or an agent
+        // clone. Applying the substitution *here* rather than at each sink is what makes the
+        // guarantee hold: an outcome cannot exist carrying an unelided root, so no present or future
+        // consumer can disclose one by forgetting to ask.
+        //
+        // `sanitize_text_for_report` last, so that whatever the first two produce is still unable to
+        // forge a column or repaint a line.
         Outcome {
             key,
             oracle,
             verdict,
             class,
             marker_id: marker_id.map(|marker| sanitize_text_for_report(&marker)),
-            detail: sanitize_text_for_report(&chosen),
+            detail: sanitize_text_for_report(&symbolize_roots(&redact_secrets(&chosen))),
         }
     }
 
@@ -2069,8 +2088,9 @@ pub fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Absolute path to the corpus root, which holds the feature-area directories, the
-/// registers, the fixture header, the maintenance tooling and the curated findings.
+/// Absolute path to the corpus root, which holds the feature-area directories, the registers, the
+/// fixture header and the curated findings — and which is also where the maintenance tooling tree
+/// belongs, planned for `tests/conformance/tools/` and not present on this branch.
 ///
 /// The corpus is discovered by scanning this directory, so a program needs **no code
 /// registration**: nothing here, and no list anywhere in the harness, enumerates the programs.
@@ -2152,7 +2172,11 @@ fn validated_target_dir() -> Result<Option<PathBuf>, String> {
              build directory is used instead"
         ));
     };
-    let shown = sanitize_text_for_report(text);
+    // Rendered through the package-only renderer rather than sanitized alone, so that a configured
+    // value naming a location inside this checkout is quoted back with that location elided. The
+    // operator supplied the value, so nothing they need is hidden; what is elided is the absolute
+    // prefix that would otherwise travel with this diagnostic into a console log or a report.
+    let shown = shown_path_within_package(Path::new(text));
     if text.chars().any(must_escape_for_report) {
         return Err(format!(
             "{VAR_CARGO_TARGET_DIR} is set to {shown:?}, which contains a character that cannot \
@@ -2197,8 +2221,130 @@ fn validated_target_dir() -> Result<Option<PathBuf>, String> {
         ));
     }
 
+    // The last check, and the one the ancestry walk cannot make: *where* the build roots would sit
+    // relative to the trees this suite reads and curates. Every workspace, every report and every
+    // generated finding is derived from this one value, and the ownership-aware purges that keep a
+    // run's account of itself from being mixed with a previous run's are performed beneath the same
+    // roots. A value naming, containing, or contained by a committed source tree would therefore
+    // create and remove directories inside material the suite is supposed to read only — including
+    // the corpus it discovers programs from and the curated finding set that is a deliverable.
+    if let Some(defect) = source_tree_overlap_defect(&resolved) {
+        return Err(format!(
+            "{VAR_CARGO_TARGET_DIR} is set to {shown:?}, which {defect}. The build roots must be \
+             disjoint from every committed tree this suite reads or curates, because the three of \
+             them are created and purged wholesale on every run; the package-relative default build \
+             directory is used instead"
+        ));
+    }
+
     Ok(Some(resolved))
 }
+
+/// How a configured build root overlaps a tree this suite must not write into, or `None`.
+///
+/// # Which trees, and why exactly these
+///
+/// Three, and each for a distinct reason:
+///
+/// - **The package root.** A build root equal to it, or above it, would place this run's
+///   directories among — or above — the whole checkout, and would point the roots' wholesale purges
+///   at a tree that holds every committed file. Note the asymmetry: the *default* build root is
+///   `<package>/target`, which is inside the package root and entirely legitimate. "Inside the
+///   package" is therefore not the defect; equalling it or containing it is.
+/// - **The committed test tree**, `tests/`. It holds the driver, this harness and the whole corpus,
+///   and the corpus is *discovered by scanning*, so a directory of build output created inside it
+///   would be scanned as though it were test material.
+/// - **The curated finding set**, `tests/conformance/findings/`. It is a committed deliverable that
+///   the findings writer already refuses to touch; a build root inside or above it would let the
+///   generated set's per-run purge remove it anyway.
+///
+/// # How the comparison is made
+///
+/// Both sides are reduced to real locations before being compared, because a lexical comparison
+/// answers a different question than the one that matters: a link at any level could make two
+/// textually unrelated paths name one directory. The configured root ordinarily does not exist yet,
+/// so its **longest existing prefix** is canonicalized and the remaining components are appended —
+/// which is sound precisely because [`directory_ancestry_defect`] has already established that no
+/// level of that existing prefix is a symbolic link. A reference tree that cannot be canonicalized
+/// is skipped rather than treated as a match: `tests/conformance/findings/` need not exist in a
+/// checkout that has never recorded one, and refusing a legitimate configuration over an absent
+/// optional directory would be the worse error.
+fn source_tree_overlap_defect(resolved: &Path) -> Option<String> {
+    let candidate = resolve_existing_prefix(resolved);
+    let package = manifest_dir();
+    let references: [(&str, PathBuf); 3] = [
+        ("the package root", package.clone()),
+        ("the committed test tree", package.join("tests")),
+        (
+            "the curated finding set",
+            corpus_root().join(CURATED_FINDINGS_DIR_NAME),
+        ),
+    ];
+    for (label, reference) in references {
+        let Ok(reference) = reference.canonicalize() else {
+            continue;
+        };
+        if candidate == reference {
+            return Some(format!(
+                "is {label} itself ({})",
+                shown_path_within_package(&reference)
+            ));
+        }
+        if candidate.starts_with(&reference) {
+            // The package root is the one reference a build root may legitimately sit inside, and
+            // the default one does. The narrower trees are never legitimate.
+            if reference == package {
+                continue;
+            }
+            return Some(format!(
+                "would place the build roots inside {label} ({})",
+                shown_path_within_package(&reference)
+            ));
+        }
+        if reference.starts_with(&candidate) {
+            return Some(format!(
+                "would place the build roots above {label} ({}), so a purge beneath them would \
+                 walk the same tree",
+                shown_path_within_package(&reference)
+            ));
+        }
+    }
+    None
+}
+
+/// `path` with its longest existing prefix canonicalized and the absent remainder appended.
+///
+/// Used for a containment comparison against a directory that does not exist yet, which is the
+/// ordinary case for a build root on a first run. Sound because every level of the existing prefix
+/// has already been proved to be a real directory rather than a link, so the canonical form of that
+/// prefix plus the literal remainder names exactly the directory that would be created.
+fn resolve_existing_prefix(path: &Path) -> PathBuf {
+    let mut remainder: Vec<&OsStr> = Vec::new();
+    let mut walked = path;
+    loop {
+        if let Ok(canonical) = walked.canonicalize() {
+            let mut resolved = canonical;
+            for component in remainder.iter().rev() {
+                resolved.push(component);
+            }
+            return resolved;
+        }
+        match (walked.file_name(), walked.parent()) {
+            (Some(name), Some(parent)) => {
+                remainder.push(name);
+                walked = parent;
+            }
+            // Nothing above resolves, so there is nothing to reduce and the path stands as written.
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// Directory name of the curated finding set inside the corpus.
+///
+/// Named here because two modules need to agree on it: this one refuses to write anywhere near it,
+/// and `findings.rs` refuses to write into it at all.
+pub const CURATED_FINDINGS_DIR_NAME: &str = "findings";
 
 /// Root of the per-cell workspaces, one subdirectory per [`CellKey::slug`].
 ///
@@ -2581,6 +2727,20 @@ pub fn digest_hex(components: &[&str]) -> String {
     )
 }
 
+/// A byte sequence as [`DIGEST_HEX_DIGITS`] lower-case hexadecimal digits.
+///
+/// The counterpart of [`digest_hex`] for content rather than for a component list, and it exists so
+/// that the width lives in one place: a finding's manifest records the digest of the reproducer it
+/// was written against, and the check that compares the two must render it identically or it would
+/// report a mismatch that is only a formatting difference.
+pub fn digest_hex_of_bytes(bytes: &[u8]) -> String {
+    format!(
+        "{:0width$x}",
+        fnv1a64_bytes(bytes),
+        width = DIGEST_HEX_DIGITS
+    )
+}
+
 // =================================================================================================
 // The run generation
 //
@@ -2817,34 +2977,130 @@ pub fn publish_bytes_no_follow(context: &str, path: &Path, bytes: &[u8]) -> Harn
 /// A staged publication that is dropped without being committed removes its own temporary file. That
 /// is what makes staging safe to use in a fallible sequence: if the second of two stagings fails, the
 /// first is discarded by unwinding out of scope and neither destination is touched.
+/// # Why the parent is carried rather than the two paths
+///
+/// The staged bytes and the destination are both entries of one directory, and that directory is held
+/// open for the whole life of this value — see [`PinnedDirectory`] for the race that makes holding it
+/// necessary. Carrying the pin rather than two assembled paths is what lets the rename be issued
+/// against the same pinned object the creation used, however the directory's *name* resolves by then.
 #[must_use = "a staged publication that is never committed writes nothing and is discarded"]
 pub struct StagedPublication {
-    temporary: PathBuf,
-    destination: PathBuf,
+    parent: PinnedDirectory,
+    temporary: String,
+    destination: String,
     context: String,
+    /// `(device, inode)` of the object the bytes were written into, read through the handle that
+    /// created it. Compared against the destination after the rename, so a publication can state that
+    /// what now stands at the destination is the object this staging produced rather than merely that
+    /// something stands there.
+    staged: Option<(u64, u64)>,
     committed: bool,
 }
 
 impl StagedPublication {
     /// Claim the destination by renaming the staged bytes onto it.
     ///
+    /// Three verifications bracket the rename, and each one fails a different real defect:
+    ///
+    /// 1. Before it, that the parent's name still designates the pinned directory — so a substitution
+    ///    that happened while the *other* half of a pair was being staged is caught before this half
+    ///    is claimed.
+    /// 2. After it, the same check again — so a substitution during the rename itself is caught. Where
+    ///    the platform offers a handle-relative path the bytes are safe regardless, and this decides
+    ///    only whether the run may claim the path it prints leads to them.
+    /// 3. After it, that the object now at the destination is the object that was staged. This is what
+    ///    catches the case the parent check alone cannot: a substitution that was undone again before
+    ///    the check, where the name resolves correctly and the artefact is somewhere else.
+    ///
     /// # Errors
     ///
-    /// Returns an explanatory failure, attributed to the staging context, when the rename fails. The
-    /// previous artifact is left intact rather than replaced by a partial one.
+    /// Returns an explanatory failure, attributed to the staging context, when the rename fails or
+    /// when any of the three verifications does. The previous artifact is left intact rather than
+    /// replaced by a partial one, and a failed rename leaves the temporary to be removed by this
+    /// value's own destructor.
     pub fn commit(mut self) -> HarnessResult<()> {
-        if let Err(error) = fs::rename(&self.temporary, &self.destination) {
+        self.parent.require_unchanged(
+            &self.context,
+            "before the staged bytes were renamed into place",
+        )?;
+        if let Err(error) = fs::rename(
+            self.parent.operand(&self.temporary),
+            self.parent.operand(&self.destination),
+        ) {
             return Err(HarnessError::new(
                 self.context.clone(),
                 format!(
                     "the temporary file {} could not be renamed onto {}: {error}; the previous \
                      artifact, if any, is left intact rather than replaced by a partial one",
-                    self.temporary.display(),
-                    self.destination.display()
+                    self.parent.shown(&self.temporary).display(),
+                    self.parent.shown(&self.destination).display()
                 ),
             ));
         }
+        // The rename has happened, so the temporary no longer exists under its own name and the
+        // destructor must not try to remove it — including on the failure paths below, where the
+        // artefact is published but the publication is refused. Set before the checks for exactly
+        // that reason.
         self.committed = true;
+        self.parent.require_unchanged(
+            &self.context,
+            "after the staged bytes were renamed into place",
+        )?;
+        self.require_destination_is_staged()?;
+        Ok(())
+    }
+
+    /// Require that what now stands at the destination is the object this staging wrote.
+    ///
+    /// # Why identity and not existence
+    ///
+    /// A file at the destination proves only that *something* is there. If the parent directory was
+    /// substituted during the rename and substituted back before the check, the name resolves to the
+    /// real directory, the artefact is in the attacker's, and every existence test passes. Comparing
+    /// the object's identity against the one read through the handle that created it is what turns
+    /// that into a failure. The hard-link count is required to be one for the same reason exclusive
+    /// creation requires it: an artefact with a second link is also a write into another file.
+    fn require_destination_is_staged(&self) -> HarnessResult<()> {
+        let Some(staged) = self.staged else {
+            return Ok(());
+        };
+        let shown = self.parent.shown(&self.destination);
+        let metadata = fs::symlink_metadata(self.parent.operand(&self.destination)).map_err(
+            |error| {
+                HarnessError::new(
+                    self.context.clone(),
+                    format!(
+                        "{} could not be inspected after it was published: {error}; a publication is \
+                         only reported as done once the destination has been confirmed to hold the \
+                         object that was written",
+                        shown.display()
+                    ),
+                )
+            },
+        )?;
+        if object_identity(&metadata) != Some(staged) {
+            return Err(HarnessError::new(
+                self.context.clone(),
+                format!(
+                    "{} exists after publication but is not the object these bytes were written \
+                     into, so the artefact this run produced is somewhere else. The parent directory \
+                     was substituted around the rename and put back, which no check on the parent's \
+                     name at one instant could observe; the publication is refused rather than \
+                     reported as complete",
+                    shown.display()
+                ),
+            ));
+        }
+        if hard_link_count(&metadata).is_some_and(|links| links != 1) {
+            return Err(HarnessError::new(
+                self.context.clone(),
+                format!(
+                    "{} carries more than one hard link after publication, so the artefact is also \
+                     reachable as another file; it is reported rather than accepted",
+                    shown.display()
+                ),
+            ));
+        }
         Ok(())
     }
 }
@@ -2854,7 +3110,9 @@ impl Drop for StagedPublication {
         if !self.committed {
             // Best effort by necessity: a destructor has nowhere to report to, and a leftover
             // temporary is a cosmetic problem where a panic in a destructor would be a fatal one.
-            let _ = fs::remove_file(&self.temporary);
+            // Addressed through the pinned parent like every other operation, so an abandoned
+            // staging cannot delete an entry of a directory that took this one's place.
+            let _ = fs::remove_file(self.parent.operand(&self.temporary));
         }
     }
 }
@@ -2876,34 +3134,27 @@ pub fn stage_bytes_no_follow(
     path: &Path,
     bytes: &[u8],
 ) -> HarnessResult<StagedPublication> {
-    let parent = path.parent().ok_or_else(|| {
-        HarnessError::new(
-            String::from(context),
-            format!(
-                "{} has no parent directory, so it names no file that could be published",
-                path.display()
-            ),
-        )
-    })?;
-    require_publishable_destination(context, path)?;
+    let (parent, name) = publication_parts(context, path)?;
+    // Opened and held before the destination is inspected, so that everything from here on — the
+    // inspection, the exclusive creation, the write and the rename — is addressed against one object
+    // rather than against a name resolved afresh each time. Vetting first and pinning afterwards
+    // would leave the vetted answer describing a directory that no longer takes part.
+    let parent = PinnedDirectory::pin(context, &parent)?;
+    require_publishable_entry(context, &parent.operand(&name), &parent.shown(&name))?;
 
     let generation = run_generation();
     let mut last: Option<std::io::Error> = None;
     for _ in 0..PUBLISH_ATTEMPTS {
         let step = PUBLISH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let stem = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("artifact");
-        let temporary = parent.join(format!(
+        let temporary = format!(
             ".{}.{}.{step:x}.tmp",
-            keep_publishable_name(stem),
+            keep_publishable_name(&name),
             generation.token()
-        ));
+        );
         let handle = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&temporary);
+            .open(parent.operand(&temporary));
         let mut file = match handle {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -2917,30 +3168,49 @@ pub fn stage_bytes_no_follow(
                         "the temporary file {} could not be created exclusively: {error}; every \
                          artifact is published by renaming a freshly created sibling, so that no \
                          write can follow a link planted at the destination",
-                        temporary.display()
+                        parent.shown(&temporary).display()
                     ),
                 ));
             }
         };
         if let Err(error) = file.write_all(bytes).and_then(|()| file.flush()) {
             drop(file);
-            let _ = fs::remove_file(&temporary);
+            let _ = fs::remove_file(parent.operand(&temporary));
             return Err(HarnessError::new(
                 String::from(context),
                 format!(
                     "{} could not be written through the temporary file {}: {error}",
-                    path.display(),
-                    temporary.display()
+                    parent.shown(&name).display(),
+                    parent.shown(&temporary).display()
                 ),
             ));
         }
+        // Read through the handle that wrote the bytes, not through the path: this is the object's
+        // own identity, and it is what the destination is compared against once the rename has
+        // happened. Taken before the handle is dropped for the same reason — afterwards there would
+        // be nothing left to ask but the name.
+        let staged = file
+            .metadata()
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .and_then(|metadata| object_identity(&metadata));
         drop(file);
-        return Ok(StagedPublication {
+        // The first of the three parent verifications: an exclusive creation cannot tell whether it
+        // created its entry inside the pinned directory or inside something substituted for the
+        // parent between the pin and the open, so it is asked here, while the bytes can still be
+        // discarded by this value's destructor rather than renamed onto a path that means nothing.
+        let staged_publication = StagedPublication {
+            parent,
             temporary,
-            destination: PathBuf::from(path),
+            destination: name,
             context: String::from(context),
+            staged,
             committed: false,
-        });
+        };
+        staged_publication
+            .parent
+            .require_unchanged(context, "after the staged bytes were written")?;
+        return Ok(staged_publication);
     }
 
     Err(HarnessError::new(
@@ -2949,13 +3219,48 @@ pub fn stage_bytes_no_follow(
             "no exclusive temporary name for {} could be created in {PUBLISH_ATTEMPTS} attempts{}; \
              publication refuses to reuse an existing file, because reusing one is how a write \
              comes to follow a link somebody else placed",
-            path.display(),
+            parent.shown(&name).display(),
             match last {
                 Some(error) => format!(" (last cause: {error})"),
                 None => String::new(),
             }
         ),
     ))
+}
+
+/// Split a destination into the directory to pin and the entry name to publish inside it.
+///
+/// # Errors
+///
+/// Returns an explanatory failure when the path names no parent, or when its final component is not a
+/// plain name this suite could address inside a directory — a trailing `.`, a trailing `..` or a name
+/// that is not valid text. Each is refused rather than normalized, because normalizing a path is a
+/// second interpretation of it, and the whole point of pinning the parent is to have exactly one.
+fn publication_parts(context: &str, path: &Path) -> HarnessResult<(PathBuf, String)> {
+    let parent = path.parent().ok_or_else(|| {
+        HarnessError::new(
+            String::from(context),
+            format!(
+                "{} has no parent directory, so it names no file that could be published",
+                shown_path(path)
+            ),
+        )
+    })?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} does not end in a plain file name, so it names no entry that could be \
+                     published inside a directory; a path ending in a directory traversal or \
+                     carrying a name that is not valid text is refused rather than reinterpreted",
+                    shown_path(path)
+                ),
+            )
+        })?;
+    Ok((PathBuf::from(parent), String::from(name)))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2968,7 +3273,7 @@ pub fn stage_bytes_no_follow(
 // write lands, and a plain `fs::write` follows a symbolic link at the leaf without complaint.
 //
 // The three functions below are the only way a byte leaves this suite, and they close that hole
-// with two mechanisms and no third-party crate:
+// with three mechanisms and no third-party crate:
 //
 // - **Exclusive creation at the leaf.** `create_new` maps to `O_CREAT | O_EXCL`, and POSIX
 //   requires `open` to fail with `EEXIST` when the final component is a symbolic link, *whatever*
@@ -2979,7 +3284,305 @@ pub fn stage_bytes_no_follow(
 //   the directories on the way to it. [`require_real_directory`] and
 //   [`require_directory_chain_below`] walk from a verified root down to the parent and require
 //   every step to be a real directory rather than a link, so a redirected *parent* is refused too.
+// - **A pinned parent, operated on through its own handle.** The two mechanisms above are both
+//   *path*-based, and a path is re-resolved by the kernel at every syscall. Verifying the parent
+//   chain and then creating a temporary and renaming it are three separate resolutions of the same
+//   name, so a concurrent process of the same user — or a tool this suite spawned — can replace the
+//   parent directory with a symbolic link in between, and both the creation and the rename then land
+//   wherever that link points while every report still names the path that was asked for.
+//   Exclusive creation cannot help: it constrains the final component only, and the final component
+//   is not what was substituted. [`PinnedDirectory`] closes that by holding the parent **open** and
+//   addressing every operation relative to the handle, so the artefact's location stops depending on
+//   name resolution at all — and by re-verifying, after each step, that the path a report will print
+//   still designates the object that was written. Both halves are needed and neither is redundant:
+//   the handle decides *where the bytes go*, and the verification decides *whether the run may claim
+//   they went where it says*.
 // ---------------------------------------------------------------------------------------------
+
+/// A directory held open, so that writing into it does not depend on resolving its name again.
+///
+/// # The window this closes, and why nothing path-based could close it
+///
+/// A publication is at least three operations on one parent directory: vet it, create a temporary
+/// inside it, rename the temporary onto the destination. Expressed as paths, those are three
+/// independent resolutions of the same components, and the kernel resolves each one afresh. Between
+/// any two of them a process running as the same user can `rename` the parent aside and put a
+/// symbolic link in its place; the create and the rename then operate inside the link's target.
+/// This is the classic time-of-check-to-time-of-use race, and it is not fixed by checking harder —
+/// every additional check is one more resolution with one more window after it.
+///
+/// It cannot be fixed by `O_EXCL` either. Exclusive creation is a guarantee about the **final**
+/// component: it refuses a leaf that already exists, including a link. The component substituted
+/// here is the parent, and nothing about the leaf constrains it.
+///
+/// What does fix it is addressing the directory by *object* rather than by name. This type opens the
+/// parent once and keeps the handle for its whole lifetime, which has two consequences that carry the
+/// argument:
+///
+/// - While the handle is open the object cannot be recycled, so the `(device, inode)` pair read
+///   through it — by `fstat`, not by resolving a path — identifies exactly one directory for as long
+///   as this value exists. That is what makes the verification below meaningful rather than
+///   circular.
+/// - On a platform that can express a path relative to an open handle, every create and every rename
+///   is issued against that path, so the operation reaches the pinned object no matter what the
+///   parent's *name* now resolves to. On Linux that path is `/proc/self/fd/<descriptor>`, which the
+///   kernel resolves by jumping to the object the descriptor refers to rather than by re-walking
+///   components — the same effect `openat` and `renameat` would give, reachable from `std` alone, with
+///   no `libc` dependency and no `unsafe` block. It is verified at pin time rather than assumed: the
+///   candidate must stat to the identity already read through the handle, so a system without that
+///   facility is discovered immediately instead of silently addressing the wrong thing.
+///
+/// # What remains, stated plainly
+///
+/// Where no handle-relative path is available, operations fall back to the parent's name and the
+/// race is *detected* rather than prevented: [`PinnedDirectory::require_unchanged`] is called after
+/// the creation, before the rename and after the rename, and a parent whose name no longer
+/// designates the pinned object fails the publication. That is weaker than prevention and is not
+/// presented as equal to it — but it does mean a redirected artefact can no longer be reported as a
+/// published one, which is the property the reports depend on.
+///
+/// The verification is *also* performed on the handle-relative path, where it is not about safety at
+/// all but about honesty: a report tells a reader to open a path, so a run whose parent was replaced
+/// after the bytes were safely written into the pinned object must still fail, because the path it
+/// would print no longer leads to what it wrote.
+pub struct PinnedDirectory {
+    /// The name the caller asked for. Used for diagnostics, for the paths reports print, and — only
+    /// where no handle-relative path exists — for the operations themselves.
+    named: PathBuf,
+    /// The open handle. Holding it is the pin: it keeps the object alive and its identity stable.
+    handle: File,
+    /// `(device, inode)` of the object the handle refers to, read through the handle. `None` on a
+    /// platform that does not express object identity, where the checks degrade to the path-based
+    /// ones this type was introduced to strengthen.
+    identity: Option<(u64, u64)>,
+    /// Whether a path relative to [`PinnedDirectory::handle`] was verified, at pin time, to reach the
+    /// object the handle refers to.
+    ///
+    /// A flag rather than the path itself, deliberately. Such a path names a descriptor, so a stored
+    /// copy would outlive the descriptor it names if the handle were ever dropped first — and a path
+    /// naming a descriptor number that has since been reused is the one thing worse than no path at
+    /// all. [`PinnedDirectory::operand`] therefore derives it from the live handle at each use, which
+    /// makes it impossible for the two to disagree, and this records only that the facility was
+    /// verified to work.
+    handle_relative: bool,
+}
+
+impl PinnedDirectory {
+    /// Open `directory` and pin it, refusing anything that is not already a real directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory failure when `directory` is absent, is a symbolic link, is not a
+    /// directory, cannot be opened, or cannot be inspected through its own handle.
+    pub fn pin(context: &str, directory: &Path) -> HarnessResult<PinnedDirectory> {
+        // Path-based first, so a name that never designated a real directory is refused with the
+        // diagnostic that describes *that* rather than with an open failure. The pin below is what
+        // makes the answer durable; this is what makes it intelligible.
+        require_real_directory(context, directory)?;
+        let handle = File::open(directory).map_err(|error| {
+            HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} could not be opened so that it could be held while artefacts are published \
+                     into it: {error}; every publication addresses its parent through an open handle, \
+                     because a parent addressed by name is re-resolved at every step and can be \
+                     replaced between two of them",
+                    shown_path(directory)
+                ),
+            )
+        })?;
+        let metadata = handle.metadata().map_err(|error| {
+            HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} was opened but could not be inspected through its own handle: {error}; the \
+                     identity read through the handle is what later steps compare against, so a \
+                     publication that cannot establish it does not proceed",
+                    shown_path(directory)
+                ),
+            )
+        })?;
+        if !metadata.is_dir() {
+            return Err(HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} was opened but the object behind the handle is not a directory, so nothing \
+                     can be published inside it",
+                    shown_path(directory)
+                ),
+            ));
+        }
+        let identity = object_identity(&metadata);
+        let handle_relative = handle_relative_base(&handle)
+            .and_then(|base| fs::metadata(base).ok())
+            // Both conditions are required, and for different reasons: the candidate must reach a
+            // directory, and it must reach *this* one. Without an expressible identity there is
+            // nothing to compare against, so the facility is declined rather than trusted.
+            .is_some_and(|resolved| {
+                resolved.is_dir() && identity.is_some() && object_identity(&resolved) == identity
+            });
+        Ok(PinnedDirectory {
+            named: PathBuf::from(directory),
+            handle,
+            identity,
+            handle_relative,
+        })
+    }
+
+    /// The path an operation on `name` inside this directory must use.
+    ///
+    /// Handle-relative where the platform allows it, so the operation reaches the pinned object
+    /// rather than whatever this directory's name currently resolves to. Derived from the live handle
+    /// on each call, so the path can never name a descriptor this value no longer holds.
+    fn operand(&self, name: &str) -> PathBuf {
+        match handle_relative_base(&self.handle).filter(|_| self.handle_relative) {
+            Some(base) => base.join(name),
+            None => self.named.join(name),
+        }
+    }
+
+    /// The path a diagnostic or a report should show for `name` inside this directory.
+    ///
+    /// Always the named form. A message quoting `/proc/self/fd/7/summary.md` would name something no
+    /// reader can open and would obscure the artefact actually being discussed.
+    fn shown(&self, name: &str) -> PathBuf {
+        self.named.join(name)
+    }
+
+    /// Whether operations on this directory are addressed relative to its handle.
+    ///
+    /// Read by the diagnostics, so a failure can say which of the two guarantees was in force rather
+    /// than leaving a reader to infer it from the platform.
+    fn handle_relative(&self) -> bool {
+        self.handle_relative
+    }
+
+    /// Require that this directory's *name* still designates the object that was pinned.
+    ///
+    /// `when` names the moment being checked — after the creation, before the rename, after the
+    /// rename — and appears in the failure, because which step observed the substitution is the first
+    /// thing a reader needs in order to reason about what landed where.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory failure when the name is absent, is no longer a directory, or now
+    /// designates a different object than the pinned one. On a platform that cannot express object
+    /// identity this degrades to requiring a real directory, which is what was checked before this
+    /// type existed.
+    fn require_unchanged(&self, context: &str, when: &str) -> HarnessResult<()> {
+        let Some(pinned) = self.identity else {
+            return require_real_directory(context, &self.named);
+        };
+        let metadata = fs::symlink_metadata(&self.named).map_err(|error| {
+            HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} could not be inspected {when}: {error}; the directory was held open \
+                     throughout, so the artefact itself is accounted for, but the path this run \
+                     would print for it no longer leads anywhere and the publication is refused \
+                     rather than reported as complete",
+                    shown_path(&self.named)
+                ),
+            )
+        })?;
+        let observed = object_identity(&metadata);
+        if !metadata.is_dir() || observed != Some(pinned) {
+            return Err(HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} no longer designates the directory this publication pinned ({when}): it is \
+                     now {}. Something replaced the parent directory while the artefact was being \
+                     published — a concurrent process of this user, or a tool this suite spawned. \
+                     The bytes {}, and the publication is refused either way, because a path a \
+                     report prints must lead to the artefact the report describes",
+                    shown_path(&self.named),
+                    describe_entry(&metadata),
+                    if self.handle_relative() {
+                        "went into the pinned directory rather than into the substitute, because \
+                         every step was addressed through the open handle"
+                    } else {
+                        "may have gone into the substitute: this platform offers no path relative to \
+                         an open directory, so the operations were addressed by name and this check \
+                         detects the substitution rather than preventing it"
+                    }
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for PinnedDirectory {
+    /// Written by hand because [`File`]'s own representation names a descriptor number, which is
+    /// noise in a diagnostic; what a reader needs is the directory and whether it is addressed
+    /// through its handle.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PinnedDirectory")
+            .field("named", &self.named)
+            .field("identity", &self.identity)
+            .field("handle_relative", &self.handle_relative())
+            .finish()
+    }
+}
+
+/// `(device, inode)` of the object this metadata describes, where the platform expresses it.
+///
+/// Read from metadata obtained through an open handle, this is an object identity rather than a
+/// statement about a name: two paths that stat to the same pair name one object, and a name that
+/// stops stating to the pinned pair has been repointed.
+#[cfg(unix)]
+fn object_identity(metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+/// Fallback for a platform with no device-and-inode notion, where the question cannot be asked.
+#[cfg(not(unix))]
+fn object_identity(_metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
+/// A path that resolves through `handle` rather than through the name it was opened by.
+///
+/// On Linux, `/proc/self/fd/<descriptor>` is a magic link the kernel resolves by jumping to the
+/// object the descriptor refers to, so `<that>/<name>` reaches an entry of the pinned directory the
+/// way `openat` would. That is exactly the guarantee a publication needs, and `std` exposes the
+/// descriptor safely — no `libc` dependency and no `unsafe` block.
+///
+/// The candidate is *offered*, never trusted: [`PinnedDirectory::pin`] confirms once that following it
+/// arrives at the object already read through the handle, and only then are operations addressed
+/// through it. A system without `procfs`, or one that mounts it elsewhere, fails that confirmation, and
+/// the caller falls back to name-based operations with the substitution *detected* rather than
+/// prevented — which the failure says in so many words instead of leaving it implicit.
+#[cfg(unix)]
+fn handle_relative_base(handle: &File) -> Option<PathBuf> {
+    use std::os::unix::io::AsRawFd;
+    Some(PathBuf::from(format!(
+        "/proc/self/fd/{}",
+        handle.as_raw_fd()
+    )))
+}
+
+/// Fallback for a platform with no path-to-an-open-handle facility.
+#[cfg(not(unix))]
+fn handle_relative_base(_handle: &File) -> Option<PathBuf> {
+    None
+}
+
+/// What is at a path, in the words a diagnostic uses.
+fn describe_entry(metadata: &fs::Metadata) -> &'static str {
+    let kind = metadata.file_type();
+    if kind.is_symlink() {
+        "a symbolic link"
+    } else if kind.is_dir() {
+        "a different directory"
+    } else if kind.is_file() {
+        "a regular file"
+    } else {
+        "neither a directory nor a regular file"
+    }
+}
 
 /// Require that `path` is an existing directory and **not** a symbolic link to one.
 ///
@@ -3050,7 +3653,7 @@ fn directory_ancestry_defect(path: &Path) -> Option<String> {
         return Some(format!(
             "{} is not an absolute path, so the chain of directories above it cannot be identified, \
              let alone verified",
-            shown_path(path)
+            shown_path_within_package(path)
         ));
     }
     let mut walked = PathBuf::new();
@@ -3063,7 +3666,7 @@ fn directory_ancestry_defect(path: &Path) -> Option<String> {
                 return Some(format!(
                     "{} contains a relative directory component, so the level it names cannot be \
                      verified without resolving it; it is refused instead",
-                    shown_path(path)
+                    shown_path_within_package(path)
                 ));
             }
         }
@@ -3074,16 +3677,16 @@ fn directory_ancestry_defect(path: &Path) -> Option<String> {
                      chain would redirect every artefact written beneath it — and every removal \
                      performed beneath it — while each report still named the path that was asked \
                      for, so it is refused rather than followed",
-                    shown_path(&walked),
-                    shown_path(path)
+                    shown_path_within_package(&walked),
+                    shown_path_within_package(path)
                 ));
             }
             Ok(metadata) if !metadata.is_dir() => {
                 return Some(format!(
                     "{} exists but is not a directory, and it is a level above {}, so nothing can \
                      be published beneath it",
-                    shown_path(&walked),
-                    shown_path(path)
+                    shown_path_within_package(&walked),
+                    shown_path_within_package(path)
                 ));
             }
             Ok(_) => {}
@@ -3094,8 +3697,8 @@ fn directory_ancestry_defect(path: &Path) -> Option<String> {
                 return Some(format!(
                     "{} could not be inspected: {error}; it is a level above {}, and a chain that \
                      cannot be verified is refused rather than assumed sound",
-                    shown_path(&walked),
-                    shown_path(path)
+                    shown_path_within_package(&walked),
+                    shown_path_within_package(path)
                 ));
             }
         }
@@ -3278,20 +3881,26 @@ pub fn create_directory_chain_below(
     Ok(())
 }
 
-/// Require that `path` is either absent or a regular file, without following a final link.
+/// Require that a destination is either absent or a regular file, without following a final link.
 ///
 /// The one condition publication needs: a rename may replace an absent entry or a regular file
 /// safely, while a directory, a device node, a socket, a FIFO or a **symbolic link** at the
 /// destination each mean the suite is about to write somewhere it did not choose.
-pub fn require_publishable_destination(context: &str, path: &Path) -> HarnessResult<()> {
-    match fs::symlink_metadata(path) {
+///
+/// `operand` is the path actually inspected, which for a pinned publication resolves through the
+/// parent's open handle; `shown` is the path a reader can open, which is what every diagnostic names.
+/// Separating the two is what lets the check be performed against the pinned object without any
+/// message quoting a `/proc/self/fd/...` path that would tell a reader nothing about the artefact.
+/// A caller with no pin passes the same path twice.
+fn require_publishable_entry(context: &str, operand: &Path, shown: &Path) -> HarnessResult<()> {
+    match fs::symlink_metadata(operand) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(HarnessError::new(
             String::from(context),
             format!(
                 "{} could not be inspected before publication: {error}; an artifact is only ever \
                  written over an entry the suite has established is a plain file",
-                path.display()
+                shown.display()
             ),
         )),
         Ok(metadata) if metadata.file_type().is_symlink() => Err(HarnessError::new(
@@ -3300,7 +3909,7 @@ pub fn require_publishable_destination(context: &str, path: &Path) -> HarnessRes
                 "{} is a symbolic link; publication refuses to follow one, because the link's \
                  target may lie anywhere on the machine while every report still names the path \
                  that was asked for",
-                path.display()
+                shown.display()
             ),
         )),
         Ok(metadata) if metadata.file_type().is_file() => Ok(()),
@@ -3310,13 +3919,13 @@ pub fn require_publishable_destination(context: &str, path: &Path) -> HarnessRes
                 "{} exists and is not a regular file, so it cannot be replaced by one; a \
                  directory, device node, socket or FIFO at an artifact's path is a condition to \
                  report rather than to write through",
-                path.display()
+                shown.display()
             ),
         )),
     }
 }
 
-/// Create `path` exclusively and return the open handle, refusing anything already there.
+/// Create an entry exclusively and return the open handle, refusing anything already there.
 ///
 /// The single publication primitive of this suite. `create_new` is `O_CREAT | O_EXCL`, which
 /// POSIX requires to fail with `EEXIST` when the final component names a symbolic link — so a
@@ -3330,15 +3939,22 @@ pub fn require_publishable_destination(context: &str, path: &Path) -> HarnessRes
 /// guarded removal and then create it here. Replacing in place is deliberately not offered,
 /// because "truncate whatever is at this name" is exactly the operation a link exploits.
 ///
+/// `operand` is the path opened and `shown` is the path a diagnostic names, which differ exactly when
+/// the caller holds a [`PinnedDirectory`]: the operation is then addressed through the parent's open
+/// handle, while every message still names the artefact a reader can open. Exclusive creation settles
+/// the final component and says nothing about the directories above it, so a caller that cares about
+/// the parent — every caller writing an artefact — supplies a pinned operand and re-verifies the pin
+/// afterwards. A caller with no parent to pin passes the same path twice.
+///
 /// # Errors
 ///
 /// Returns an explanatory failure when the entry already exists, when it cannot be created, or
 /// when the created object is not a fresh regular file.
-pub fn create_new_file(context: &str, path: &Path) -> HarnessResult<File> {
+pub fn create_new_file(context: &str, operand: &Path, shown: &Path) -> HarnessResult<File> {
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
+        .open(operand)
         .map_err(|error| {
             HarnessError::new(
                 String::from(context),
@@ -3348,7 +3964,7 @@ pub fn create_new_file(context: &str, path: &Path) -> HarnessResult<File> {
                      including a symbolic link, whatever it points at — so an entry already at \
                      this path is refused rather than written through. Remove the stale entry, or \
                      investigate what created it",
-                    shown_path(path)
+                    shown_path(shown)
                 ),
             )
         })?;
@@ -3357,7 +3973,7 @@ pub fn create_new_file(context: &str, path: &Path) -> HarnessResult<File> {
             String::from(context),
             format!(
                 "{} was created but could not be inspected through its own handle: {error}",
-                shown_path(path)
+                shown_path(shown)
             ),
         )
     })?;
@@ -3366,7 +3982,7 @@ pub fn create_new_file(context: &str, path: &Path) -> HarnessResult<File> {
             String::from(context),
             format!(
                 "{} was created but is not a regular file, so it is refused rather than written to",
-                shown_path(path)
+                shown_path(shown)
             ),
         ));
     }
@@ -3376,7 +3992,7 @@ pub fn create_new_file(context: &str, path: &Path) -> HarnessResult<File> {
             format!(
                 "{} was created but already carries more than one hard link, so writing to it \
                  would write into another file as well; it is refused rather than used",
-                shown_path(path)
+                shown_path(shown)
             ),
         ));
     }
@@ -3402,24 +4018,38 @@ fn hard_link_count(_metadata: &fs::Metadata) -> Option<u64> {
 /// for byte and must be stored exactly as the program produced it — no line-ending
 /// normalization, and no replacement character for a byte that is not valid text.
 ///
+/// The parent is pinned for the creation and re-verified after the write, on the same reasoning that
+/// governs [`stage_bytes_no_follow`]: exclusive creation constrains the final component, and the
+/// component an attacker substitutes is the parent. This path writes the ownership claim that decides
+/// which run owns a directory, so a redirected write here would misplace the very entry the other
+/// protections consult.
+///
 /// # Errors
 ///
-/// Everything [`create_new_file`] can fail on, plus a failed write.
+/// Everything [`create_new_file`] and [`PinnedDirectory::pin`] can fail on, plus a failed write, plus a
+/// parent that stopped designating the pinned directory while the bytes were being written.
 pub fn write_new_file(context: &str, path: &Path, bytes: &[u8]) -> HarnessResult<()> {
     use std::io::Write;
-    let mut file = create_new_file(context, path)?;
+    let (parent, name) = publication_parts(context, path)?;
+    let parent = PinnedDirectory::pin(context, &parent)?;
+    let shown = parent.shown(&name);
+    let mut file = create_new_file(context, &parent.operand(&name), &shown)?;
     file.write_all(bytes).map_err(|error| {
         HarnessError::new(
             String::from(context),
-            format!("{} could not be written: {error}", shown_path(path)),
+            format!("{} could not be written: {error}", shown_path(&shown)),
         )
     })?;
     file.sync_all().map_err(|error| {
         HarnessError::new(
             String::from(context),
-            format!("{} could not be flushed to disk: {error}", shown_path(path)),
+            format!(
+                "{} could not be flushed to disk: {error}",
+                shown_path(&shown)
+            ),
         )
-    })
+    })?;
+    parent.require_unchanged(context, "after the file was created and written")
 }
 
 /// Remove whatever is at `path`, treating absence as success and never following a link.
@@ -3995,8 +4625,222 @@ impl CaptureIntegrity {
 /// A path that is not valid text is rendered lossily *for the diagnostic only*: every path the
 /// suite actually compiles, executes or publishes is proved to be valid text before it is used,
 /// so a lossy rendering can only ever appear in the message explaining that refusal.
+///
+/// # Why the two roots are rendered symbolically
+///
+/// A path under this checkout is not merely long: it is a **disclosure**. The absolute location of a
+/// package root names the machine that built it — a continuous-integration workspace identifier, an
+/// agent clone directory, a maintainer's home — and this suite writes paths into places that travel
+/// much further than the run that produced them: the console output of a failing area, the verdict
+/// rows of a committed-looking report, and the manifest of a finding directory that is meant to be
+/// attached to a defect report and read by someone else entirely. Every one of those went out with
+/// the full absolute path before this, including the corpus-defect diagnostics a reader is most
+/// likely to paste somewhere.
+///
+/// So the build root and the package root are replaced by [`BUILD_ROOT_TOKEN`] and
+/// [`PACKAGE_ROOT_TOKEN`], longest first so the build root — which sits inside the package by
+/// default — is never rendered as a package-relative path. The result stays exact in the way a
+/// reader needs: `<build>/conformance-work/…` names the same file for anybody who knows where their
+/// own build directory is, and the tokens make it obvious that the prefix was elided rather than
+/// lost.
+///
+/// **Reproduction exactness is untouched, deliberately.** Nothing that has to be executed goes
+/// through this function: `commands.sh` renders its argument vectors through [`posix_quote`] on the
+/// raw arguments, the shell variables a finding declares carry raw tool paths, and the compile and
+/// run lines a workspace records are argument vectors rather than rendered paths. This function is
+/// the *reporting* renderer, and only the reporting renderer.
+///
+/// A path outside both roots — `/usr/bin/gcc-13`, an emulator, a kernel image name — is left as it
+/// is. Those are the identity of the toolchain a divergence must be attributed against, a
+/// maintainer comparing two machines needs to see exactly which driver ran, and a system location
+/// under `/usr` discloses nothing about who ran it.
 pub fn shown_path(path: &Path) -> String {
-    sanitize_text_for_report(&path.to_string_lossy())
+    sanitize_text_for_report(&symbolize_roots(&path.to_string_lossy()))
+}
+
+/// A path rendered safely **without** consulting the build directory.
+///
+/// The one renderer the build-directory validation itself may use, and it exists to break a cycle
+/// rather than to offer a choice. [`shown_path`] elides the build root, which it has to *derive* —
+/// and deriving it is exactly what [`validated_target_dir`] is in the middle of doing when it needs
+/// to name a value it is refusing. A refusal that rendered its own path through [`shown_path`] would
+/// re-enter that derivation from inside it and never return.
+///
+/// So this renders the package root symbolically — [`manifest_dir`] is fixed at compile time and
+/// depends on nothing — and leaves everything else literal. Two consequences, both wanted: a refused
+/// value is still stated in the words the operator wrote it in, which is what makes the diagnostic
+/// actionable, and the checkout's own location is still elided wherever it appears inside that value.
+fn shown_path_within_package(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+    let package = manifest_dir();
+    let symbolized = match package.to_str() {
+        Some(root) if !root.is_empty() && rendered.contains(root) => {
+            rendered.replace(root, PACKAGE_ROOT_TOKEN)
+        }
+        _ => rendered.into_owned(),
+    };
+    sanitize_text_for_report(&symbolized)
+}
+
+/// Stands in for the package root wherever a path is rendered for a human.
+pub const PACKAGE_ROOT_TOKEN: &str = "<package>";
+
+/// Stands in for the build directory wherever a path is rendered for a human.
+pub const BUILD_ROOT_TOKEN: &str = "<build>";
+
+/// Replace the build root and the package root in `text` with their symbolic tokens.
+///
+/// Applied to free text as well as to paths, because a path reaches a report inside a sentence at
+/// least as often as it reaches one on its own: a compiler diagnostic naming the source it refused,
+/// a captured argument vector inside an outcome's detail, a workspace named in an explanation. The
+/// substitution is textual for exactly that reason — there is no path to reduce in "error: cannot
+/// open /…/program.c" — and it is why [`Outcome::new`] applies it to the whole of a detail rather
+/// than to the paths it happens to know about.
+///
+/// Order matters: the build root is substituted first, because the default build root lies inside
+/// the package root and substituting the shorter prefix first would leave `<package>/target/…`,
+/// which discloses nothing but reads as though the build directory were part of the committed tree.
+///
+/// The roots are computed once per process. [`manifest_dir`] is fixed at compile time and
+/// [`build_root`] is derived from one environment variable that is read and validated on every call,
+/// so memoizing costs nothing in fidelity and saves two path derivations on a function that runs for
+/// every field of every row.
+fn symbolize_roots(text: &str) -> String {
+    static ROOTS: OnceLock<Vec<(String, &'static str)>> = OnceLock::new();
+    let roots = ROOTS.get_or_init(|| {
+        let mut roots: Vec<(String, &'static str)> = Vec::with_capacity(2);
+        // The build root first: it is the longer of the two whenever it sits inside the package.
+        for (root, token) in [
+            (build_root(), BUILD_ROOT_TOKEN),
+            (manifest_dir(), PACKAGE_ROOT_TOKEN),
+        ] {
+            if let Some(rendered) = root.to_str() {
+                if !rendered.is_empty() {
+                    roots.push((String::from(rendered), token));
+                }
+            }
+        }
+        roots.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+        roots
+    });
+    let mut rendered = String::from(text);
+    for (root, token) in roots {
+        if rendered.contains(root.as_str()) {
+            rendered = rendered.replace(root.as_str(), token);
+        }
+    }
+    rendered
+}
+
+/// The inverse of the root substitution [`shown_path`] applies, for a path that has to be USED.
+///
+/// # Why an inverse is needed at all
+///
+/// [`shown_path`] exists to stop a report disclosing where it was produced, and it is applied to
+/// every path a report row carries. That is right for a row a person reads — and it is also why a
+/// row cannot simply be read back and acted on. The per-area machine-readable report is not only
+/// output: the run summary is aggregated by parsing those files back, and one of the fields it
+/// parses back is the directory a finding's artifacts were written to. A check that took the
+/// rendered field at face value would ask the file system about `<build>/conformance-findings/…`,
+/// which is not a path on any machine, and would then report *every* finding in the run as having
+/// no artifacts on disk while the artifacts sat beside it — turning the first genuine finding into
+/// a failure of the suite instead of a delivered observation about the compiler.
+///
+/// So the token is expanded again here, and the two halves stay honest about their different jobs:
+/// what is *written* discloses nothing, and what is *used* is a real path.
+///
+/// Only a leading token is expanded, because that is the only position the substitution can have
+/// produced for a path: [`symbolize_roots`] replaces a prefix of the rendered path, and a token
+/// appearing anywhere else came from the path's own bytes rather than from the substitution. A
+/// rendering with no token is returned unchanged, which covers a path outside both roots — a
+/// compiler driver, an emulator — exactly as it was recorded.
+pub fn resolve_shown_path(rendered: &str) -> PathBuf {
+    for (token, root) in [
+        (BUILD_ROOT_TOKEN, build_root()),
+        (PACKAGE_ROOT_TOKEN, manifest_dir()),
+    ] {
+        if let Some(remainder) = rendered.strip_prefix(token) {
+            let trimmed = remainder.trim_start_matches('/');
+            return if trimmed.is_empty() {
+                root
+            } else {
+                root.join(trimmed)
+            };
+        }
+    }
+    PathBuf::from(rendered)
+}
+
+/// Free text made safe to publish: credentials redacted, checkout locations elided, line-safe.
+///
+/// The text counterpart of [`shown_path`], and the same three transformations [`Outcome::new`]
+/// applies, in the same order and for the same reasons — [`redact_secrets`] first so an escape cannot
+/// hide a credential from it, then the root substitution, then the line-safety escaping.
+///
+/// Needed because a *description* carries paths that no path renderer will ever see: a one-line
+/// summary of a compilation ends with the argument vector that was spawned, and that vector names the
+/// workspace, the program and the compiler by absolute path. Those lines go to the console as progress
+/// and into report rows, so they disclosed the checkout's location even while every path rendered
+/// beside them was elided.
+///
+/// Reproduction is unaffected, for the same reason as [`shown_path`]: what a maintainer re-runs is
+/// rendered from argument vectors through [`posix_quote`], not from a description.
+pub fn public_text(text: &str) -> String {
+    sanitize_text_for_report(&symbolize_roots(&redact_secrets(text)))
+}
+
+/// Everything about `text` that would disclose a location or a credential if it were published.
+///
+/// The scan a **curation** step must pass before a generated finding is copied into the committed
+/// set, and the check `findings.rs` applies to a curated directory it validates. Generated artifacts
+/// under the build directory legitimately hold absolute paths — they are what a maintainer re-runs on
+/// the machine that produced them — but a curated artifact is committed, read by people who never
+/// saw that machine, and outlives it, so the absolute location of the checkout that produced it is
+/// disclosure rather than evidence.
+///
+/// Two classes are reported, and neither is guessed at:
+///
+/// - **A location.** The package root or the build root appearing literally. Both are known exactly,
+///   so this cannot false-positive on prose; and the remedy is mechanical, because
+///   [`PACKAGE_ROOT_TOKEN`] and [`BUILD_ROOT_TOKEN`] are what the reporting renderer already
+///   substitutes, and `commands.sh` already parameterizes every tool path as a shell variable.
+/// - **A credential.** Any value [`redact_secrets`] recognises, which is every value of every
+///   environment variable whose name marks it as a secret. Reported rather than silently replaced,
+///   because a curated artifact that had a credential in it needs a human to decide what to do about
+///   the credential, not just about the file.
+///
+/// An empty result means the text is safe to commit. The findings are already report-safe.
+pub fn disclosure_defects(text: &str) -> Vec<String> {
+    let mut defects: Vec<String> = Vec::new();
+    for (root, token) in [
+        (build_root(), BUILD_ROOT_TOKEN),
+        (manifest_dir(), PACKAGE_ROOT_TOKEN),
+    ] {
+        let Some(rendered) = root.to_str() else {
+            continue;
+        };
+        if !rendered.is_empty() && text.contains(rendered) {
+            // The offending root is named by its *token* rather than by its absolute spelling: this
+            // diagnostic is itself report text, so quoting the path here would reintroduce exactly
+            // the disclosure being reported. The token identifies which of the two roots leaked,
+            // and it is also the substitution the remedy asks for, so one word carries both.
+            defects.push(format!(
+                "it spells this machine's {token} root out as an absolute path; a committed \
+                 artifact is read on machines that never had that directory, so render the root as \
+                 {token} the way every report line already does, or parameterize it as a shell \
+                 variable the way {} already does",
+                "commands.sh"
+            ));
+        }
+    }
+    if redact_secrets(text) != text {
+        defects.push(String::from(
+            "it contains the value of an environment variable this run treats as a secret; a \
+             credential must not be committed, and replacing it is not sufficient on its own — the \
+             credential itself has been exposed to whatever produced this text and needs rotating",
+        ));
+    }
+    defects
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4190,11 +5034,22 @@ pub fn isolate_child_environment(command: &mut Command, private_directory: &Path
 
 /// The variables pointed at the cell's own workspace, so a child writes its scratch state there.
 ///
-/// A tool that writes a cache, a history file or a temporary file puts it inside the cell's workspace
-/// rather than into the invoking user's home directory or a shared temporary directory. That is what
-/// makes the hermeticity claim true of the *children* as well as of the harness. All four names are
-/// set because the three temporary-directory spellings are consulted by different tools and a tool
-/// that reads only the one this suite left unset would fall back to the shared directory.
+/// A tool that consults these variables before writing a cache, a history file or a temporary file
+/// puts it inside the cell's workspace rather than into the invoking user's home directory or a
+/// shared temporary directory. All four names are set because the three temporary-directory spellings
+/// are consulted by different tools and a tool that reads only the one this suite left unset would
+/// fall back to the shared directory.
+///
+/// What this is, precisely: **redirection of cooperating tools, not confinement.** A variable can
+/// only be honoured by a program that reads it, so nothing here prevents a child from writing to an
+/// absolute path of its own choosing — no filesystem namespace, no sandbox and no privilege drop is
+/// involved, and none is available from the standard library. The hermeticity the suite actually
+/// guarantees rests on what it *asks* of a child rather than on what it could stop one doing: every
+/// command is spawned with the cell's workspace as its working directory, every output path the
+/// suite hands a tool lies beneath the build directory, and the corpus authoring rules forbid a
+/// program from opening a socket or naming a path at all — every input is a literal in its source.
+/// These four variables close the remaining ordinary gap, which is a well-behaved tool defaulting to
+/// a shared location, and that is the whole of their contribution.
 ///
 /// Public because a finding's reproduction script has to set the same four, pointed at the reader's
 /// own scratch directory. Two lists would be two things to keep in step; this is one.
@@ -4259,11 +5114,22 @@ pub const REDACTED_PLACEHOLDER: &str = "[redacted]";
 /// artifact the suite writes, replacing the whole of a report's evidence in order to hide one
 /// character that is not secret in the first place.
 ///
-/// Eight is chosen because nothing shorter is a credential worth protecting by substring match, and
-/// because the two other defences still cover such a value completely: the `NAME=value` rule below
+/// Eight is chosen because a substring rule below that length destroys more evidence than it
+/// protects, and because the two other defences carry the ordinary cases: the `NAME=value` rule below
 /// is applied at **every** length, which is the shape an environment listing actually renders, and
-/// [`isolate_child_environment`] stops the value reaching a spawned tool at all, so there is no path
-/// by which a child can echo it back.
+/// [`isolate_child_environment`] stops the value reaching a spawned tool at all, so a child this
+/// suite launched cannot echo one back.
+///
+/// **What is therefore not redacted, stated plainly.** A credential-bearing value shorter than this,
+/// appearing *bare* — without its variable name beside it — is left in the text. The realistic route
+/// to that is narrow: it needs a tool the suite spawned before isolation applied, or one that read the
+/// value from a file rather than the environment, to print a short secret with no name attached. It is
+/// narrow but not impossible, so it is a residual risk rather than an absence, and the mitigation is
+/// human: a maintainer curating a finding directory for publication inspects its artifacts, which is
+/// exactly what the curation procedure in `tests/conformance/FINDINGS.md` asks for. Lowering this
+/// bound is not the fix — a session identifier of `1` would then rewrite the digit in every count,
+/// every digest and every triple in every artifact, destroying the report's evidence to hide one
+/// character that is not secret.
 const BARE_REDACTION_MIN_CHARS: usize = 8;
 
 /// Every credential-bearing variable of this process, read once and ordered for repeatability.
@@ -4312,12 +5178,18 @@ pub fn secret_bearing_variable(name: &str) -> bool {
 /// spawned before isolation applied — or a tool that read a credential from a file — echoes one
 /// back in its own output.
 ///
-/// Two shapes are recognised, which between them cover how a value is actually rendered: the
-/// `NAME=value` form an environment listing uses, and the bare occurrence of a value the suite
-/// can still see in its own environment. The second is what catches a banner that prints a token
-/// without naming it, and it is the one bounded by [`BARE_REDACTION_MIN_CHARS`] — for the reason
-/// recorded there, which is that a substring rule shorter than that destroys evidence instead of
-/// protecting it.
+/// Two shapes are recognised: the `NAME=value` form an environment listing uses, and the bare
+/// occurrence of a value the suite can still see in its own environment. The second is what catches a
+/// banner that prints a token without naming it, and it is the one bounded by
+/// [`BARE_REDACTION_MIN_CHARS`] — for the reason recorded there, which is that a substring rule
+/// shorter than that destroys evidence instead of protecting it.
+///
+/// The scope of the guarantee is exactly that, and no wider. This recognises **values this process
+/// can read in its own environment under a credential-bearing name**: it cannot recognise a secret
+/// the suite never saw, a literal embedded in a tool's own configuration, or a bare value shorter
+/// than the floor above. So this is the last of several bounded defences rather than a proof that no
+/// artifact can carry a credential, and a maintainer publishing a finding directory still inspects
+/// it — the residual cases are enumerated at [`BARE_REDACTION_MIN_CHARS`].
 ///
 /// Cheap enough to sit on the hot path. The environment is read once by [`secret_variables`] and an
 /// environment holding no credential-bearing variable — the ordinary case, and the case in this

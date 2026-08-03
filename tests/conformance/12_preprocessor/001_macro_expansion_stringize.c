@@ -22,8 +22,16 @@
    <stdio.h> - a grep for "stdio" across the repository documentation returns zero
    matches - so an include of it would succeed under the reference compiler and fail
    under bcc, manufacturing a divergence caused by the test rather than by the compiler.
-   Keeping the program to a single file is also what makes it reproducible in isolation
-   from its source plus its sibling .expected record, with no harness involved.
+   Keeping the program to a single file is what a reproducible-in-isolation program needs
+   from its source half. The other half is the sibling record
+   001_macro_expansion_stringize.expected, committed beside it, which supplies all four
+   targets, all three optimization levels, all three oracles and a 13-line golden stdout
+   measured on this branch and byte-identical across all twelve cells. Reproducing this
+   program by hand needs only a C compiler and this one file; reproducing a harness cell of
+   it needs the record's three command templates and nothing else. What no cell has resolved
+   yet is a VERDICT, and the record is not what is missing: there is no compiler under test
+   on this branch, so the flag-capability probe is recorded UNPERFORMED and blocks every
+   area unconditionally.
 
    Determinism. Output is a fixed 13-line sequence of key=value pairs, exactly one line
    per preprocessing property claimed, so a single divergent line localises the defect to
