@@ -39,8 +39,9 @@ Free of undefined and unspecified behaviour by construction:
 - No pointer arithmetic and NO POINTER-TO-INTEGER CONVERSION of any kind. The null
   pointer is only ever compared, never printed or converted.
 - No aliasing violation. The only object written after its declaration is the static
-  struct AlignedBlock, whose two unsigned char stores are separate statements and are
-  read back in a later statement, never in the expression that wrote them.
+  alignas-qualified array aligned_buf, whose two unsigned char stores are separate
+  statements and are read back in a later statement, never in the expression that wrote
+  them.
 - No read of uninitialized storage. The static object has static storage duration and is
   therefore zero-initialized before either store; both bytes that are printed are stored
   first.
@@ -71,9 +72,15 @@ alignas specifier is applied to a struct MEMBER, so the requirement it imposes b
 property of a TYPE, and alignof reports that property directly: C11 6.7.5p2 makes 8 the
 member's alignment requirement, a structure's requirement is at least that of each of
 its members, and C11 6.2.8p1 makes every alignment a power of two, so
-alignof(struct AlignedBlock) >= 8 holds BY THE LANGUAGE rather than by any target ABI.
-The relation rather than an exact value is printed because an implementation is free to
-over-align. An earlier form of this check converted the object's address to uintptr_t
+alignof(struct AlignedHolder) >= 8 holds BY THE LANGUAGE rather than by any target ABI.
+EVERY ONE OF THE THREE ALIGNMENT FACTS IS PRINTED AS A RELATION RATHER THAN AS AN EXACT
+VALUE, and that is what the language actually guarantees: an implementation may align more
+strictly than requested, and 6.7.2.1p15 lets it insert additional padding between members,
+so alignof >= 8, offsetof nonzero and divisible by 8, and sizeof divisible by 8 are
+guaranteed while alignof == 8 and offsetof == 8 are not. The relations still fail exactly
+when the request is ignored -- the member would then sit at offset 1, which is neither
+divisible by 8 nor consistent with a structure alignment of 8 -- so nothing is given up by
+declining to pin the padding this implementation happened to choose. An earlier form of this check converted the object's address to uintptr_t
 and asserted its residue modulo 8 was zero, justified by uintptr_t being pointer-width
 on every target so that the conversion crossed no width boundary. Equal width does not
 carry that conclusion: C11 7.20.1.4p1 and 6.3.2.3p6 guarantee only that a pointer

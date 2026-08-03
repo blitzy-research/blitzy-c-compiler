@@ -154,14 +154,21 @@
 //! The second half of that discipline lives in `classify.rs`: a refusal happens once per cell,
 //! before any oracle is asked, and it removes the authority every one of them needs. It nevertheless
 //! reaches the classifier once per oracle arm, and each arm is matched against a marker's scope
-//! **strictly, on all four dimensions — class, oracle, target and optimization level**. So a marker
-//! excuses the arms its scope names and no others: the corpus's one active marker is scoped
-//! `oracle_a`, which means a refusal it documents is an expected divergence on oracle (a) while the
-//! same refusal seen by oracles (b) and (c) is reported as a **finding**, each delivered with the
-//! refusal's own artifacts. A marker meant to cover every arm a refusal blocks scopes `all oracles`,
-//! which is one word in the record and the register; this module never widens a scope on a marker's
-//! behalf, and every outcome detail names both the oracle the marker covers and the oracle being
-//! judged, so the two can never be confused for one another.
+//! **strictly, on all four dimensions — class, oracle, target and optimization level**. A marker is
+//! therefore never widened on its own behalf, and every outcome detail names both the oracle the
+//! marker covers and the oracle being judged, so the two can never be confused.
+//!
+//! What follows from a refusal being **one root event** is handled by dependency-aware
+//! classification rather than by widening anything. The corpus carries two active markers —
+//! `XD-GCCEXT-CASE-RANGES-001`, a `compile_failure` scoped `oracle_a`, and
+//! `XD-TYPE-LONGDOUBLE-001`, a `stdout_mismatch` scoped `oracle_b` — and the first is the refusal
+//! case. `classify::refusal_root` names the arm whose marker documents the refusal; that arm settles
+//! it as an expected divergence, and every other arm of the same cell is reported as a **dependent
+//! blocked** expected divergence which cites the root marker, names the arm carrying it, and states
+//! that no comparison was attempted on it. No finding directory is written for the blocked arms,
+//! because one event has one explanation — but the propagation requires a marker that already covers
+//! this cell's target, level and observed class on some arm, so an *undocumented* refusal is still a
+//! finding on every applicable arm, delivered with the refusal's own artifacts.
 //!
 //! Only the standard library is used, every operation is safe, no lint is suppressed, and not one
 //! of the eighteen tests is marked ignored — the repository's ignored-test count is itself the most
@@ -172,6 +179,7 @@ mod conformance_harness;
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -548,7 +556,16 @@ fn infra_expected_divergence_register() {
     // it is committed. `findings::curated_finding_defects` is the mandatory scan the curation
     // procedure in that register names, and running it here is what makes it mandatory rather than
     // advisory.
-    let curated = curated_finding_directories();
+    // Fails closed: an unreadable or partially readable curated set is reported as a defect rather
+    // than read as an empty one, so this audit can never announce that it validated a set it could not
+    // enumerate. An absent directory is the one tolerated answer and yields an empty set honestly.
+    let curated = match curated_finding_directories() {
+        Ok(curated) => curated,
+        Err(defects) => {
+            violations.extend(defects);
+            Vec::new()
+        }
+    };
     for directory in &curated {
         for defect in findings::curated_finding_defects(directory) {
             violations.push(format!(
@@ -557,12 +574,32 @@ fn infra_expected_divergence_register() {
             ));
         }
     }
+    // And the register's own table, read and held against those directories in both directions. A
+    // validated directory nothing indexes is a deliverable nobody can find; an indexed row with no
+    // directory is a pointer into nothing. Until this existed, `FINDINGS.md` was never parsed at all —
+    // the curated *directories* were checked and the file that indexes them was taken on trust, which
+    // is precisely the asymmetry the marker register's bidirectional check exists to avoid.
+    let register_rows = match findings_register_rows() {
+        Ok(rows) => rows,
+        Err(defect) => {
+            violations.push(defect);
+            Vec::new()
+        }
+    };
+    violations.extend(findings_register_violations(&register_rows, &curated));
     println!(
-        "curated findings — {} directory(ies) under {}, each validated for completeness, identity, \
-         post-reduction consistency and disclosure",
+        "curated findings — {} directory(ies) under {}, {} row(s) in it, each validated for \
+         completeness, identity, post-reduction consistency, disclosure and register agreement",
         curated.len(),
         classify::FINDINGS_REGISTER,
+        register_rows.len(),
     );
+    for row in &register_rows {
+        println!(
+            "  {} [{}] status {} — {}",
+            row.id, row.class, row.status, row.directory
+        );
+    }
 
     println!(
         "expected-divergence register — {} marker(s) in the corpus, {} identifier(s) in {}",
@@ -1118,7 +1155,11 @@ impl<'a> CellPlan<'a> {
         let mut outcomes = Vec::with_capacity(self.oracles.len());
         outcomes.push(self.oracle_a(&subject, &reference));
         if self.oracles.contains(&Oracle::CrossBackend) {
-            outcomes.push(self.oracle_b(&subject, baseline.as_ref()));
+            // The reference arm travels into oracle (b) as well, not to be compared there but to be
+            // CARRIED: a cross-backend divergence over a property the ABIs fix is a different
+            // observation from one the compiler under test got wrong, and the same-target reference
+            // capture is what tells the two apart. See `CellPlan::corroborant`.
+            outcomes.push(self.oracle_b(&subject, baseline.as_ref(), &reference));
         }
         outcomes.push(self.oracle_c(&subject));
 
@@ -1215,6 +1256,12 @@ impl<'a> CellPlan<'a> {
                 *class,
                 *attribution,
                 summary,
+                // No dependency root: this refusal is the REFERENCE compiler's, and a marker in
+                // this record documents a limitation of the compiler under test. Borrowing it here
+                // would excuse a defect in the test material with documentation about something
+                // else entirely. Both attributions reaching this arm are unavailable scopes in any
+                // case, which never reach the marker logic at all.
+                None,
             ),
             ReferenceArm::Refused {
                 summary,
@@ -1248,7 +1295,12 @@ impl<'a> CellPlan<'a> {
     }
 
     /// Oracle (b): this target against the x86-64 baseline at the same optimization level.
-    fn oracle_b(&self, subject: &Authority, baseline: Option<&Baseline>) -> Outcome {
+    fn oracle_b(
+        &self,
+        subject: &Authority,
+        baseline: Option<&Baseline>,
+        reference: &ReferenceArm,
+    ) -> Outcome {
         let oracle = Oracle::CrossBackend;
         if !self.record.oracle_enabled(oracle) {
             return self.excluded(oracle);
@@ -1259,7 +1311,7 @@ impl<'a> CellPlan<'a> {
         match baseline {
             Some(Baseline::Observed(authority)) => {
                 let comparison = compare::oracle_b(&subject.run, &authority.run, self.key);
-                self.settle(
+                self.settle_corroborated(
                     &comparison,
                     Side::ran(CaptureRole::UnderTest, self.key.target(), subject),
                     Some(Side::ran(
@@ -1267,6 +1319,7 @@ impl<'a> CellPlan<'a> {
                         Target::BASELINE,
                         authority,
                     )),
+                    self.corroborant(reference),
                 )
             }
             // The baseline was refused by the same compiler under test, so this arm is judged as
@@ -1350,8 +1403,61 @@ impl<'a> CellPlan<'a> {
         subject: Side<'_>,
         counterpart: Option<Side<'_>>,
     ) -> Outcome {
+        self.settle_corroborated(comparison, subject, counterpart, None)
+    }
+
+    /// Classify one comparison, delivering a third capture that corroborates its attribution.
+    ///
+    /// The corroborant is never compared. It is carried so that a finding can state whether the
+    /// divergence is a candidate defect in the compiler under test or an observation about two
+    /// application binary interfaces — a distinction `findings::Finding::cross_arm_attribution`
+    /// computes from the captures rather than leaving to a reader's judgement. See
+    /// [`CellPlan::corroborant`] for which capture that is and why only oracle (b) needs one.
+    fn settle_corroborated(
+        &self,
+        comparison: &Comparison,
+        subject: Side<'_>,
+        counterpart: Option<Side<'_>>,
+        corroborant: Option<Side<'_>>,
+    ) -> Outcome {
         let outcome = classify::classify(comparison, self.record, self.key, comparison.oracle);
-        self.deliver(outcome, comparison, subject, counterpart)
+        self.deliver(outcome, comparison, subject, counterpart, corroborant)
+    }
+
+    /// The same-target reference capture, when the reference arm ran, for an oracle (b) finding.
+    ///
+    /// # Why a cross-backend finding carries a third capture
+    ///
+    /// A cross-backend divergence is a difference between two of this compiler's own backends, and on
+    /// its own it does not say whose fault it is. Two readings are possible and they lead a maintainer
+    /// to different code:
+    ///
+    /// - the compiler under test got this target wrong, which is a candidate defect; or
+    /// - the property under comparison is one each target's application binary interface fixes for
+    ///   itself, in which case the two backends differing is a fact about two ABIs.
+    ///
+    /// The same-target reference compiler settles it: if the compiler under test agrees with the
+    /// toolchain that implements this target's ABI, and only the cross-target comparison differs, the
+    /// observation is about the ABIs. That is the AAP's own carve-out — a cross-backend divergence
+    /// attributable to a documented implementation-defined difference, ABI included, is not a compiler
+    /// defect — and it is also step 1 of the triage procedure the findings register documents.
+    ///
+    /// So the capture that settles it travels with the finding. The verdict is unaffected: it remains a
+    /// `FINDING`, because requirement 6 makes an undocumented divergence a deliverable and nothing here
+    /// excuses one. What changes is that the artifact states the attribution and carries the evidence
+    /// for it, instead of asking a reader to reproduce a comparison the run had already made.
+    ///
+    /// `None` when the reference arm did not run — no driver, an exclusion, a refusal, a lost arm — in
+    /// which case the attribution is recorded as undetermined rather than guessed.
+    fn corroborant<'r>(&self, reference: &'r ReferenceArm) -> Option<Side<'r>> {
+        match reference {
+            ReferenceArm::Ran(authority) => Some(Side::ran(
+                CaptureRole::ReferenceCompiler,
+                self.key.target(),
+                authority,
+            )),
+            _ => None,
+        }
     }
 
     /// Classify a build that produced no artifact, for one oracle, and deliver the result.
@@ -1364,6 +1470,25 @@ impl<'a> CellPlan<'a> {
     /// — see [`CellPlan::deliver`]. Both roads end in the same place, and that is the point: a
     /// refusal no marker covers is a finding, and a finding is an artifact directory, so a refusal
     /// is never classified and then dropped.
+    ///
+    /// # Why the dependency root is derived here, and only here
+    ///
+    /// A refusal produces no artifact, so one root event denies every oracle arm of the cell the
+    /// subject of its comparison at once. `classify::refusal_root` names the arm whose marker
+    /// documents that event, and `classify::build_failure` then settles that arm on the marker
+    /// directly while every other arm becomes a *dependent blocked* expected divergence citing it —
+    /// one event, one explanation, no finding directory per arm.
+    ///
+    /// Deriving it here rather than at each of the six call sites is deliberate, and it is safe for
+    /// one reason: both [`RefusedSide`] variants are refusals by **the compiler under test** — this
+    /// cell's own build, or the cross-backend baseline cell's — which is exactly what a marker in
+    /// this record is written about. The reference arm's own refusal never reaches this function; it
+    /// goes to `classify::build_failure` with no root, because a marker documenting a limitation of
+    /// the compiler under test must not excuse a defect in the test material.
+    ///
+    /// The root is `None` unless a marker already covers this cell's target, optimization level and
+    /// the observed class on some arm, so an undocumented refusal still becomes a finding on every
+    /// applicable arm.
     fn settle_refusal(
         &self,
         oracle: Oracle,
@@ -1381,10 +1506,15 @@ impl<'a> CellPlan<'a> {
             class,
             build_attribution(build),
             &summary,
+            classify::refusal_root(self.record, self.key, class),
         );
         let comparison =
             compare::build_refusal(oracle, self.key, class, side, &summary, reference_arm);
-        self.deliver(outcome, &comparison, subject, counterpart)
+        // No corroborant: a refusal produced no artifact, so there is no cross-backend VALUE to
+        // attribute to an ABI in the first place — the attribution question this carries evidence for
+        // does not arise. The reference arm still travels with the refusal, as a capture when it ran
+        // and as one phrase naming how it ended when it did not.
+        self.deliver(outcome, &comparison, subject, counterpart, None)
     }
 
     /// The single path from a verdict to the artifacts that verdict obliges the run to produce.
@@ -1411,11 +1541,12 @@ impl<'a> CellPlan<'a> {
         comparison: &Comparison,
         subject: Side<'_>,
         counterpart: Option<Side<'_>>,
+        corroborant: Option<Side<'_>>,
     ) -> Outcome {
         if outcome.verdict() != Verdict::Finding {
             return outcome;
         }
-        match self.assemble_finding(comparison, subject, counterpart) {
+        match self.assemble_finding(comparison, subject, counterpart, corroborant) {
             Ok(finding) => findings::record(&finding, self.caps),
             Err(error) => classify::internal_error(self.key, outcome.oracle(), &error),
         }
@@ -1432,12 +1563,19 @@ impl<'a> CellPlan<'a> {
         comparison: &Comparison,
         subject: Side<'_>,
         counterpart: Option<Side<'_>>,
+        corroborant: Option<Side<'_>>,
     ) -> Result<Finding, HarnessError> {
         let opt = self.key.opt();
         let mut finding = Finding::new(self.key.clone(), comparison, self.record)?
             .with_capture(subject.capture(opt)?);
         if let Some(counterpart) = counterpart {
             finding = finding.with_capture(counterpart.capture(opt)?);
+        }
+        // Carried, never compared — see [`CellPlan::corroborant`]. It cannot be mistaken for the
+        // authority of this comparison, because `Finding::authority` selects by the observing oracle's
+        // own role and this capture belongs to another oracle's.
+        if let Some(corroborant) = corroborant {
+            finding = finding.with_capture(corroborant.capture(opt)?);
         }
         if comparison.oracle == Oracle::GoldenRecord {
             finding = finding.with_capture(Capture::golden(
@@ -1606,6 +1744,12 @@ impl<'a> CellPlan<'a> {
                 *class,
                 *attribution,
                 summary,
+                // No dependency root: this refusal is the REFERENCE compiler's, and a marker in
+                // this record documents a limitation of the compiler under test. Borrowing it here
+                // would excuse a defect in the test material with documentation about something
+                // else entirely. Both attributions reaching this arm are unavailable scopes in any
+                // case, which never reach the marker logic at all.
+                None,
             ),
             ReferenceArm::Refused {
                 summary,
@@ -2069,6 +2213,30 @@ fn run_area(area: &str) {
     let gates = preflight(&caps);
 
     let programs = select_programs(spec, &caps);
+
+    // The gate BLOCKS here, before the first cell of this area is compiled.
+    //
+    // Requirement 1 makes undefined-behaviour freedom the precondition that gives an oracle its
+    // meaning: a program containing undefined behaviour permits both compilers to do anything, so a
+    // comparison over it is not evidence either way. An earlier form of this function ran the whole
+    // matrix and asserted afterwards, which was wrong in a way that mattered rather than merely
+    // untidy — a divergence over a program whose gate had failed was classified, and **filed as a
+    // FINDING with a full artifact directory**. A finding is a deliverable that says "the compiler
+    // did this"; producing one from a program not shown to be undefined-behaviour-free delivers a
+    // claim the suite has no standing to make.
+    //
+    // So nothing is compiled, nothing is classified and nothing is published as evidence. What is
+    // published is the area's report carrying the failing gate, the withholding stated in its own
+    // words, and an empty tally that can never be read as agreement — after which the area fails.
+    // The report-before-assert discipline the rest of this file keeps is preserved exactly: the
+    // report is written first, so the correction can be checked against what the gate said.
+    let blocking = gates.recorded.blocking_area(spec.directory());
+    if !blocking.is_empty() {
+        let withheld = withheld_notes(spec, &programs, &blocking);
+        publish(spec, &[], &caps, &withheld);
+        panic!("{}", preflight_gap(spec.directory(), &blocking));
+    }
+
     let mut outcomes: Vec<Outcome> = Vec::new();
     for program in &programs {
         outcomes.extend(run_program(&caps, program));
@@ -2076,8 +2244,38 @@ fn run_area(area: &str) {
 
     let digest = area_digest(spec, &programs, &outcomes, caps.config());
     println!("{digest}");
-    publish(spec, &outcomes, &caps);
+    publish(spec, &outcomes, &caps, &[]);
     conclude(spec, &programs, &outcomes, &digest, caps.config(), gates);
+}
+
+/// What the report of a withheld area must say, in the caller's own words.
+///
+/// Three facts a reader needs before anything else in that report: that the area was withheld rather
+/// than merely empty, which gate withheld it, and how many programs did not run. The program count is
+/// stated because an empty tally beside a corpus of ten programs is a different thing from an empty
+/// tally beside a corpus of none, and only the caller knows which this is — the report module is handed
+/// no outcomes and could not tell them apart.
+fn withheld_notes(
+    spec: &'static AreaSpec,
+    programs: &[PathBuf],
+    blocking: &[&report::PreflightGate],
+) -> Vec<String> {
+    let mut notes = vec![format!(
+        concat!(
+            "⚠️ NO CELL OF THIS AREA WAS RUN. {} preflight gate(s) governing `{}` did not",
+            " hold, so its {} program(s) were withheld before the first compile: requirement 1",
+            " makes undefined-behaviour freedom the precondition an oracle rests on, and a",
+            " comparison made without it is evidence of nothing. Nothing here was compiled,",
+            " classified or filed as a finding.",
+        ),
+        blocking.len(),
+        spec.directory(),
+        programs.len(),
+    )];
+    for gate in blocking {
+        notes.push(format!("⚠️ withholding gate — {}", gate.describe()));
+    }
+    notes
 }
 
 /// Resolve the oracles once, or refuse to start.
@@ -2482,11 +2680,15 @@ fn preflight_gap(area: &str, blocking: &[&report::PreflightGate]) -> String {
          both compilers to do anything — so while a gate is unmet this area's PASSes are not \
          evidence of agreement and its divergences are not evidence of a defect. That is why the \
          area fails here rather than reporting a matrix nobody can read.\n\n\
-         This area's report was still written, and every outcome in it is still enumerated, so the \
-         correction can be checked against what was observed. Fix the TEST PROGRAM the audit names \
-         — never the compiler — or install the tool the probe names, and run again. The full gate \
-         reports, with every command line and the compiler's own words, are printed by \
-         `cargo test --test conformance infra_ -- --nocapture`.",
+         NO CELL OF THIS AREA WAS RUN. The gate is checked before the first compile, so nothing was \
+         built, nothing was classified, and no finding was filed — a finding produced from a program \
+         not shown to be free of undefined behaviour would assert something about the compiler that \
+         this suite has no standing to assert. The area's report was still written and states the \
+         withholding, the gate and the number of programs held back, so the correction can be \
+         checked against what the gate said.\n\n\
+         Fix the TEST PROGRAM the audit names — never the compiler — or install the tool the probe \
+         names, and run again. The full gate reports, with every command line and the compiler's own \
+         words, are printed by `cargo test --test conformance infra_ -- --nocapture`.",
     );
     text
 }
@@ -2580,7 +2782,16 @@ fn select_programs(spec: &'static AreaSpec, caps: &Capabilities) -> Vec<PathBuf>
     let discovered = match manifest::discover_area(spec.directory()) {
         Ok(discovered) => discovered,
         Err(error) => {
-            publish(spec, &[], caps);
+            publish(
+                spec,
+                &[],
+                caps,
+                &[String::from(concat!(
+                    "⚠️ NO CELL OF THIS AREA WAS RUN: its corpus could not be enumerated, so",
+                    " there was no program to compile. The gap itself is stated in full by the",
+                    " failure this report accompanies.",
+                ))],
+            );
             panic!("{}", corpus_gap(spec, Some(&error)));
         }
     };
@@ -2602,7 +2813,19 @@ fn select_programs(spec: &'static AreaSpec, caps: &Capabilities) -> Vec<PathBuf>
     // deliberately excludes this one, which is partial coverage rather than a failure.
     if filter.area() == spec.directory() {
         if let Err(error) = filter.require_match(selected.len()) {
-            publish(spec, &[], caps);
+            publish(
+                spec,
+                &[],
+                caps,
+                &[format!(
+                    concat!(
+                        "⚠️ NO CELL OF THIS AREA WAS RUN: the {} filter names this area but",
+                        " selected no program in it, so the run this report describes was never",
+                        " the run that was asked for.",
+                    ),
+                    discovery::VAR_ONLY
+                )],
+            );
             panic!("{error}");
         }
     }
@@ -2813,8 +3036,8 @@ fn corpus_identity(source: &Path) -> (String, String) {
 /// still produces a summary — labelled partial, naming what it covered and what it did not. The
 /// summary is a named deliverable, so a run that swept a subset must still say what it swept rather
 /// than publish nothing at all.
-fn publish(spec: &'static AreaSpec, outcomes: &[Outcome], caps: &Capabilities) {
-    if let Err(error) = report::write_area(spec.directory(), outcomes, caps) {
+fn publish(spec: &'static AreaSpec, outcomes: &[Outcome], caps: &Capabilities, notes: &[String]) {
+    if let Err(error) = report::write_area(spec.directory(), outcomes, caps, notes) {
         panic!(
             "the report for the feature area {:?} could not be written.\n\n{error}\n\nThe per-area \
              report and the run summary are this suite's deliverable — the areas covered, every \
@@ -3016,12 +3239,14 @@ fn conclude(
         return;
     }
 
-    // The preconditions settle the area before its outcomes are consulted, because they decide what
-    // those outcomes are worth. An area whose gate did not hold is not a narrower run: it is a run
-    // whose comparisons cannot be read as evidence about a compiler, so reporting its outcome tally
-    // as the verdict would publish a green matrix nobody can rely on. Deliberately placed after
-    // `publish`, keeping this file's report-before-assert discipline: the area's report and every
-    // outcome in it survive, so the correction can be checked against what was observed.
+    // A backstop, and stated as one. `run_area` withholds a gated area before its first compile and
+    // fails there, so in an unmodified run this can never fire — the outcomes below exist precisely
+    // because no gate governing this area blocked. It is kept, and kept cheap, because the property it
+    // guards is the one requirement 1 rests on: if a future edit were to reorder `run_area` and let a
+    // gated area reach its cells, the consequence would be a FINDING artifact filed from a program not
+    // shown to be undefined-behaviour-free, and that is a claim the suite has no standing to make.
+    // One comparison here is what makes the guarantee structural rather than a property of the order
+    // two statements happen to be written in.
     //
     // An area excluded by the program filter returns above without reaching this, and rightly: it
     // produced no comparison, so it has nothing to distrust. A gate that fails there still fails the
@@ -3280,7 +3505,16 @@ fn matrix_statement(config: &RunConfig) -> String {
     text
 }
 
-/// The six fields a register entry must state, in the order the audit reports them.
+/// The token a register entry writes for an optional marker key the record does not carry.
+///
+/// An entry states all eight fields whether or not the marker carries all eight keys, because a table
+/// with a row missing is indistinguishable from a table an author forgot to finish. Two of the keys
+/// are optional (§2.1 of the register), so their rows need a way to say "the record does not carry
+/// this" that a reader and the audit both recognise — this token is it. An empty cell is accepted
+/// too, for an author who prefers one.
+const REGISTER_ENTRY_UNWRITTEN: &str = "(not written)";
+
+/// The eight fields a register entry must state, in the order the audit reports them.
 ///
 /// Held in one place so that the parser, the comparison and the diagnostics cannot disagree about
 /// what an entry consists of. `Program` is included because an entry that named the wrong program
@@ -3558,6 +3792,13 @@ fn register_entry_mismatches(
             continue;
         };
         let agrees = match field {
+            // The two optional keys may be absent from the record. An entry still states their rows,
+            // and states them as unwritten — either literally empty or with the register's own token
+            // — so a reader can tell "the record does not carry this" apart from "somebody stopped
+            // filling in the table".
+            _ if recorded.trim().is_empty() => {
+                stated.trim().is_empty() || stated.trim() == REGISTER_ENTRY_UNWRITTEN
+            }
             "Documented" | "Evidence" | "Observed" => {
                 collapse_whitespace(stated) == collapse_whitespace(recorded)
             }
@@ -3582,15 +3823,17 @@ fn register_entry_mismatches(
 ///
 /// Four properties are asserted, and each closes a distinct way a basis can be hollow:
 ///
-/// The fourth is the one that makes the other three mean anything, and it was added because they do
-/// not. A contained, readable document plus a locator that resolves establishes only that a file
-/// exists and that a line number is within it — nothing at all about whether the section named says
-/// what the marker claims it says. A marker could therefore cite any committed document, any real
-/// line, and any prose it liked, and the audit would certify it. The marker must now also QUOTE the
-/// sentence that documents the limitation, and that quotation is resolved against the cited
-/// document's own bytes: an omission cannot be quoted, so a basis resting on what the repository
-/// fails to say can no longer pass, and a basis resting on what it does say is checkable by anyone
-/// with the file in front of them.
+/// The three together establish that a citation can be FOLLOWED: the document exists inside this
+/// repository, it is readable, and the section the marker names can be located inside it. They do not
+/// establish that the section supports the claim — that is a reviewer's judgement, and the frozen
+/// marker contract deliberately leaves it to one, because one of the two mandated markers rests on an
+/// inventory's silence, which no automated check can weigh. What the audit guarantees is that the
+/// reviewer has somewhere concrete to look.
+///
+/// The optional `expected_divergence.documented` key exists for an author who can do better than a
+/// citation. When it is written, the quotation must occur INSIDE the region the locator resolved to —
+/// not merely somewhere in the same file, which is a check a marker could satisfy while citing one
+/// section and quoting another. See [`documented_quotation_violation`].
 ///
 /// - **Containment.** The cited path is resolved and required to lie beneath the package root, so a
 ///   marker cannot reclassify a divergence on the authority of something outside this repository.
@@ -3638,15 +3881,33 @@ fn basis_violations(marker: &manifest::ExpectedDivergence) -> Vec<String> {
     };
     let document = String::from_utf8_lossy(&bytes);
     match resolve_locators(marker.basis_citation(), &document) {
-        Ok(resolved) => {
-            if let Some(violation) = documented_quotation_violation(marker, &document, &absolute) {
+        Ok(resolution) => {
+            if let Some(violation) =
+                documented_quotation_violation(marker, &document, &absolute, &resolution)
+            {
                 return vec![violation];
             }
             println!(
-                "  basis of {} resolved in {}: {}, and its documenting sentence occurs verbatim",
+                "  basis of {} resolved in {}: {}{}",
                 marker.id(),
                 shown_path(&absolute),
-                comma_list(&resolved),
+                comma_list(&resolution.descriptions),
+                match marker.documented().trim().is_empty() {
+                    // Stated rather than left to inference: the optional key was not written, so
+                    // nothing about a documenting sentence has been established, and a line claiming
+                    // one occurs would be the audit reporting a check it never made.
+                    true => String::from(
+                        concat!(
+                            " — no documenting quotation was supplied, so the audit establishes",
+                            " that the citation resolves and nothing about what the cited section",
+                            " says",
+                        ),
+                    ),
+                    false => format!(
+                        " — and its documenting sentence occurs verbatim {}",
+                        resolution.span_label()
+                    ),
+                }
             );
             Vec::new()
         }
@@ -3662,45 +3923,83 @@ fn basis_violations(marker: &manifest::ExpectedDivergence) -> Vec<String> {
     }
 }
 
-/// Why a marker's documenting quotation is not a quotation of the document it cites, or `None`.
+/// Why a marker's documenting quotation is not a quotation of the CITED SECTION, or `None`.
+///
+/// Absent when the optional `expected_divergence.documented` key is not written: the frozen marker
+/// contract does not require it, so its absence is not a violation. What is a violation is writing
+/// one that cannot be found where the marker says to look.
+///
+/// # Why the search is bounded to the cited range rather than to the whole document
+///
+/// This check previously searched the entire file, and that made it possible to satisfy while
+/// defeating its own purpose: a marker could cite one section, quote a sentence from a completely
+/// unrelated part of the same document, and pass — so the audit certified that the words were the
+/// document's own while establishing nothing about the section a reader was sent to. Since the basis
+/// must carry a locator anyway, and the locator resolves to concrete positions, the quotation is now
+/// required to occur INSIDE the union of those positions. The two halves of a citation then have to
+/// agree with each other, which is the whole point of asking for both.
+///
+/// A citation may resolve to several positions — a line, a range, a section, a quoted phrase — and any
+/// one of them satisfying the search is enough: an author who cites two sections is not required to
+/// have the sentence in both.
 ///
 /// The quotation is compared with runs of whitespace collapsed, and that is the only latitude given:
 /// a Markdown document wraps its lines wherever its own formatting demands, so requiring the
 /// quotation to match the file's line breaks would be requiring the author to reproduce an accident.
 /// Everything else must match — every word, in order — because the whole value of the check is that a
-/// reader can find the sentence and judge whether it says what the marker claims.
-///
-/// A quotation spanning several lines in the record is normalised the same way, so an author may wrap
-/// it for legibility.
+/// reader can find the sentence and judge whether it says what the marker claims. A quotation
+/// spanning several lines in the record is normalised the same way, so an author may wrap it for
+/// legibility.
 fn documented_quotation_violation(
     marker: &manifest::ExpectedDivergence,
     document: &str,
     absolute: &Path,
+    resolution: &LocatorResolution,
 ) -> Option<String> {
-    let quotation = collapse_whitespace(marker.documented());
-    if collapse_whitespace(document).contains(&quotation) {
+    if marker.documented().trim().is_empty() {
         return None;
     }
+    let quotation = collapse_whitespace(marker.documented());
+    let lines: Vec<&str> = document.lines().collect();
+    if resolution
+        .spans
+        .iter()
+        .any(|span| collapse_whitespace(&span.text(&lines)).contains(&quotation))
+    {
+        return None;
+    }
+    let occurs_elsewhere = collapse_whitespace(document).contains(&quotation);
     Some(format!(
         "marker {} quotes {} as the sentence documenting the limitation, but that text does not \
-         occur in {}. A path, a readable file and a locator that resolves establish only that a \
-         document exists and that a line is inside it — they establish nothing about whether the \
-         section says what the marker claims. The quotation is what closes that gap, so it has to be \
-         the document's own words: copy the sentence that states the limitation, exactly, allowing \
-         only a change of line wrapping. If no sentence in the repository states it, the divergence \
-         is not documented, and requirement 6 makes it a FINDING — a deliverable with a reproducer \
-         and exact commands — rather than something to be excused here",
+         occur inside the section its basis cites — {} in {}{}. A path, a readable file and a \
+         locator that resolves establish only that a document exists and that a line is inside it; \
+         they establish nothing about whether the section says what the marker claims, and a \
+         quotation taken from somewhere else in the same document establishes nothing about it \
+         either. Copy the sentence that states the limitation FROM THE SECTION YOU CITED, exactly, \
+         allowing only a change of line wrapping — or widen the citation to the section the sentence \
+         is really in. If no sentence in the repository states it, leave the key out: the contract \
+         does not require it, and a divergence nothing documents is a FINDING — a deliverable with a \
+         reproducer and exact commands — rather than something to be excused here",
         marker.id(),
         quoted_for_diagnostic(marker.documented()),
+        comma_list(&resolution.descriptions),
         shown_path(absolute),
+        match occurs_elsewhere {
+            true => ". The text does occur elsewhere in that document, which is why the search is \
+                     bounded: quoting an unrelated section would otherwise pass"
+                .to_string(),
+            false => String::new(),
+        }
     ))
 }
 
 /// Resolve every locator a citation contains against the cited document.
 ///
-/// `Ok` carries a description of each locator that resolved, for the audit's own output — a maintainer
-/// reading a passing run sees which sections were actually checked, not merely that something was.
-/// `Err` carries the first reason the citation cannot be followed.
+/// `Ok` carries a [`LocatorResolution`]: a description of each locator that resolved, for the audit's
+/// own output — a maintainer reading a passing run sees which sections were actually checked, not
+/// merely that something was — and the concrete document region each one names, which is what bounds
+/// the documenting-quotation check to the section the marker cited. `Err` carries the first reason the
+/// citation cannot be followed.
 ///
 /// Three locator forms are recognised, and they are the three a citation in this repository naturally
 /// uses, because §7 of the register already writes bases this way:
@@ -3713,21 +4012,26 @@ fn documented_quotation_violation(
 /// **Every** locator present must resolve, and **at least one** must be present. Requiring all of
 /// them is what stops a correct locator from carrying an incorrect one alongside it; requiring one is
 /// what stops a citation from being unfalsifiable prose.
-fn resolve_locators(citation: &str, document: &str) -> Result<Vec<String>, String> {
+fn resolve_locators(citation: &str, document: &str) -> Result<LocatorResolution, String> {
     let lines: Vec<&str> = document.lines().collect();
-    let mut resolved: Vec<String> = Vec::new();
+    let mut resolution = LocatorResolution::default();
 
     for phrase in backtick_phrases(citation) {
-        if !document.contains(&phrase) {
+        // Located as well as found: the line the phrase occurs on becomes the span, so a quotation
+        // bound to this locator has to sit in the same neighbourhood as the phrase that named it.
+        let Some(index) = lines.iter().position(|line| line.contains(phrase.as_str())) else {
             return Err(format!(
                 "the quoted phrase `{phrase}` does not occur in that document"
             ));
-        }
-        resolved.push(format!("phrase `{phrase}`"));
+        };
+        resolution.push(
+            format!("phrase `{phrase}`"),
+            DocumentSpan::around(index + 1, lines.len()),
+        );
     }
 
     for section in section_locators(citation) {
-        let found = lines.iter().any(|line| {
+        let heading = lines.iter().position(|line| {
             let trimmed = line.trim_start();
             trimmed.starts_with('#') && trimmed.trim_start_matches('#').trim_start() == section
                 || trimmed.starts_with('#')
@@ -3736,12 +4040,23 @@ fn resolve_locators(citation: &str, document: &str) -> Result<Vec<String>, Strin
                         .trim_start()
                         .starts_with(&format!("{section} "))
         });
-        if !found {
+        let Some(heading) = heading else {
             return Err(format!(
                 "that document carries no heading for section {section}"
             ));
-        }
-        resolved.push(format!("section {section}"));
+        };
+        // A section's span runs from its heading to the line before the next heading of any level,
+        // so quoting inside it means quoting inside the section a reader would actually read.
+        let end = (heading + 1..lines.len())
+            .find(|index| lines[*index].trim_start().starts_with('#'))
+            .unwrap_or(lines.len());
+        resolution.push(
+            format!("section {section}"),
+            DocumentSpan {
+                first: heading + 1,
+                last: end.max(heading + 1),
+            },
+        );
     }
 
     for (first, last) in line_locators(citation) {
@@ -3757,17 +4072,93 @@ fn resolve_locators(citation: &str, document: &str) -> Result<Vec<String>, Strin
                 lines.len()
             ));
         }
-        match first == last {
-            true => resolved.push(format!("line {first}")),
-            false => resolved.push(format!("lines {first}-{last}")),
-        }
+        let description = match first == last {
+            true => format!("line {first}"),
+            false => format!("lines {first}-{last}"),
+        };
+        // A single-line citation is widened by one line either side, and only that far: a Markdown
+        // table row or a bullet frequently wraps, so a sentence cited by its opening line may finish
+        // on the next one, while a window any wider would start absorbing neighbouring claims.
+        let span = match first == last {
+            true => DocumentSpan::around(first, lines.len()),
+            false => DocumentSpan { first, last },
+        };
+        resolution.push(description, span);
     }
 
-    match resolved.is_empty() {
+    match resolution.descriptions.is_empty() {
         true => Err(String::from(
             "that citation carries no locator the audit can resolve inside the document",
         )),
-        false => Ok(resolved),
+        false => Ok(resolution),
+    }
+}
+
+/// A citation resolved against the document it cites: what was found, and where.
+///
+/// The `where` half is what lets the documenting quotation be checked against the SECTION the marker
+/// cites rather than against the whole file. Both vectors are parallel and are pushed together, so a
+/// description and the span it describes cannot drift apart.
+#[derive(Debug, Default)]
+struct LocatorResolution {
+    /// Each locator as the audit reports it, for the passing run's own output.
+    descriptions: Vec<String>,
+    /// The document region each locator resolved to, one-based and inclusive.
+    spans: Vec<DocumentSpan>,
+}
+
+impl LocatorResolution {
+    /// Record one resolved locator and the region it names.
+    fn push(&mut self, description: String, span: DocumentSpan) {
+        self.descriptions.push(description);
+        self.spans.push(span);
+    }
+
+    /// The resolved regions as one phrase, for a diagnostic or a progress line.
+    fn span_label(&self) -> String {
+        let spans: Vec<String> = self
+            .spans
+            .iter()
+            .map(|span| match span.first == span.last {
+                true => format!("at line {}", span.first),
+                false => format!("within lines {}-{}", span.first, span.last),
+            })
+            .collect();
+        match spans.is_empty() {
+            true => String::from("in the cited document"),
+            false => spans.join(" or "),
+        }
+    }
+}
+
+/// A one-based, inclusive region of a document.
+#[derive(Debug, Clone, Copy)]
+struct DocumentSpan {
+    first: usize,
+    last: usize,
+}
+
+impl DocumentSpan {
+    /// The region a single-line citation resolves to: that line and one line either side of it.
+    fn around(line: usize, total: usize) -> DocumentSpan {
+        DocumentSpan {
+            first: line.saturating_sub(1).max(1),
+            last: line.saturating_add(1).min(total.max(1)),
+        }
+    }
+
+    /// The text of this region, joined by newlines.
+    ///
+    /// Out-of-range bounds yield the empty string rather than panicking: every span here is built
+    /// from a position already validated against the document, and a check that could abort the run
+    /// on an arithmetic edge would be a worse failure than the one it is looking for.
+    fn text(&self, lines: &[&str]) -> String {
+        let first = self.first.saturating_sub(1);
+        let last = self.last.min(lines.len());
+        match first < last {
+            true => lines[first..last].join("\n"),
+            false => String::new(),
+        }
     }
 }
 
@@ -3903,31 +4294,382 @@ fn comma_list(items: &[impl AsRef<str>]) -> String {
 /// Every curated finding directory committed under the corpus, in a deterministic order.
 ///
 /// An empty result is the ordinary and honest state of a branch that has recorded no finding: the
-/// directory holds only its own placeholder, and the register says so. Anything that is not a
-/// directory is skipped rather than reported, because the placeholder that keeps an empty directory
-/// in version control is a regular file and is not a finding.
+/// directory holds only its own placeholder, and the register says so. A regular file is skipped
+/// rather than reported, because the placeholder that keeps an empty directory in version control is
+/// a regular file and is not a finding.
 ///
-/// A directory that cannot be listed at all is skipped too, and deliberately: the curated set is
-/// optional by construction, so an absent or unreadable directory must not fail a run that has
-/// nothing to do with findings. What must not be skipped is a directory that *is* there and is
-/// defective, which is exactly what [`findings::curated_finding_defects`] reports on.
-fn curated_finding_directories() -> Vec<PathBuf> {
+/// # Why this fails closed, and what the one tolerated absence is
+///
+/// The curated set is an audit input, and an audit that reads "nothing to check" from an error has not
+/// established that there is nothing to check — it has established nothing at all. An earlier form of
+/// this function turned **every** listing failure into an empty set and discarded every per-entry
+/// error, which meant a permission change, a partially unreadable directory, or a `findings/` replaced
+/// by a symbolic link all read as "no findings committed" and the whole curated audit silently passed
+/// over the set it was meant to validate.
+///
+/// So exactly one condition is tolerated, and it is the one that carries information: [`NotFound`] —
+/// the directory is not there, which is the true and complete answer for a branch that has never
+/// curated a finding. Every other listing error, every per-entry error, and any entry that is a
+/// symbolic link or resolves outside the root is returned as a defect for the caller to report.
+///
+/// A symbolic link is refused rather than skipped, and the distinction matters: skipping one would
+/// leave a curated finding *reachable by a reader following the register* while invisible to the
+/// validator, which is the one asymmetry this audit exists to prevent.
+///
+/// [`NotFound`]: io::ErrorKind::NotFound
+fn curated_finding_directories() -> Result<Vec<PathBuf>, Vec<String>> {
     let root = corpus_root().join(conformance_harness::CURATED_FINDINGS_DIR_NAME);
-    let Ok(entries) = fs::read_dir(&root) else {
-        return Vec::new();
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        // The only tolerated answer: there is no curated set, which is a fact rather than a failure to
+        // learn one.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(vec![format!(
+                "the curated finding set at {} could not be listed, so this run has established \
+                 nothing about the committed findings — not that there are none: {error}. An audit \
+                 that read this as an empty set would report every curated finding as validated \
+                 while having read none of them",
+                shown_path(&root)
+            )])
+        }
     };
-    let mut directories: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_type()
-                .map(|kind| kind.is_dir() && !kind.is_symlink())
-                .unwrap_or(false)
-        })
-        .map(|entry| entry.path())
-        .collect();
+
+    let mut directories: Vec<PathBuf> = Vec::new();
+    let mut defects: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                defects.push(format!(
+                    "an entry of the curated finding set at {} could not be read, so the set was \
+                     only partially enumerated and a curated finding may have gone unaudited: \
+                     {error}",
+                    shown_path(&root)
+                ));
+                continue;
+            }
+        };
+        let path = entry.path();
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) => {
+                defects.push(format!(
+                    "the type of {} in the curated finding set could not be determined, so whether \
+                     it is a finding to audit is unknown: {error}",
+                    shown_path(&path)
+                ));
+                continue;
+            }
+        };
+        if kind.is_symlink() {
+            defects.push(format!(
+                "{} in the curated finding set is a symbolic link. A reader following the register \
+                 would arrive at whatever it points at while this audit refuses to follow it, so the \
+                 evidence a maintainer sees and the evidence that was validated would be two \
+                 different things — commit the directory itself",
+                shown_path(&path)
+            ));
+            continue;
+        }
+        if !kind.is_dir() {
+            // A regular file is the placeholder that keeps the directory in version control. Not a
+            // finding, and not a defect.
+            continue;
+        }
+        // Belt and braces against a name that escapes the root — `..` cannot come out of `read_dir`,
+        // but the containment is the property every later read depends on, so it is established here
+        // where the path is first admitted rather than assumed at each use.
+        if !path.starts_with(&root) {
+            defects.push(format!(
+                "{} was enumerated from the curated finding set but does not lie beneath it, so \
+                 auditing it would read a directory the register does not index",
+                shown_path(&path)
+            ));
+            continue;
+        }
+        directories.push(path);
+    }
+
+    if !defects.is_empty() {
+        return Err(defects);
+    }
     directories.sort();
-    directories
+    Ok(directories)
+}
+
+/// One row of the curated findings register.
+///
+/// The narrow, factual fields the register's own table declares. The explanation lives in each
+/// directory's `MANIFEST.txt` and is deliberately not duplicated here, so this type holds only what an
+/// audit can check against the filesystem.
+struct FindingsRegisterRow {
+    /// The `F-NNNN-<slug>` identifier.
+    id: String,
+    /// The divergence class the row states.
+    class: String,
+    /// The artifact directory the row points at, as written.
+    directory: String,
+    /// The row's status, from the register's closed vocabulary.
+    status: String,
+    /// The identifier this row defers to, when its status is `superseded`.
+    superseded_by: Option<String>,
+    /// The line the row was read from, for a diagnostic that can be located.
+    line: usize,
+}
+
+/// The closed status vocabulary the register declares.
+const FINDINGS_STATUS_VALUES: &[&str] = &["open", "acknowledged", "superseded"];
+
+/// The register's spelling of an empty cell.
+const FINDINGS_EMPTY_CELL: &str = "—";
+
+/// Read the curated findings register's table.
+///
+/// # Why the whole file is parsed rather than searched
+///
+/// The register is prose with one table in it, and the table is what the audit is about. Rows are
+/// recognised structurally — a pipe-delimited line inside the section that declares the table's
+/// header, with the header and separator skipped — rather than by pattern-matching an identifier
+/// anywhere in the file, because an identifier quoted in a paragraph is a mention and not a row. The
+/// distinction matters: a maintainer who describes a finding in §7.4's changelog has not indexed it,
+/// and an audit that could not tell those apart would report the changelog as the index.
+///
+/// # Errors
+///
+/// Returns a defect describing the file when it cannot be read or when a row cannot be parsed into the
+/// fields the register declares. A register the audit cannot read is a register nobody can rely on, so
+/// it is reported rather than treated as empty.
+fn findings_register_rows() -> Result<Vec<FindingsRegisterRow>, String> {
+    let path = manifest_dir().join(classify::FINDINGS_REGISTER);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            return Err(format!(
+            "{} could not be read, so the curated findings it indexes cannot be held against the \
+                 directories on disk: {error}",
+            classify::FINDINGS_REGISTER
+        ))
+        }
+    };
+    let mut rows: Vec<FindingsRegisterRow> = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+            continue;
+        }
+        let cells: Vec<String> = trimmed
+            .trim_start_matches('|')
+            .trim_end_matches('|')
+            .split('|')
+            .map(|cell| cell.trim().trim_matches('`').trim().to_string())
+            .collect();
+        // The register's table has ten columns. Any other pipe-delimited line in the file belongs to
+        // one of its explanatory tables, and is not a row of the index.
+        if cells.len() != 10 {
+            continue;
+        }
+        let identifier = cells[0].clone();
+        if !identifier.starts_with("F-") {
+            continue;
+        }
+        rows.push(FindingsRegisterRow {
+            id: identifier,
+            class: cells[3].clone(),
+            directory: cells[7].clone(),
+            status: cells[8].clone(),
+            superseded_by: (cells[9] != FINDINGS_EMPTY_CELL && !cells[9].is_empty())
+                .then(|| cells[9].clone()),
+            line: index + 1,
+        });
+    }
+    Ok(rows)
+}
+
+/// Hold the curated findings register against the directories on disk, in both directions.
+///
+/// Every check here closes a way the register and the evidence can disagree while each looks intact on
+/// its own:
+///
+/// - **Identity, both ways.** Every row names a directory beneath `findings/` that exists, and every
+///   directory beneath `findings/` has exactly one row. A directory nothing indexes is a deliverable a
+///   reader cannot find; a row pointing at nothing is a broken pointer wearing the appearance of an
+///   index entry.
+/// - **The path is the identifier.** A row's `Artifact directory` must be exactly
+///   `findings/<its own identifier>/`, which is what makes the index followable by reading rather than
+///   by searching. A row whose path names another finding's evidence is the one shape of error that
+///   sends a reader confidently to the wrong place.
+/// - **The manifest agrees.** The directory's own `MANIFEST.txt` must declare that identifier on its
+///   `curated_id` line and the same divergence class the row states, so the index cannot describe one
+///   finding while the evidence describes another.
+/// - **Status is from the closed vocabulary**, and `superseded` — and only `superseded` — carries a
+///   successor. That successor must be a row in this same table, and must not itself defer back to the
+///   row that named it, because a cycle identifies no live finding at all.
+/// - **Identifiers are unique.** Two rows sharing one identifier make every other check ambiguous.
+fn findings_register_violations(rows: &[FindingsRegisterRow], curated: &[PathBuf]) -> Vec<String> {
+    let mut violations: Vec<String> = Vec::new();
+    let register = classify::FINDINGS_REGISTER;
+    let directory_name = |path: &PathBuf| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default()
+    };
+
+    for row in rows {
+        if rows.iter().filter(|other| other.id == row.id).count() > 1 {
+            violations.push(format!(
+                "{register} line {} lists {} more than once; one identifier names one investigation, \
+                 so a duplicate row makes every check about it ambiguous",
+                row.line, row.id
+            ));
+        }
+        let expected_path = format!(
+            "{}/{}/",
+            conformance_harness::CURATED_FINDINGS_DIR_NAME,
+            row.id
+        );
+        if row.directory != expected_path {
+            violations.push(format!(
+                "{register} line {} indexes {} but points at `{}` rather than `{expected_path}`; the \
+                 path is what makes the row followable by reading, and a row pointing at another \
+                 finding's evidence sends a reader confidently to the wrong place",
+                row.line, row.id, row.directory
+            ));
+        }
+        if !FINDINGS_STATUS_VALUES.contains(&row.status.as_str()) {
+            violations.push(format!(
+                "{register} line {} gives {} the status `{}`, which is not one of the closed set {}; \
+                 anything else is a comment and belongs in the finding's own manifest",
+                row.line,
+                row.id,
+                row.status,
+                comma_list(
+                    &FINDINGS_STATUS_VALUES
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<String>>()
+                )
+            ));
+        }
+        match (&row.superseded_by, row.status.as_str()) {
+            (Some(successor), "superseded") => {
+                match rows.iter().find(|other| &other.id == successor) {
+                    None => violations.push(format!(
+                        "{register} line {} says {} is superseded by {successor}, which is not a row \
+                         in this table; a successor the register never identifies sends a reader \
+                         looking for a finding that is not indexed",
+                        row.line, row.id
+                    )),
+                    Some(other)
+                        if other.status == "superseded"
+                            && other.superseded_by.as_deref() == Some(row.id.as_str()) =>
+                    {
+                        violations.push(format!(
+                            "{register} lines {} and {} defer to each other: {} is superseded by {} \
+                             and {} by {}. A cycle identifies no live finding at all",
+                            row.line, other.line, row.id, other.id, other.id, row.id
+                        ))
+                    }
+                    Some(_) => {}
+                }
+            }
+            (None, "superseded") => violations.push(format!(
+                "{register} line {} marks {} superseded without naming its successor; the pointer is \
+                 what makes the status meaningful, so the column is mandatory for it",
+                row.line, row.id
+            )),
+            (Some(successor), status) => violations.push(format!(
+                "{register} line {} gives {} the status `{status}` and still names {successor} as its \
+                 successor; only `superseded` carries one, and the column must read `\
+                 {FINDINGS_EMPTY_CELL}` otherwise",
+                row.line, row.id
+            )),
+            (None, _) => {}
+        }
+
+        match curated.iter().find(|path| directory_name(path) == row.id) {
+            None => violations.push(format!(
+                "{register} line {} indexes {} but no directory of that name exists beneath \
+                 `{}/`; a row pointing at nothing is a broken pointer with the appearance of an index \
+                 entry, and the deliverable it promises cannot be read",
+                row.line, row.id, conformance_harness::CURATED_FINDINGS_DIR_NAME
+            )),
+            Some(path) => violations.extend(register_row_agrees_with_manifest(row, path)),
+        }
+    }
+
+    for path in curated {
+        let name = directory_name(path);
+        if !rows.iter().any(|row| row.id == name) {
+            violations.push(format!(
+                "the curated finding {} has no row in {register}; a directory nothing indexes is a \
+                 deliverable a reader cannot find, and the register and the evidence must enumerate \
+                 the same set in both directions",
+                shown_path(path)
+            ));
+        }
+    }
+    violations
+}
+
+/// Whether one register row agrees with the manifest inside the directory it points at.
+fn register_row_agrees_with_manifest(row: &FindingsRegisterRow, path: &Path) -> Vec<String> {
+    let mut violations: Vec<String> = Vec::new();
+    let register = classify::FINDINGS_REGISTER;
+    let manifest_path = path.join(findings::MANIFEST_NAME);
+    let text = match fs::read_to_string(&manifest_path) {
+        Ok(text) => text,
+        Err(error) => {
+            violations.push(format!(
+                "the manifest of the curated finding {} could not be read, so {register}'s row for \
+                 {} cannot be checked against it: {error}",
+                shown_path(path),
+                row.id
+            ));
+            return violations;
+        }
+    };
+    let value = |prefix: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .map(str::trim)
+            .map(String::from)
+    };
+    match value(findings::MANIFEST_CURATED_ID_PREFIX) {
+        Some(declared) if declared == row.id => {}
+        Some(declared) => violations.push(format!(
+            "{register} indexes {} but the manifest in {} declares `{}` as {}; the index and the \
+             evidence must name the same finding",
+            row.id,
+            shown_path(path),
+            findings::MANIFEST_CURATED_ID_PREFIX.trim_end(),
+            declared
+        )),
+        None => violations.push(format!(
+            "{register} indexes {} but the manifest in {} declares no `{}` line, so nothing inside \
+             the directory claims the identifier the register indexes it under",
+            row.id,
+            shown_path(path),
+            findings::MANIFEST_CURATED_ID_PREFIX.trim_end()
+        )),
+    }
+    match value("divergence_class = ") {
+        Some(declared) if declared == row.class => {}
+        Some(declared) => violations.push(format!(
+            "{register} states the divergence class of {} as `{}` while the manifest in {} records \
+             `{declared}`; the index must describe the evidence it points at",
+            row.id,
+            row.class,
+            shown_path(path)
+        )),
+        None => violations.push(format!(
+            "the manifest of the curated finding {} records no divergence class, so {register}'s \
+             `{}` cannot be confirmed",
+            shown_path(path),
+            row.class
+        )),
+    }
+    violations
 }
 
 /// The corpus markers as one readable list, for a message that has to name them all.

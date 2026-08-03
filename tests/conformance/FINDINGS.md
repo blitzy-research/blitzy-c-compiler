@@ -97,26 +97,35 @@ worth having.
 
 Two notes on reading the table once it has rows.
 
-**One row per generated finding identity — and a generated identity is exactly one cell, one oracle
-and one divergence class.** A run names each transient finding directory from those three things
-together, injectively (§2.3), and curation carries that name forward as the `finding_id` and
-`identity_digest` lines of the curated `MANIFEST.txt`. So one curated directory — and therefore one
-`F-NNNN-<slug>` row — stands for exactly **one** generated identity. The consequence is arithmetic
-rather than editorial: a divergence observed by **two** oracles at the same cell is two generated
-identities, two sets of evidence and therefore **two rows**, whether or not a maintainer
-investigated them together. Likewise two divergence classes at one cell, or one class at two
-optimization levels, or one class at two targets. The reverse also holds: every directory under
-[`findings/`](findings/) must have exactly one row and every row exactly one directory, so the index
-and the evidence enumerate the same set in both directions.
+**One row per generated finding identity — and a generated identity is exactly one cell and one
+divergence class.** A run names each transient finding directory from those two things together,
+injectively (§2.3), and curation carries that name forward as the `finding_id` and `identity_digest`
+lines of the curated `MANIFEST.txt`. So one curated directory — and therefore one `F-NNNN-<slug>` row
+— stands for exactly **one** generated identity.
 
-**A row may not stand for several generated identities.** `Oracle(s) affected`, `Target(s)` and
-`Opt level(s)` are plural in the header because a *curated, minimized* reproducer may legitimately
-have been reduced from a wider observation and the row should say what was seen — but the row's
-identity, and the evidence it points at, remain the single generated identity recorded in its
-manifest. If a maintainer ever wants one row to *replace* several, that requires a **merge schema
-defined here first**: a stated rule for which fields may hold a list, a stated rule for which of the
-several generated identities the curated manifest records, a stated rule for how the evidence of the
-others is still reachable, and a check that audits all three. Until such a schema exists, merging is
+**The oracle is deliberately not part of that identity, and the arithmetic follows from that.** A
+divergence observed by two oracles at the same cell is **one** generated identity, one directory and
+therefore **one row**: the row's `Oracle(s) affected` column lists both, and the directory's manifest
+carries an `observed_by` line naming them together with one `OBSERVATION —` section apiece, so
+nothing either oracle saw is lost by their sharing a directory (§2.3 gives the measurement that
+settled this). What *does* multiply rows is a difference in the identity itself: two divergence
+classes at one cell, or one class at two optimization levels, or one class at two targets, are
+distinct identities, distinct evidence and distinct rows. The reverse also holds: every directory
+under [`findings/`](findings/) must have exactly one row and every row exactly one directory, so the
+index and the evidence enumerate the same set in both directions — and
+`infra_expected_divergence_register` audits exactly that, in both directions, on every run.
+
+**A row may still not stand for several generated identities.** The merge that exists is *across
+oracles within one identity*, defined in §2.3 and implemented in
+[`findings.rs`](../conformance_harness/findings.rs); merging two identities into one row is a
+different thing and remains prohibited. `Oracle(s) affected`, `Target(s)` and `Opt level(s)` are
+plural in the header because a *curated, minimized* reproducer may legitimately have been reduced
+from a wider observation and the row should say what was seen — but the row's identity, and the
+evidence it points at, remain the single generated identity recorded in its manifest. If a maintainer
+ever wants one row to *replace* several identities, that requires a **merge schema defined here
+first**: a stated rule for which fields may hold a list, a stated rule for which of the several
+generated identities the curated manifest records, a stated rule for how the evidence of the others is
+still reachable, and a check that audits all three. Until such a schema exists, merging identities is
 prohibited — an unaudited merge silently loses the pointer to every set of evidence it did not name,
 and a lost pointer is a lost deliverable.
 
@@ -555,13 +564,30 @@ Three checks, all cheap, each catching a class of broken deliverable that is oth
 next reader. The third runs itself.
 
 **The suite still passes.** `cargo test --test conformance infra_expected_divergence_register`
-audits every directory in the curated set on every run and fails if any of four things is wrong: an
-artifact from §3 is **missing** (or is a symlink, which is never followed); the directory name and
-the manifest's `finding_id` **disagree**, which is how a copied-and-renamed directory is caught;
-the reproducer no longer matches the digest recorded for it in `MANIFEST.txt`, which is how a
-**minimization that was not followed by refreshing the rest of the directory** is caught; or a text
-artifact **discloses** an absolute root or a secret (step 7). Each failure names the directory, the
-artifact and what to do about it, so this check is a proofreader rather than a gate to argue with.
+audits every directory in the curated set on every run and fails on any of these, each naming the
+directory, the artifact and what to do about it — a proofreader rather than a gate to argue with:
+
+- an artifact from §3 is **missing**, or is a symlink, which is never followed;
+- the directory name and the manifest's identity **disagree** — either it is named in the curated
+  `F-NNNN-<slug>` form without a `curated_id` line declaring that name, or it is named as the run
+  derived it and the `finding_id` line says otherwise — which is how a copied-and-renamed directory is
+  caught;
+- the **register and the directory set** disagree in either direction: a row with no directory, a
+  directory with no row, a row whose `Artifact directory` is not its own identifier, a status outside
+  §2.1's vocabulary, a `Superseded by` pointer to an identifier that does not exist or that forms a
+  cycle, or a row whose fields contradict the manifest beside it;
+- the reproducer no longer matches the `reproducer_digest` recorded for it, or **any** artifact no
+  longer matches the size and digest recorded for it in the manifest's `artifact =` and `capture =`
+  inventory lines — which is how a **minimization, or an elision, that was not followed by refreshing
+  the rest of the directory** is caught. That failure quotes both the recorded pair and the observed
+  pair, so it is also the calculator for the refresh (step 6, step 7);
+- a text artifact **discloses** — this machine's package or build root, a value this run treats as a
+  secret, or any of the machine-independent private shapes in step 7. Every artifact is scanned,
+  including recursively through `outputs/`;
+- the manifest does not state **which machine produced the evidence** (`source_machine`), or does not
+  record that the mandatory disclosure review of step 7 was **performed** (`disclosure_review`). A
+  generated directory carries `not-performed` in that field, truthfully, so promoting one cannot skip
+  the review by omission.
 
 **The finding still reproduces from `commands.sh` alone**, in a clean shell, with no harness, no
 Cargo and no Rust toolchain on the path. If it does not, the curated directory is not a reproducer —
@@ -622,12 +648,47 @@ acceptable, and there is no later step at which it can be undone: a commit is hi
 is therefore **step 7 of §5 and is required**, not advisory, and it is required even when the
 finding came from a machine the curator believes to be uninteresting.
 
+**What the automated scan can and cannot do, and why this step exists anyway.** The audit in §5.2
+scans every artifact in two halves, and the halves differ in what they *know*:
+
+- **Byte-exact, about this machine only.** This checkout's package root, the build root, and the value
+  of every environment variable this run treats as a secret are known exactly, so an occurrence cannot
+  be missed and cannot be a false positive. This half can only ever apply on the machine that produced
+  the artifact: on any other machine those roots are not in the text and those secrets were never in
+  the environment, so it passes trivially and says nothing.
+- **Machine-independent, about any host.** The *shapes* private locations and credentials take
+  everywhere: an absolute path inside `/home/`, `/Users/`, `/root/`, `/tmp` or `/var/tmp`, a
+  per-account temporary or runtime directory, a mounted volume, a `file://` URL, a drive-qualified
+  path — and, for credentials, a PEM private-key block, a URL carrying a password in its authority, an
+  HTTP authorization header, and the standardized cloud and source-forge token prefixes. This half is
+  what still bites when the producing machine was somebody else's, and it reports the **shape and the
+  line numbers** rather than the offending bytes, because the report is itself a file and quoting a
+  home directory into it would republish the disclosure.
+
+Two things follow, and they are why this step is a person's and not a validator's. A **host name**, an
+**account name**, a **ticket number** and a **colleague's name** have no shape at all — no scan can
+recognise one — and whether a given one may be published is a judgement about this project, not a
+property of the text. So the judgement is recorded rather than re-derived: the manifest carries
+
+```text
+source_machine    = <digest of the producing machine's roots>
+disclosure_review = clean            # or: redacted: commands.sh, outputs/a-aarch64-O2.compile.stderr
+```
+
+The first is written by the run and says which machine-and-checkout the evidence came from, so a later
+reader on a different machine can tell that only the portable half of the scan was in force. The second
+is written by the run as `not-performed` — truthfully, because nothing under the build directory is
+committed — and the curated audit **rejects that value**, so a promotion cannot happen without a human
+replacing it with what they found. A declared redaction is checked further: it must name at least one
+artifact that exists in the directory, and it must not name a compared stream, because redacting one of
+those destroys the finding rather than protecting the machine.
+
 **Read every file in the directory, not a sample.** The seven artifacts differ in how likely they
 are to carry something, and two carry it almost every time:
 
 | Artifact | What to look for |
 |---|---|
-| `environment.txt` | The **host name** — the kernel line is the usual carrier, because a full `uname -a` banner begins with the node name; also account names and absolute home or build paths inside a tool's version banner |
+| `environment.txt` | Account names and absolute home or build paths inside a tool's **version banner**, which is whatever that tool chose to print. The kernel line is *not* a carrier: the fingerprint asks for the system, release, version, machine and operating system by name and never for the node name, so no host identity is collected in the first place — confirm that when regenerating (step 6) rather than eliding it |
 | `commands.sh` | **Absolute paths** into a home directory, a workspace root, a CI checkout path, or a temporary directory whose name encodes a run or job identifier; also any tool invoked by an absolute path that reveals where it was installed |
 | `outputs/*.compile.stderr` | Diagnostics quote **include paths and source paths verbatim**, and a rejected build usually quotes several |
 | `outputs/*.stderr`, `outputs/*.stdout` | A corpus program prints only literals, so anything path-like here is a signal that the reproducer broke a corpus rule and should be re-read against §3 |
@@ -656,23 +717,36 @@ destroyed the finding to protect the machine:
 - When a path must go from `commands.sh`, replace it with a **relative path that still runs** — the
   script has to work as `sh commands.sh` from inside the finding directory, and §5.2 re-checks
   exactly that. A redaction that breaks the script fails the check rather than passing quietly.
-- Record in `MANIFEST.txt` that a redaction was made and which artifacts it touched. A reader
-  comparing two curated findings needs to know that a placeholder is a curation act and not a tool's
-  output.
+- Record the redaction in `MANIFEST.txt`'s `disclosure_review` line, naming every artifact it
+  touched — `redacted: commands.sh, outputs/a-aarch64-O2.compile.stderr`. A reader comparing two
+  curated findings needs to know that a placeholder is a curation act and not a tool's output, and the
+  §5.2 audit reads this field back: a review that removed something and did not say so is reported.
+- **Refresh the artifact inventory for every file you edited.** `MANIFEST.txt` records each artifact's
+  size and digest, and eliding a value changes both — so the audit will report the file as stale, which
+  is exactly what it should do for a file that no longer matches its record. Its failure message quotes
+  the observed size and digest beside the recorded pair, so transcribing the observed one into the
+  `artifact =` or `capture =` line closes the loop in a single pass; re-running the audit then confirms
+  it. This is bookkeeping, not evidence: the `reproducer_digest` line still ties the whole directory to
+  the program, and `disclosure_review` still states that the change was a redaction.
 
-**Write the kernel line nodename-free in the first place.** The generated fingerprint identifies the
-host with the full `uname -a` banner, whose second field is the node name, so a copied line
-publishes it. When regenerating `environment.txt` during curation (step 6), take the kernel
-identification from a form that does not include the node name at all:
+**The kernel line is nodename-free already, and that is a substitution made at the source.** An
+earlier form of the fingerprint identified the host with the full `uname -a` banner, whose second field
+is the node name, so every copied line published it and every curator had to remember to replace it.
+The harness now asks for the identification by selector instead — system, kernel release, kernel
+version, machine, operating system — and never for the node name, the processor or the hardware
+platform:
 
 ```sh
-uname -srvmo          # system, release, version, machine, operating system — no nodename
+uname -srvmo          # what the fingerprint records; -srvm when -o is unsupported
 ```
 
-That keeps every fact the fingerprint exists for — the kernel release and version, the machine
-architecture — while carrying nothing that identifies the machine, which is why it is a substitution
-rather than a redaction. The transient fingerprint is untouched by this: it is git-ignored, it is
-what the harness needs for its own reconciliation, and a full banner there costs nothing.
+Every fact the fingerprint exists for is kept — the kernel release and version, the machine
+architecture — and nothing that identifies the machine is collected, which is why this is a
+substitution rather than a redaction. Doing it at the source rather than at curation time is the point:
+a host name is the one private identifier no validator on another machine can recognise, so the only
+reliable place to deal with it is before it is written. When regenerating `environment.txt` during
+step 6, **confirm** the line carries no node name rather than editing one out; if it does carry one,
+the fingerprint was produced by an older harness and the whole file should be regenerated.
 
 **Before committing, re-read the diff rather than the directory.** `git diff --cached` over the
 finding directory is the last artifact anyone sees, and it is the one place a stray file — an editor
@@ -739,21 +813,34 @@ restriction** here and leaves all three oracles enabled, and why the expectation
 [`04_bitfields/005_straddling_and_zero_width.expected`](04_bitfields/005_straddling_and_zero_width.expected)
 are stated as measured target-toolchain expectations rather than as language invariants.
 
-**The consequence for triage is a procedure, not a verdict.** A cross-backend bitfield divergence is
-worth investigating and must not be waved away as a layout choice — but on its own it is not yet a
-defect in `bcc`, because the property the backends are being held to is an ABI convention. Work
-through it in this order:
+**The consequence for triage is computed by the harness, not left to a reader.** A cross-backend
+bitfield divergence is worth investigating and must not be waved away as a layout choice — but on its
+own it does not say whose fault it is, because the property the backends are being held to is an ABI
+convention. Step 1 of the procedure below used to be an instruction to a maintainer; it is now
+performed by the run, and its answer is recorded in the finding's own manifest:
 
-1. **Compare the diverging target against its own reference compiler — oracle (a).** If `bcc` and
-   the same-target reference toolchain agree, and only the cross-target comparison differs, the
-   observation is about the two ABIs rather than about `bcc`, and there is no finding against the
-   compiler.
+1. **The same-target reference comparison is carried, not requested.** Every cross-backend finding
+   ships the same-target reference capture beside the two captures it compared, and its manifest
+   states `attribution_b` as one of `abi-observation` — `bcc` agrees with the toolchain implementing
+   this target's own ABI, so the cross-target difference is a statement about two ABIs —
+   `defect-candidate` — `bcc` disagrees with that toolchain too, so two independent oracles point the
+   same way — or `undetermined`, when no reference driver for the target was available and the
+   question is therefore not guessed at.
 2. **Read the diverging target's psABI** for the bitfield allocation order and straddling rule it
    actually specifies. The ABI, not this register and not the expectation record, is authoritative
-   for the target.
-3. **Only a divergence that survives both** — `bcc` disagreeing with its own target's reference
-   compiler, or with the order that target's ABI specifies — is a finding against `bcc`. Record
-   which of the two it was in the manifest, because the two lead a maintainer to different code.
+   for the target — and it is what an `abi-observation` or an `undetermined` attribution sends you to.
+3. **The verdict is a FINDING in every case.** An attribution is not an excuse and never softens a
+   verdict: requirement 6 makes an undocumented divergence a deliverable, so the directory, the
+   reproducer and the exact commands exist whichever way the attribution came out. What it changes is
+   which code a maintainer opens first.
+
+This replaces a genuine inconsistency rather than restating a preference. The expectation record for
+[`04_bitfields/005_straddling_and_zero_width`](04_bitfields/005_straddling_and_zero_width.expected)
+asserted that a cross-backend divergence in its area *is* a defect rather than an
+implementation-defined difference, while the procedure here made same-target agreement an ABI
+observation instead. Both were reasoning correctly about the same distinction; neither decided it, so
+the two could be read against each other. The decision now lives in one place — in
+`findings.rs::Finding::cross_arm_attribution` — and both documents point at it.
 
 Should a toolchain in the set ever change its bitfield layout, the measured basis stops holding and
 the record's expectations must be re-derived for that target rather than read as a regression. That

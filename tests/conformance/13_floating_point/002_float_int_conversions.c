@@ -55,6 +55,14 @@
  *     1000000.0f        float   unsigned int            1000000  vast
  *     -32000.0f         float   short                    -32000  768 above the minimum
  *     250.75f           float   unsigned char               250  5 below the maximum
+ *     -0.75             double  unsigned int                  0  exactly at the minimum
+ *     -0.5f             float   unsigned char                 0  exactly at the minimum
+ *     -0.25             double  unsigned long long            0  exactly at the minimum
+ *
+ * The last three rows are the deliberate negative-to-unsigned cases.  They are
+ * defined, not borderline-undefined: 6.3.1.4p1 turns on the representability of
+ * the INTEGRAL PART, and a value strictly between -1 and 0 has integral part 0,
+ * which every unsigned type represents.  See the asymmetry note below.
  *
  * The four round trips add four more conversions in this direction, on their
  * inward leg, and each is inside its destination by an equally wide margin:
@@ -93,14 +101,22 @@
  * destination alike.  The dangerous region is "integral part out of range",
  * not "source negative".
  *
- * This program stays clear of the whole question rather than relying on the
- * narrow defined case: no negative floating value is converted to an unsigned
- * type anywhere in it.  Every source feeding unsigned int, unsigned short,
- * unsigned char or unsigned long long above is non-negative, and every integral
- * part converted anywhere sits inside its destination by the margins tabulated
- * earlier.  That is a requirement rather than a tidiness -- a conversion whose
- * definedness depended on a truncation happening to land on zero would be a
- * fragile subject for an oracle even though it is well defined.
+ * This program therefore exercises that narrow defined case ON PURPOSE rather
+ * than steering around it.  THREE NEGATIVE SOURCES ARE CONVERTED TO UNSIGNED
+ * DESTINATIONS -- -0.75 to unsigned int, -0.5f to unsigned char and -0.25 to
+ * unsigned long long -- and every one of them lies strictly between -1 and 0, so
+ * every integral part is 0 and every conversion is fully defined and must yield
+ * 0.  Each is written twice, once as a constant expression and once through a
+ * volatile operand, so the constant folder and the backend are held to the same
+ * answer.  The case earns its place because it is where an implementation is
+ * likeliest to substitute a modular reinterpretation or a saturating conversion
+ * for truncation toward zero, and either of those prints something other than 0.
+ * What is absent is the UNDEFINED region on both sides: no negative source of
+ * magnitude one or more reaches an unsigned destination, and no source of either
+ * sign has an integral part outside its destination's range.  Every other source
+ * feeding unsigned int, unsigned short, unsigned char or unsigned long long is
+ * non-negative, and every integral part converted anywhere sits inside its
+ * destination by the margins tabulated earlier.
  *
  * INTEGER -> FLOATING is the safer direction but has one hazard of its own: an
  * integer not exactly representable in the destination floating type is

@@ -42,15 +42,30 @@ Free of undefined and unspecified behaviour by construction:
   is well defined: the returned value is an object with temporary lifetime and the member
   access happens within that lifetime, in the same full expression.
 - NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and this is enforced structurally
-  rather than argued. An access to a volatile object IS an observable side effect and the
-  order in which a call's arguments are evaluated is unspecified, so every volatile datum
+  rather than argued. An access to a volatile object IS an observable side effect, and
+  C11 6.5.2.2p10 leaves the order of evaluation of a call's FUNCTION DESIGNATOR, of its
+  arguments, and of subexpressions within those arguments unspecified. Two shapes in this
+  program would therefore have been unsound, and both are structurally absent:
+    - reading one volatile object more than once inside a single argument list, which the
+      direct member probes would do if they read a maker's volatile pointer once per member
+      (two reads for the 8-byte shape, six for the 24-byte one); and
+    - reading two volatile objects in one full expression, which a forwarding call would do
+      if it read the consumer's pointer as its designator and the maker's pointer inside its
+      argument.
+  Neither can arise, because NO VOLATILE LVALUE APPEARS ANYWHERE IN main BEYOND ITS OWN
+  SNAPSHOT STATEMENT. Every volatile datum -- the sixteen ints, the six doubles, the eight
+  floats, the twelve 24-byte-shape ints and all FOURTEEN call-boundary function pointers --
   is read exactly once, in a statement of its own, and only the resulting plain locals are
-  passed. Machine-checked on this branch: flattening the program into statements and
-  counting references to its volatile objects finds NO statement with more than one. The
-  snapshots cost nothing in coverage, because each is itself a load from volatile storage
-  that the optimizer may neither fold nor elide, so every value the callee receives was
-  genuinely materialised at run time and marshalled through the ABI; what changed is only
-  that the loads are now SEQUENCED rather than unordered.
+  used thereafter. Machine-checked on this branch: flattening the program into statements
+  and counting references to its volatile objects finds NO statement with more than one.
+  The snapshots cost nothing in coverage. A staged value is still a value that arrived
+  through a volatile load, so the optimizer may neither fold nor elide it and every callee
+  still receives arguments genuinely materialised at run time; and a function pointer whose
+  value arrived through a volatile load still designates a function no conforming compiler
+  can identify, so every call through it is still indirect, still un-inlined and still
+  un-cloned. Verified in the generated assembly: at -O2 on x86_64 and aarch64 all seven
+  producers and all seven consumers are emitted unmodified, with no .constprop and no .isra
+  clone. What changed is only that the loads are now SEQUENCED rather than unordered.
 - Hermetic, as constraint C4 requires: every input is a literal in the source. Nothing is
   opened, no socket is created, no environment variable and no program argument is read,
   and no storage is obtained from the heap.
@@ -82,16 +97,26 @@ COVERAGE OF THE BY-MEMORY SHAPE. For the 40-byte aggregate every one of the ten 
 read back rather than a sample of three, because a return path that corrupted only an
 interior member would otherwise leave no trace in stdout.
 
-THE CALL BARRIER. Every call this program makes to the function whose ABI boundary is
-under test goes through a FILE-SCOPE volatile FUNCTION POINTER, and that is load-bearing
-rather than stylistic. A C11 volatile lvalue must be re-read on every access, so no
-conforming compiler may assume which function the pointer designates: it can neither
-inline the callee nor clone it, and it must marshal the arguments exactly as the ABI
-prescribes because it cannot know what will receive them. This is plain standard C rather
-than a compiler attribute, so both sides of oracle (a) honour it for the same reason and
-neither needs to support an extension for the barrier to hold. It also makes the
-function-pointer load the ONLY volatile access in each call expression, which is what
-keeps the one-side-effecting-argument rule satisfied. Measured before-state on this branch: with direct calls, gcc 13.4.0 at
+THE CALL BARRIER, AND WHERE THE POINTER IS READ. Every call this program makes to the
+function whose ABI boundary is under test goes through a FILE-SCOPE volatile FUNCTION
+POINTER, and that is load-bearing rather than stylistic. A C11 volatile lvalue must be
+re-read on every access, so no conforming compiler may assume which function the pointer
+designates: it can neither inline the callee nor clone it, and it must marshal the
+arguments exactly as the ABI prescribes because it cannot know what will receive them.
+This is plain standard C rather than a compiler attribute, so both sides of oracle (a)
+honour it for the same reason and neither needs to support an extension for the barrier to
+hold.
+
+The volatile pointer is read ONCE PER RUN, at the top of main, into a plain local function
+pointer, and every call site uses that local. That placement is deliberate and it is what
+keeps the one-volatile-access-per-full-expression rule satisfied without weakening the
+barrier: the local's value came from a volatile load, so it is still opaque to the
+compiler, while a call site that re-read the volatile object would place one or two
+observable side effects inside an argument list whose evaluation order C11 6.5.2.2p10
+leaves unspecified. Reading it at the call site would buy nothing -- the barrier is a
+property of where the value CAME FROM, not of how often it is fetched -- and would cost the
+program its own defined behaviour, which is the precondition every oracle here rests on.
+Measured before-state on this branch: with direct calls, gcc 13.4.0 at
 -O2 left only make_sbig standing -- every small, mixed and homogeneous-float return and both
 forwarding consumers were inlined away, so six of the seven documented return mechanisms and
 both forwarding paths were not exercised at that level. Measured after: all seven producers
@@ -107,7 +132,8 @@ double has three different representations across the four targets (measured 16,
 16 bytes; x87 80-bit versus IEEE binary128) and is absent from this program entirely --
 using it would import a difference that has nothing to do with parameter passing. That
 type is covered by 13_floating_point/004_long_double_target_restricted, whose record
-disables oracle (b) alone with the measured reason recorded and carries NO marker.
+disables oracle (b) alone, with the measured reason recorded and the expected-divergence
+marker XD-TYPE-LONGDOUBLE-001 scoping that oracle.
 
 No target is dropped, no oracle is disabled and this record carries no expected-divergence
 marker: a cross-backend divergence here is a GENUINE FINDING rather than an

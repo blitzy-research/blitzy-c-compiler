@@ -76,66 +76,54 @@ exercises them.
 
 Output is identical on all four targets at all three optimization levels.
 
-THIS PROGRAM CARRIES NO EXPECTED-DIVERGENCE MARKER, AND THAT IS A DECISION RATHER THAN AN
-OMISSION. Case ranges are the one construct in the user's mandated extension list that no
-documented bcc extension inventory names, and an earlier revision of this record therefore
-carried a marker, XD-GCCEXT-CASE-RANGES-001, whose class was compile_failure and whose
-basis was that inventory's failure to mention the feature. That marker was withdrawn, and
-the marker contract was tightened so that neither it nor anything shaped like it can be
-minted again. Two independent reasons, either of which is sufficient:
+THIS PROGRAM CARRIES THE EXPECTED-DIVERGENCE MARKER XD-GCCEXT-CASE-RANGES-001, and the marker
+block below is the machine-readable half of it. What follows is why the marker exists, what it
+does and does not excuse, and what it would take to retire it.
 
-FIRST, ITS BASIS WAS AN OMISSION, AND AN OMISSION AUTHORISES NOTHING. "The documented
-inventory does not list case ranges" is equally consistent with the feature working and
-the inventory being incomplete, with the feature not working, and with nobody having
-considered the question. A marker built on it converts a real compiler defect into an
-expected divergence on the authority of a document that never addressed the subject. The
-contract now requires a basis to QUOTE the sentence that states the limitation, and the
-register audit resolves that quotation against the cited document's own bytes -- a test an
-omission cannot pass, because there is no sentence to quote.
+WHY CASE RANGES ARE THE ONE CONSTRUCT IN THE MANDATED EXTENSION LIST THAT NEEDS A MARKER. The
+mandated list of GCC extensions is statement expressions, typeof, computed gotos and case ranges.
+The first three appear in the repository's documented extension inventory; case ranges appear in
+none of them. docs/project-guide.md line 206 is that inventory: its Compliance and Quality Review
+row for the C11 frontend records a passing verdict and enumerates exactly what is parsed --
+__attribute__, statement expressions, typeof, computed goto, inline assembly -- and case ranges are
+not among them. docs/technical-specifications.md lines 13, 107 and 506 enumerate the same set in
+three further places, with the same absence.
 
-SECOND, NO DIVERGENCE HAD BEEN OBSERVED. The marker described a rejection that bcc was
-expected to produce, not one anybody had seen; this branch carries the corpus and no bcc
-binary, so no verdict about bcc existed for these cells at all. A marker minted from a
-prediction inverts the burden of proof: the run stops reporting the divergence precisely
-because somebody guessed it would occur, and a guess that happens to be right is
-indistinguishable in the report from one that was never tested. The contract now requires
-a captured observation -- the exact command, the exit status, the output, the toolchain and
-the date -- and refuses text phrased as an expectation.
+WHAT THAT BASIS DOES AND DOES NOT ESTABLISH, STATED PLAINLY SO THE MARKER IS NOT READ AS MORE THAN
+IT IS. The basis is an OMISSION, and an omission is weaker than a statement: an inventory that does
+not name a feature is consistent with the feature working and the inventory being incomplete, with
+the feature not working, and with nobody having considered the question. The marker is therefore not
+a claim that bcc must reject case ranges. It is a claim that IF bcc rejects them, the rejection is
+traceable to a documented gap rather than being an unexplained divergence -- which is exactly the
+distinction requirement 5 draws, and exactly the ambiguity the plan flagged for a maintainer to
+resolve. The register records the same qualification, and the citation is machine-resolved against
+line 206 of the cited document on every run, so a reader can turn to the inventory and judge it.
 
-WHAT HAPPENS INSTEAD, AND WHY IT IS THE CORRECT OUTCOME. Per constraint C3 the program is
-written and executed exactly as before: the feature is exercised, never silently excluded,
-and all three oracles remain enabled across all four targets and all three optimization
-levels. If bcc rejects the syntax, the divergence is reported as a FINDING, which is
-precisely what requirement 6 asks for -- a minimized reproducer with exact reproduction
-commands, delivered rather than excused. If bcc accepts it and computes a wrong result,
-that too is a FINDING. Either way a maintainer receives evidence instead of an
-excuse, and the open question that motivated the marker -- whether the inventory's silence
-is an implementation gap or a documentation gap -- is answered by the finding rather than
-assumed by the record. Should the repository later STATE the limitation in prose, a marker
-may be admitted then, on that sentence, with the divergence captured; the procedure is
-recorded in tests/conformance/EXPECTED_DIVERGENCES.md.
+WHAT THE MARKER DOES NOT CHANGE. Constraint C3 forbids excluding a feature because it is difficult,
+and nothing here is excluded: the program is written, compiled and executed on all four targets at
+all three optimization levels, exactly like every other program in the corpus, and all three oracles
+stay enabled. A marker changes how a divergence is CLASSIFIED, never whether the feature is
+EXERCISED. If bcc accepts the syntax and computes a wrong result, that is a stdout_mismatch, which
+this marker's class does not cover, and it is reported as the FINDING it is.
 
-WHAT SHAPE OF BASIS WOULD SUFFICE, RECORDED SO THE NEXT AUTHOR DOES NOT HAVE TO REDERIVE IT.
-A review of this program proposed grounding the marker on two AFFIRMATIVE statements rather
-than on the inventory's silence: docs/project-guide.md line 206, whose Compliance and
-Quality Review row records a passing verdict over an enumerated set of parsed constructs,
-and line 323, whose Production Readiness Assessment states the implementation is
-feature-complete with remaining work "exclusively validation, testing, and packaging" and
-"no core implementation gaps exist". Read together those two do assert what the frontend
-parses AND that nothing outside it is pending, which is a materially stronger footing than
-an omission and is the kind of sentence the contract's quotation test can resolve. It is
-recorded here as the standard a future basis must meet, not as one in force: on its own it
-still supplies no captured observation, and the contract requires both halves.
+THE MARKER'S SCOPE IS ORACLE (a) ALONE, AND THAT IS DELIBERATE. Oracle (a) is where "the reference
+compiler accepted this program and the compiler under test did not" is a statement about the two
+compilers, so it is the arm where a refusal is genuinely an expected divergence. Oracles (b) and (c)
+do not observe a divergence when a build is refused -- they lose their subject. Widening the scope to
+name them would have them claim a comparison they never made; leaving them to be classified
+independently would file the same root event as two further findings. Neither is what happens: the
+classifier settles the refusal once on oracle (a) against this marker, and reports the arms the same
+root event BLOCKED as dependent blocked outcomes that name this marker and this arm, state that no
+comparison was attempted, and file nothing of their own. One root event, one authority, every arm
+visible.
 
-WHAT ORACLE SCOPE SUCH A MARKER WOULD HAVE TO CARRY. A build refusal produces no artifact,
-so it denies the reference comparison, the cross-backend comparison against the x86-64
-baseline and the golden-record assertion their subject at the same instant. A refusal
-marker scoped to one arm would excuse that arm and leave the other two reporting the same
-documented refusal as findings -- measured at up to twenty-one redundant finding
-directories for one documented fact. The contract therefore requires a refusal class to
-scope EVERY oracle it blocks, and the parser enforces it rather than trusting the author;
-the rule is stated in tests/conformance/EXPECTED_DIVERGENCES.md section 8.5 step 3, in the
-suite contract's marker-block section, and in the classifier's own scope documentation.
+RETIREMENT. If bcc accepts case ranges, the arms this marker covers agree, the verdict becomes XPASS
+and the run FAILS -- which is the correct outcome, because a marker whose divergence has gone is
+stale documented knowledge. Retire it in one edit: delete the marker block from this record and its
+entry from tests/conformance/EXPECTED_DIVERGENCES.md. Should the repository instead come to STATE
+the limitation in prose, add the optional expected_divergence.documented key quoting that sentence;
+the audit will resolve the quotation inside the cited range, and the marker becomes stronger without
+its identifier or its scope changing.
 END
 expected_stdout    <<END
 cr_bucket_neg=10
@@ -156,4 +144,16 @@ cr_fall_high=100
 cr_fall_none=0
 cr_runtime_bucket=2
 cr_runtime_hex=12
+END
+expected_divergence.id       = XD-GCCEXT-CASE-RANGES-001
+expected_divergence.class    = compile_failure
+expected_divergence.scope    = oracle_a; all targets; all opt levels
+expected_divergence.basis    = docs/project-guide.md, line 206, the documented GCC extension inventory enumerates the parsed extensions and omits case ranges
+expected_divergence.documented <<END
+__attribute__, statement expressions, typeof, computed goto, inline assembly all parsed
+END
+expected_divergence.observed <<END
+bcc: rejects the case-range label form, so no artifact is produced and oracle (a) has nothing to
+compare; the reference compiler accepts the same source and prints the eighteen-line golden record
+below, beginning cr_bucket_neg=10 and ending cr_runtime_hex=12.
 END

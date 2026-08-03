@@ -75,30 +75,39 @@
  * producers and both consumers are emitted unmodified, with no .constprop and no
  * .isra clone.
  *
- * EVALUATION-ORDER DISCIPLINE.  An access to a volatile object is an observable
- * side effect and argument evaluation order is unspecified, so every volatile
- * datum is read exactly once, in a statement of its own, and only the resulting
- * snapshots are passed to a producer -- at most one side-effecting argument per
- * call, which here means the function-pointer load and nothing else.  The
- * snapshots do not weaken the runtime variant: each is itself a load from
- * volatile storage the optimizer may not fold, so every returned aggregate is
- * still built from values materialised at run time.
+ * EVALUATION-ORDER DISCIPLINE, AND WHY IT REACHES THE FUNCTION POINTERS TOO.  An
+ * access to a volatile object is an observable side effect, and C11 6.5.2.2p10
+ * leaves the order of evaluation of a call's FUNCTION DESIGNATOR, of its
+ * arguments, and of subexpressions within those arguments unspecified.  Two
+ * shapes would therefore have been unsound here, and neither exists: a direct
+ * member probe reading one maker's volatile pointer once per member (two reads for
+ * the 8-byte shape, six for the 24-byte one) inside a single argument list, and a
+ * forwarding call reading a consumer's pointer as its designator while reading a
+ * maker's pointer inside its argument.  So EVERY volatile datum in this program --
+ * the runtime operands and all fourteen call-boundary function pointers alike --
+ * is read exactly once, in a statement of its own, and only plain locals appear at
+ * any call site.  No argument list and no function designator anywhere in main is
+ * a volatile lvalue.  The snapshots do not weaken the runtime variant: each is
+ * itself a load from volatile storage the optimizer may not fold, so every
+ * returned aggregate is still built from values materialised at run time, and each
+ * snapshotted pointer still designates a function no compiler can identify.
  *
  * AT WHICH OPTIMIZATION LEVEL THOSE RETURN PATHS ARE REALLY EXERCISED.  Measured,
  * not assumed, by counting this program's own static helpers still emitted in the
- * reference compiler's assembly and the calls to them - `<driver> -O<n> -S -o -
- * 005_struct_return_by_value.c`, then grepping for the helper labels:
+ * reference compiler's assembly - `<driver> -O<n> -S -o -
+ * 005_struct_return_by_value.c`, then grepping for the helper labels.  With the
+ * volatile call boundary in place, all fifteen helpers - seven producers, seven
+ * forwarding consumers and the element printer - are emitted at -O0, -O1 and -O2
+ * on x86-64, i686, AArch64 and RISC-V 64 alike, with no .constprop and no .isra
+ * clone anywhere.  Every documented return mechanism is therefore exercised as a
+ * real indirect call at every one of the twelve cells, which is the property the
+ * boundary exists to guarantee.
  *
- *   -O0  all 9 helpers, 40 calls   on x86-64, i686, AArch64 and RISC-V 64 alike
- *   -O1  1 helper / 4 calls on all four targets
- *   -O2  1 helper / 4 calls on all four targets
- *
- * So the return mechanisms are exercised as real calls at -O0 on every target,
- * while from -O1 upward the reference compiler inlines almost all of these small
- * static helpers and the returns collapse into their callers.  The higher levels
- * are still worth running - all three oracles compare the same printed member
- * values at every level, and a wrong value is caught wherever it appears - but the
- * register-pair, hidden-pointer and HFA return paths above are what -O0 covers.
+ * The measured BEFORE-state, recorded because it is the reason the boundary is
+ * there: with direct calls to these static producers, gcc 13.4.0 at -O1 and above
+ * left one helper standing out of nine and four calls out of forty, so six of the
+ * seven return mechanisms and both forwarding paths were not exercised at all
+ * above -O0.  That measurement describes the program as it was, not as it is.
  * The compiler under test may inline differently; no bcc binary is present on this
  * branch, so nothing here was measured of it.
  *
@@ -122,24 +131,30 @@
  * indirection was added: of the twenty intended maker and consumer calls in each
  * variant only four survived in total, every other one having been inlined, so
  * six of the seven return shapes had no boundary left to test.  A volatile
- * pointer must be re-read at the point of call, so the designated function is
- * unknown and the call is genuinely indirect; and because the address escapes
- * into storage, the signature may not be cloned or the return value scalarised
- * either.  The mechanism is pure ISO C:
+ * pointer must be re-read on every access, so the value main snapshots out of it
+ * cannot be established at translation time: the designated function is unknown
+ * and every call through the snapshot is genuinely indirect.  And because the
+ * address escapes into storage, the signature may not be cloned or the return
+ * value scalarised either.  Both consequences follow from where the value CAME
+ * FROM rather than from how often the pointer is fetched, which is why reading it
+ * once per run costs the barrier nothing.  The mechanism is pure ISO C:
  * a function attribute would have been shorter, but the documented attribute set
  * for the compiler under test is packed, aligned, section, unused, deprecated,
  * visibility and format (docs/technical-specifications.md line 506), so an
  * inlining attribute would risk a divergence caused by the test and would import
  * an extension into an area whose subject is the calling convention.
  *
- * ONE VOLATILE READ PER FULL STATEMENT.  No argument list contains a volatile
- * lvalue.  Every runtime operand is copied out of volatile storage into a plain
- * local in a statement of its own, and the maker calls then read only those
- * locals.  An access to a volatile object is an observable side effect and the
- * order of side effects within one argument list is unspecified, so a maker call
- * reading several volatile elements in place would have an unspecified order of
- * side effects - and a suite whose premise is that a divergence means a defect
- * needs the program to have exactly one defined behaviour.
+ * ONE VOLATILE READ PER FULL STATEMENT, WITH NO EXCEPTION FOR THE POINTERS.
+ * Neither an argument list nor a function designator anywhere in main is a
+ * volatile lvalue.  Every runtime operand and every one of the fourteen call
+ * boundaries is copied out of volatile storage into a plain local in a statement
+ * of its own, and the calls then read only those locals.  An access to a volatile
+ * object is an observable side effect and the order of side effects within one
+ * full expression is unspecified, so a call reading several volatile elements in
+ * place - or reading one volatile pointer several times, or a consumer's pointer
+ * and a maker's pointer together - would have an unspecified order of side
+ * effects, and a suite whose premise is that a divergence means a defect needs the
+ * program to have exactly one defined behaviour.
  */
 
 int printf(const char *, ...);
@@ -394,39 +409,67 @@ int main(void)
     float sf[8];
     int s24v[12];
     int element;
+    /* The fourteen call boundaries, snapshotted out of the file-scope volatile pointers one
+       read per full expression and used through these plain locals everywhere below.  The
+       barrier is entirely preserved: each value ARRIVED through a volatile load, so no
+       conforming compiler can establish which function any of these designates, and every
+       call through them stays indirect, un-inlined and un-cloned at every optimization
+       level.  What the snapshot removes is the only unsound part of reading them at the call
+       site - an access to a volatile object is an observable side effect, and the order of
+       evaluation of a call's function designator and of its arguments is unspecified
+       (C11 6.5.2.2p10), so a direct member probe reading one volatile pointer four times in
+       one argument list, or a forwarding call reading a consumer's pointer and a maker's
+       pointer in the same full expression, would leave the relative order of those side
+       effects unspecified.  A program whose own behaviour is unspecified cannot make a
+       divergence between two compilers attributable to either, which is the precondition
+       every oracle in this suite rests on. */
+    struct s8 (*mk_s8)(int, int) = make_s8_p;
+    struct s16i (*mk_s16i)(int, int, int, int) = make_s16i_p;
+    struct s16m (*mk_s16m)(int, double) = make_s16m_p;
+    struct s16d (*mk_s16d)(double, double) = make_s16d_p;
+    struct s16f (*mk_s16f)(float, float, float, float) = make_s16f_p;
+    struct s24 (*mk_s24)(int, int, int, int, int, int) = make_s24_p;
+    struct sbig (*mk_sbig)(int) = make_sbig_p;
+    void (*use_s8)(struct s8, const char *) = consume_s8_p;
+    void (*use_s16i)(struct s16i, const char *) = consume_s16i_p;
+    void (*use_s16m)(struct s16m, const char *) = consume_s16m_p;
+    void (*use_s16d)(struct s16d, const char *) = consume_s16d_p;
+    void (*use_s16f)(struct s16f, const char *) = consume_s16f_p;
+    void (*use_s24)(struct s24, const char *) = consume_s24_p;
+    void (*use_sbig)(struct sbig, const char *) = consume_sbig_p;
 
-    f8a = make_s8_p(11, -12);
-    f8b = make_s8_p(21, -22);
+    f8a = mk_s8(11, -12);
+    f8b = mk_s8(21, -22);
     printf("ret_s8_folded_1 a=%d b=%d\n", f8a.a, f8a.b);
     printf("ret_s8_folded_2 a=%d b=%d\n", f8b.a, f8b.b);
-    f16ia = make_s16i_p(101, -102, 103, -104);
-    f16ib = make_s16i_p(201, -202, 203, -204);
+    f16ia = mk_s16i(101, -102, 103, -104);
+    f16ib = mk_s16i(201, -202, 203, -204);
     printf("ret_s16i_folded_1 a=%d b=%d c=%d d=%d\n",
            f16ia.a, f16ia.b, f16ia.c, f16ia.d);
     printf("ret_s16i_folded_2 a=%d b=%d c=%d d=%d\n",
            f16ib.a, f16ib.b, f16ib.c, f16ib.d);
-    f16ma = make_s16m_p(201, 1.5);
-    f16mb = make_s16m_p(401, 2.5);
+    f16ma = mk_s16m(201, 1.5);
+    f16mb = mk_s16m(401, 2.5);
     printf("ret_s16m_folded_1 a=%d b=%.4f\n", f16ma.a, f16ma.b);
     printf("ret_s16m_folded_2 a=%d b=%.4f\n", f16mb.a, f16mb.b);
-    f16da = make_s16d_p(1.25, -1.75);
-    f16db = make_s16d_p(2.25, -2.75);
+    f16da = mk_s16d(1.25, -1.75);
+    f16db = mk_s16d(2.25, -2.75);
     printf("ret_s16d_folded_1 x=%.4f y=%.4f\n", f16da.x, f16da.y);
     printf("ret_s16d_folded_2 x=%.4f y=%.4f\n", f16db.x, f16db.y);
-    f16fa = make_s16f_p(1.5f, -1.25f, 1.125f, -1.0625f);
-    f16fb = make_s16f_p(2.5f, -2.25f, 2.125f, -2.0625f);
+    f16fa = mk_s16f(1.5f, -1.25f, 1.125f, -1.0625f);
+    f16fb = mk_s16f(2.5f, -2.25f, 2.125f, -2.0625f);
     printf("ret_s16f_folded_1 x=%.4f y=%.4f z=%.4f w=%.4f\n",
            (double)f16fa.x, (double)f16fa.y, (double)f16fa.z, (double)f16fa.w);
     printf("ret_s16f_folded_2 x=%.4f y=%.4f z=%.4f w=%.4f\n",
            (double)f16fb.x, (double)f16fb.y, (double)f16fb.z, (double)f16fb.w);
-    f24a = make_s24_p(1001, -1002, 1003, -1004, 1005, -1006);
-    f24b = make_s24_p(2001, -2002, 2003, -2004, 2005, -2006);
+    f24a = mk_s24(1001, -1002, 1003, -1004, 1005, -1006);
+    f24b = mk_s24(2001, -2002, 2003, -2004, 2005, -2006);
     printf("ret_s24_folded_1 a=%d b=%d c=%d d=%d e=%d f=%d\n",
            f24a.a, f24a.b, f24a.c, f24a.d, f24a.e, f24a.f);
     printf("ret_s24_folded_2 a=%d b=%d c=%d d=%d e=%d f=%d\n",
            f24b.a, f24b.b, f24b.c, f24b.d, f24b.e, f24b.f);
-    fbiga = make_sbig_p(7100);
-    fbigb = make_sbig_p(7200);
+    fbiga = mk_sbig(7100);
+    fbigb = mk_sbig(7200);
     print_sbig("ret_sbig", "folded_1", &fbiga);
     print_sbig("ret_sbig", "folded_2", &fbigb);
 
@@ -436,46 +479,50 @@ int main(void)
        the local-storage path above, where an assignment stands between the two.  Every member of
        every shape is read, so a return that was truncated or misordered cannot hide in an
        unexamined tail; each read is its own call, hence its own return, which is stronger than
-       one call inspected several times.  For the 40-byte shape this is the case C11 6.2.4p8
-       covers: a non-lvalue aggregate containing an array member designates an object with
-       temporary lifetime that lasts to the end of the containing full expression, and each read
-       below is a full expression of its own, so no temporary is used after its lifetime. */
+       one call inspected several times.  Several of those calls share one printing call and
+       therefore one full expression, and their relative order is immaterial: each is reached
+       through a PLAIN local pointer, so the expression contains no volatile access, and every
+       producer is a pure function of its arguments that writes nothing a sibling call could
+       observe.  For the 40-byte shape this is the case C11 6.2.4p8 covers: a non-lvalue aggregate
+       containing an array member designates an object with temporary lifetime lasting to the end
+       of the containing full expression, which here is the whole printing call - so every member
+       access sits inside the lifetime of the temporary it reads. */
     printf("direct_s8_folded a=%d b=%d\n",
-           make_s8_p(11, -12).a, make_s8_p(11, -12).b);
+           mk_s8(11, -12).a, mk_s8(11, -12).b);
     printf("direct_s16i_folded a=%d b=%d c=%d d=%d\n",
-           make_s16i_p(101, -102, 103, -104).a, make_s16i_p(101, -102, 103, -104).b,
-           make_s16i_p(101, -102, 103, -104).c, make_s16i_p(101, -102, 103, -104).d);
+           mk_s16i(101, -102, 103, -104).a, mk_s16i(101, -102, 103, -104).b,
+           mk_s16i(101, -102, 103, -104).c, mk_s16i(101, -102, 103, -104).d);
     printf("direct_s16m_folded a=%d b=%.4f\n",
-           make_s16m_p(201, 1.5).a, make_s16m_p(201, 1.5).b);
+           mk_s16m(201, 1.5).a, mk_s16m(201, 1.5).b);
     printf("direct_s16d_folded x=%.4f y=%.4f\n",
-           make_s16d_p(1.25, -1.75).x, make_s16d_p(1.25, -1.75).y);
+           mk_s16d(1.25, -1.75).x, mk_s16d(1.25, -1.75).y);
     printf("direct_s16f_folded x=%.4f y=%.4f z=%.4f w=%.4f\n",
-           (double)make_s16f_p(1.5f, -1.25f, 1.125f, -1.0625f).x,
-           (double)make_s16f_p(1.5f, -1.25f, 1.125f, -1.0625f).y,
-           (double)make_s16f_p(1.5f, -1.25f, 1.125f, -1.0625f).z,
-           (double)make_s16f_p(1.5f, -1.25f, 1.125f, -1.0625f).w);
+           (double)mk_s16f(1.5f, -1.25f, 1.125f, -1.0625f).x,
+           (double)mk_s16f(1.5f, -1.25f, 1.125f, -1.0625f).y,
+           (double)mk_s16f(1.5f, -1.25f, 1.125f, -1.0625f).z,
+           (double)mk_s16f(1.5f, -1.25f, 1.125f, -1.0625f).w);
     printf("direct_s24_folded a=%d b=%d c=%d d=%d e=%d f=%d\n",
-           make_s24_p(1001, -1002, 1003, -1004, 1005, -1006).a,
-           make_s24_p(1001, -1002, 1003, -1004, 1005, -1006).b,
-           make_s24_p(1001, -1002, 1003, -1004, 1005, -1006).c,
-           make_s24_p(1001, -1002, 1003, -1004, 1005, -1006).d,
-           make_s24_p(1001, -1002, 1003, -1004, 1005, -1006).e,
-           make_s24_p(1001, -1002, 1003, -1004, 1005, -1006).f);
+           mk_s24(1001, -1002, 1003, -1004, 1005, -1006).a,
+           mk_s24(1001, -1002, 1003, -1004, 1005, -1006).b,
+           mk_s24(1001, -1002, 1003, -1004, 1005, -1006).c,
+           mk_s24(1001, -1002, 1003, -1004, 1005, -1006).d,
+           mk_s24(1001, -1002, 1003, -1004, 1005, -1006).e,
+           mk_s24(1001, -1002, 1003, -1004, 1005, -1006).f);
     printf("direct_sbig_folded");
     for (element = 0; element < 10; ++element) {
-        printf(" v%d=%d", element, make_sbig_p(7100).v[element]);
+        printf(" v%d=%d", element, mk_sbig(7100).v[element]);
     }
     printf("\n");
 
     /* The forwarding path, for every one of the seven shapes: a maker's return value handed
        straight into a consumer's parameter with no named object between them. */
-    consume_s8_p(make_s8_p(11, -12), "folded");
-    consume_s16i_p(make_s16i_p(101, -102, 103, -104), "folded");
-    consume_s16m_p(make_s16m_p(201, 1.5), "folded");
-    consume_s16d_p(make_s16d_p(1.25, -1.75), "folded");
-    consume_s16f_p(make_s16f_p(1.5f, -1.25f, 1.125f, -1.0625f), "folded");
-    consume_s24_p(make_s24_p(1001, -1002, 1003, -1004, 1005, -1006), "folded");
-    consume_sbig_p(make_sbig_p(7100), "folded");
+    use_s8(mk_s8(11, -12), "folded");
+    use_s16i(mk_s16i(101, -102, 103, -104), "folded");
+    use_s16m(mk_s16m(201, 1.5), "folded");
+    use_s16d(mk_s16d(1.25, -1.75), "folded");
+    use_s16f(mk_s16f(1.5f, -1.25f, 1.125f, -1.0625f), "folded");
+    use_s24(mk_s24(1001, -1002, 1003, -1004, 1005, -1006), "folded");
+    use_sbig(mk_sbig(7100), "folded");
 
     /* Plain staging of every runtime operand, one volatile read per full expression and in fixed
        index order.  Reading four volatile elements inside a maker's argument list would leave the
@@ -498,79 +545,79 @@ int main(void)
         s24v[element] = v24[element];
     }
 
-    f8a = make_s8_p(si[0], si[1]);
-    f8b = make_s8_p(si[2], si[3]);
+    f8a = mk_s8(si[0], si[1]);
+    f8b = mk_s8(si[2], si[3]);
     printf("ret_s8_runtime_1 a=%d b=%d\n", f8a.a, f8a.b);
     printf("ret_s8_runtime_2 a=%d b=%d\n", f8b.a, f8b.b);
-    f16ia = make_s16i_p(si[4], si[5], si[6], si[7]);
-    f16ib = make_s16i_p(si[8], si[9], si[10], si[11]);
+    f16ia = mk_s16i(si[4], si[5], si[6], si[7]);
+    f16ib = mk_s16i(si[8], si[9], si[10], si[11]);
     printf("ret_s16i_runtime_1 a=%d b=%d c=%d d=%d\n",
            f16ia.a, f16ia.b, f16ia.c, f16ia.d);
     printf("ret_s16i_runtime_2 a=%d b=%d c=%d d=%d\n",
            f16ib.a, f16ib.b, f16ib.c, f16ib.d);
-    f16ma = make_s16m_p(si[12], sd[0]);
-    f16mb = make_s16m_p(si[13], sd[1]);
+    f16ma = mk_s16m(si[12], sd[0]);
+    f16mb = mk_s16m(si[13], sd[1]);
     printf("ret_s16m_runtime_1 a=%d b=%.4f\n", f16ma.a, f16ma.b);
     printf("ret_s16m_runtime_2 a=%d b=%.4f\n", f16mb.a, f16mb.b);
-    f16da = make_s16d_p(sd[2], sd[3]);
-    f16db = make_s16d_p(sd[4], sd[5]);
+    f16da = mk_s16d(sd[2], sd[3]);
+    f16db = mk_s16d(sd[4], sd[5]);
     printf("ret_s16d_runtime_1 x=%.4f y=%.4f\n", f16da.x, f16da.y);
     printf("ret_s16d_runtime_2 x=%.4f y=%.4f\n", f16db.x, f16db.y);
-    f16fa = make_s16f_p(sf[0], sf[1], sf[2], sf[3]);
-    f16fb = make_s16f_p(sf[4], sf[5], sf[6], sf[7]);
+    f16fa = mk_s16f(sf[0], sf[1], sf[2], sf[3]);
+    f16fb = mk_s16f(sf[4], sf[5], sf[6], sf[7]);
     printf("ret_s16f_runtime_1 x=%.4f y=%.4f z=%.4f w=%.4f\n",
            (double)f16fa.x, (double)f16fa.y, (double)f16fa.z, (double)f16fa.w);
     printf("ret_s16f_runtime_2 x=%.4f y=%.4f z=%.4f w=%.4f\n",
            (double)f16fb.x, (double)f16fb.y, (double)f16fb.z, (double)f16fb.w);
-    f24a = make_s24_p(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]);
-    f24b = make_s24_p(s24v[6], s24v[7], s24v[8], s24v[9], s24v[10], s24v[11]);
+    f24a = mk_s24(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]);
+    f24b = mk_s24(s24v[6], s24v[7], s24v[8], s24v[9], s24v[10], s24v[11]);
     printf("ret_s24_runtime_1 a=%d b=%d c=%d d=%d e=%d f=%d\n",
            f24a.a, f24a.b, f24a.c, f24a.d, f24a.e, f24a.f);
     printf("ret_s24_runtime_2 a=%d b=%d c=%d d=%d e=%d f=%d\n",
            f24b.a, f24b.b, f24b.c, f24b.d, f24b.e, f24b.f);
-    fbiga = make_sbig_p(si[14]);
-    fbigb = make_sbig_p(si[15]);
+    fbiga = mk_sbig(si[14]);
+    fbigb = mk_sbig(si[15]);
     print_sbig("ret_sbig", "runtime_1", &fbiga);
     print_sbig("ret_sbig", "runtime_2", &fbigb);
 
     /* The direct-expression path for all seven shapes, runtime operands this time. */
     printf("direct_s8_runtime a=%d b=%d\n",
-           make_s8_p(si[0], si[1]).a, make_s8_p(si[0], si[1]).b);
+           mk_s8(si[0], si[1]).a, mk_s8(si[0], si[1]).b);
     printf("direct_s16i_runtime a=%d b=%d c=%d d=%d\n",
-           make_s16i_p(si[4], si[5], si[6], si[7]).a,
-           make_s16i_p(si[4], si[5], si[6], si[7]).b,
-           make_s16i_p(si[4], si[5], si[6], si[7]).c,
-           make_s16i_p(si[4], si[5], si[6], si[7]).d);
+           mk_s16i(si[4], si[5], si[6], si[7]).a,
+           mk_s16i(si[4], si[5], si[6], si[7]).b,
+           mk_s16i(si[4], si[5], si[6], si[7]).c,
+           mk_s16i(si[4], si[5], si[6], si[7]).d);
     printf("direct_s16m_runtime a=%d b=%.4f\n",
-           make_s16m_p(si[12], sd[0]).a, make_s16m_p(si[12], sd[0]).b);
+           mk_s16m(si[12], sd[0]).a, mk_s16m(si[12], sd[0]).b);
     printf("direct_s16d_runtime x=%.4f y=%.4f\n",
-           make_s16d_p(sd[2], sd[3]).x, make_s16d_p(sd[2], sd[3]).y);
+           mk_s16d(sd[2], sd[3]).x, mk_s16d(sd[2], sd[3]).y);
     printf("direct_s16f_runtime x=%.4f y=%.4f z=%.4f w=%.4f\n",
-           (double)make_s16f_p(sf[0], sf[1], sf[2], sf[3]).x,
-           (double)make_s16f_p(sf[0], sf[1], sf[2], sf[3]).y,
-           (double)make_s16f_p(sf[0], sf[1], sf[2], sf[3]).z,
-           (double)make_s16f_p(sf[0], sf[1], sf[2], sf[3]).w);
+           (double)mk_s16f(sf[0], sf[1], sf[2], sf[3]).x,
+           (double)mk_s16f(sf[0], sf[1], sf[2], sf[3]).y,
+           (double)mk_s16f(sf[0], sf[1], sf[2], sf[3]).z,
+           (double)mk_s16f(sf[0], sf[1], sf[2], sf[3]).w);
     printf("direct_s24_runtime a=%d b=%d c=%d d=%d e=%d f=%d\n",
-           make_s24_p(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).a,
-           make_s24_p(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).b,
-           make_s24_p(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).c,
-           make_s24_p(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).d,
-           make_s24_p(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).e,
-           make_s24_p(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).f);
+           mk_s24(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).a,
+           mk_s24(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).b,
+           mk_s24(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).c,
+           mk_s24(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).d,
+           mk_s24(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).e,
+           mk_s24(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]).f);
     printf("direct_sbig_runtime");
     for (element = 0; element < 10; ++element) {
-        printf(" v%d=%d", element, make_sbig_p(si[14]).v[element]);
+        printf(" v%d=%d", element, mk_sbig(si[14]).v[element]);
     }
     printf("\n");
 
     /* The forwarding path for all seven shapes, runtime operands. */
-    consume_s8_p(make_s8_p(si[0], si[1]), "runtime");
-    consume_s16i_p(make_s16i_p(si[4], si[5], si[6], si[7]), "runtime");
-    consume_s16m_p(make_s16m_p(si[12], sd[0]), "runtime");
-    consume_s16d_p(make_s16d_p(sd[2], sd[3]), "runtime");
-    consume_s16f_p(make_s16f_p(sf[0], sf[1], sf[2], sf[3]), "runtime");
-    consume_s24_p(make_s24_p(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]),
+    use_s8(mk_s8(si[0], si[1]), "runtime");
+    use_s16i(mk_s16i(si[4], si[5], si[6], si[7]), "runtime");
+    use_s16m(mk_s16m(si[12], sd[0]), "runtime");
+    use_s16d(mk_s16d(sd[2], sd[3]), "runtime");
+    use_s16f(mk_s16f(sf[0], sf[1], sf[2], sf[3]), "runtime");
+    use_s24(mk_s24(s24v[0], s24v[1], s24v[2], s24v[3], s24v[4], s24v[5]),
                 "runtime");
-    consume_sbig_p(make_sbig_p(si[14]), "runtime");
+    use_sbig(mk_sbig(si[14]), "runtime");
     return 0;
 }

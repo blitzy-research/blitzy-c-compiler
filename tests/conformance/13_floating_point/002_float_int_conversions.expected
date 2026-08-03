@@ -21,14 +21,38 @@ ub_notes           <<END
 Free of undefined and unspecified behaviour by construction, and the conversion rules
 are the whole subject here, so they are argued precisely:
 - FLOATING TO INTEGER. C11 6.3.1.4p1 discards the fractional part and leaves the
-  behaviour undefined only when THE INTEGRAL PART cannot be represented in the
-  destination. Every such conversion below is inside its destination by a wide margin --
-  the narrowest margin anywhere is the 5 that separates 250 from unsigned char's maximum,
-  and the narrowest on a signed destination is the 27 that separates 100 from signed
-  char's. The two negative floating sources, -1000000.5 and -0.75, are converted ONLY to
-  signed destinations, where their integral parts -1000000 and 0 are both comfortably in
-  range. No negative floating value is converted to any unsigned type anywhere, which is
-  a requirement of this program rather than a tidiness.
+  behaviour undefined ONLY when the value of THE INTEGRAL PART cannot be represented in
+  the destination type. Nothing is reduced modulo anything, and the sign of the SOURCE is
+  not what the rule turns on -- the representability of its truncated integral part is.
+  Every such conversion in this program satisfies that condition, and the four unsigned
+  destinations it exercises are enumerated here in full, because a claim about unsigned
+  destinations is the one a reader will want to check:
+    unsigned char      <- 200.25 (double, integral part 200, 55 below the maximum)
+                       <- 250.75f (float, 250, 5 below the maximum -- the narrowest
+                          margin anywhere in the program)
+                       <- -0.5f (float, integral part 0)
+    unsigned short     <- 65000.5 (double, 65000, 535 below the maximum)
+    unsigned int       <- 4000000000.0 (double, 4000000000, 294967295 below the maximum)
+                       <- 1000000.0f (float, 1000000)
+                       <- -0.75 (double, integral part 0)
+    unsigned long long <- 4000000000000.75 (double, 4000000000000, vastly below the
+                          maximum)
+                       <- -0.25 (double, integral part 0)
+  THREE NEGATIVE SOURCES ARE CONVERTED TO UNSIGNED DESTINATIONS, DELIBERATELY, and each
+  is inside the one narrow region where that is fully defined: a value strictly between
+  -1 and 0 truncates to a zero every unsigned type represents, so -0.75, -0.5f and -0.25
+  convert to 0 rather than to anything undefined. That case is worth testing precisely
+  because it is where an implementation is most likely to reach for a modular
+  reinterpretation or a saturating conversion instead of truncation toward zero, and both
+  would print a value other than 0. Each is exercised twice, once folded and once through
+  a volatile operand, so the constant folder and the backend are held to the same answer.
+  What this program does NOT contain is a negative source of magnitude one or more feeding
+  an unsigned destination -- whose integral part would be negative and therefore outside
+  every unsigned range -- nor a positive source whose integral part exceeds the
+  destination maximum, which is undefined for a signed and an unsigned destination alike.
+  On the signed side the two negative sources -1000000.5 and -0.75 truncate to -1000000
+  and 0, both comfortably in int's range, and the narrowest signed margin anywhere is the
+  27 that separates 100 from signed char's maximum.
 - INTEGER TO FLOATING. An integer not exactly representable in the destination format is
   converted with implementation-defined rounding, so every integer converted below is
   EXACTLY representable in the format it is converted to and no rounding decision is ever
@@ -88,7 +112,7 @@ explicitly for that reason.
 
 long double is absent, its representation having been measured at 16, 12, 16 and 16 bytes
 across the four targets. It belongs to 004_long_double_target_restricted in this area,
-which carries NO marker: that program's record instead disables oracle (b) alone with the
+which carries the marker XD-TYPE-LONGDOUBLE-001: that program's record disables oracle (b) alone with the
 measured representation difference as its recorded reason, and keeps oracles (a) and (c)
 enabled on all four targets at all three optimization levels.
 

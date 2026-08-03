@@ -185,13 +185,13 @@
 //!
 //! Edition 2021, minimum supported Rust 1.70.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use super::classify::FINDINGS_REGISTER;
 use super::compare::{locate_stdout_divergence, unified_diff, Comparison};
 use super::compile::CompileOutcome;
 use super::env::Capabilities;
@@ -202,11 +202,12 @@ use super::sandbox::{
 };
 use super::{
     create_directory_chain_below, digest_hex_of_bytes, disclosure_defects, findings_root,
-    is_forbidden_for_side, posix_quote, publish_bytes_no_follow, read_file_bounded, redact_secrets,
-    remove_entry, require_contained_corpus_file, require_directory_chain_below,
-    require_replaceable, run_generation, sanitize_text_for_report, shown_path, stable_digest,
-    CellKey, CompilerSide, DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Outcome,
-    Replaceable, Target, Verdict, MAX_INSPECTED_FILE_BYTES,
+    is_forbidden_for_side, machine_fingerprint, posix_quote, public_text, publish_bytes_no_follow,
+    read_file_bounded, redact_secrets, remove_entry, require_contained_corpus_file,
+    require_directory_chain_below, require_replaceable, run_generation, sanitize_text_for_report,
+    shown_path, stable_digest, CellKey, CompilerSide, DivergenceClass, HarnessError, HarnessResult,
+    OptLevel, Oracle, Outcome, Replaceable, Target, Verdict, DIGEST_HEX_DIGITS,
+    MAX_INSPECTED_FILE_BYTES,
 };
 
 /// The reproducer: a **verbatim**, byte-for-byte copy of the corpus program.
@@ -231,6 +232,81 @@ pub const MANIFEST_NAME: &str = "MANIFEST.txt";
 /// depends on. A check that silently stops checking is worse than no check, because it still reads
 /// like one.
 pub const MANIFEST_IDENTIFIER_PREFIX: &str = "finding_id       = ";
+
+/// The [`MANIFEST_NAME`] line recording the name the committed register indexes a **curated** finding
+/// under, without its value.
+///
+/// Present only in a promoted directory, and it is what keeps the two identities apart. A run derives
+/// its directory name from the divergence, so a generated directory's name and its
+/// [`MANIFEST_IDENTIFIER_PREFIX`] value are the same string. The committed register names a curated
+/// finding `F-NNNN-<slug>` instead, because a sequential number a human assigns is what a person cites
+/// — so a promoted directory records **both**: the curated name it is indexed under, here, and the
+/// generated identity the evidence was produced under, above. Requiring the two to be separate fields
+/// is what stops a curated finding and a generated one from being mistaken for one another.
+pub const MANIFEST_CURATED_ID_PREFIX: &str = "curated_id       = ";
+
+/// The [`MANIFEST_NAME`] line recording a digest of the machine-and-checkout the evidence was
+/// produced on, without its value.
+///
+/// # The question it exists to settle
+///
+/// [`disclosure_defects`] audits a text artifact in two halves. The portable half recognises the
+/// *shapes* private locations and credentials take on any machine, and runs everywhere. The exact
+/// half knows this machine's package root, this machine's build root and this run's secret values to
+/// the byte — a far stronger check, and one that can only ever apply on the machine that produced the
+/// artifact. On any other machine it passes trivially and says nothing.
+///
+/// A committed directory is validated on every machine that runs the suite, so without this field a
+/// reader has no way to tell which of those two audits the artifact actually passed before it was
+/// committed. With it, the answer is a comparison: the value equals
+/// [`machine_fingerprint`](super::machine_fingerprint) exactly when the roots the exact half knows are
+/// the roots this evidence was written against.
+///
+/// It is a digest rather than the paths themselves, because it lives inside the artifact whose
+/// portability it describes and must not become the disclosure it reasons about.
+pub const MANIFEST_SOURCE_MACHINE_PREFIX: &str = "source_machine   = ";
+
+/// The [`MANIFEST_NAME`] line recording the outcome of the mandatory pre-commit disclosure review,
+/// without its value.
+///
+/// # Why an attestation, and not another check
+///
+/// The disclosure review in `tests/conformance/FINDINGS.md` §5.3 is required before a finding is
+/// committed, and part of it cannot be mechanised on the machine that runs the audit: whether a host
+/// name inside a tool's banner is one this project may publish, whether a hand-written paragraph names
+/// a colleague or an internal ticket, whether a captured diagnostic quotes a path that matters. Those
+/// are judgements, and a validator that pretended to make them would be worse than one that does not,
+/// because a reader would then believe they had been made.
+///
+/// So the judgement is *recorded* instead. A run writes
+/// [`DISCLOSURE_NOT_PERFORMED`] here — honestly, because a generated directory beneath the build
+/// directory has had no review and needs none — and the curated audit rejects exactly that value. The
+/// consequence is that promotion cannot happen without a human editing this line to state what they
+/// found, which turns "read every file before committing" from an instruction in a document into a
+/// step the audit can see was taken.
+///
+/// The accepted curated values are [`DISCLOSURE_CLEAN`] and [`DISCLOSURE_REDACTED_PREFIX`] followed by
+/// the artifacts a redaction touched — which is the record `FINDINGS.md` §5.3 already asks a curator to
+/// leave, now in a field the audit reads back.
+pub const MANIFEST_DISCLOSURE_PREFIX: &str = "disclosure_review = ";
+
+/// The [`MANIFEST_DISCLOSURE_PREFIX`] value a **generated** directory carries: no review, none needed.
+///
+/// Everything beneath the generated findings root is git-ignored and describes the machine that
+/// produced it as freely as it likes, because that is what makes it re-runnable there. Writing this
+/// value rather than leaving the field absent is deliberate: an absent field is indistinguishable from
+/// an older manifest, and a claim of "clean" would be a review nobody performed.
+pub const DISCLOSURE_NOT_PERFORMED: &str = "not-performed (a curation step: FINDINGS.md §5.3)";
+
+/// The [`MANIFEST_DISCLOSURE_PREFIX`] value stating the review was performed and removed nothing.
+pub const DISCLOSURE_CLEAN: &str = "clean";
+
+/// The [`MANIFEST_DISCLOSURE_PREFIX`] value stating the review replaced values, before the artifacts.
+///
+/// Followed by a comma-separated list of the artifacts a redaction touched, which the curated audit
+/// requires to be non-empty and to name entries that exist in the directory. `FINDINGS.md` §5.3 forbids
+/// redacting a compared stream, so naming one here is itself reported.
+pub const DISCLOSURE_REDACTED_PREFIX: &str = "redacted: ";
 
 /// The [`MANIFEST_NAME`] line recording the digest of the reproducer the evidence was produced from.
 ///
@@ -337,72 +413,300 @@ pub const FINDING_RUN_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 /// not been helped by the surplus.
 pub const FINDING_RUN_COUNT_MAX: u64 = 1536;
 
-/// Bytes this run has published into finding directories so far.
-static PUBLISHED_BYTES: AtomicU64 = AtomicU64::new(0);
+/// One oracle's contribution to a finding directory: the sections only that oracle can supply.
+///
+/// # Why a contribution is stored rather than written straight out
+///
+/// A finding's identity is the **cell and the divergence class**, deliberately not the oracle: one
+/// refused build is one root cause however many oracle arms watched it lose their subject, and filing
+/// three near-identical directories for it would triple the evidence a maintainer has to read while
+/// splitting the one thing they need to see.
+///
+/// The consequence is that two or three oracles publish into the *same* directory, and three of its
+/// artifacts — the manifest, the reproduction script and the diff — have per-oracle content. An
+/// earlier form of this module re-rendered each of them from the contributing oracle alone and wrote
+/// them with a plain overwrite, so the last oracle to file silently replaced the first's observation,
+/// its capture roster, its comparison block and its diff. The directory then described one arm while
+/// claiming, on its own `observed_by` line, to speak for all of them.
+///
+/// So each oracle's sections are **kept**, and the three merged artifacts are re-rendered from the
+/// union on every contribution. Nothing is overwritten in the sense that matters: a later write
+/// produces a superset of what the earlier one produced.
+///
+/// # Why the sections are stored as rendered text
+///
+/// A [`Capture`] borrows the run and compile outcomes it describes, so a contribution cannot hold one
+/// past the end of the cell that produced it. Rendering at contribution time and merging the text is
+/// therefore the only arrangement that keeps the evidence; it is also the cheaper one, since each
+/// section is rendered exactly once however many oracles follow.
+///
+/// The one thing that arrangement asks for is that a block rendered against one oracle's shell
+/// variables stays valid in the merged preamble. It does, because the merge re-declares every
+/// contribution's variables in oracle order and [`ShellVariables::declare`] is first-wins on both the
+/// name and the value: within one cell there is one `bcc`, one reference driver per target, one runner
+/// per target and one budget, so no two contributions can bind the same name to different values.
+#[derive(Debug, Clone, Default)]
+struct Contribution {
+    /// The comparator's one-line summary, as this oracle stated it.
+    summary: String,
+    /// The `WHAT WAS OBSERVED` body for this oracle: its summary and its observation paragraph.
+    observation: String,
+    /// One roster line per capture this oracle contributed.
+    roster: Vec<String>,
+    /// The machine-readable capture inventory lines this oracle's captures publish.
+    inventory: Vec<String>,
+    /// Each capture file this oracle publishes and its size, so the merged directory can be sized
+    /// without reading the filesystem. Keyed by file name, which is what lets the merge count a file
+    /// two oracles both publish exactly once.
+    capture_files: Vec<(String, u64)>,
+    /// The shell variable declarations this oracle's captures imply, in declaration order.
+    variables: Vec<(String, String)>,
+    /// This oracle's capture blocks, keyed by capture stem so the merge can dedupe them.
+    capture_blocks: Vec<(String, String)>,
+    /// The comparison block that states what this oracle compared and where it parted.
+    comparison_block: String,
+    /// The computed difference this oracle observed.
+    diff: String,
+    /// What this oracle's divergence is attributable to, for the cross-backend arm.
+    ///
+    /// Held per contribution rather than derived at assembly time from whichever `Finding` is filing,
+    /// because the attribution is a statement about **this** oracle's captures: reading it off the
+    /// filing finding would make it appear and disappear as other oracles contributed, which is the
+    /// class of defect the merge exists to remove.
+    attribution: Option<&'static str>,
+}
 
-/// Finding directories this run has published so far.
-static PUBLISHED_COUNT: AtomicU64 = AtomicU64::new(0);
+/// One finding directory's contributions and what the run has been charged for it.
+#[derive(Debug, Default)]
+struct DirectoryLedger {
+    /// Every oracle that has published into this directory, with its sections.
+    contributions: BTreeMap<Oracle, Contribution>,
+    /// Bytes of this directory already charged against the run's byte ceiling.
+    charged: u64,
+}
+
+/// The run's finding-artifact accounting and per-directory contributions, under one lock.
+///
+/// # Why one lock rather than two atomics and a map
+///
+/// The ceilings are checked and then charged. An earlier form of this module loaded two atomics to
+/// check and `fetch_add`ed them to charge, which is two operations with a window between them: two
+/// threads could each read a total below the ceiling and each add to it, and the run would publish
+/// past a bound it had just verified. Worse, the charge was the *whole* directory size on every
+/// contribution, so a directory two oracles filed into was counted twice over and a run could refuse
+/// a legitimate finding on the strength of bytes that were never written.
+///
+/// Holding the totals and the contributions together means a contribution **reserves the exact
+/// delta** — the merged directory's new size less what this directory has already been charged — in
+/// the same critical section that decided the reservation was within the ceilings. A write that then
+/// fails releases the reservation, and a write that succeeds reconciles it against the bytes actually
+/// on disk, so the totals describe the filesystem rather than an estimate of it.
+#[derive(Debug, Default)]
+struct Ledger {
+    /// Per-directory contributions and charges, keyed by identifier text so the map has one obvious
+    /// ordering when it is read back.
+    directories: BTreeMap<String, DirectoryLedger>,
+    /// Bytes this run has published into finding directories so far.
+    published_bytes: u64,
+    /// Finding directories this run has published so far.
+    published_count: u64,
+}
+
+/// The process-wide finding ledger.
+///
+/// In-process state, and that is sufficient rather than a compromise. Every oracle arm of a given
+/// cell is judged by the one area test that owns that cell, so contributions to a directory are made
+/// by a single thread in sequence; the lock is what makes the *run totals* correct across the
+/// fourteen concurrent areas. A second run re-files every contribution from scratch, because the
+/// generated-findings root is emptied once per process before the first directory is created.
+fn ledger() -> &'static Mutex<Ledger> {
+    static LEDGER: OnceLock<Mutex<Ledger>> = OnceLock::new();
+    LEDGER.get_or_init(|| Mutex::new(Ledger::default()))
+}
+
+/// Take the ledger, recovering from a poisoned lock rather than propagating the panic.
+///
+/// A poisoned lock means a thread panicked while holding it. The records already made are still true,
+/// and discarding them would make a subsequent contribution purge captures its siblings had written
+/// and mis-state the run's totals — so they are recovered.
+fn hold_ledger() -> std::sync::MutexGuard<'static, Ledger> {
+    match ledger().lock() {
+        Ok(held) => held,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// Bytes and directories this run has published as finding artifacts.
 ///
 /// Read once, when the run summary is assembled, so the deliverable states what the run cost rather
 /// than leaving it to be measured from the filesystem afterwards.
 pub fn artifact_totals() -> (u64, u64) {
-    (
-        PUBLISHED_BYTES.load(Ordering::Relaxed),
-        PUBLISHED_COUNT.load(Ordering::Relaxed),
-    )
+    let held = hold_ledger();
+    (held.published_bytes, held.published_count)
 }
 
-/// Which oracles have filed into each finding directory during this process.
+/// A reservation one contribution holds against the run's ceilings.
 ///
-/// The counterpart of dropping the oracle from [`FindingId::derive`]: one root cause files once, and
-/// this is where the set of windows that observed it accumulates so the manifest can name all of
-/// them. Keyed by identifier text rather than by [`FindingId`] so the map has one obvious ordering
-/// when it is read back.
-///
-/// It is in-process state, and that is sufficient rather than a compromise. Every oracle arm of a
-/// given cell is judged by the one area test that owns that cell, so the contributions to a
-/// directory are always made by a single thread in sequence; and a *second run* re-files every
-/// contribution from scratch, because the generated-findings root is emptied once per process before
-/// the first directory is created.
-fn contributions() -> &'static Mutex<BTreeMap<String, BTreeSet<Oracle>>> {
-    static CONTRIBUTIONS: OnceLock<Mutex<BTreeMap<String, BTreeSet<Oracle>>>> = OnceLock::new();
-    CONTRIBUTIONS.get_or_init(|| Mutex::new(BTreeMap::new()))
+/// Returned by [`reserve_contribution`] and settled exactly once, by [`Reservation::reconcile`] when
+/// the artifacts are on disk or by [`Reservation::release`] when the write failed. Carrying the
+/// pre-reservation state is what makes the release exact rather than approximate: a failed write must
+/// leave the ledger indistinguishable from one in which the contribution was never attempted, because
+/// anything else would let a refused finding consume budget or, worse, leave the next oracle believing
+/// this directory already exists on disk.
+struct Reservation {
+    /// The directory this reservation belongs to.
+    id: String,
+    /// Whether this contribution is publishing a directory the run has not published before.
+    fresh: bool,
+    /// Bytes charged to this directory before the reservation.
+    charged_before: u64,
+    /// Bytes charged to this directory by the reservation.
+    charged_now: u64,
+    /// This oracle's previous contribution, if it had one, so a release restores it exactly.
+    previous: Option<Contribution>,
+    /// Which oracle reserved, so a release removes the right entry.
+    oracle: Oracle,
+}
+
+impl Reservation {
+    /// Give the reservation back after a write that did not complete.
+    fn release(self) {
+        let mut held = hold_ledger();
+        held.published_bytes = held
+            .published_bytes
+            .saturating_sub(self.charged_now.saturating_sub(self.charged_before));
+        if self.fresh {
+            held.published_count = held.published_count.saturating_sub(1);
+        }
+        if let Some(entry) = held.directories.get_mut(&self.id) {
+            entry.charged = self.charged_before;
+            match self.previous {
+                Some(previous) => {
+                    entry.contributions.insert(self.oracle, previous);
+                }
+                None => {
+                    entry.contributions.remove(&self.oracle);
+                }
+            }
+            if entry.contributions.is_empty() && entry.charged == 0 {
+                held.directories.remove(&self.id);
+            }
+        }
+    }
+
+    /// Settle the reservation against the bytes the directory actually holds.
+    ///
+    /// The reservation was made from the sizes of the rendered artifacts, which is the only thing
+    /// knowable before they exist. This corrects it to what was published, so the run summary states
+    /// a measured cost. The correction is normally zero; it is not assumed to be.
+    fn reconcile(self, measured: u64) {
+        let mut held = hold_ledger();
+        if measured >= self.charged_now {
+            held.published_bytes = held
+                .published_bytes
+                .saturating_add(measured - self.charged_now);
+        } else {
+            held.published_bytes = held
+                .published_bytes
+                .saturating_sub(self.charged_now - measured);
+        }
+        if let Some(entry) = held.directories.get_mut(&self.id) {
+            entry.charged = measured;
+        }
+    }
 }
 
 /// Refuse a finding whose artifacts would take this run past a ceiling.
 ///
-/// Called once, after everything is rendered and before anything is written, with the exact byte
-/// count the directory will hold. `fresh` says whether this contribution is publishing a *new*
-/// directory, which is what the count ceiling governs.
-///
-/// The three ceilings are checked from the most specific outward, so the message names the one that
-/// actually bit. Each names the ceiling, what was measured against it and the run's totals, because a
-/// refusal a reader cannot size up is a refusal they cannot act on.
-fn require_within_artifact_budget(
+/// Rendered inside the reservation's critical section, so the totals it quotes are the totals the
+/// decision was made against rather than whatever they had become by the time the message was built.
+fn budget_refusal(
     context: &str,
     directory: &Path,
-    largest_artifact: u64,
-    directory_bytes: u64,
-    fresh: bool,
-) -> HarnessResult<()> {
+    cause: String,
+    published_bytes: u64,
+    published_count: u64,
+) -> HarnessError {
+    HarnessError::new(
+        String::from(context),
+        format!(
+            "{cause}. The artifacts are the whole of a finding, so there is nothing here it would \
+             be honest to shorten: this is refused loudly rather than published incomplete or \
+             allowed to exhaust the build directory. Run totals so far: {published_bytes} byte(s) \
+             of {FINDING_RUN_BYTES_MAX} across {published_count} directory(ies) of \
+             {FINDING_RUN_COUNT_MAX}. The directory that would have been written is {}",
+            shown_path(directory)
+        ),
+    )
+}
+
+/// Merge one oracle's contribution, render the directory it would produce, and reserve its cost.
+///
+/// This is the whole of the accounting, in one critical section, and the ordering inside it is the
+/// point:
+///
+/// 1. the contribution is merged into a **copy** of the directory's contributions, so a refusal below
+///    leaves the ledger untouched;
+/// 2. the three merged artifacts are rendered from that copy, which is what makes the sizes real
+///    rather than estimated;
+/// 3. the ceilings are checked against the **delta** this directory would add — the merged size less
+///    what it has already been charged — so a directory a second oracle adds to is charged for the
+///    growth and never for its whole size a second time;
+/// 4. only then is the merge committed and the delta charged.
+///
+/// Returns the rendered artifacts and the reservation that must be settled once the write ends,
+/// either way.
+#[allow(clippy::too_many_arguments)]
+fn reserve_contribution(
+    context: &str,
+    finding: &Finding,
+    id: &FindingId,
+    caps: &Capabilities,
+    minimization: &Minimization,
+    fixed: &FixedArtifacts<'_>,
+    contribution: Contribution,
+) -> HarnessResult<(MergedArtifacts, Reservation, bool)> {
+    let oracle = finding.oracle();
+    let mut held = hold_ledger();
+    let published_bytes = held.published_bytes;
+    let published_count = held.published_count;
+    let entry = held
+        .directories
+        .entry(String::from(id.as_str()))
+        .or_default();
+    let charged_before = entry.charged;
+    let fresh = entry.contributions.is_empty() && charged_before == 0;
+
+    let mut merged = entry.contributions.clone();
+    let previous = merged.insert(oracle, contribution);
+
+    let artifacts =
+        MergedArtifacts::render(context, finding, id, caps, minimization, fixed, &merged)?;
+
+    let mut sizes: Vec<u64> = vec![
+        fixed.reproducer.len() as u64,
+        fixed.record.len() as u64,
+        fixed.environment.len() as u64,
+    ];
+    sizes.push(artifacts.manifest.len() as u64);
+    sizes.push(artifacts.commands.len() as u64);
+    sizes.push(artifacts.diff.len() as u64);
+    for (_, bytes) in &artifacts.capture_bytes {
+        sizes.push(*bytes);
+    }
+    let directory_bytes: u64 = sizes.iter().copied().sum();
+    let largest_artifact = sizes.iter().copied().max().unwrap_or(0);
+    let delta = directory_bytes.saturating_sub(charged_before);
+
     let refuse = |cause: String| {
-        Err(HarnessError::new(
-            String::from(context),
-            format!(
-                "{cause}. The artifacts are the whole of a finding, so there is nothing here it \
-                 would be honest to shorten: this is refused loudly rather than published \
-                 incomplete or allowed to exhaust the build directory. Run totals so far: {} \
-                 byte(s) of {FINDING_RUN_BYTES_MAX} across {} directory(ies) of \
-                 {FINDING_RUN_COUNT_MAX}. The directory that would have been written is {}",
-                PUBLISHED_BYTES.load(Ordering::Relaxed),
-                PUBLISHED_COUNT.load(Ordering::Relaxed),
-                shown_path(directory)
-            ),
+        Err(budget_refusal(
+            context,
+            &id.directory(),
+            cause,
+            published_bytes,
+            published_count,
         ))
     };
-
     if largest_artifact > FINDING_ARTIFACT_BYTES_MAX {
         return refuse(format!(
             "one artifact of this finding would hold {largest_artifact} byte(s), past the \
@@ -415,78 +719,189 @@ fn require_within_artifact_budget(
              {FINDING_DIRECTORY_BYTES_MAX}-byte ceiling on one finding directory"
         ));
     }
-    let projected = PUBLISHED_BYTES
-        .load(Ordering::Relaxed)
-        .saturating_add(directory_bytes);
+    let projected = published_bytes.saturating_add(delta);
     if projected > FINDING_RUN_BYTES_MAX {
         return refuse(format!(
-            "publishing this finding's {directory_bytes} byte(s) would take the run to {projected} \
-             byte(s), past the {FINDING_RUN_BYTES_MAX}-byte ceiling on everything one run files"
+            "publishing this contribution's {delta} further byte(s) would take the run to \
+             {projected} byte(s), past the {FINDING_RUN_BYTES_MAX}-byte ceiling on everything one \
+             run files"
         ));
     }
-    if fresh && PUBLISHED_COUNT.load(Ordering::Relaxed) >= FINDING_RUN_COUNT_MAX {
+    if fresh && published_count >= FINDING_RUN_COUNT_MAX {
         return refuse(format!(
             "this would be finding directory number {}, past the {FINDING_RUN_COUNT_MAX}-directory \
              ceiling on one run — which is above the number of cells the matrix has, so reaching it \
              means the derivation is filing more directories than there are divergences to file",
-            PUBLISHED_COUNT.load(Ordering::Relaxed).saturating_add(1)
+            published_count.saturating_add(1)
         ));
     }
-    Ok(())
+
+    // Committed only now: every refusal above returned with the ledger unchanged apart from a
+    // possibly-created empty entry, which the release path and the emptiness test below both tolerate.
+    let entry = held
+        .directories
+        .entry(String::from(id.as_str()))
+        .or_default();
+    entry.contributions = merged;
+    entry.charged = directory_bytes;
+    held.published_bytes = published_bytes.saturating_add(delta);
+    if fresh {
+        held.published_count = published_count.saturating_add(1);
+    }
+    let reservation = Reservation {
+        id: String::from(id.as_str()),
+        fresh,
+        charged_before,
+        charged_now: directory_bytes,
+        previous,
+        oracle,
+    };
+    Ok((artifacts, reservation, fresh))
 }
 
-/// Charge one published finding directory against the run's totals.
+/// The three artifacts whose content is the union of every contributing oracle's sections.
 ///
-/// Called after a successful write, so the totals describe what is actually on disk. A directory a
-/// later contribution adds to is charged for the bytes it added and is not counted a second time.
-fn charge_artifact_budget(directory_bytes: u64, fresh: bool) {
-    PUBLISHED_BYTES.fetch_add(directory_bytes, Ordering::Relaxed);
-    if fresh {
-        PUBLISHED_COUNT.fetch_add(1, Ordering::Relaxed);
+/// Rendered together because they are decided together: the manifest names each oracle's observation,
+/// the script carries each oracle's capture blocks and comparison, and the diff carries each oracle's
+/// computed difference. Rendering them in one place is what keeps them from disagreeing about who
+/// contributed what.
+struct MergedArtifacts {
+    /// The merged manifest text.
+    manifest: String,
+    /// The merged reproduction script.
+    commands: String,
+    /// The merged difference report.
+    diff: String,
+    /// Every capture file the merged directory holds, deduplicated by name.
+    capture_bytes: Vec<(String, u64)>,
+}
+
+impl MergedArtifacts {
+    /// Assemble the three merged artifacts from every contribution filed for this directory.
+    ///
+    /// `finding` supplies only what is a property of the **cell and the class** — the key, the class,
+    /// the corpus paths, the record's declared contract, the record's description and the marker note.
+    /// Everything that is a property of an **oracle** comes from `merged`, and that division is the
+    /// whole correctness argument: reading a per-oracle field off `finding` here would reintroduce the
+    /// defect this type exists to remove, because `finding` is whichever contribution happens to be
+    /// filing.
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        context: &str,
+        finding: &Finding,
+        id: &FindingId,
+        caps: &Capabilities,
+        minimization: &Minimization,
+        fixed: &FixedArtifacts<'_>,
+        merged: &BTreeMap<Oracle, Contribution>,
+    ) -> HarnessResult<MergedArtifacts> {
+        let mut capture_bytes: Vec<(String, u64)> = Vec::new();
+        for contribution in merged.values() {
+            for (name, bytes) in &contribution.capture_files {
+                if !capture_bytes.iter().any(|(existing, _)| existing == name) {
+                    capture_bytes.push((name.clone(), *bytes));
+                }
+            }
+        }
+        // The two merged artifacts are rendered BEFORE the manifest, because the manifest publishes
+        // their digests: an inventory computed from anything other than the exact bytes about to be
+        // written would be a provenance claim that was never true.
+        let commands = assemble_commands(context, finding, id, merged)?;
+        let diff = assemble_diff(finding, id, merged);
+        let inventory = vec![
+            artifact_inventory_entry(REPRODUCER_SOURCE_NAME, fixed.reproducer),
+            artifact_inventory_entry(REPRODUCER_RECORD_NAME, fixed.record),
+            artifact_inventory_entry(COMMANDS_NAME, commands.as_bytes()),
+            artifact_inventory_entry(ENVIRONMENT_NAME, fixed.environment.as_bytes()),
+            artifact_inventory_entry(DIFF_NAME, diff.as_bytes()),
+        ];
+        Ok(MergedArtifacts {
+            manifest: assemble_manifest(
+                finding,
+                id,
+                caps,
+                minimization,
+                fixed,
+                merged,
+                &capture_bytes,
+                &inventory,
+            ),
+            commands,
+            diff,
+            capture_bytes,
+        })
     }
 }
 
-/// What `oracle` observing the finding `id` *would* mean, without committing to it.
+/// The artifacts of a finding directory whose bytes do not depend on which oracle is filing.
 ///
-/// Returns whether this would be the **first** contribution of the run to that directory — which
-/// decides whether the captured outputs are replaced or added to — and the set of oracles that would
-/// then have observed it, which the manifest names.
-///
-/// # Why this does not record anything
-///
-/// Recording here is what an earlier form of this did, and it made the directory-count ceiling
-/// bypassable in a way that measured cleanly and behaved wrongly: a first contribution refused by the
-/// budget still left its identifier in the map, so the *next* oracle for that cell was told the
-/// directory already existed, skipped the count check on that basis and published it. The ceiling was
-/// set to five and twelve directories appeared. Recording only [after a successful
-/// write](commit_contribution) keeps the two facts in agreement — a directory is "already ours" only
-/// when it is actually on disk — so a cell whose first contribution the budget refuses has every
-/// contribution refused and leaves nothing behind.
-fn peek_contribution(id: &FindingId, oracle: Oracle) -> (bool, Vec<Oracle>) {
-    let held = match contributions().lock() {
-        Ok(held) => held,
-        // A poisoned lock means a thread panicked while recording. The records already made are still
-        // true, and losing them would make a subsequent contribution purge captures its siblings had
-        // written — so they are recovered rather than discarded.
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let mut observed = held.get(id.as_str()).cloned().unwrap_or_default();
-    let first = observed.is_empty();
-    observed.insert(oracle);
-    (first, observed.into_iter().collect())
+/// Grouped rather than passed as five parameters because they travel together everywhere: they are
+/// sized together for the reservation, digested together for the artifact inventory, and written
+/// together. The digests are what make a reduction auditable — see [`render_artifact_inventory`].
+struct FixedArtifacts<'a> {
+    /// The reproducer, a verbatim copy of the corpus program.
+    reproducer: &'a [u8],
+    /// Its expectation record, likewise verbatim.
+    record: &'a [u8],
+    /// The environment fingerprint.
+    environment: &'a str,
 }
 
-/// Record that `oracle`'s evidence for the finding `id` is on disk.
+/// One `artifact = ` inventory line: a name, its exact size, and the digest of its bytes.
+fn artifact_inventory_entry(name: &str, bytes: &[u8]) -> String {
+    format!(
+        "artifact = {name} bytes={} digest={}",
+        bytes.len(),
+        digest_hex_of_bytes(bytes)
+    )
+}
+
+/// Build this oracle's contribution: every section of the merged artifacts that only it can supply.
 ///
-/// Called only after the write has completed, for the reason on [`peek_contribution`].
-fn commit_contribution(id: &FindingId, oracle: Oracle) {
-    let mut held = match contributions().lock() {
-        Ok(held) => held,
-        Err(poisoned) => poisoned.into_inner(),
+/// The flag guard runs here rather than at assembly time, because it is a statement about *this*
+/// oracle's recorded argument vectors and a contribution that fails it must never enter the ledger.
+fn build_contribution(
+    context: &str,
+    finding: &Finding,
+    variables: &ShellVariables,
+) -> HarnessResult<Contribution> {
+    let captures = ordered_captures(finding);
+    for capture in &captures {
+        if let Some(compile) = capture.compile() {
+            require_permitted_flags(context, capture.role(), compile.argv())?;
+        }
+        if let Some(run) = capture.run() {
+            require_permitted_flags(context, capture.role(), run.argv())?;
+        }
+    }
+    let mut contribution = Contribution {
+        summary: String::from(finding.summary()),
+        observation: render_observation_section(finding),
+        roster: captures.iter().map(|capture| capture.describe()).collect(),
+        inventory: Vec::new(),
+        capture_files: Vec::new(),
+        variables: variables.entries.clone(),
+        capture_blocks: Vec::new(),
+        comparison_block: render_comparison_block(finding, &captures),
+        diff: render_diff_section(finding),
+        attribution: finding.cross_arm_attribution(),
     };
-    held.entry(String::from(id.as_str()))
-        .or_default()
-        .insert(oracle);
+    for capture in &captures {
+        contribution.capture_blocks.push((
+            capture.file_stem(),
+            render_capture_block(capture, variables),
+        ));
+        for (name, bytes, digest) in capture_artifact_inventory(capture) {
+            contribution.inventory.push(format!(
+                "capture = {name} role={} target={} opt={} bytes={bytes} digest={digest}",
+                capture.role().prefix(),
+                capture.target().triple(),
+                finding.key().opt().flag()
+            ));
+            contribution.capture_files.push((name, bytes));
+        }
+    }
+    Ok(contribution)
 }
 
 // Why this module derives an identifier that is injective rather than merely unlikely to repeat.
@@ -923,19 +1338,24 @@ impl Capture {
             report.push_str(&format!("failure_scope = {}\n", failure.scope()));
             report.push_str(&format!("failure = {}\n", failure.summary()));
         }
-        // The line that reproduces the artifact by hand, and then the line that actually ran. They
-        // differ whenever a bounding utility wrapped the invocation, and a record that conflated
-        // them would either document a command a maintainer cannot use or hide the supervision the
-        // run really applied.
-        report.push_str(&format!("argv = {}\n", compile.command_line()));
-        // What reproduces the artifact and what this run actually spawned are two different lines
+        // The line that describes the build, and then the line that actually ran. They differ
+        // whenever a bounding utility wrapped the invocation, and a record that conflated them would
+        // either document a command a maintainer cannot use or hide the supervision the run really
+        // applied. Both go through the reporting funnel, so this capture — which is committed with a
+        // curated finding, and which §5.3 forbids editing — carries no absolute checkout path; the
+        // pasteable form of the same build is the corresponding line in `commands.sh`.
+        report.push_str(&format!("argv = {}\n", public_text(compile.command_line())));
+        // What describes the build and what this run actually spawned are two different lines
         // whenever the system timeout utility was available to wrap the compiler. Recording both,
         // and saying which mechanism bounded the build, is what lets a reader attribute a build
         // that was killed at its budget to the bound rather than to the compiler — while `argv`
-        // above stays the line a maintainer pastes, free of scaffolding this run added.
+        // above stays the compiler's own vector, free of scaffolding this run added.
         report.push_str(&format!("timeout_tool = {}\n", compile.timeout_tool_used()));
         if compile.timeout_tool_used() {
-            report.push_str(&format!("spawned = {}\n", compile.spawned_command_line()));
+            report.push_str(&format!(
+                "spawned = {}\n",
+                public_text(&compile.spawned_command_line())
+            ));
         }
         Some(report)
     }
@@ -1047,7 +1467,13 @@ impl Capture {
             ),
             (None, None, None) => String::from("no observation recorded"),
         };
-        sanitize_text_for_report(&format!(
+        // `public_text` rather than sanitization alone, for the same reason
+        // [`RunOutcome::describe`] uses it: this line ends with the command that ran, which names the
+        // workspace, the program and the compiler by absolute path. It is a `MANIFEST.txt` roster row,
+        // so it is *committed* with a curated finding — and a curator cannot elide it there without
+        // also breaking the manifest's own artifact inventory, so the elision belongs here, where the
+        // line is assembled, rather than in a procedure somebody has to remember.
+        public_text(&format!(
             "{} [{}] {} {}: {observation}",
             self.file_stem(),
             self.role.label(),
@@ -1654,7 +2080,71 @@ impl Finding {
     pub fn minimization(&self, caps: &Capabilities) -> Minimization {
         Minimization::describe_for(&self.id(), caps)
     }
+
+    /// What a cross-backend divergence is attributable to, computed from the captures this finding
+    /// carries.
+    ///
+    /// # The one policy, and why it is computed rather than described
+    ///
+    /// A cross-backend divergence is a difference between two of this compiler's own backends, and two
+    /// readings are possible: the compiler under test got this target wrong, or the property being
+    /// compared is one each target's application binary interface fixes for itself. The two lead a
+    /// maintainer to different code, and until this existed the suite said both things in different
+    /// places — one expectation record asserting that every cross-backend divergence in its area is a
+    /// genuine defect, and the findings register describing a triage procedure under which same-target
+    /// agreement makes it an ABI observation instead.
+    ///
+    /// Neither document was wrong about the reasoning; what was missing was a single place that
+    /// *decided*, from evidence the run already had. So the policy is one sentence, encoded here:
+    ///
+    /// - **`abi-observation`** — the compiler under test agrees with the toolchain that implements this
+    ///   target's own ABI, on both stdout bytes and exit status, and only the cross-target comparison
+    ///   differs. The AAP's carve-out applies: a cross-backend divergence attributable to a documented
+    ///   implementation-defined difference, ABI included, is not a defect in the compiler.
+    /// - **`defect-candidate`** — the compiler under test disagrees with its own target's reference
+    ///   toolchain as well. Two independent oracles then point the same way.
+    /// - **`undetermined`** — no same-target reference capture accompanies the finding, so the question
+    ///   cannot be settled from this evidence and is not guessed at. Read the target's psABI, which is
+    ///   authoritative for it.
+    ///
+    /// The verdict is unaffected in every case: it remains [`Verdict::Finding`], because requirement 6
+    /// makes an undocumented divergence a deliverable and an attribution is not an excuse. What this
+    /// changes is that the artifact states which of the two a maintainer is looking at, and carries the
+    /// capture that establishes it.
+    ///
+    /// `None` for any oracle but the cross-backend one, where the question does not arise.
+    pub fn cross_arm_attribution(&self) -> Option<&'static str> {
+        if self.oracle != Oracle::CrossBackend {
+            return None;
+        }
+        let subject = self.subject()?;
+        let Some(reference) = self
+            .captures
+            .iter()
+            .find(|capture| capture.role() == CaptureRole::ReferenceCompiler)
+        else {
+            return Some(ATTRIBUTION_UNDETERMINED);
+        };
+        let agrees = subject.stdout() == reference.stdout()
+            && subject.exit_report() == reference.exit_report();
+        Some(if agrees {
+            ATTRIBUTION_ABI_OBSERVATION
+        } else {
+            ATTRIBUTION_DEFECT_CANDIDATE
+        })
+    }
 }
+
+/// The compiler under test agrees with its own target's reference toolchain, so a cross-backend
+/// difference over this property is a statement about two application binary interfaces.
+pub const ATTRIBUTION_ABI_OBSERVATION: &str = "abi-observation";
+
+/// The compiler under test disagrees with its own target's reference toolchain too, so two independent
+/// oracles point the same way.
+pub const ATTRIBUTION_DEFECT_CANDIDATE: &str = "defect-candidate";
+
+/// No same-target reference capture accompanies the finding, so the attribution is not guessed at.
+pub const ATTRIBUTION_UNDETERMINED: &str = "undetermined";
 
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2168,7 +2658,7 @@ fn prepare_directory(id: &FindingId, fresh: bool) -> HarnessResult<(PathBuf, Pat
 /// single failure mode the findings register exists to prevent.
 ///
 /// The occupant's identity is read from the first line of its own [`MANIFEST_NAME`] that declares
-/// `finding_id`, which [`render_manifest`] writes as the first identity line of every manifest. A
+/// `finding_id`, which [`assemble_manifest`] writes as the first identity line of every manifest. A
 /// directory with no manifest, or a manifest that declares nothing, is treated as this finding's own
 /// partial output from an interrupted run and is rewritten: refusing there would leave a run
 /// unable to make progress after a crash, and there is no other finding's evidence to protect.
@@ -2306,6 +2796,14 @@ const VAR_FINDING_DIR: &str = "FINDING_DIR";
 
 /// Shell variable holding the compiler under test.
 const VAR_BCC: &str = "BCC";
+
+/// The variable holding the path to `setsid`, discovered on the reader's machine.
+///
+/// Probed with `command -v` inside the script rather than declared by the harness, because it is a
+/// property of the machine running the reproduction rather than of the machine that produced the
+/// finding. Empty when the utility is absent, which the watchdog reports as a stated degradation
+/// rather than a silent one.
+const VAR_SETSID: &str = "SETSID";
 
 /// Shell variable holding the timeout utility every reproduced execution is bounded with.
 ///
@@ -2754,29 +3252,46 @@ fn comment(text: &str) -> String {
 /// # Errors
 ///
 /// Refuses to render a script whose recorded invocations carry a flag the shared-flag discipline
-/// forbids on that side — see [`require_permitted_flags`].
-fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
-    let context = format!("rendering the reproduction commands for finding {id}");
-    let captures = ordered_captures(finding);
-    for capture in &captures {
-        if let Some(compile) = capture.compile() {
-            require_permitted_flags(&context, capture.role(), compile.argv())?;
-        }
-        if let Some(run) = capture.run() {
-            require_permitted_flags(&context, capture.role(), run.argv())?;
+/// forbids on that side — see [`require_permitted_flags`], which each contribution passes before it
+/// enters the ledger.
+///
+/// # Why it is assembled from every contribution
+///
+/// Two or three oracles publish into one finding directory, and each contributes its own capture
+/// blocks and its own comparison. The script is therefore the union: the shared preamble, then every
+/// capture block exactly once — deduplicated by capture stem, because two oracles that both observed
+/// the compiler under test contributed the same block — then one comparison section per oracle, in
+/// oracle order. A script that carried only the last contributor's blocks would reproduce one arm of a
+/// divergence while the manifest beside it named all of them.
+fn assemble_commands(
+    context: &str,
+    finding: &Finding,
+    id: &FindingId,
+    merged: &BTreeMap<Oracle, Contribution>,
+) -> HarnessResult<String> {
+    let _ = context;
+    // Re-declared in oracle order from every contribution, so the preamble covers every block the
+    // script carries. `declare` is first-wins on both the name and the value, so the names the blocks
+    // were rendered against are exactly the names declared here — see [`Contribution`].
+    let mut variables = ShellVariables::default();
+    for contribution in merged.values() {
+        for (name, value) in &contribution.variables {
+            variables.declare(name, value);
         }
     }
-
-    let variables = collect_shell_variables(finding);
     let mut script = String::from("#!/bin/sh\n");
     script.push_str(&comment(&format!(
         "Exact reproduction commands for finding {id}."
     )));
     script.push_str("#\n");
+    script.push_str(&comment(&format!("Cell    : {}", finding.key())));
     script.push_str(&comment(&format!(
-        "Cell    : {} under {}",
-        finding.key(),
-        finding.oracle()
+        "Observed: {}",
+        merged
+            .keys()
+            .map(|oracle| format!("{oracle}"))
+            .collect::<Vec<String>>()
+            .join(", ")
     )));
     script.push_str(&comment(&format!("Class   : {}", finding.class())));
     script.push_str("#\n");
@@ -2896,10 +3411,22 @@ fn render_commands(finding: &Finding, id: &FindingId) -> HarnessResult<String> {
     script.push('\n');
     script.push_str(&render_bounded_run_function());
 
-    for capture in &captures {
-        script.push_str(&render_capture_block(capture, &variables));
+    let mut emitted: Vec<&str> = Vec::new();
+    for contribution in merged.values() {
+        for (stem, block) in &contribution.capture_blocks {
+            if emitted.contains(&stem.as_str()) {
+                continue;
+            }
+            emitted.push(stem.as_str());
+            script.push_str(block);
+        }
     }
-    script.push_str(&render_comparison_block(finding, &captures));
+    for (oracle, contribution) in merged {
+        script.push_str(&comment(&format!(
+            "=== what {oracle} compared, and where the two parted ==="
+        )));
+        script.push_str(&contribution.comparison_block);
+    }
     Ok(script)
 }
 
@@ -3470,11 +3997,27 @@ fn render_bounded_invocation(
 /// - **The classification is out of band.** `termination` is set to [`TERMINATION_TIMEOUT`] on the
 ///   strength of `kill` having been issued by this function, never from `$?`. A command that returns
 ///   [`TIMEOUT_UTILITY_STATUS`] promptly is reported as having exited with it.
-/// - **Nothing is orphaned.** When the utility is in front, *it* is the direct child and the program
-///   is its descendant, so killing the child alone would leave the program running. The process group
-///   is therefore killed instead — but only after confirming the child leads a group of its own, which
-///   a wrapped launch does and a bare one does not. Killing a group the script itself belongs to would
-///   kill the script, so that case takes the direct kill.
+/// - **Nothing is orphaned, and the group is one the script creates.** When the utility is in front,
+///   *it* is the direct child and the program is its descendant, so killing the child alone would
+///   leave the program running past the bound — the one failure mode a watchdog exists to prevent.
+///
+///   An earlier form of this function tried to *discover* a group rather than create one: it read
+///   `ps -o pgid=` for the child and for itself and killed the group when the two differed. Both
+///   halves were unsound. A launch the shell does not job-control leaves the child in the script's own
+///   group, so the two agreed and every descendant survived the bound; and the discovery depended on
+///   `ps`, whose absence silently downgraded the kill to the direct child with nothing said about it.
+///
+///   So the script **creates** the group it will kill. The launch goes through `setsid` when the
+///   reader's machine has it, which makes the child a session and process-group leader, so its PGID is
+///   its PID by definition. That the group is not the script's own needs no `ps` to establish: this
+///   script's group leader is a live process, so the kernel cannot have reused its PID for a child
+///   just spawned. The group's existence is then confirmed with `kill -0` on the negated PID before
+///   any signal reaches it. Where `setsid` is absent the function kills the direct child and **says
+///   so on stderr**, which is a stated degradation rather than a silent one.
+///
+///   The direct child is always reaped with `wait`, whichever path was taken, so no zombie is left
+///   behind; descendants killed by the group signal are children of the child and are reaped by the
+///   system, which is not something a script can wait on.
 /// - **The outer net keeps its margin.** The utility, when the run used one, is applied at
 ///   `BUDGET_SECS + OUTER_MARGIN_SECS`: behind the watchdog above, never in front of it.
 ///
@@ -3501,6 +4044,16 @@ fn render_bounded_run_function() -> String {
          put it. Its status is never read. Where the preamble declares none, the reproduction is \
          still bounded, by the loop below."
     )));
+    text.push_str(&comment(
+        "The launch is placed in a process group of its OWN, through `setsid` where the machine has \
+         it, so that a timeout kills the program and not merely the utility in front of it. `setsid` \
+         makes the child a group leader, so its PGID is its PID, and that group cannot be this \
+         script's own because this script's group leader is alive and the kernel cannot have reused \
+         its PID. Without `setsid` the fallback kills the direct child only, and says so on stderr.",
+    ));
+    text.push_str(&format!(
+        "{VAR_SETSID}=$(command -v setsid 2> /dev/null || :)\n\n"
+    ));
     text.push_str(&format!("{SH_BOUNDED}() {{\n"));
     text.push_str("    _b_status=$1\n");
     text.push_str("    _b_stdout=$2\n");
@@ -3510,19 +4063,40 @@ fn render_bounded_run_function() -> String {
     text.push_str(&format!(
         "    _b_outer=$(( _b_budget + ${{{VAR_OUTER_MARGIN}:-5}} ))\n"
     ));
+    // Four launches rather than two, because the group and the outer net are independent choices and
+    // collapsing them would leave one of the four cases untested. The isolation wraps the utility as
+    // well as the command, which is what the harness does: it installs the environment on the one
+    // command it spawns, and that command is already the wrapped vector. Isolating only the inner
+    // command would leave the utility running under the reader's environment and pass that environment
+    // on to the program it bounds. `setsid` goes outside the isolation, because it has to be the
+    // process the shell backgrounds for its PID to be the group's.
     text.push_str(&format!("    if [ -n \"${{{VAR_TIMEOUT}:-}}\" ]; then\n"));
-    // The isolation wraps the utility as well as the command, which is what the harness does: it
-    // installs the environment on the one command it spawns, and that command is already the wrapped
-    // vector. Isolating only the inner command would leave the utility running under the reader's
-    // environment and pass that environment on to the program it bounds.
     text.push_str(&format!(
-        "        {SH_ISOLATED} \"${VAR_TIMEOUT}\" \"$_b_outer\" \"$@\" \
+        "        if [ -n \"${{{VAR_SETSID}:-}}\" ]; then\n"
+    ));
+    text.push_str(&format!(
+        "            \"${VAR_SETSID}\" {SH_ISOLATED} \"${VAR_TIMEOUT}\" \"$_b_outer\" \"$@\" \
          > \"$_b_stdout\" 2> \"$_b_stderr\" &\n"
     ));
+    text.push_str("        else\n");
+    text.push_str(&format!(
+        "            {SH_ISOLATED} \"${VAR_TIMEOUT}\" \"$_b_outer\" \"$@\" \
+         > \"$_b_stdout\" 2> \"$_b_stderr\" &\n"
+    ));
+    text.push_str("        fi\n");
     text.push_str("    else\n");
     text.push_str(&format!(
-        "        {SH_ISOLATED} \"$@\" > \"$_b_stdout\" 2> \"$_b_stderr\" &\n"
+        "        if [ -n \"${{{VAR_SETSID}:-}}\" ]; then\n"
     ));
+    text.push_str(&format!(
+        "            \"${VAR_SETSID}\" {SH_ISOLATED} \"$@\" > \"$_b_stdout\" \
+         2> \"$_b_stderr\" &\n"
+    ));
+    text.push_str("        else\n");
+    text.push_str(&format!(
+        "            {SH_ISOLATED} \"$@\" > \"$_b_stdout\" 2> \"$_b_stderr\" &\n"
+    ));
+    text.push_str("        fi\n");
     text.push_str("    fi\n");
     text.push_str("    _b_child=$!\n");
     text.push_str("    _b_waited=0\n");
@@ -3534,17 +4108,26 @@ fn render_bounded_run_function() -> String {
     text.push_str("    done\n");
     text.push_str("    if kill -0 \"$_b_child\" 2> /dev/null; then\n");
     text.push_str("        _b_killed=1\n");
-    // Established at runtime rather than assumed. A wrapped launch puts the utility in a process
-    // group of its own and the program inside it, so the group is what has to go; a bare launch stays
-    // in this script's group, where a group kill would take the script with it.
-    text.push_str("        _b_group=$(ps -o pgid= -p \"$_b_child\" 2> /dev/null | tr -d ' ')\n");
-    text.push_str("        _b_self=$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')\n");
-    text.push_str("        if [ -n \"$_b_group\" ] && [ \"$_b_group\" != \"$_b_self\" ]; then\n");
-    text.push_str("            kill -9 \"-$_b_group\" 2> /dev/null || :\n");
+    // The group this script created, confirmed to exist before it is signalled. `setsid` makes the
+    // child a group leader, so the group is the child's PID; `kill -0` on the negated PID proves the
+    // group is there and signallable rather than assuming the launch took that path.
+    text.push_str(&format!(
+        "        if [ -n \"${{{VAR_SETSID}:-}}\" ] && kill -0 \"-$_b_child\" 2> /dev/null; then\n"
+    ));
+    text.push_str("            kill -9 \"-$_b_child\" 2> /dev/null || :\n");
     text.push_str("        else\n");
     text.push_str("            kill -9 \"$_b_child\" 2> /dev/null || :\n");
+    // The stated degradation, printed in the script the reader is running: without a group of its own
+    // only the direct child can be signalled safely, so a program behind a timeout utility may outlive
+    // the bound. A bound that quietly does less than it claims is worse than none.
+    text.push_str(&format!(
+        "            [ -n \"${{{VAR_SETSID}:-}}\" ] || command printf '%s\\n' 'note: setsid is \
+         absent, so only the direct child was killed; a program behind a timeout utility may outlive \
+         the bound' >&2\n"
+    ));
     text.push_str("        fi\n");
     text.push_str("    fi\n");
+    // Reaped whichever path was taken, so the script leaves no zombie behind.
     text.push_str("    status=0\n");
     text.push_str("    wait \"$_b_child\" || status=$?\n");
     text.push_str("    if [ \"$_b_killed\" -eq 1 ]; then\n");
@@ -3839,12 +4422,8 @@ fn render_environment(
 /// megabytes wide. So the result is bounded again here by bytes, at a character boundary, with its
 /// own explicit notice. An unbounded artifact is not more evidence than a bounded one — it is a file
 /// a maintainer cannot open.
-fn render_diff(finding: &Finding) -> String {
-    let id = finding.id();
-    let mut text = format!("# computed difference for finding {id}\n");
-    text.push_str(&format!("# cell    : {}\n", finding.key()));
-    text.push_str(&format!("# oracle  : {}\n", finding.oracle()));
-    text.push_str(&format!("# class   : {}\n", finding.class()));
+fn render_diff_section(finding: &Finding) -> String {
+    let mut text = format!("# --- as {} observed it ---\n", finding.oracle());
     text.push_str(&format!(
         "# summary : {}\n",
         sanitize_text_for_report(finding.summary())
@@ -3893,6 +4472,38 @@ fn render_diff(finding: &Finding) -> String {
     text
 }
 
+/// Assemble the difference report from every contribution: one section per observing oracle.
+///
+/// The header states the cell and the class, which every contribution shares; each section then states
+/// what one oracle compared and where it parted. A report carrying only the last contributor's section
+/// would leave the other arms' differences unrecorded while the manifest named them.
+fn assemble_diff(
+    finding: &Finding,
+    id: &FindingId,
+    merged: &BTreeMap<Oracle, Contribution>,
+) -> String {
+    let mut text = format!("# computed difference for finding {id}\n");
+    text.push_str(&format!("# cell    : {}\n", finding.key()));
+    text.push_str(&format!("# class   : {}\n", finding.class()));
+    text.push_str(&format!(
+        "# oracles : {}\n",
+        merged
+            .keys()
+            .map(|oracle| format!("{oracle}"))
+            .collect::<Vec<String>>()
+            .join(", ")
+    ));
+    text.push_str("#\n");
+    text.push_str("# One section follows per oracle that observed this root cause. A section\n");
+    text.push_str("# is that oracle's own comparison; the sections are independent, and a\n");
+    text.push_str("# difference visible in one and not another is itself evidence.\n");
+    for contribution in merged.values() {
+        text.push_str("#\n");
+        text.push_str(&contribution.diff);
+    }
+    text
+}
+
 /// Truncate `text` to [`MAX_DIFF_BYTES`] at a character boundary, appending an explicit notice.
 ///
 /// The boundary walk is what keeps the result valid text: cutting a multi-byte character in half
@@ -3926,14 +4537,20 @@ fn bound_text(text: &str) -> String {
 /// restraint is the point — the suite's authority comes from having compared two independent
 /// implementations and reported what it saw, and a guess recorded beside the evidence in the same
 /// voice would be indistinguishable from a measurement to every later reader.
-fn render_manifest(
+#[allow(clippy::too_many_arguments)]
+fn assemble_manifest(
     finding: &Finding,
     id: &FindingId,
     caps: &Capabilities,
     minimization: &Minimization,
-    reproducer_digest: &str,
-    observers: &[Oracle],
+    fixed: &FixedArtifacts<'_>,
+    merged: &BTreeMap<Oracle, Contribution>,
+    capture_bytes: &[(String, u64)],
+    artifact_inventory: &[String],
 ) -> String {
+    let observers: Vec<Oracle> = merged.keys().copied().collect();
+    let reproducer_digest = digest_hex_of_bytes(fixed.reproducer);
+    let reproducer_digest = reproducer_digest.as_str();
     let mut text = String::from("BLITZY C COMPILER — DIFFERENTIAL CONFORMANCE FINDING\n");
     text.push_str("====================================================\n\n");
     text.push_str(&format!("{MANIFEST_IDENTIFIER_PREFIX}{id}\n"));
@@ -3951,6 +4568,22 @@ fn render_manifest(
     text.push_str(&format!(
         "{MANIFEST_REPRODUCER_DIGEST_PREFIX}{reproducer_digest}\n"
     ));
+    // Which machine-and-checkout this evidence was produced on, as a digest of the two roots and
+    // nothing else. It is what tells a later reader — on a machine whose roots are different — whether
+    // the byte-exact half of the disclosure audit was in force when this directory was committed, or
+    // only the portable half. See [`MANIFEST_SOURCE_MACHINE_PREFIX`].
+    text.push_str(&format!(
+        "{MANIFEST_SOURCE_MACHINE_PREFIX}{}\n",
+        machine_fingerprint()
+    ));
+    // The disclosure review, stated honestly for what a generated directory is: unreviewed, and
+    // needing no review, because nothing beneath the generated findings root is committed. The curated
+    // audit rejects this exact value, so promoting a directory requires a human to replace it with
+    // what they found — which is how the mandatory review in FINDINGS.md §5.3 becomes visible to the
+    // audit rather than remaining an instruction in a document.
+    text.push_str(&format!(
+        "{MANIFEST_DISCLOSURE_PREFIX}{DISCLOSURE_NOT_PERFORMED}\n"
+    ));
     text.push_str(&format!("area             = {}\n", finding.key().area()));
     text.push_str(&format!("program          = {}\n", finding.key().program()));
     text.push_str(&format!(
@@ -3958,16 +4591,16 @@ fn render_manifest(
         finding.key().target().triple(),
         finding.key().opt().flag()
     ));
-    text.push_str(&format!(
-        "oracle           = {}, letter {}\n",
-        finding.oracle(),
-        finding.oracle().letter()
-    ));
-    // Every oracle that observed this root cause, not just the one whose write produced this text.
-    // The identity is the cell and the class, so one refused build is one finding however many oracles
-    // were watching, and this is where that set is recorded rather than in three near-identical
-    // directories. The line is present even when a single oracle observed it, so a reader never has to
-    // wonder whether an absent field means one observer or an older manifest.
+    // Every oracle that observed this root cause. The identity is the cell and the class, so one
+    // refused build is one finding however many oracles were watching, and this is where that set is
+    // recorded rather than in three near-identical directories. The line is present even when a single
+    // oracle observed it, so a reader never has to wonder whether an absent field means one observer
+    // or an older manifest.
+    //
+    // There is deliberately no singular `oracle =` line. An earlier form of this manifest carried one,
+    // naming whichever contribution happened to write last, beside an `observed_by` line naming all of
+    // them — two fields making incompatible claims about the same directory. The per-oracle account is
+    // now a section apiece, below.
     text.push_str(&format!(
         "observed_by      = {}\n",
         observers
@@ -3976,6 +4609,29 @@ fn render_manifest(
             .collect::<Vec<String>>()
             .join(", ")
     ));
+    // One line per observer, so a machine reading this manifest can extract each oracle's own account
+    // without parsing the sections below it. The sections carry the same summary in full; this is the
+    // index, and it exists because a reader comparing two directories wants the one-line answers side
+    // by side before the paragraphs.
+    for (oracle, contribution) in merged {
+        text.push_str(&format!(
+            "observed_{}       = {}\n",
+            oracle.letter(),
+            sanitize_text_for_report(&contribution.summary)
+        ));
+    }
+    // Computed per contributing oracle, from the captures that oracle contributed, so the one policy
+    // lives in the code rather than in two documents that could describe it differently — and so it
+    // survives the merge rather than depending on which oracle happened to file last. Present only for
+    // the cross-backend arm, where the question arises. See [`Finding::cross_arm_attribution`].
+    for (oracle, contribution) in merged {
+        if let Some(attribution) = contribution.attribution {
+            text.push_str(&format!(
+                "attribution_{}    = {attribution}\n",
+                oracle.letter()
+            ));
+        }
+    }
     text.push_str(&format!("divergence_class = {}\n", finding.class()));
     text.push_str(&format!("verdict          = {}\n", Verdict::Finding));
     text.push_str(&format!(
@@ -3984,25 +4640,36 @@ fn render_manifest(
     ));
 
     text.push_str("\nWHAT WAS OBSERVED\n-----------------\n");
-    text.push_str(&sanitize_text_for_report(finding.summary()));
-    text.push_str("\n\n");
-    text.push_str(&render_observation_paragraph(finding));
-
-    text.push_str("\nDIVERGING ORACLES AND CELLS\n---------------------------\n");
     text.push_str(&format!(
-        "The divergence was observed by {} at the cell above. Every capture below is evidence for \
-         it; a capture is listed whether or not it is one of the two sides that differed, because a \
-         side that agreed is part of what makes the difference meaningful.\n\n",
-        finding.oracle()
+        "One section per oracle that observed this root cause, {} in total. Each states that oracle's \
+         own summary, what each side of ITS comparison produced, and the captures it contributed. A \
+         single root cause seen by more than one oracle is one finding; the sections are how the whole \
+         of what was seen stays here without splitting it across near-identical directories.\n",
+        observers.len()
     ));
-    for capture in ordered_captures(finding) {
-        text.push_str(&format!("  {}\n", capture.describe()));
+    for (oracle, contribution) in merged {
+        text.push_str(&format!(
+            "\nOBSERVATION — {oracle} (letter {})\n",
+            oracle.letter()
+        ));
+        text.push_str(&"-".repeat(40));
+        text.push('\n');
+        text.push_str(&contribution.observation);
+        if let Some(attribution) = contribution.attribution {
+            text.push_str(&format!("\n{}\n", attribution_account(attribution)));
+        }
+        text.push_str("\ncaptures contributed by this oracle:\n");
+        for line in &contribution.roster {
+            text.push_str(&format!("  {line}\n"));
+        }
     }
     if let Some(note) = &finding.marker_note {
         text.push_str(&format!("\n  note: {note}\n"));
     }
 
     text.push_str(&finding.contract.render());
+    text.push_str(&render_artifact_inventory(artifact_inventory));
+    text.push_str(&render_capture_inventory(merged, capture_bytes));
 
     text.push_str("\nARTIFACTS IN THIS DIRECTORY\n---------------------------\n");
     text.push_str(&format!(
@@ -4223,25 +4890,176 @@ fn describe_termination(capture: &Capture) -> String {
 /// be able to know what stream it holds without first working out whether that side's build
 /// succeeded, and a scheme that put compiler diagnostics in `.stderr` whenever a program had not run
 /// would make exactly that question unavoidable.
-/// The byte count of every entry [`write_capture`] will publish for one capture.
+/// Every entry [`write_capture`] will publish for one capture: its file name, its byte count and the
+/// digest of its bytes.
 ///
-/// Kept beside that function and derived from the same conditions, because the budget is decided
-/// before anything is written and a projection that disagreed with the write would either refuse a
-/// finding that fitted or accept one that did not.
-fn capture_artifact_sizes(capture: &Capture) -> Vec<u64> {
-    let mut sizes = vec![
-        capture.stdout().len() as u64,
-        capture.stderr().len() as u64,
-        capture.exit_report().len() as u64,
+/// Kept beside that function and derived from the same conditions, for two reasons. The budget is
+/// decided before anything is written, and a projection that disagreed with the write would either
+/// refuse a finding that fitted or accept one that did not. And the manifest publishes this as a
+/// machine-readable **capture inventory**, which is what turns "the outputs directory is not empty"
+/// into a checkable claim: a validator can require every inventory line to match a file on disk and
+/// require every file on disk to be named by a line, so neither a missing capture nor a stray one can
+/// pass as a complete deliverable.
+///
+/// The digest is over the bytes this run captured, so a curated directory whose captures were
+/// regenerated after a reduction — or edited by hand — no longer matches its own manifest, and
+/// `curated_finding_defects` says so.
+fn capture_artifact_inventory(capture: &Capture) -> Vec<(String, u64, String)> {
+    let stem = capture.file_stem();
+    let mut entries = vec![
+        (
+            format!("{stem}.stdout"),
+            capture.stdout().len() as u64,
+            digest_hex_of_bytes(capture.stdout()),
+        ),
+        (
+            format!("{stem}.stderr"),
+            capture.stderr().len() as u64,
+            digest_hex_of_bytes(capture.stderr()),
+        ),
+        (
+            format!("{stem}.exit"),
+            capture.exit_report().len() as u64,
+            digest_hex_of_bytes(capture.exit_report().as_bytes()),
+        ),
     ];
     if let Some(compile) = capture.compile() {
-        sizes.push(compile.stdout().len() as u64);
-        sizes.push(compile.stderr().len() as u64);
+        entries.push((
+            format!("{stem}.compile.stdout"),
+            compile.stdout().len() as u64,
+            digest_hex_of_bytes(compile.stdout()),
+        ));
+        entries.push((
+            format!("{stem}.compile.stderr"),
+            compile.stderr().len() as u64,
+            digest_hex_of_bytes(compile.stderr()),
+        ));
         if let Some(report) = capture.compile_report() {
-            sizes.push(report.len() as u64);
+            entries.push((
+                format!("{stem}.compile.exit"),
+                report.len() as u64,
+                digest_hex_of_bytes(report.as_bytes()),
+            ));
         }
     }
-    sizes
+    entries
+}
+
+/// The manifest's machine-readable capture inventory, merged across every contributing oracle.
+///
+/// # Why an inventory rather than a prose roster
+///
+/// The roster above it is for a reader. This is for a validator, and the distinction is what closes a
+/// real hole: an earlier form of the completeness check established only that `outputs/` existed and
+/// held *something*, so a directory that had lost every capture but one — or had gained a file nobody
+/// published — was certified complete. A report row then read as a recorded observation with the
+/// observation missing.
+///
+/// Each line names one file, the role that produced it, the target and optimization level it belongs
+/// to, its exact byte count and the digest of its bytes. `require_complete` and
+/// `curated_finding_defects` validate the inventory in **both** directions against the filesystem, so
+/// the claim "the per-compiler and per-backend evidence is here" is checked rather than asserted.
+fn render_capture_inventory(
+    merged: &BTreeMap<Oracle, Contribution>,
+    capture_bytes: &[(String, u64)],
+) -> String {
+    let mut text = String::from("\nCAPTURE INVENTORY\n-----------------\n");
+    text.push_str(&format!(
+        "One line per captured file beneath {OUTPUTS_DIR_NAME}/, naming its producer, its exact size \
+         and the digest of its bytes. This is validated against the filesystem in both directions — \
+         every line must match a file, and every file must be named by a line — when the directory is \
+         published and again whenever a curated finding is checked, so a lost capture, an edited one \
+         or a stray one is reported rather than certified.\n\n"
+    ));
+    let mut emitted: Vec<&str> = Vec::new();
+    for contribution in merged.values() {
+        for line in &contribution.inventory {
+            let name = line.split_whitespace().nth(2).unwrap_or_default();
+            if emitted.contains(&name) {
+                continue;
+            }
+            emitted.push(name);
+            text.push_str(&format!("  {line}\n"));
+        }
+    }
+    text.push_str(&format!(
+        "\n  {} capture file(s), {} byte(s) in total\n",
+        capture_bytes.len(),
+        capture_bytes.iter().map(|(_, bytes)| bytes).sum::<u64>()
+    ));
+    text
+}
+
+/// The manifest's machine-readable inventory of its sibling artifacts.
+///
+/// # Why a digest per artifact, and not only for the reproducer
+///
+/// Reduction is the one operation that legitimately rewrites a finding's reproducer, and the whole of
+/// the curation flow is that the record, the captures, the commands and the diff are **regenerated**
+/// against the reduced program before the finding is promoted. The manifest already recorded a digest
+/// of the reproducer, so a reduction that forgot to rewrite the manifest was caught — but a reduction
+/// that rewrote the reproducer *and* the manifest while leaving `commands.sh` compiling the original
+/// program, or `diff.txt` describing its output, was not. The directory then read as a consistent
+/// deliverable whose script reproduced something other than the program it shipped.
+///
+/// Recording a digest for every artifact makes that state impossible to certify: whichever file was
+/// left behind, its digest no longer matches, and `curated_finding_defects` names it. The manifest
+/// cannot digest itself, which is why the reproducer digest also keeps its own dedicated line — a
+/// reader checking one thing by hand checks that one.
+fn render_artifact_inventory(entries: &[String]) -> String {
+    let mut text = String::from("\nARTIFACT INVENTORY\n------------------\n");
+    text.push_str(
+        "One line per artifact beside this manifest, with its exact size and the digest of its bytes, \
+         taken from\nthe bytes actually written. Validated against the filesystem whenever a curated \
+         finding is checked, so a\nreduction that regenerated some artifacts and not others is \
+         reported rather than certified. This manifest\ncannot digest itself; the reproducer digest \
+         above is the one a reader checks by hand.\n\n",
+    );
+    for entry in entries {
+        text.push_str(&format!("  {entry}\n"));
+    }
+    text
+}
+
+/// What a computed cross-backend attribution means, for the manifest section that states it.
+///
+/// One sentence each, and each says what it does **not** claim as well as what it does, because the
+/// distinction it draws is the one a maintainer is most likely to over-read: an ABI observation is not
+/// an excuse, and the verdict is a finding either way.
+fn attribution_account(attribution: &str) -> String {
+    match attribution {
+        ATTRIBUTION_ABI_OBSERVATION => format!(
+            "attribution: {ATTRIBUTION_ABI_OBSERVATION} — the compiler under test AGREES with the \
+             toolchain that implements this target's own ABI, on both stdout bytes and exit status, \
+             and only the cross-target comparison differs. A difference over a property each ABI \
+             fixes for itself is a statement about two ABIs rather than a defect in the compiler, \
+             which is the implementation-defined carve-out this suite works under. This is NOT an \
+             excuse and NOT a pass: the verdict is a finding, the evidence is here, and the target's \
+             own psABI is authoritative for what the layout should be — read it before concluding."
+        ),
+        ATTRIBUTION_DEFECT_CANDIDATE => format!(
+            "attribution: {ATTRIBUTION_DEFECT_CANDIDATE} — the compiler under test DISAGREES with \
+             its own target's reference toolchain as well, so two independent oracles point the same \
+             way and the ABI carve-out does not apply. This is the strongest form a finding takes; it \
+             is still a deliverable rather than something this suite patches."
+        ),
+        _ => format!(
+            "attribution: {ATTRIBUTION_UNDETERMINED} — no same-target reference capture accompanies \
+             this finding, so whether the divergence is a candidate defect or a difference between \
+             two ABIs cannot be settled from this evidence, and it is not guessed at. Re-run the \
+             cell with a reference driver for this target, or read the target's psABI, which is \
+             authoritative for it."
+        ),
+    }
+}
+
+/// One oracle's `WHAT WAS OBSERVED` body: its own summary and its own side-by-side account.
+fn render_observation_section(finding: &Finding) -> String {
+    let mut text = String::new();
+    text.push_str(&sanitize_text_for_report(finding.summary()));
+    text.push_str("\n\n");
+    text.push_str(&render_observation_paragraph(finding));
+    text
 }
 
 fn write_capture(context: &str, outputs: &Path, capture: &Capture) -> HarnessResult<Vec<PathBuf>> {
@@ -4327,7 +5145,326 @@ fn require_complete(context: &str, directory: &Path, key: &CellKey) -> HarnessRe
             ));
         }
     }
+    // The inventory the manifest just published, validated against what was just written. Checked here
+    // as well as by `artifact_defect` because this is the moment the run can still say something: a
+    // capture that failed to reach the disk is a defect in this write, and discovering it later leaves
+    // a report row pointing at evidence that is not there.
+    let manifest_text = String::from_utf8_lossy(&read_file_bounded(
+        context,
+        &directory.join(MANIFEST_NAME),
+        MAX_INSPECTED_FILE_BYTES,
+    )?)
+    .into_owned();
+    if let Some(defect) = capture_inventory_defect(directory, &manifest_text) {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "the finding directory was written but its captured evidence does not match the \
+                 inventory its own manifest publishes: {defect}"
+            ),
+        ));
+    }
     require_reproducer_pair_usable(context, directory, key)
+}
+
+/// The manifest line that introduces one capture-inventory entry, without its value.
+///
+/// A constant rather than a literal at each site for the same reason the identifier prefix is: a
+/// validator whose prefix silently stops matching reports a complete directory for an empty one.
+const MANIFEST_CAPTURE_PREFIX: &str = "capture = ";
+
+/// One parsed capture-inventory entry: the file a run published, its size and the digest of its bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InventoryEntry {
+    /// The file name beneath `outputs/`.
+    name: String,
+    /// The exact byte count the run published.
+    bytes: u64,
+    /// The digest of those bytes.
+    digest: String,
+}
+
+/// Read the capture inventory out of a manifest.
+///
+/// Tolerant of the surrounding prose by construction: only lines whose first non-space token sequence
+/// is the inventory prefix are considered, and a line that carries the prefix without a well-formed
+/// `bytes=` and `digest=` is returned as malformed rather than skipped — a validator that skipped it
+/// would certify a directory whose inventory it could not read.
+fn parse_inventory(text: &str, prefix: &str) -> (Vec<InventoryEntry>, Vec<String>) {
+    let mut entries = Vec::new();
+    let mut malformed = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(prefix) else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let Some(name) = fields.next() else {
+            malformed.push(String::from(trimmed));
+            continue;
+        };
+        let mut bytes: Option<u64> = None;
+        let mut digest: Option<String> = None;
+        for field in fields {
+            if let Some(value) = field.strip_prefix("bytes=") {
+                bytes = value.parse::<u64>().ok();
+            } else if let Some(value) = field.strip_prefix("digest=") {
+                digest = Some(String::from(value));
+            }
+        }
+        match (bytes, digest) {
+            (Some(bytes), Some(digest)) => entries.push(InventoryEntry {
+                name: String::from(name),
+                bytes,
+                digest,
+            }),
+            _ => malformed.push(String::from(trimmed)),
+        }
+    }
+    (entries, malformed)
+}
+
+/// Why the captured evidence on disk disagrees with the inventory its own manifest publishes, or
+/// `None`.
+///
+/// # The hole this closes
+///
+/// An earlier form of the completeness check established that `outputs/` was a directory and that it
+/// held *something*. A finding that had lost every capture but one satisfied it; so did one that had
+/// gained a file nobody published; so did one whose captures had been edited. The report row then read
+/// as a recorded observation with the observation missing or altered, which is the one shape of report
+/// that actively misleads — worse than a failure, because it looks like a result.
+///
+/// So the inventory is validated in **both** directions, against exact producer triplets:
+///
+/// - every line names a file that is a **regular file** beneath `outputs/` — checked without following
+///   a link, because every name here is predictable before the run publishes it — whose size is exactly
+///   the recorded one and whose bytes digest to the recorded digest;
+/// - every regular file beneath `outputs/` is named by exactly one line, so a stray capture is a defect
+///   rather than an unremarked extra;
+/// - a non-regular entry beneath `outputs/` is a defect, since a run publishes only regular files there.
+///
+/// The digests are what make this a provenance check as well as a completeness one: a curated finding
+/// whose reproducer was reduced and whose captures were not regenerated fails here, naming the file.
+fn capture_inventory_defect(directory: &Path, manifest_text: &str) -> Option<String> {
+    let outputs = directory.join(OUTPUTS_DIR_NAME);
+    let (entries, malformed) = parse_inventory(manifest_text, MANIFEST_CAPTURE_PREFIX);
+    if let Some(line) = malformed.first() {
+        return Some(format!(
+            "its {MANIFEST_NAME} carries a capture-inventory line this validator cannot read, so the \
+             evidence it names cannot be checked: {}",
+            sanitize_text_for_report(line)
+        ));
+    }
+    if entries.is_empty() {
+        return Some(format!(
+            "its {MANIFEST_NAME} publishes no capture inventory, so there is no statement of which \
+             per-compiler and per-backend files the directory should hold — and therefore no way to \
+             tell a complete set from a partial one"
+        ));
+    }
+
+    let context = format!("validating the captures of {}", shown_path(directory));
+    for entry in &entries {
+        // A name with a separator or a parent reference would read outside the captures directory.
+        if entry.name.contains('/') || entry.name.contains('\\') || entry.name.contains("..") {
+            return Some(format!(
+                "its {MANIFEST_NAME} names the capture {}, which is not a plain file name; a capture \
+                 inventory names files inside {OUTPUTS_DIR_NAME}/ and nothing else",
+                sanitize_text_for_report(&entry.name)
+            ));
+        }
+        let path = outputs.join(&entry.name);
+        let observed = fs::symlink_metadata(&path).ok();
+        match &observed {
+            Some(metadata) if metadata.is_file() => {}
+            Some(metadata) if metadata.file_type().is_symlink() => {
+                return Some(format!(
+                    "its {MANIFEST_NAME} names the capture {OUTPUTS_DIR_NAME}/{} but a symbolic link \
+                     is there, which is not evidence a run published and is not followed",
+                    sanitize_text_for_report(&entry.name)
+                ))
+            }
+            Some(_) => {
+                return Some(format!(
+                    "its {MANIFEST_NAME} names the capture {OUTPUTS_DIR_NAME}/{} but what is there is \
+                     not a regular file",
+                    sanitize_text_for_report(&entry.name)
+                ))
+            }
+            None => {
+                return Some(format!(
+                    "its {MANIFEST_NAME} names the capture {OUTPUTS_DIR_NAME}/{} and nothing is \
+                     there, so evidence the finding claims to carry was never published or has been \
+                     lost",
+                    sanitize_text_for_report(&entry.name)
+                ))
+            }
+        }
+        let bytes = match read_file_bounded(&context, &path, MAX_INSPECTED_FILE_BYTES) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Some(format!(
+                "its capture {OUTPUTS_DIR_NAME}/{} could not be read, so the evidence cannot be \
+                     confirmed: {error}",
+                sanitize_text_for_report(&entry.name)
+            ))
+            }
+        };
+        if bytes.len() as u64 != entry.bytes {
+            return Some(format!(
+                "its {MANIFEST_NAME} records {OUTPUTS_DIR_NAME}/{} as {} byte(s) and the file holds \
+                 {}; the evidence and the manifest describing it no longer agree",
+                sanitize_text_for_report(&entry.name),
+                entry.bytes,
+                bytes.len()
+            ));
+        }
+        let observed_digest = digest_hex_of_bytes(&bytes);
+        if observed_digest != entry.digest {
+            return Some(format!(
+                "its {MANIFEST_NAME} records {OUTPUTS_DIR_NAME}/{} with digest {} and the file \
+                 digests to {}; the captured evidence was changed after the manifest was written, \
+                 which is the signature of a reduction whose evidence was not regenerated",
+                sanitize_text_for_report(&entry.name),
+                sanitize_text_for_report(&entry.digest),
+                sanitize_text_for_report(&observed_digest)
+            ));
+        }
+    }
+
+    let published = match fs::read_dir(&outputs) {
+        Ok(published) => published,
+        Err(error) => {
+            return Some(format!(
+            "its {OUTPUTS_DIR_NAME} directory could not be enumerated, so the captures it holds \
+                 cannot be checked against the inventory: {error}"
+        ))
+        }
+    };
+    for found in published {
+        let found = match found {
+            Ok(found) => found,
+            Err(error) => {
+                return Some(format!(
+                "an entry of its {OUTPUTS_DIR_NAME} directory could not be read, so the captures \
+                     cannot be checked against the inventory: {error}"
+            ))
+            }
+        };
+        let name = found.file_name().to_string_lossy().into_owned();
+        let metadata = match fs::symlink_metadata(found.path()) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return Some(format!(
+                    "the capture {OUTPUTS_DIR_NAME}/{} could not be inspected: {error}",
+                    sanitize_text_for_report(&name)
+                ))
+            }
+        };
+        if !metadata.is_file() {
+            return Some(format!(
+                "its {OUTPUTS_DIR_NAME} directory holds {}, which is not a regular file; a run \
+                 publishes only regular files there, so anything else arrived by another route",
+                sanitize_text_for_report(&name)
+            ));
+        }
+        if !entries.iter().any(|entry| entry.name == name) {
+            return Some(format!(
+                "its {OUTPUTS_DIR_NAME} directory holds {}, which its own {MANIFEST_NAME} does not \
+                 name; evidence nobody declared cannot be attributed to a producer, so it is \
+                 reported rather than silently counted as part of the deliverable",
+                sanitize_text_for_report(&name)
+            ));
+        }
+    }
+    None
+}
+
+/// The manifest line that introduces one sibling-artifact inventory entry, without its value.
+const MANIFEST_ARTIFACT_PREFIX: &str = "artifact = ";
+
+/// Why a finding's sibling artifacts disagree with the inventory its own manifest publishes, or
+/// `None`.
+///
+/// The same both-directions discipline [`capture_inventory_defect`] applies to the captures, applied to
+/// the five artifacts beside the manifest. It is what makes post-reduction regeneration **proven**
+/// rather than instructed: a reduction that rewrote `reproducer.c` and the manifest while leaving
+/// `commands.sh` compiling the original program is reported here, naming the file whose digest no
+/// longer matches.
+///
+/// The inventory is a closed set — exactly the five artifacts a run writes beside the manifest — so a
+/// line naming anything else is a defect rather than an extra, and a missing line is a manifest that
+/// has stopped describing its own directory.
+fn artifact_inventory_defect(directory: &Path, manifest_text: &str) -> Option<String> {
+    let expected = [
+        REPRODUCER_SOURCE_NAME,
+        REPRODUCER_RECORD_NAME,
+        COMMANDS_NAME,
+        ENVIRONMENT_NAME,
+        DIFF_NAME,
+    ];
+    let (entries, malformed) = parse_inventory(manifest_text, MANIFEST_ARTIFACT_PREFIX);
+    if let Some(line) = malformed.first() {
+        return Some(format!(
+            "its {MANIFEST_NAME} carries an artifact-inventory line this validator cannot read, so \
+             the artifact it names cannot be checked: {}",
+            sanitize_text_for_report(line)
+        ));
+    }
+    for name in expected {
+        if !entries.iter().any(|entry| entry.name == name) {
+            return Some(format!(
+                "its {MANIFEST_NAME} publishes no `{}{name}` line, so there is no record of the bytes \
+                 that artifact held when the manifest was written — which is exactly what a reduction \
+                 changes",
+                MANIFEST_ARTIFACT_PREFIX
+            ));
+        }
+    }
+    let context = format!("validating the artifacts of {}", shown_path(directory));
+    for entry in &entries {
+        if !expected.contains(&entry.name.as_str()) {
+            return Some(format!(
+                "its {MANIFEST_NAME} names {} in its artifact inventory, which is not one of the \
+                 artifacts a finding directory holds beside the manifest",
+                sanitize_text_for_report(&entry.name)
+            ));
+        }
+        let path = directory.join(&entry.name);
+        let bytes = match read_file_bounded(&context, &path, MAX_INSPECTED_FILE_BYTES) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Some(format!(
+                    "its {} could not be read, so the manifest's record of its bytes cannot be \
+                     confirmed: {error}",
+                    sanitize_text_for_report(&entry.name)
+                ))
+            }
+        };
+        // Both halves are reported together rather than the size first and the digest on the next
+        // run. A curator who elided a path from `commands.sh` during the disclosure review has
+        // legitimately changed the bytes and has to write the new pair into this inventory, and the
+        // arithmetic is not one anybody does by hand — so this message is the calculator: it states
+        // the recorded pair and the observed pair, and transcribing the observed one closes the loop
+        // in a single pass instead of two.
+        let observed = digest_hex_of_bytes(&bytes);
+        if bytes.len() as u64 != entry.bytes || observed != entry.digest {
+            return Some(format!(
+                "its {MANIFEST_NAME} records {} as {} byte(s) with digest {}, and the file holds {} \
+                 byte(s) digesting to {}. Reducing a reproducer is expected, and so is eliding a \
+                 value during the disclosure review — leaving the manifest describing the artifact as \
+                 it was before either is not. Rerun every affected cell, or transcribe the observed \
+                 pair into this line, so every artifact and the record of it agree",
+                sanitize_text_for_report(&entry.name),
+                entry.bytes,
+                sanitize_text_for_report(&entry.digest),
+                bytes.len(),
+                sanitize_text_for_report(&observed)
+            ));
+        }
+    }
+    None
 }
 
 /// Why a finding's artifact directory falls short of being a deliverable, or `None`.
@@ -4396,6 +5533,29 @@ pub fn artifact_defect(directory: &Path) -> Option<String> {
             "its {OUTPUTS_DIR_NAME} directory holds nothing, so the per-compiler and per-backend \
              evidence it names was never published"
         ));
+    }
+    // Non-empty is not the same as complete. The manifest publishes an exact inventory of the files
+    // it produced, with a size and a digest for each, and the directory is held to it in both
+    // directions — see [`capture_inventory_defect`].
+    let context = format!("reading the manifest of {}", shown_path(directory));
+    let manifest_text = match read_file_bounded(
+        &context,
+        &directory.join(MANIFEST_NAME),
+        MAX_INSPECTED_FILE_BYTES,
+    ) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => {
+            return Some(format!(
+            "its {MANIFEST_NAME} could not be read, so the evidence beside it cannot be checked \
+                 against what it claims: {error}"
+        ))
+        }
+    };
+    if let Some(defect) = capture_inventory_defect(directory, &manifest_text) {
+        return Some(defect);
+    }
+    if let Some(defect) = artifact_inventory_defect(directory, &manifest_text) {
+        return Some(defect);
     }
     if let Err(error) = load_curated_pair(directory) {
         return Some(format!(
@@ -4498,20 +5658,73 @@ pub fn curated_finding_defects(directory: &Path) -> Vec<String> {
         }
     };
 
-    match manifest_line_value(&manifest_text, MANIFEST_IDENTIFIER_PREFIX) {
-        Some(identifier) if identifier == name => {}
-        Some(identifier) => defects.push(format!(
-            "its directory is named {} while its own {MANIFEST_NAME} declares the identifier {}; the \
-             register indexes a finding by its directory name, so the two must agree or a reader \
-             following an entry arrives at evidence for a different divergence",
-            sanitize_text_for_report(&name),
-            sanitize_text_for_report(&identifier)
-        )),
+    // Identity, in the two forms a curated directory can legitimately carry.
+    //
+    // A run derives a directory name from the divergence itself, and that generated identifier is
+    // always recorded — it is what ties this evidence to the cell and class that produced it. But the
+    // committed register names a curated finding `F-NNNN-<slug>`, deliberately: a sequential number a
+    // human assigns is what a person cites in an issue, and a derived digest-and-slug name is not.
+    //
+    // An earlier form of this check required the directory basename to equal the generated identifier,
+    // which made the register's own naming rule unsatisfiable — every promoted finding was reported as
+    // a defect for being named the way the register says to name it. So both forms are accepted, and
+    // which one applies is not left to inference: a directory named in the curated form must declare
+    // that name in its own `curated_id` line, so the manifest states the identity the register indexes
+    // it under **and** the generated identity the evidence was produced under, and neither can
+    // masquerade as the other.
+    let generated = manifest_line_value(&manifest_text, MANIFEST_IDENTIFIER_PREFIX);
+    let curated = manifest_line_value(&manifest_text, MANIFEST_CURATED_ID_PREFIX);
+    match &generated {
+        Some(_) => {}
         None => defects.push(format!(
-            "its {MANIFEST_NAME} states no `{}` line, so nothing inside the directory claims the \
-             identifier the register indexes it under",
+            "its {MANIFEST_NAME} states no `{}` line, so nothing inside the directory records the \
+             identity the evidence was produced under",
             MANIFEST_IDENTIFIER_PREFIX.trim_end()
         )),
+    }
+    if is_curated_finding_name(&name) {
+        match &curated {
+            Some(declared) if declared == &name => {}
+            Some(declared) => defects.push(format!(
+                "its directory is named {} while its own {MANIFEST_NAME} declares `{}` as {}; the \
+                 register indexes a curated finding by its directory name, so the two must agree or a \
+                 reader following an entry arrives at evidence filed under another name",
+                sanitize_text_for_report(&name),
+                MANIFEST_CURATED_ID_PREFIX.trim_end(),
+                sanitize_text_for_report(declared)
+            )),
+            None => defects.push(format!(
+                "its directory is named {} — the curated `{CURATED_NAME_SHAPE}` form — but its \
+                 {MANIFEST_NAME} states no `{}` line, so nothing inside it claims that name. Record \
+                 it beside the generated identifier: the curated name is what the register indexes \
+                 and the generated one is what ties the evidence to the cell that produced it",
+                sanitize_text_for_report(&name),
+                MANIFEST_CURATED_ID_PREFIX.trim_end()
+            )),
+        }
+    } else {
+        match (&generated, &curated) {
+            (Some(identifier), None) if identifier == &name => {}
+            (_, Some(declared)) => defects.push(format!(
+                "its directory is named {} while its own {MANIFEST_NAME} declares the curated \
+                 identifier {}; a directory carrying a `{}` line must be named in the \
+                 `{CURATED_NAME_SHAPE}` form the register indexes, so that a curated finding and a \
+                 generated one can never be mistaken for one another",
+                sanitize_text_for_report(&name),
+                sanitize_text_for_report(declared),
+                MANIFEST_CURATED_ID_PREFIX.trim_end()
+            )),
+            (Some(identifier), None) => defects.push(format!(
+                "its directory is named {} while its own {MANIFEST_NAME} declares the identifier {}, \
+                 and the name is not the curated `{CURATED_NAME_SHAPE}` form either; a promoted \
+                 finding is named either exactly as the run derived it or in the curated form with a \
+                 `{}` line declaring that name",
+                sanitize_text_for_report(&name),
+                sanitize_text_for_report(identifier),
+                MANIFEST_CURATED_ID_PREFIX.trim_end()
+            )),
+            (None, None) => {}
+        }
     }
 
     match (
@@ -4538,6 +5751,8 @@ pub fn curated_finding_defects(directory: &Path) -> Vec<String> {
         )),
     }
 
+    defects.extend(portability_defects(&manifest_text, directory));
+
     for artifact in CURATED_TEXT_ARTIFACTS {
         let path = directory.join(artifact);
         let text = match read_file_bounded(&context, &path, MAX_INSPECTED_FILE_BYTES) {
@@ -4554,15 +5769,117 @@ pub fn curated_finding_defects(directory: &Path) -> Vec<String> {
         }
     }
 
+    // Every capture, too. An earlier form of this check deliberately exempted `outputs/`, reasoning
+    // that a captured stream is evidence and must not be rewritten. The first half of that is right
+    // and the conclusion did not follow: a compiler diagnostic naming `/home/<someone>/checkout/...`
+    // is exactly as disclosing in `outputs/bcc-aarch64-O2.compile.stderr` as it is in `commands.sh`,
+    // and it is the artifact most likely to carry one, because a compiler prints the paths it was
+    // given. Exempting it left the largest disclosure surface in the directory unexamined.
+    //
+    // What changes is only *what is done about it*: this reports, and never rewrites. Elision is a
+    // curator's decision, taken before promotion and recorded in `FINDINGS.md`, because redacting a
+    // captured stream alters evidence and must be visible in the register rather than performed by a
+    // validator.
+    for (name, text) in curated_capture_texts(&context, directory, &mut defects) {
+        for defect in disclosure_defects(&text) {
+            defects.push(format!(
+                "its {OUTPUTS_DIR_NAME}/{name} must not be committed as it is: {defect}. A captured \
+                 stream is evidence, so nothing here rewrites it: elide before promotion and record \
+                 the elision in {FINDINGS_REGISTER}"
+            ));
+        }
+    }
+
     defects
 }
 
-/// The text artifacts a curation step must scan before committing a finding.
+/// The shape the committed register names a curated finding by.
+const CURATED_NAME_SHAPE: &str = "F-NNNN-<slug>";
+
+/// Whether `name` is a curated finding directory name: `F-`, four or more digits, `-`, then a slug.
 ///
-/// The captured streams under `outputs/` are deliberately excluded: they are a program's own stdout
-/// and a compiler's own diagnostics, byte for byte, and rewriting them would destroy the evidence.
-/// A compiler diagnostic naming the workspace it was given is a fact about the run, and the
-/// procedure in `FINDINGS.md` is what tells a curator to review those by eye.
+/// Deliberately strict about the parts a reader relies on — the `F-` prefix, at least four digits, and
+/// a non-empty kebab-case remainder — and deliberately silent about how long the slug is, because the
+/// register's numbering is a human sequence rather than a derived one.
+fn is_curated_finding_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("F-") else {
+        return false;
+    };
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() < 4 {
+        return false;
+    }
+    let Some(slug) = rest[digits.len()..].strip_prefix('-') else {
+        return false;
+    };
+    !slug.is_empty()
+        && slug.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+}
+
+/// Read every capture beneath a curated finding's `outputs/` directory as text, for inspection.
+///
+/// Enumeration failures are pushed onto `defects` rather than swallowed: a captures directory that
+/// cannot be read is a curated finding that cannot be validated, and reporting nothing would certify
+/// it. Each file is read through the bounded reader, which refuses a link, a device node and an
+/// oversized file, so nothing here can be led outside the directory or made to read something
+/// unbounded. Bytes that are not valid text are inspected lossily — a disclosing path is ASCII
+/// whatever surrounds it.
+fn curated_capture_texts(
+    context: &str,
+    directory: &Path,
+    defects: &mut Vec<String>,
+) -> Vec<(String, String)> {
+    let outputs = directory.join(OUTPUTS_DIR_NAME);
+    let mut texts: Vec<(String, String)> = Vec::new();
+    let entries = match fs::read_dir(&outputs) {
+        Ok(entries) => entries,
+        Err(error) => {
+            defects.push(format!(
+                "its {OUTPUTS_DIR_NAME} directory could not be enumerated, so its captures could not \
+                 be inspected before promotion: {error}"
+            ));
+            return texts;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                defects.push(format!(
+                    "an entry of its {OUTPUTS_DIR_NAME} directory could not be read, so its captures \
+                     could not be inspected before promotion: {error}"
+                ));
+                continue;
+            }
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        match read_file_bounded(context, &entry.path(), MAX_INSPECTED_FILE_BYTES) {
+            Ok(bytes) => texts.push((name, String::from_utf8_lossy(&bytes).into_owned())),
+            Err(error) => defects.push(format!(
+                "its capture {OUTPUTS_DIR_NAME}/{} could not be read, so it could not be inspected \
+                 before promotion: {error}",
+                sanitize_text_for_report(&name)
+            )),
+        }
+    }
+    texts.sort_by(|(left, _), (right, _)| left.cmp(right));
+    texts
+}
+
+/// The artifacts beside the manifest that a curation step scans before committing a finding.
+///
+/// The captured streams under `outputs/` are **also** scanned — recursively, by
+/// [`curated_capture_texts`] — and are listed separately rather than here only because they are
+/// enumerated from the filesystem rather than named in advance. Exempting them, as an earlier form of
+/// this check did, left the largest disclosure surface in the directory unexamined: a compiler prints
+/// the paths it was given, so `outputs/*.compile.stderr` is the artifact most likely to carry an
+/// absolute home path.
+///
+/// What differs is only the remedy. A captured stream is evidence, so nothing here rewrites one:
+/// elision is a curator's decision, taken before promotion and recorded in `FINDINGS.md`, because
+/// altering evidence must be visible in the register rather than performed by a validator.
 const CURATED_TEXT_ARTIFACTS: &[&str] = &[
     MANIFEST_NAME,
     COMMANDS_NAME,
@@ -4571,6 +5888,144 @@ const CURATED_TEXT_ARTIFACTS: &[&str] = &[
     REPRODUCER_RECORD_NAME,
     REPRODUCER_SOURCE_NAME,
 ];
+
+/// Every way a curated directory fails to state how portable its evidence is, or an empty list.
+///
+/// # Why two fields rather than one more scan
+///
+/// The disclosure audit in [`disclosure_defects`] has a portable half that runs everywhere and an
+/// exact half that can only ever apply on the machine that produced the artifact. That asymmetry is
+/// unavoidable — a validator cannot know another machine's account names, host names or secret values
+/// — and it is exactly why a committed directory has to *say* which half was in force when it was
+/// promoted, and *say* that the part no validator can perform was performed by a person.
+///
+/// So this checks two recorded claims rather than re-deriving anything:
+///
+/// - [`MANIFEST_SOURCE_MACHINE_PREFIX`] must be present and well formed. Its value is not required to
+///   equal this machine's: a committed finding produced elsewhere is the ordinary case, and that is
+///   the case the portable half of the scan exists for. What is required is that the value be *there*,
+///   so a reader can make the comparison at all.
+/// - [`MANIFEST_DISCLOSURE_PREFIX`] must state a reviewed outcome. A run writes
+///   [`DISCLOSURE_NOT_PERFORMED`], truthfully, so that value is rejected here and promotion cannot
+///   happen without a human replacing it — which is how `FINDINGS.md` §5.3's mandatory review becomes
+///   a step the audit can see was taken instead of an instruction in a document.
+///
+/// A declared redaction is checked further, because two of its ways of being wrong are mechanical: it
+/// must name at least one artifact that exists in the directory, and it must not name a **compared**
+/// stream. Editing a `.stdout` or an `.exit` capture makes the divergence unfalsifiable — the finding
+/// *is* the difference between those bytes — so §5.3 forbids it, and a manifest that declares it is
+/// reporting a destroyed deliverable rather than a protected one.
+fn portability_defects(manifest_text: &str, directory: &Path) -> Vec<String> {
+    let mut defects: Vec<String> = Vec::new();
+    match manifest_line_value(manifest_text, MANIFEST_SOURCE_MACHINE_PREFIX) {
+        Some(recorded)
+            if recorded.len() == DIGEST_HEX_DIGITS
+                && recorded.chars().all(|digit| digit.is_ascii_hexdigit()) => {}
+        Some(other) => defects.push(format!(
+            "its {MANIFEST_NAME} states `{}{}`, which is not the {DIGEST_HEX_DIGITS}-digit \
+             hexadecimal digest that field holds; a value that cannot be compared with this machine's \
+             own answers nothing about whether the byte-exact half of the disclosure audit applied \
+             when this directory was committed",
+            MANIFEST_SOURCE_MACHINE_PREFIX.trim_end(),
+            sanitize_text_for_report(&other)
+        )),
+        None => defects.push(format!(
+            "its {MANIFEST_NAME} states no `{}` line, so nothing records which machine-and-checkout \
+             this evidence was produced on. The disclosure audit knows this machine's roots and this \
+             run's secrets exactly and knows another machine's not at all, so without that field a \
+             reader cannot tell which half of the audit was in force before this was committed",
+            MANIFEST_SOURCE_MACHINE_PREFIX.trim_end()
+        )),
+    }
+
+    let review = manifest_line_value(manifest_text, MANIFEST_DISCLOSURE_PREFIX);
+    match review.as_deref() {
+        Some(DISCLOSURE_CLEAN) => {}
+        Some(value) if value.starts_with(DISCLOSURE_REDACTED_PREFIX) => {
+            let listed = &value[DISCLOSURE_REDACTED_PREFIX.len()..];
+            let named: Vec<&str> = listed
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .collect();
+            if named.is_empty() {
+                defects.push(format!(
+                    "its {MANIFEST_NAME} declares a redaction and names no artifact it touched; a \
+                     reader comparing two curated findings has to be able to tell which files hold a \
+                     placeholder rather than a tool's own output"
+                ));
+            }
+            for name in named {
+                if is_compared_capture(name) {
+                    defects.push(format!(
+                        "its {MANIFEST_NAME} declares a redaction of {}, which is one of the \
+                         compared streams. The divergence IS the difference between those bytes, so \
+                         editing one makes the finding unfalsifiable: if a program's own stdout \
+                         carries something that cannot be published, the reproducer breaks a corpus \
+                         authoring rule and the fix is to rewrite the program and re-capture",
+                        sanitize_text_for_report(name)
+                    ));
+                    continue;
+                }
+                if !directory.join(name).exists() {
+                    defects.push(format!(
+                        "its {MANIFEST_NAME} declares a redaction of {}, which is not an entry in the \
+                         directory; name the artifacts exactly as they are filed, so the declaration \
+                         can be followed to the file it describes",
+                        sanitize_text_for_report(name)
+                    ));
+                }
+            }
+        }
+        Some(DISCLOSURE_NOT_PERFORMED) => defects.push(format!(
+            "its {MANIFEST_NAME} still carries the state a run writes — the pre-commit disclosure \
+             review in {FINDINGS_REGISTER} §5.3 has not been performed. That review is mandatory, and \
+             a generated directory states so in this field precisely so that promoting one cannot skip \
+             it by omission. Replace the value with `{DISCLOSURE_CLEAN}` when the review removed \
+             nothing, or with `{DISCLOSURE_REDACTED_PREFIX}<artifact>[, …]` naming every artifact a \
+             replacement touched"
+        )),
+        Some(value) => defects.push(format!(
+            "its {MANIFEST_NAME} states `{}{}`, which is not one of the outcomes this field holds. \
+             Use `{DISCLOSURE_CLEAN}` when the review in {FINDINGS_REGISTER} §5.3 removed nothing, or \
+             `{DISCLOSURE_REDACTED_PREFIX}<artifact>[, …]` naming every artifact a replacement \
+             touched; a value outside that vocabulary records an opinion rather than an outcome the \
+             audit can read back",
+            MANIFEST_DISCLOSURE_PREFIX.trim_end(),
+            sanitize_text_for_report(value)
+        )),
+        None => defects.push(format!(
+            "its {MANIFEST_NAME} states no `{}` line, so nothing records that the mandatory \
+             pre-commit disclosure review in {FINDINGS_REGISTER} §5.3 was performed. Part of that \
+             review is a judgement no validator can make — whether a host name in a banner may be \
+             published, whether a hand-written paragraph names a person — so it is recorded rather \
+             than re-derived",
+            MANIFEST_DISCLOSURE_PREFIX.trim_end()
+        )),
+    }
+    defects
+}
+
+/// Whether `name` addresses a capture whose bytes a comparison was decided on.
+///
+/// The compared streams are a program's `stdout` and its termination: those are what the oracles judge,
+/// so they are the two entries `FINDINGS.md` §5.3 forbids redacting. A compiler's own diagnostics are a
+/// different stream, are never compared, and are the artifact most likely to need eliding — so
+/// `.compile.stdout` is deliberately **not** treated as compared, and the discrimination is made on the
+/// full suffix rather than on `.stdout` appearing anywhere in the name.
+fn is_compared_capture(name: &str) -> bool {
+    let Some(entry) = name
+        .strip_prefix(OUTPUTS_DIR_NAME)
+        .and_then(|rest| rest.strip_prefix('/'))
+    else {
+        return false;
+    };
+    match entry.rsplit_once('.') {
+        Some((stem, "stdout")) => !stem.ends_with(".compile"),
+        Some((stem, "exit")) => !stem.ends_with(".compile"),
+        _ => false,
+    }
+}
 
 /// The value of the first line of `text` beginning with `prefix`, trimmed.
 fn manifest_line_value(text: &str, prefix: &str) -> Option<String> {
@@ -4715,17 +6170,13 @@ pub fn write(finding: &Finding, caps: &Capabilities) -> HarnessResult<FindingArt
     // every call after the first is a load and a comparison.
     super::sandbox::ensure_roots()?;
 
-    // Consulted before anything is rendered, because the manifest names every oracle that has
-    // observed this root cause and the answer depends on who has already filed here. Consulted rather
-    // than recorded: the record is made once the bytes are on disk, so a refusal below cannot leave
-    // the next oracle believing this directory already exists.
-    let (fresh, observers) = peek_contribution(&id, finding.oracle());
-
-    // Rendered before the directory exists, so a refusal leaves nothing behind.
-    let commands = render_commands(finding, &id)?;
+    // Rendered before the directory exists, so a refusal leaves nothing behind. This oracle's
+    // contribution is built first and separately from the merge, because the flag guard inside it is a
+    // statement about this oracle's own recorded argument vectors and a contribution that fails it must
+    // never reach the ledger.
     let variables = collect_shell_variables(finding);
+    let contribution = build_contribution(&context, finding, &variables)?;
     let environment = render_environment(finding, caps, &variables);
-    let diff = render_diff(finding);
     let minimization = finding.minimization(caps);
     // Read once, digested and published from the same bytes. Reading the program a second time to
     // digest it would leave the manifest describing one revision while the reproducer beside it held
@@ -4743,80 +6194,131 @@ pub fn write(finding: &Finding, caps: &Capabilities) -> HarnessResult<FindingArt
     // path every other artifact takes. The traffic is one-directional by construction: nothing here
     // writes back out, so the corpus stays read-only to the suite.
     let record_bytes = read_file_bounded(&context, &finding.record, MAX_INSPECTED_FILE_BYTES)?;
-    let manifest = render_manifest(
+    // Every artifact's bytes are known at this point, so the budget is settled before the directory
+    // exists rather than discovered part way through writing it. The merge, the render and the
+    // reservation happen together, under one lock: see [`reserve_contribution`].
+    let fixed = FixedArtifacts {
+        reproducer: &reproducer_bytes,
+        record: &record_bytes,
+        environment: &environment,
+    };
+    let (merged, reservation, fresh) = reserve_contribution(
+        &context,
         finding,
         &id,
         caps,
         &minimization,
-        &digest_hex_of_bytes(&reproducer_bytes),
-        &observers,
-    );
-
-    // Every artifact's bytes are known at this point, so the budget is settled before the directory
-    // exists rather than discovered part way through writing it.
-    let mut sizes: Vec<u64> = vec![
-        reproducer_bytes.len() as u64,
-        record_bytes.len() as u64,
-        manifest.len() as u64,
-        commands.len() as u64,
-        environment.len() as u64,
-        diff.len() as u64,
-    ];
-    for capture in ordered_captures(finding) {
-        sizes.extend(capture_artifact_sizes(capture));
-    }
-    let directory_bytes: u64 = sizes.iter().copied().sum();
-    let largest_artifact = sizes.iter().copied().max().unwrap_or(0);
-    require_within_artifact_budget(
-        &context,
-        &id.directory(),
-        largest_artifact,
-        directory_bytes,
-        fresh,
+        &fixed,
+        contribution,
     )?;
+    let MergedArtifacts {
+        manifest,
+        commands,
+        diff,
+        capture_bytes,
+    } = merged;
+    let observers: Vec<Oracle> = {
+        let held = hold_ledger();
+        held.directories
+            .get(id.as_str())
+            .map(|entry| entry.contributions.keys().copied().collect())
+            .unwrap_or_else(|| vec![finding.oracle()])
+    };
 
-    let (directory, outputs) = prepare_directory(&id, fresh)?;
-    let mut entries = Vec::new();
+    // From here on every early return must give the reservation back, so a refused or failed write
+    // leaves the ledger indistinguishable from one in which this contribution was never attempted.
+    let published = publish_artifacts(
+        &context,
+        finding,
+        &id,
+        fresh,
+        &reproducer_bytes,
+        &record_bytes,
+        &manifest,
+        &commands,
+        &environment,
+        &diff,
+    );
+    let (directory, entries) = match published {
+        Ok(published) => published,
+        Err(error) => {
+            reservation.release();
+            return Err(error);
+        }
+    };
 
-    // Written in the order REQUIRED_ARTIFACTS lists, so the returned paths and the completeness
-    // check read in the same sequence as the documented artifact table.
-    let source = guarded_path(&context, &directory, &[REPRODUCER_SOURCE_NAME])?;
-    write_bytes(&context, &source, &reproducer_bytes)?;
-    entries.push(source.clone());
-
-    let record = guarded_path(&context, &directory, &[REPRODUCER_RECORD_NAME])?;
-    write_bytes(&context, &record, &record_bytes)?;
-    entries.push(record.clone());
-
-    let manifest_path = guarded_path(&context, &directory, &[MANIFEST_NAME])?;
-    write_text(&context, &manifest_path, &manifest)?;
-    entries.push(manifest_path);
-
-    let commands_path = guarded_path(&context, &directory, &[COMMANDS_NAME])?;
-    write_text(&context, &commands_path, &commands)?;
-    entries.push(commands_path);
-
-    let environment_path = guarded_path(&context, &directory, &[ENVIRONMENT_NAME])?;
-    write_text(&context, &environment_path, &environment)?;
-    entries.push(environment_path);
-
-    let diff_path = guarded_path(&context, &directory, &[DIFF_NAME])?;
-    write_text(&context, &diff_path, &diff)?;
-    entries.push(diff_path);
-
-    for capture in ordered_captures(finding) {
-        entries.extend(write_capture(&context, &outputs, capture)?);
-    }
-
-    require_complete(&context, &directory, finding.key())?;
-    charge_artifact_budget(directory_bytes, fresh);
-    commit_contribution(&id, finding.oracle());
+    // Reconciled against what the directory actually holds: the reservation was made from the sizes of
+    // the rendered artifacts, which is the only thing knowable before they exist, and this corrects it
+    // to the published bytes so the run summary states a measured cost.
+    let measured = (reproducer_bytes.len() + record_bytes.len() + environment.len()) as u64
+        + manifest.len() as u64
+        + commands.len() as u64
+        + diff.len() as u64
+        + capture_bytes.iter().map(|(_, bytes)| bytes).sum::<u64>();
+    reservation.reconcile(measured);
     Ok(FindingArtifacts {
         id,
         directory,
         entries,
         observers,
     })
+}
+
+/// Write one contribution's artifacts and prove the directory complete.
+///
+/// Separated from [`write`] so that every failure inside it reaches one place, where the reservation
+/// this contribution holds is given back. A partial write leaving a charge behind would let a run
+/// refuse a later finding on the strength of bytes that are not there.
+#[allow(clippy::too_many_arguments)]
+fn publish_artifacts(
+    context: &str,
+    finding: &Finding,
+    id: &FindingId,
+    fresh: bool,
+    reproducer_bytes: &[u8],
+    record_bytes: &[u8],
+    manifest: &str,
+    commands: &str,
+    environment: &str,
+    diff: &str,
+) -> HarnessResult<(PathBuf, Vec<PathBuf>)> {
+    let context = String::from(context);
+    let context = context.as_str();
+    let (directory, outputs) = prepare_directory(id, fresh)?;
+    let mut entries = Vec::new();
+
+    // Written in the order REQUIRED_ARTIFACTS lists, so the returned paths and the completeness
+    // check read in the same sequence as the documented artifact table.
+    let source = guarded_path(context, &directory, &[REPRODUCER_SOURCE_NAME])?;
+    write_bytes(context, &source, reproducer_bytes)?;
+    entries.push(source.clone());
+
+    let record = guarded_path(context, &directory, &[REPRODUCER_RECORD_NAME])?;
+    write_bytes(context, &record, record_bytes)?;
+    entries.push(record.clone());
+
+    let manifest_path = guarded_path(context, &directory, &[MANIFEST_NAME])?;
+    write_text(context, &manifest_path, manifest)?;
+    entries.push(manifest_path);
+
+    let commands_path = guarded_path(context, &directory, &[COMMANDS_NAME])?;
+    write_text(context, &commands_path, commands)?;
+    entries.push(commands_path);
+
+    let environment_path = guarded_path(context, &directory, &[ENVIRONMENT_NAME])?;
+    write_text(context, &environment_path, environment)?;
+    entries.push(environment_path);
+
+    let diff_path = guarded_path(context, &directory, &[DIFF_NAME])?;
+    write_text(context, &diff_path, diff)?;
+    entries.push(diff_path);
+
+    for capture in ordered_captures(finding) {
+        entries.extend(write_capture(context, &outputs, capture)?);
+    }
+
+    require_complete(context, &directory, finding.key())?;
+    Ok((directory, entries))
 }
 
 /// Write one finding's artifacts and return the outcome a report should carry for it.

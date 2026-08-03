@@ -242,8 +242,8 @@ use super::{
     create_directory_chain_below, escape_markdown_inline, posix_quote, read_file_bounded,
     redact_secrets, remove_entry, report_root, require_directory_chain_below, require_replaceable,
     resolve_shown_path, run_generation, sanitize_text_for_report, shown_path, stable_digest,
-    stage_bytes_no_follow, AreaSpec, DivergenceClass, HarnessError, HarnessResult, OptLevel,
-    Oracle, Outcome, Replaceable, Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT,
+    stage_bytes_no_follow, AreaSpec, CellKey, DivergenceClass, HarnessError, HarnessResult,
+    OptLevel, Oracle, Outcome, Replaceable, Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT,
     MAX_INSPECTED_FILE_BYTES, MIN_PROGRAMS_PER_MANDATED_AREA, ORACLE_A_COMPARISON_COUNT,
     ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT,
     REFERENCE_CROSS_CELL_COUNT_MAX, REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
@@ -1600,7 +1600,7 @@ impl Row {
     /// into a loud diagnostic in the summary instead of failing the run. An area file that cannot
     /// be read is a defect in the artifact, and a summary that says so is more useful than a run
     /// that aborts before writing one.
-    fn parse(line: &str, number: usize) -> Result<(Row, RunIdentity), String> {
+    fn parse(line: &str, number: usize) -> Result<(Row, RunIdentity, Option<String>), String> {
         let fields: Vec<&str> = line.split(TSV_SEPARATOR).collect();
         if fields.len() != AREA_TSV_COLUMNS.len() {
             return Err(format!(
@@ -1631,10 +1631,21 @@ impl Row {
                 DivergenceClass::parse(value(6)),
             )?)
         };
+        let area = String::from(value(0));
+        let program = String::from(value(1));
+        let (finding_dir, defect) = parse_finding_dir(
+            number,
+            optional_field(fields[9]).as_deref(),
+            &area,
+            &program,
+            target,
+            opt,
+            class,
+        );
         Ok((
             Row {
-                area: String::from(value(0)),
-                program: String::from(value(1)),
+                area,
+                program,
                 target,
                 opt,
                 oracle,
@@ -1642,25 +1653,115 @@ impl Row {
                 class,
                 marker_id: optional_field(fields[7]),
                 finding_id: optional_field(fields[8]),
-                // Through `resolve_shown_path`, not `PathBuf::from`. The field was written by
-                // `to_tsv` through `shown_path`, which elides the build root so a published report
-                // discloses nothing about the machine that produced it — so the recorded text is
-                // `<build>/conformance-findings/…` rather than a path. The summary is aggregated by
-                // parsing these files back and then asks the file system whether each finding's
-                // artifacts are really there, so taking the rendered text at face value would
-                // answer "not there" for every finding in the run while the artifacts sat beside
-                // it, and fail the run on a defect of the suite rather than deliver the
-                // observation. Expanding the token restores the path without weakening the
-                // elision: what is written still discloses nothing.
-                finding_dir: optional_field(fields[9]).as_deref().map(resolve_shown_path),
+                finding_dir,
                 detail: String::from(fields[12]),
             },
             RunIdentity {
                 run: String::from(value(10)),
                 identity: String::from(value(11)),
             },
+            defect,
         ))
     }
+}
+
+/// The artifact directory a parsed row may be asked about, **re-derived** rather than trusted.
+///
+/// # Why the recorded text cannot simply be used
+///
+/// The field was written through [`shown_path`], which elides the build root so a published report
+/// discloses nothing about the machine that produced it — the recorded text is
+/// `<build>/conformance-findings/…` rather than a path. The summary is aggregated by parsing these
+/// files back and then asking the file system whether each finding's artifacts are really there, so
+/// something has to turn that text into a path again, and [`resolve_shown_path`] is that something.
+///
+/// What it cannot do is *validate*. It expands a leading token and returns whatever follows, so a
+/// report file whose tenth field had been altered — by a corrupted write, a truncated concurrent
+/// publish, or a hand edit — would send the summary's completeness check reading directories chosen by
+/// that field: `<build>/../../etc`, or a bare relative path resolved against the process's working
+/// directory. Nothing was written through it, so this is a read rather than a write, and the cost is
+/// still real: the summary would report the artifacts of whatever it was pointed at as the artifacts
+/// of this finding, and a directory that happened to hold the right file names would be counted as a
+/// complete deliverable.
+///
+/// # What is done instead
+///
+/// The directory is a **pure function of the row's own identity**: [`FindingId::derive`] over the cell
+/// and the divergence class, beneath [`findings_root`]. Both are already parsed and validated — the
+/// target, the level and the class each had to match a canonical spelling for this row to exist at
+/// all, and [`CellKey::new`] re-validates the two names as corpus stems. So the expected directory is
+/// recomputed here from those values, and the recorded field is required to agree with it.
+///
+/// Three outcomes, and only the first yields a path:
+///
+/// - **Agreement** — the recomputed directory is returned. It is derived rather than parsed, so it is
+///   inside the findings root by construction and no separate containment check is needed.
+/// - **Disagreement** — the path is dropped and a diagnostic is returned. The row survives with its
+///   verdict intact, because the comparison it records is still a fact; what is refused is reading a
+///   directory this row's identity does not name.
+/// - **A directory named with no divergence class** — also dropped and diagnosed, because no
+///   identifier can be derived without one, so nothing could be compared against it.
+///
+/// A row with an empty field is the ordinary case for every verdict but `FINDING`, and yields no path
+/// and no diagnostic.
+#[allow(clippy::too_many_arguments)]
+fn parse_finding_dir(
+    number: usize,
+    recorded: Option<&str>,
+    area: &str,
+    program: &str,
+    target: Target,
+    opt: OptLevel,
+    class: Option<DivergenceClass>,
+) -> (Option<PathBuf>, Option<String>) {
+    let Some(recorded) = recorded else {
+        return (None, None);
+    };
+    let Some(class) = class else {
+        return (
+            None,
+            Some(format!(
+                "line {number} names a finding artifact directory but records no divergence class, \
+                 so the identifier that directory is named from cannot be derived and the recorded \
+                 path cannot be confirmed; the row is kept and the path is dropped"
+            )),
+        );
+    };
+    let key = match CellKey::new(area, program, target, opt) {
+        Ok(key) => key,
+        Err(error) => {
+            return (
+                None,
+                Some(format!(
+                    "line {number} names a finding artifact directory, but its own area and program \
+                     are not a valid cell identity, so the directory that identity would name cannot \
+                     be derived: {error}"
+                )),
+            )
+        }
+    };
+    let expected = FindingId::derive(&key, class).directory();
+    let resolved = resolve_shown_path(recorded);
+    if resolved == expected {
+        return (Some(expected), None);
+    }
+    (
+        None,
+        Some(format!(
+            "line {number} names the finding artifact directory {}, but the identity that row \
+             records — {}/{} at {} {} with class {} — names {}. A directory is derived from the \
+             identity and nothing else, so the two can only differ if the field was altered after it \
+             was written; the row is kept and the path is dropped rather than read, because reading \
+             it would report whatever that directory holds as this finding's evidence",
+            shown_path(&resolved),
+            sanitize_text_for_report(area),
+            sanitize_text_for_report(program),
+            target.triple(),
+            opt.flag(),
+            class.label(),
+            shown_path(&expected)
+        )),
+    )
 }
 
 /// A parsed field, or a sentence naming the line, the role and the value that matched nothing.
@@ -3473,7 +3574,7 @@ fn finding_artifact_defect(directory: &Path) -> Option<String> {
     findings::artifact_defect(directory)
 }
 
-/// The state of a finding's artifact directory, checked rather than assumed.
+/// The state of a finding's artifact directory, checked rather than assumed, ready for a table cell.
 ///
 /// A report that named a directory nobody could open would be worse than one that admitted the
 /// artifacts are missing, because the reproduction commands are the whole point of a finding.
@@ -3483,10 +3584,23 @@ fn finding_artifact_defect(directory: &Path) -> Option<String> {
 /// publication can never describe different states. The defect's own words are carried into the cell
 /// rather than collapsed to a fixed phrase, because "missing `outputs`" and "missing
 /// `reproducer.expected`" send a reader to different places.
+///
+/// # Why the whole rendered state goes through [`table_cell`]
+///
+/// Those words are not this module's. A defect sentence quotes what was found on disk — an entry name,
+/// a manifest line, an operating-system error — and an earlier form of this function formatted it
+/// straight into a Markdown table cell. Any vertical bar in it would then have ended the cell early
+/// and shifted every value after it into the wrong column, which is the table equivalent of forging a
+/// field; a bracket or an angle bracket could restructure the document around it. The bound
+/// [`table_cell`] applies matters as much: a defect that enumerated a large directory would otherwise
+/// widen one row past anything a reader can scan.
+///
+/// The marker characters are prepended **after** escaping rather than included in it, so the cell keeps
+/// the ✅/⚠️ a reader scans for while everything that came from outside this module is escaped.
 fn finding_artifact_state(directory: &Path) -> String {
     match finding_artifact_defect(directory) {
         None => String::from("✅ present"),
-        Some(defect) => format!("⚠️ {defect}"),
+        Some(defect) => format!("⚠️ {}", table_cell(&defect)),
     }
 }
 
@@ -3806,48 +3920,51 @@ fn render_coverage_reasons(coverage: &Coverage) -> Vec<String> {
 /// warning: an expected divergence with no traceable basis is precisely what the marker mechanism
 /// exists to prevent.
 ///
-/// # A marker-less `XFail` is a recorded exclusion, not an untraceable marker
+/// # Every `XFail` cites a marker, so an `XFail` without one is reported as a defect
 ///
-/// `XFail` is reached three ways, and exactly one of them carries no marker identifier: a
-/// narrowing the program's own record documents with its recorded reason, which `classify.rs`
-/// builds in `xfail_recorded_exclusion_outcome` — the case the record format refuses to accept
-/// without a reason, so the basis is present by construction. A marker there would be
-/// *unfalsifiable*: an oracle a record switches off performs no comparison, so it can never
-/// produce the captured observation a marker is required to carry.
+/// `XFail` is reached three ways and **all three carry a marker identifier**: a divergence a
+/// marker covers; a comparison the program's own record narrows away, where the frozen contract
+/// requires a marker naming the narrowed oracle beside the recorded reason; and an arm blocked by a
+/// marked root refusal on another arm of the same cell, which cites the root marker. `classify.rs`
+/// has no builder that produces an `XFail` with no identifier — a narrowing no marker names is
+/// [`Verdict::Fail`] there, and the record parser refuses to load such a record in the first place.
 ///
-/// Those rows are therefore separated out rather than swept into a synthetic
-/// `(no marker identifier recorded)` group. Grouping them with genuinely untraceable identifiers
-/// would attach the strongest warning this section can print — *"an expected divergence whose
-/// basis cannot be traced is not an expected divergence"* — to the one shape whose basis is
-/// guaranteed to exist, and the warning would fire on every run for as long as the corpus kept a
-/// single reasoned exclusion. Nothing is hidden by the separation: each row is enumerated here
-/// with its recorded reason, and the recorded-exclusions table later in the summary lists the same
-/// narrowings program by program. The warning is kept for what it was written for — an identifier
-/// that came back on an outcome and is declared in no record this report could read.
+/// An earlier form of this report separated marker-less `XFail` rows into a "documented by the
+/// record's own recorded reason" group and presented them as legitimate expected divergences. That
+/// was the reporting half of the same defect: a reasoned exclusion is worth reporting, but it was
+/// being *counted as an expected divergence* while carrying no identifier a row could cite, no
+/// entry the bidirectional register audit could find, and no basis resolved against any document.
+///
+/// So a marker-less `XFail` is now reported for what it is: an outcome claiming the authority of a
+/// documented limitation while naming none. It is listed with a warning naming the remedy, and it
+/// is never presented as an expected divergence. Nothing about the *reporting* of reasoned
+/// narrowings is lost — the recorded-exclusions table later in the summary lists every one of them
+/// program by program, with the reason its record states — and now each also appears under the
+/// marker that documents it.
 fn render_expected_divergence_section(facts: &CorpusFacts, xfail: &[&Row]) -> Vec<String> {
     let mut grouped: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
-    let mut recorded_exclusions: Vec<&Row> = Vec::new();
+    let mut unattributed: Vec<&Row> = Vec::new();
     for row in xfail {
         match row.marker_id.clone() {
             Some(identifier) => grouped.entry(identifier).or_default().push(row),
-            None => recorded_exclusions.push(row),
+            None => unattributed.push(row),
         }
     }
 
     let declared = facts.markers();
     let mut lines = Vec::new();
-    if declared.is_empty() && grouped.is_empty() && recorded_exclusions.is_empty() {
+    if declared.is_empty() && grouped.is_empty() && unattributed.is_empty() {
         lines.push(String::from(
-            "None — no expected-divergence marker applies here and no record narrowed an oracle, \
-             so every divergence would be a finding or a failure.",
+            "None — no expected-divergence marker applies here, so every divergence would be a \
+             finding or a failure.",
         ));
         return lines;
     }
     if declared.is_empty() && grouped.is_empty() {
         lines.push(String::from(
             "**No expected-divergence marker applies here**, so a divergence of any class would be \
-             a finding or a failure. What follows is not a marker: it is every comparison a \
-             program's own record declined to make, documented by that record's recorded reason.",
+             a finding or a failure. What follows is not an expected divergence: it is every \
+             outcome that claimed the authority of one while naming no marker.",
         ));
         lines.push(String::new());
     }
@@ -3878,28 +3995,33 @@ fn render_expected_divergence_section(facts: &CorpusFacts, xfail: &[&Row]) -> Ve
         }
         lines.push(String::new());
     }
-    if !recorded_exclusions.is_empty() {
+    if !unattributed.is_empty() {
         lines.push(String::from(
-            "### Narrowings documented by the record's own recorded reason, not by a marker",
+            "### ⚠️ Expected divergences claimed with no marker identifier — a defect, not a basis",
         ));
         lines.push(String::new());
         lines.push(format!(
-            "{} comparison(s) were not attempted, because the program's own expectation record \
-             narrows its oracle coverage. Each is `XFAIL` rather than a pass — nothing was \
-             compared, so no equality is claimed — and each carries the reason its record states, \
-             which the record format requires before it will accept any narrowing at all. **No \
-             marker is involved, and none could be:** an oracle a record switches off performs no \
-             comparison, so it can never produce the captured observation a marker must carry, and \
-             a marker scoped to it would be unfalsifiable. The basis is the recorded reason, quoted \
-             per cell below and listed program by program in the recorded-exclusions table further \
-             down. The oracles each of these programs keeps still judge every one of its cells, \
-             which is how a property whose value legitimately differs between architectures stays \
-             under test instead of being dropped for being difficult — `{EXPECTED_DIVERGENCE_REGISTER}` \
-             §4 works through the reasoning for each one.",
-            recorded_exclusions.len()
+            "{count} outcome(s) were recorded as `XFAIL` while naming no marker. **This is not a \
+             reportable expected divergence and it is not presented as one.** All three `XFAIL` \
+             forms cite a marker: a divergence a marker covers; a comparison a program's own record \
+             narrows away, where the frozen contract requires a marker naming the narrowed oracle \
+             beside the recorded reason; and an arm blocked by a marked root refusal on another arm \
+             of the same cell, which cites the root marker. An outcome with no identifier therefore \
+             claims the authority of a documented limitation while naming none — there is no row a \
+             reader can follow, no entry for `{EXPECTED_DIVERGENCE_REGISTER}`'s bidirectional audit \
+             to find, and no basis resolved against any document, which is exactly the silent \
+             exclusion the marker mechanism exists to prevent. Neither the classifier nor the record \
+             parser can produce this state, so reaching it means this report was written by an older \
+             revision of the suite, or that a record reached classification without going through \
+             the parser. Remedy: give each narrowing below a marker in the program's own record, \
+             scoped to name the oracle it narrows, and mirror it in `{EXPECTED_DIVERGENCE_REGISTER}` \
+             — the narrowing and its recorded reason stay exactly as they are. Every reasoned \
+             narrowing is listed program by program in the recorded-exclusions table further down \
+             whether or not it is marked, so nothing is hidden by refusing to count it here.",
+            count = unattributed.len()
         ));
         lines.push(String::new());
-        for cell in &recorded_exclusions {
+        for cell in &unattributed {
             lines.push(format!(
                 "- {} under `oracle_{}`: {}",
                 md_code(&cell.cell_label()),
@@ -4656,12 +4778,15 @@ fn render_summary_markdown(
          — and classification happens at the first terminal outcome or the completed \
          comparison, so nothing short-circuits a phase because a marker exists. Every marker \
          cites a limitation this repository already documents, and the set is cross-referenced \
-         by `{EXPECTED_DIVERGENCE_REGISTER}`. `XFAIL` has a second form that carries no marker \
-         and needs none: a comparison a program's own record declines to make, documented by \
-         that record's recorded reason, which the record format will not accept without one. The \
-         two are reported separately below, because a marker asserts a divergence was OBSERVED \
-         while a recorded exclusion states that a comparison was deliberately NOT MADE, and \
-         reading either as the other would misstate what the run established."
+         by `{EXPECTED_DIVERGENCE_REGISTER}`. `XFAIL` has three forms and every one of them cites \
+         a marker: a divergence a marker covers; a comparison a program's own record declines to \
+         make, which needs a marker naming the narrowed oracle beside the record's own recorded \
+         reason; and an arm blocked by a marked root refusal on another arm of the same cell, \
+         which cites the root marker and states that no comparison was attempted. Each cell's \
+         detail says which form it is, because a marker asserting a divergence was OBSERVED, a \
+         narrowing stating a comparison was deliberately NOT MADE, and an arm that lost its \
+         subject to a refusal are three different statements, and reading any of them as another \
+         would misstate what the run established."
     ));
     lines.push(String::new());
     lines.extend(render_expected_divergence_section(
@@ -5763,13 +5888,26 @@ fn release_finalization_claim() {
 /// passes are what make the tally, the matrix and the planned-against-recorded comparison mean
 /// anything; a report of the failures alone could not show that the rest of the matrix ran.
 ///
+/// `notes` carries statements the *caller* knows and this module cannot derive from the outcomes it
+/// is handed. There is exactly one such statement today and it is the reason the parameter exists: an
+/// area whose preflight gate did not hold never runs a cell, so it arrives here with no outcome at
+/// all, and "no outcome" alone is indistinguishable from a matrix that produced nothing for some
+/// other reason. The caller states which gate withheld the area and how many programs it withheld,
+/// and it lands in the report's Diagnostics section beside everything else a reader has to know
+/// before reading the tally.
+///
 /// # Errors
 ///
 /// Fails when `area` is not a known feature area, when the run's roots cannot be prepared, or when
 /// the report pair cannot be published. A failure here is reported rather than swallowed: a verdict
 /// that was computed and then silently not recorded is worse than a loud I/O error, because the run
 /// would look clean.
-pub fn write_area(area: &str, outcomes: &[Outcome], caps: &Capabilities) -> HarnessResult<()> {
+pub fn write_area(
+    area: &str,
+    outcomes: &[Outcome],
+    caps: &Capabilities,
+    notes: &[String],
+) -> HarnessResult<()> {
     super::sandbox::ensure_roots()?;
     let spec = AreaSpec::lookup(area).ok_or_else(|| {
         HarnessError::new(
@@ -5797,6 +5935,11 @@ pub fn write_area(area: &str, outcomes: &[Outcome], caps: &Capabilities) -> Harn
 
     let mut report = AreaReport::from_outcomes(spec, outcomes);
     let facts = CorpusFacts::for_area(spec);
+    // The caller's statements first, because they explain the shape of everything below them: a
+    // withheld area's empty tally reads as an absence until the note says what withheld it.
+    report
+        .diagnostics
+        .extend(notes.iter().map(|note| sanitize_text_for_report(note)));
     report
         .diagnostics
         .extend(diagnose_unrecorded_programs(&report.rows, &facts));
@@ -6082,8 +6225,19 @@ fn read_area(spec: &'static AreaSpec, current: &Generation, identity: &RunIdenti
         // The preamble and the header took the first two lines, so a body line's number in the file
         // is its offset plus three.
         match Row::parse(line, offset + 3) {
-            Ok((row, provenance)) => {
+            Ok((row, provenance, defect)) => {
                 if identity.accepts(&provenance.run, &provenance.identity) {
+                    // Reported only for a row this run owns. A refused foreign row is already
+                    // accounted for by name below, and adding a second diagnostic about a field of a
+                    // row that contributes to nothing would describe another run's artifact as
+                    // though it were a defect in this one.
+                    if let Some(defect) = defect {
+                        diagnostics.push(format!(
+                            "⚠️ a row of the machine-readable report of feature area `{}` names an \
+                             artifact directory that its own identity does not: {defect}",
+                            spec.directory()
+                        ));
+                    }
                     rows.push(row);
                 } else {
                     *foreign

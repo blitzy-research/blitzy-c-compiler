@@ -66,19 +66,30 @@ END
 impl_defined_notes <<END
 WHY THE PACKING PRAGMA WAS REMOVED, AND WHY NO GATE DEVIATION REPLACED IT.
 
-An earlier form of this program spelled the pragma pack(push, 1) / pack(pop) and asserted relations
-over the sizes of a packed and an unpacked struct. That subject is unsound for a differential oracle
-on two counts. The behaviour of a RECOGNISED pragma is implementation-defined and C11 6.10.6p1 permits
-it to make translation fail outright, so a compiler that recognises pack and declines this particular
-request is within its rights and would be reported as defective. And no repository document describes
-a packing pragma for the compiler under test at all -- the documented inventory names the directive but
-not one pragma it honours -- so a divergence arising from the push/pop lifecycle could not be
-attributed to a documented limitation either, leaving it neither a sound comparison nor a recordable
-expected divergence.
+An earlier form of this program spelled the pragma pack(push, 1) / pack(push, 2) / pack(pop) and
+printed the EXACT size, alignment and member offsets of four structures, one per state of that stack.
+That subject is unsound for a differential oracle on two counts, either sufficient on its own. The
+behaviour of a RECOGNISED pragma is implementation-defined and C11 6.10.6p1 permits it to make
+translation fail outright, so a compiler that recognises pack and declines this particular request is
+within its rights and would be reported as defective. And no repository document describes a packing
+pragma for the compiler under test at all -- the documented inventory names the directive but not one
+pragma it honours -- so a divergence arising from the push/pop lifecycle could not be attributed to a
+documented limitation either, leaving it neither a sound comparison nor a recordable expected
+divergence.
+
+The four structures, their eight layout values and the two member round trips have therefore been
+REMOVED FROM THE PROGRAM AND FROM THE GOLDEN RECORD TOGETHER, so that the source, this record and the
+expected output describe one and the same portable test. Nothing about packing is dropped from the
+corpus: the layout effect of packing is exercised by
+08_gcc_extensions/005_attribute_packed_aligned.c, whose subject is the packed and aligned attributes
+that the repository's own extension inventory does name as supported, which is a materially stronger
+authority than a pragma no document mentions.
 
 What replaced it takes its authority from the standard rather than from any implementation's
 documentation: 6.10.6p1's closing requirement that an unrecognised pragma is ignored, asserted through
-the size and alignment of two otherwise identical structure declarations that straddle one.
+the size and alignment of two otherwise identical structure declarations that straddle one. Neither
+size nor alignment is printed as an absolute value -- only the equality of the two -- so no
+implementation-defined layout choice can reach the output while the requirement stays observable.
 
 MEASURED, AND WHY THIS RECORD DECLARES NO `ub_audit_flags` DEVIATION. Both reference compilers
 diagnose an unknown pragma under the gate's -Wall, through -Werror=unknown-pragmas, and the reference
@@ -95,19 +106,14 @@ alignment is printed as an absolute -- only the equality of two of them -- so an
 layout choices cannot reach the output. The harness copies each program into its own per-cell
 workspace, so the real source path differs between cells; before the first line directive the
 file-name macro is therefore reduced to the relation "is not empty", and afterwards the directive
-supplies a virtual name written in this source, whose length and first and last characters are
-compile-time constants and may be printed as values. That virtual name designates no file, is never
-opened, and must never be created.
+supplies a virtual name written in this source, which is a compile-time constant and is therefore
+printed in full, byte for byte, alongside its length and its first and last characters -- each of
+those three relations localising a different kind of corruption, a truncation, a lost first byte or a
+lost terminator, to its own line. That virtual name designates no file, is never opened, and must
+never be created.
 END
 expected_stdout    <<END
 line_delta=1
-pack1_layout=6 1 0 1 5
-pack2_layout=8 2 0 2 6
-pack1b_layout=6 1 0 1 5
-natural_layout=12 4 0 4 8
-pack1_took_effect=1 pack2_took_effect=1 pack1b_restored=1 pop_scoped=1
-pack1_roundtrip=161 16909060 195
-natural_roundtrip=161 16909060 195
 ignored_pragma_size_unchanged=1
 ignored_pragma_align_unchanged=1
 real_file_nonempty=1

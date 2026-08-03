@@ -1,10 +1,15 @@
 /* Area 14 - ABI and calling convention.
  * 006_nested_calls_callee_saved: a bounded chain of nested calls, nine frames
- * deep, in which every frame keeps ten INDEPENDENT values live across its
- * nested call and prints them only AFTER that call has returned.  That is what
- * detects a clobbered callee-saved register: if the callee fails to restore a
- * register the caller was using, the caller's printed value is wrong and the
- * divergence localises to the exact frame.
+ * deep - EIGHT PRESSURE FRAMES ABOVE ONE LEAF.  Each of the eight pressure frames
+ * keeps ten INDEPENDENT values live across its nested call and prints them only
+ * AFTER that call has returned.  That is what detects a clobbered callee-saved
+ * register: if the callee fails to restore a register the caller was using, the
+ * caller's printed value is wrong and the divergence localises to the exact frame.
+ *
+ * The leaf is the ninth frame and is counted as one, but it is deliberately NOT a
+ * pressure frame: it makes no call, so it has nothing to hold values across, and
+ * giving it a row of live values would read as coverage while providing none.  Its
+ * job is to be the innermost frame the eight above it must survive.
  *
  * THE PRESERVED REGISTER SETS, STATED IN FULL.  What follows is what each ABI
  * REQUIRES a callee to preserve; it is not a claim about how any compiler chooses
@@ -26,14 +31,14 @@
  *                   v0-v7 and v16-v31, are not.
  *   LP64D           s0-s11 integer, where s0 doubles as the frame pointer, and
  *                   fs0-fs11 floating.
- * Each frame keeps six ints, three doubles and one pointer live ACROSS its nested
- * call and prints them only after that call returns.  Ten live values is more
- * than the narrowest of those sets can hold, so on every target some of them must
- * survive the call somewhere other than a preserved register - but which values
- * go where is the compiler's choice, and this program does not assert it.  What it
- * asserts is the OBSERVABLE consequence: if any of the ten fails to survive the
- * call, the printed line for that frame changes and the divergence localises to
- * the exact frame.
+ * Each of the eight pressure frames keeps six ints, three doubles and one pointer
+ * live ACROSS its nested call and prints them only after that call returns.  Ten
+ * live values is more than the narrowest of those sets can hold, so on every
+ * target some of them must survive the call somewhere other than a preserved
+ * register - but which values go where is the compiler's choice, and this program
+ * does not assert it.  What it asserts is the OBSERVABLE consequence: if any of the
+ * ten fails to survive the call, the printed line for that frame changes and the
+ * divergence localises to the exact frame.
  *
  * WHY THE LIVE VALUES COME FROM VOLATILE STORAGE, WHICH IS THE WHOLE POINT.
  * Live-across-a-call is a property of the generated code, not of the source, and
@@ -47,11 +52,11 @@
  *
  * A value read from a volatile object cannot be rematerialized, because reading
  * it again would be a second observable access that the abstract machine does not
- * perform.  Each frame therefore reads its ten values out of its OWN row of
- * volatile tables before the nested call and consumes them only after the call
+ * perform.  Each PRESSURE frame therefore reads its ten values out of its OWN row
+ * of volatile tables before the nested call and consumes them only after the call
  * returns, which leaves the backend no choice: ten independent quantities must
  * survive the call, in callee-saved registers as far as they reach and spilled
- * beyond that.  The rows differ per frame and every value in the tables is
+ * beyond that.  There are eight such rows for the eight such frames.  The rows differ per frame and every value in the tables is
  * distinct, so a value restored from the wrong slot prints a value belonging to
  * another frame and names both frames at once.
  *
@@ -84,29 +89,21 @@
  * AT WHICH OPTIMIZATION LEVEL THE CHAIN IS REALLY NINE FRAMES DEEP.  At the source
  * level it always is; as emitted code it depends on inlining, and that was
  * measured rather than assumed.  Counting this program's own static functions still
- * emitted in the reference compiler's assembly and the calls to them - `<driver>
- * -O<n> -S -o - 006_nested_calls_callee_saved.c`, then grepping for the function
- * labels:
+ * emitted in the reference compiler's assembly - `<driver> -O<n> -S -o -
+ * 006_nested_calls_callee_saved.c`, then grepping for the function labels: with the
+ * volatile call boundary in place, ALL NINE FRAMES ARE EMITTED at -O0, -O1 and -O2
+ * on x86-64, i686, AArch64 and RISC-V 64 alike, with no .constprop and no .isra
+ * clone anywhere.  So the eight-frame pressure and the save/restore discipline it is
+ * designed to stress are exercised as real frames at every one of the twelve cells,
+ * which is the property the boundary exists to guarantee.
  *
- *   -O0  all 9 frames emitted, 10 calls   on all four targets
- *   -O1  only level1 survives, 2 calls (one per variant) - the remaining eight
- *        frames are inlined into it, on all four targets
- *   -O2  the same 1 frame / 2 calls on all four targets
- *
- * So the nine-frame pressure and the save/restore discipline it is designed to
- * stress are exercised as real frames at -O0 on every target, while from -O1 upward
- * the reference compiler flattens the chain and the pressure becomes one frame's
- * register allocation problem instead of nine handoffs.  Running the higher levels
- * still matters - all three oracles compare the same printed values at every level,
- * so a value lost anywhere is still caught - but a claim that nine-frame pressure
- * is universal across levels would be false.  The compiler under test may inline
- * differently again; no bcc binary is present on this branch, so nothing here was
- * measured of it.
- *
- * Depth is bounded at nine nested frames plus main.  Each frame holds at most ten
- * scalars, so peak stack use is a few hundred bytes on every target, far below
- * any stack limit under QEMU user-mode emulation.  There is no recursion and no
- * unbounded growth.
+ * The measured BEFORE-state, recorded because it is the reason the boundary is
+ * there: with direct calls, gcc 13.4.0 at -O1 and above left only level1 standing -
+ * levels 2 through 8 and the leaf were inlined into it, two calls survived in total,
+ * and a nine-frame chain was testing a single frame.  That measurement describes the
+ * program as it was, not as it is.  The compiler under test may inline differently
+ * again; no bcc binary is present on this branch, so nothing here was measured of
+ * it.
  *
  * Depth is bounded at nine nested frames plus main, and every call is a distinct
  * function, so there is no recursion and no unbounded growth.  Peak stack use for
@@ -151,14 +148,21 @@ static volatile int vseed = 100;
 static volatile double vfseed = 1.0;
 static const char *volatile vtag = "runtime";
 
-/* The independent live values, one row per frame.  Every one of the fifty-four
-   integers and twenty-seven doubles is distinct, so a value restored from the
-   wrong slot prints a quantity that belongs to a different frame or a different
-   position and names both at once.  Reading them through volatile storage is what
-   makes them independent of the frame's parameters and therefore genuinely live
-   across its nested call: they cannot be recomputed afterwards, because reading a
-   volatile object twice is not what the program says. */
-static volatile int vlive_i[9][6] = {
+/* The independent live values, ONE ROW PER PRESSURE FRAME -- eight rows for the
+   eight frames that hold values across a nested call, and none for the leaf, which
+   makes no call and therefore holds nothing across one.  Every one of the
+   forty-eight integers, twenty-four doubles and eight pointed-to integers is
+   distinct, so a value restored from the wrong slot prints a quantity that belongs
+   to a different frame or a different position and names both at once.  Reading
+   them through volatile storage is what makes them independent of the frame's
+   parameters and therefore genuinely live across its nested call: they cannot be
+   recomputed afterwards, because reading a volatile object twice is not what the
+   program says.
+
+   The table is sized to what is CONSUMED.  A ninth row would be initialized and
+   never read, which reads as coverage while providing none: the leaf has no call to
+   survive, so a row belonging to it could not be live across anything. */
+static volatile int vlive_i[8][6] = {
     { 3101, -3102, 3103, -3104, 3105, -3106 },
     { 3201, -3202, 3203, -3204, 3205, -3206 },
     { 3301, -3302, 3303, -3304, 3305, -3306 },
@@ -166,11 +170,10 @@ static volatile int vlive_i[9][6] = {
     { 3501, -3502, 3503, -3504, 3505, -3506 },
     { 3601, -3602, 3603, -3604, 3605, -3606 },
     { 3701, -3702, 3703, -3704, 3705, -3706 },
-    { 3801, -3802, 3803, -3804, 3805, -3806 },
-    { 3901, -3902, 3903, -3904, 3905, -3906 }
+    { 3801, -3802, 3803, -3804, 3805, -3806 }
 };
 
-static volatile double vlive_d[9][3] = {
+static volatile double vlive_d[8][3] = {
     { 1.25, -2.5, 3.75 },
     { 4.25, -5.5, 6.75 },
     { 7.25, -8.5, 9.75 },
@@ -178,21 +181,20 @@ static volatile double vlive_d[9][3] = {
     { 13.25, -14.5, 15.75 },
     { 16.25, -17.5, 18.75 },
     { 19.25, -20.5, 21.75 },
-    { 22.25, -23.5, 24.75 },
-    { 25.25, -26.5, 27.75 }
+    { 22.25, -23.5, 24.75 }
 };
 
 /* The pointed-to objects for each frame's live pointer.  Only the int a pointer
    designates is ever printed, never the pointer itself, so the output cannot
    depend on an address. */
-static const int plive_target[9] = {
-    5101, 5202, 5303, 5404, 5505, 5606, 5707, 5808, 5909
+static const int plive_target[8] = {
+    5101, 5202, 5303, 5404, 5505, 5606, 5707, 5808
 };
 
-static const int *volatile vlive_p[9] = {
+static const int *volatile vlive_p[8] = {
     &plive_target[0], &plive_target[1], &plive_target[2],
     &plive_target[3], &plive_target[4], &plive_target[5],
-    &plive_target[6], &plive_target[7], &plive_target[8]
+    &plive_target[6], &plive_target[7]
 };
 
 /* THE CALL BARRIER, AND WHY THE NINE-FRAME CHAIN WOULD OTHERWISE NOT EXIST.  A

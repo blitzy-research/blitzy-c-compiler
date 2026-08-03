@@ -111,9 +111,9 @@
  * No signed overflow, no shift, no aliasing violation, no pointer arithmetic and no
  * pointer-to-integer conversion at all, no object modified twice between sequence
  * points, and at most one side-effecting argument per call.  The only object written
- * after its declaration is aligned_block, whose two byte stores are separate
- * statements and are read back afterwards, never in the same expression that wrote
- * them.  main returns 0, inside the permitted 0-125 exit range.
+ * after its declaration is the alignas-qualified array aligned_buf, whose two byte
+ * stores are separate statements and are read back afterwards, never in the same
+ * expression that wrote them.  main returns 0, inside the permitted 0-125 exit range.
  */
 
 #include <stddef.h>
@@ -159,12 +159,22 @@ struct Fixed {
 /* stdalign.h's alignas, in the two grammar positions the macro can occupy, so that
  * neither is left untested.
  *
- * On a MEMBER, where the effect is observable with integer constant expressions alone:
- * a struct's alignment is at least the strictest alignment of its members, so
- * alignof(struct AlignedHolder) must be 8; the member must then begin at the first
- * multiple of 8 that follows the single leading byte, so offsetof must be exactly 8;
- * and a type's size must be a multiple of its alignment, so sizeof must divide by 8.
- * Three independent consequences of one request, none of them a pointer conversion.
+ * On a MEMBER, where the effect is observable with integer constant expressions alone.
+ * Each of the three facts printed for it is a RELATION the language guarantees rather
+ * than an exact value, because an implementation is free to align more strictly than
+ * requested (C11 6.2.8p1 makes every alignment a power of two, and nothing forbids a
+ * stricter one) and free to insert additional padding between members (6.7.2.1p15):
+ *   - a structure's alignment is at least the strictest alignment of its members, and
+ *     the member requests 8, so alignof(struct AlignedHolder) >= 8;
+ *   - the member's own alignment requirement is 8, so its offset is a multiple of 8,
+ *     and the single leading byte before it makes that offset at least 1 - hence
+ *     nonzero and divisible by 8, which is exactly what the request buys and what
+ *     ignoring the request would break, since the member would then sit at offset 1;
+ *   - a type's size is a multiple of its alignment, so sizeof divides by 8.
+ * Three independent consequences of one request, none of them an exact layout value and
+ * none of them a pointer conversion.  Asserting offsetof == 8 instead would have been an
+ * assertion about how much padding this implementation chose, which is not what alignas
+ * requests and not something a differential oracle may hold a compiler to.
  *
  * On an OBJECT, where the request is exercised by using the storage rather than by
  * observing where it sits.  16 bytes is more than the requested alignment needs, so
@@ -260,9 +270,10 @@ int main(void)
      * stddef.h respectively, both of which this program includes, so the assertions
      * exercise the bundled headers as well as the alignment machinery.  Each operand
      * is unsigned throughout, which is what keeps -Wsign-conversion satisfied. */
-    printf("alignas_type_alignment=%d\n", (int)(alignof(struct AlignedHolder) == 8u));
+    printf("alignas_type_alignment=%d\n", (int)(alignof(struct AlignedHolder) >= 8u));
     printf("alignas_member_offset=%d\n",
-           (int)(offsetof(struct AlignedHolder, body) == 8u));
+           (int)(offsetof(struct AlignedHolder, body) >= 1u
+                 && (offsetof(struct AlignedHolder, body) % 8u) == 0u));
     printf("alignas_size_multiple=%d\n",
            (int)((sizeof(struct AlignedHolder) % 8u) == 0u));
     aligned_buf[0] = 0x5au;

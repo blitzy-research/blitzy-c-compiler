@@ -91,12 +91,15 @@
 //! both are handled by construction rather than left to these gates.
 //!
 //! `sizeof(long double)` was measured at 16, 12, 16 and 16 bytes (x87 80-bit versus IEEE binary128),
-//! and that difference cannot be normalized away, so the long-double program's own record is where a
-//! per-oracle exclusion belongs. **No such exclusion is in force on this branch**:
-//! `13_floating_point/004_long_double_target_restricted.c` is committed, but its `.expected` record
-//! is one of the sixteen not yet written, so nothing yet records the exclusion. Neither gate is
-//! affected either way — the warning gate compiles without linking and the sanitizer gate is native
-//! only, so neither compares one target against another.
+//! and that difference cannot be normalized away, so the long-double program's own record is where
+//! the per-oracle exclusion belongs — and is where it now lives.
+//! `13_floating_point/004_long_double_target_restricted.expected` disables oracle (b), records the
+//! measured reason in `impl_defined_notes`, and carries the marker `XD-TYPE-LONGDOUBLE-001` that the
+//! record format requires beside any narrowing. The program still compiles, still runs on all four
+//! targets at all three levels, and is still judged by its same-target reference comparison and its
+//! own golden record; only cross-backend *value* equality is excluded. Neither gate is affected
+//! either way — the warning gate compiles without linking and the sanitizer gate is native only, so
+//! neither compares one target against another.
 //!
 //! ## Headers, and why a program declares `printf` by hand
 //!
@@ -121,9 +124,9 @@
 //!   anything, which is a coverage hole rather than a discipline. The bonus `stdatomic.h` is
 //!   excluded from both exceptions.
 //!
-//! A program taking either exception owes the exception and its reason to its own `ub_notes`: the six
-//! area 07 records state it today, and the preprocessor probe's record is one of the sixteen not yet
-//! committed. Should a bare declaration ever provoke a diagnostic under the strict gate, the correct
+//! A program taking either exception owes the exception and its reason to its own `ub_notes`, and
+//! every one of the seven does: the six area 07 records and the preprocessor probe's record all
+//! state it. Should a bare declaration ever provoke a diagnostic under the strict gate, the correct
 //! resolution is a recorded per-program deviation, never a silent relaxation of the gate for every
 //! program.
 //!

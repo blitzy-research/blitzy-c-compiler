@@ -219,25 +219,6 @@ pub const VAR_TIMEOUT_SECS: &str = "BCC_CONFORMANCE_TIMEOUT_SECS";
 
 pub const VAR_KEEP_WORK: &str = "BCC_CONFORMANCE_KEEP_WORK";
 
-/// Whether the external `timeout` utility is wrapped around a launch as an outer net.
-///
-/// Three values, and the default is the middle one:
-///
-/// - `off` — never wrap. `execute.rs`'s watchdog is the whole bound, which it already is
-///   authoritatively.
-/// - `auto` (the default, and what an unset variable means) — wrap only when the discovered
-///   implementation passes the behavioural qualification in [`qualify_outer_net`], which measures
-///   what an engaged outer net actually costs per invocation.
-/// - `on` — wrap whenever an implementation was discovered, without qualifying it. For a maintainer
-///   who has installed one they trust and would rather not pay for the probe.
-///
-/// The variable exists because the alternative is worse in both directions. Wrapping
-/// unconditionally charged a measured 103 milliseconds to every one of at least 5,508 invocations
-/// for a net that never fires in a healthy run; refusing to wrap at all would discard a real reach
-/// the utility has when this process's own watchdog thread is starved. Qualifying by behaviour keeps
-/// the reach where it is cheap, drops it where it is not, and says which it did.
-pub const VAR_OUTER_TIMEOUT: &str = "BCC_CONFORMANCE_OUTER_TIMEOUT";
-
 /// Native reference compilers, probed in order.
 ///
 /// `gcc` is the reference compiler of record, and the suite passes **no** standard-selection flag to
@@ -2547,46 +2528,27 @@ impl OuterNet {
             OuterNet::Declined { reason } => format!(
                 "declined: no external wrapper is spawned ({reason}). The watchdog in execute.rs is \
                  the whole bound, which it is authoritatively in either case, so no verdict changes \
-                 — set {VAR_OUTER_TIMEOUT}=on to wrap regardless"
+                 — the decision is measured rather than configured, so there is nothing to override"
             ),
         };
         sanitize_text_for_report(&text)
     }
 }
 
-/// What [`VAR_OUTER_TIMEOUT`] asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OuterNetRequest {
-    /// Never wrap.
-    Off,
-    /// Wrap only an implementation that passes qualification. The default.
-    Auto,
-    /// Wrap whatever was discovered, without measuring it.
-    On,
-}
-
-impl OuterNetRequest {
-    /// Read the request from the environment, defaulting to [`OuterNetRequest::Auto`].
-    ///
-    /// An unrecognised value reads as `auto` rather than failing the run: this variable selects a
-    /// performance policy that cannot change a verdict, so refusing to start over a typo would be a
-    /// worse outcome than proceeding with the default. The pre-flight report states which policy is
-    /// in force, so a typo is visible there rather than silent.
-    fn from_environment() -> OuterNetRequest {
-        match env::var(VAR_OUTER_TIMEOUT) {
-            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-                "off" | "0" | "false" | "no" => OuterNetRequest::Off,
-                "on" | "1" | "true" | "yes" | "require" => OuterNetRequest::On,
-                _ => OuterNetRequest::Auto,
-            },
-            Err(_) => OuterNetRequest::Auto,
-        }
-    }
-}
-
 /// Decide whether the discovered `timeout` utility is engaged as an outer net.
 ///
 /// Runs during discovery, once per process, so its cost is paid once rather than per cell.
+///
+/// # Measured, never configured
+///
+/// There is no override, and that is the point. The engagement is a *cost* decision — the watchdog in
+/// `execute.rs` is the authoritative bound in either case — so the only question is what this machine's
+/// implementation charges, and that is something to measure rather than to be told. An earlier form
+/// read an environment variable that could force the answer both ways; it was declared in no
+/// document, a malformed value silently became the default, and it did not reach the environment
+/// fingerprint, so a run's command topology could differ from another's with nothing in either run's
+/// artifacts to show it. Removing it makes the decision a function of the machine, and
+/// [`OuterNet::summary`] records which way it went in the pre-flight report and in every finding.
 ///
 /// # The measurement
 ///
@@ -2612,12 +2574,6 @@ impl OuterNetRequest {
 /// `--signal=KILL`, and an indefinite hang under `--kill-after` — are in spellings this suite never
 /// passes; the plain spelling it does pass measured correct.
 fn qualify_outer_net(tool: &ToolRecord) -> OuterNet {
-    let request = OuterNetRequest::from_environment();
-    if request == OuterNetRequest::Off {
-        return OuterNet::Declined {
-            reason: format!("{VAR_OUTER_TIMEOUT} is set to `off`"),
-        };
-    }
     let Some(path) = tool.path() else {
         return OuterNet::Declined {
             reason: format!(
@@ -2626,15 +2582,6 @@ fn qualify_outer_net(tool: &ToolRecord) -> OuterNet {
             ),
         };
     };
-    if request == OuterNetRequest::On {
-        return OuterNet::Engaged {
-            path: path.to_path_buf(),
-            evidence: format!(
-                "{VAR_OUTER_TIMEOUT} is set to `on`, so it was engaged without measuring its \
-                 per-invocation cost"
-            ),
-        };
-    }
     match measure_outer_net_overhead(path) {
         None => OuterNet::Declined {
             reason: format!(
@@ -5821,7 +5768,27 @@ fn compiler_under_test_error(reason: &str) -> HarnessError {
     )
 }
 
-/// Identify the kernel for the environment fingerprint.
+/// Identify the kernel for the environment fingerprint, **without naming the host**.
+///
+/// # Why not `uname -a`
+///
+/// The full banner's second field is the node name, and this line is copied verbatim into every
+/// finding's `environment.txt`. A generated finding lives under the git-ignored build directory, so a
+/// node name there costs nothing — but a curated finding is *committed*, and a machine's name is an
+/// infrastructure identifier that is never needed to reproduce a divergence. Worse, it is the one
+/// private identifier a validator on another machine cannot recognise: an account directory has a
+/// shape, and a host name does not.
+///
+/// So it is never collected. The selectors below request exactly the facts the fingerprint exists for
+/// — the system, the kernel release and version, the machine architecture, and the operating system —
+/// and none of the fields that identify the host, which makes this a substitution rather than a
+/// redaction: no fact the artifact is read for is lost, and there is nothing left to elide during
+/// curation. That is strictly better than auditing for the node name afterwards, because the value the
+/// audit cannot see is a value that was never written.
+///
+/// `-o` is an extension rather than a standardized selector, so a host whose utility rejects it falls
+/// back to the four standardized ones; both spellings are node-name-free, so the fallback weakens
+/// nothing that matters here.
 ///
 /// Never fatal, and bounded like every other pre-flight process: the utility is spawned through
 /// [`run_bounded_probe`], so a host whose identification utility hangs degrades to the fallback
@@ -5835,11 +5802,18 @@ fn probe_kernel() -> String {
         .iter()
         .find_map(|candidate| resolve_tool(candidate));
     if let Some(uname) = resolved {
-        if let Some(capture) = run_bounded_probe(Command::new(uname).arg("-a")) {
-            if !capture.timed_out {
-                if let Some(line) = first_non_empty_line(&capture.stdout) {
-                    return line;
-                }
+        for selectors in KERNEL_SELECTORS {
+            let Some(capture) = run_bounded_probe(Command::new(&uname).args(*selectors)) else {
+                continue;
+            };
+            // The status is consulted here, unlike in a banner probe: a utility that rejected an
+            // extension selector has said nothing about the kernel, and reading its refusal as an
+            // answer is what would make the fallback below unreachable.
+            if capture.timed_out || !capture.status.is_some_and(|status| status.success()) {
+                continue;
+            }
+            if let Some(line) = first_non_empty_line(&capture.stdout) {
+                return line;
             }
         }
     }
@@ -5849,3 +5823,11 @@ fn probe_kernel() -> String {
         env::consts::ARCH
     )
 }
+
+/// Node-name-free identification selectors, tried in order.
+///
+/// The first asks for system, kernel release, kernel version, machine and operating system. The second
+/// drops the operating-system selector, which is an extension a host's utility may reject; the four
+/// that remain are standardized. Neither spelling requests the node name, the processor or the hardware
+/// platform, so neither can carry a host identity into a committed artifact.
+const KERNEL_SELECTORS: &[&[&str]] = &[&["-srvmo"], &["-srvm"]];

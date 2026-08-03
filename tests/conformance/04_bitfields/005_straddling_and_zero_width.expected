@@ -100,25 +100,59 @@ CANNOT be deduced from int's width, and this record does not claim they can.
 
 What supports them is measurement.  On all four supported targets, with gcc 13.3.0 and
 re-verified on this branch with gcc 13.4.0, the following were observed to agree exactly:
-the allocation unit for a bitfield declared on an int base type is four bytes; a field that
-does not fit in the remainder of the current unit straddles into the next one rather than
-starting a fresh unit; allocation within a unit proceeds from the least significant bit
-upward; all four targets are little-endian; and each structure below carries no padding
-beyond the bytes the units themselves occupy, so its size is exactly the number of
-allocation units it spans -- 4 for a single 32-bit cover, 8 for the 64-bit cover, 12 where
-a zero-width separator forces a third unit.  Every printed size, alignment and byte image
-follows from THAT premise.  Each of the four supported ABIs fixes these choices in its own
-psABI document, and the measurement is the statement that the four fix them identically;
-the printed values are target-invariant because the four ABIs agree, not because the
-language required them to.
+
+  - the allocation unit for a bitfield declared on an int base type is FOUR BYTES;
+  - allocation within a unit proceeds from the LEAST SIGNIFICANT BIT UPWARD, and all four
+    targets are little-endian, so a field's bit position within a unit fixes which bytes of
+    the structure image it occupies;
+  - a field DOES straddle a BYTE boundary inside its allocation unit -- struct cover32's
+    9-bit c occupies bits 8 through 16 and its 15-bit d occupies bits 17 through 31, which
+    is what makes its printed byte image a non-trivial fact;
+  - a field that does NOT fit in the remainder of the current unit STARTS A FRESH UNIT
+    rather than straddling the unit boundary.  This is the opposite of what an earlier form
+    of this record asserted, and the corpus already depends on the correct reading: struct
+    nostraddle declares 20 + 20 + 24 bits, which would occupy 8 bytes if the unit boundary
+    could be straddled and occupies 12 because it cannot -- and 12 is what the golden record
+    below states.  Independently re-measured on this branch with a two-field probe,
+    { a : 30; b : 4; }, which is 8 bytes on all four targets rather than the 5 or 8 a
+    straddling rule would give.  The struct's NAME records the same fact.
+  - each structure below carries no padding beyond the bytes the units themselves occupy, so
+    its size is exactly the number of allocation units it spans -- 4 for a single 32-bit
+    cover, 8 for the 64-bit cover, 12 for the three units nostraddle needs and for the three
+    a pair of zero-width separators forces.
+
+Every printed size, alignment and byte image follows from THAT premise.  Each of the four
+supported ABIs fixes these choices in its own psABI document, and the measurement is the
+statement that the four fix them identically; the printed values are target-invariant because
+the four ABIs agree, not because the language required them to.
 
 The consequence for the oracles.  Because the premise is measured to hold on all four
 targets rather than assumed, no target restriction is applied and all three oracles remain
-enabled.  A cross-backend divergence here is a genuine finding rather than an
-implementation-defined difference: the four backends each have a psABI to conform to, and
-these values are what conforming to it produces.  No expected-divergence marker is
+enabled, and a cross-backend divergence here is a FINDING -- a deliverable with a reproducer
+and exact commands -- rather than something excused.  No expected-divergence marker is
 attached, because no documented bitfield limitation exists anywhere in the repository to
 serve as a basis.
+
+What such a finding is ATTRIBUTABLE to is decided by the harness, from evidence the run
+already holds, and this record does not decide it here.  Every cross-backend finding carries
+the same-target reference capture beside the two it compared, and its manifest states one of:
+
+  - attribution = abi-observation, when bcc AGREES with the toolchain that implements this
+    target's own ABI and only the cross-target comparison differs.  A difference over a
+    property each psABI fixes for itself is then a statement about two ABIs rather than a
+    defect in bcc.  It remains a finding; it is not excused and not passed.
+  - attribution = defect-candidate, when bcc disagrees with its own target's reference
+    toolchain too, so two independent oracles point the same way.
+  - attribution = undetermined, when no same-target reference capture accompanies the
+    finding, in which case the target's psABI is authoritative and is what a maintainer
+    reads next.
+
+An earlier form of this record asserted flatly that a cross-backend divergence here is a
+genuine defect rather than an implementation-defined difference, while FINDINGS.md described
+a triage procedure under which same-target agreement makes it an ABI observation.  Both were
+reasoning correctly about the same distinction and neither DECIDED it, so the two documents
+could be read against each other.  The decision now lives in one place, in code, and both
+documents point at it.
 
 Signed straddling fields are observed through read-back of their values rather than through a
 byte image, because the bit pattern of a negative value is a representation detail rather than a

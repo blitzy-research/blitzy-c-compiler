@@ -128,7 +128,8 @@ double has three different representations across the four targets (measured 16,
 16 bytes; x87 80-bit versus IEEE binary128) and is absent from this program entirely --
 using it would import a difference that has nothing to do with parameter passing. That
 type is covered by 13_floating_point/004_long_double_target_restricted, whose record
-disables oracle (b) alone with the measured reason recorded and carries NO marker.
+disables oracle (b) alone, with the measured reason recorded and the expected-divergence
+marker XD-TYPE-LONGDOUBLE-001 scoping that oracle.
 
 No target is dropped, no oracle is disabled and this record carries no expected-divergence
 marker: a cross-backend divergence here is a GENUINE FINDING rather than an

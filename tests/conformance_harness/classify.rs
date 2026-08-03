@@ -26,10 +26,11 @@
 //! | The comparison agrees and a marker covers this cell and oracle | `XPASS` | **yes**, unless `BCC_CONFORMANCE_ALLOW_XPASS` |
 //! | A divergence, and a marker covers this oracle, target, level **and** class | `XFAIL` | no |
 //! | A build produced no artifact, and a marker covers this oracle, target, level **and** class | `XFAIL` on that oracle's arm | no |
-//! | A build produced no artifact, and a marker covers the other three dimensions but not this oracle | `FINDING` on that arm | no — a finding is a deliverable |
+//! | A build produced no artifact, a marker covers another arm of the same cell, and this arm lost its subject to that one refusal | `XFAIL` on this arm, citing the root marker and stating no comparison was attempted | no |
+//! | A build produced no artifact and **no** arm of the cell is marked | `FINDING` on every applicable arm | no — a finding is a deliverable |
 //! | A divergence with no covering marker | `FINDING` | no — a finding is a deliverable |
 //! | Not attempted because the record narrows coverage, and a marker covers the scope | `XFAIL` citing the marker | no |
-//! | Not attempted because the record narrows coverage, with no covering marker | `XFAIL` citing the record's own recorded reason | no |
+//! | Not attempted because the record narrows coverage, with **no** marker naming that oracle | `FAIL` | **yes** — the record format forbids the state, so reaching it is an inconsistency |
 //! | Not attempted while the record *enables* that oracle | `FAIL` | **yes** |
 //! | Anything unexplained | `FAIL` | **yes** |
 //!
@@ -37,7 +38,7 @@
 //!
 //! | Class | Meaning, and how it can be excused |
 //! |---|---|
-//! | `compile_failure` | One compiler rejected a program the other accepted. Excusable by a marker citing a limitation the repository **explicitly documents** — never by an inventory that merely omits the construct, which is why GCC case ranges carry no marker and a refusal there is a finding. |
+//! | `compile_failure` | One compiler rejected a program the other accepted. Excusable by a marker citing a limitation the repository documents — including one documented by an inventory that enumerates what is implemented and **omits** the construct, which is the form the frozen contract mandates for GCC case ranges. Whether such a citation is strong enough is a reviewer's judgement recorded in the register, not a parse-time verdict. |
 //! | `link_failure` | The program translated but did not link. **Attributable to this machine** when a target's C runtime is absent, in which case it is `UNAVAILABLE` at environment scope and never a finding against the compiler. |
 //! | `run_crash` | The program died on a signal instead of exiting. Compared as a raw wait status, so it is never conflated with a numerically equal ordinary exit. |
 //! | `exit_code_mismatch` | Two completed runs disagreed on status. |
@@ -56,8 +57,13 @@
 //!    [`Verdict::XPass`]. The marker claims a divergence that is no longer there.
 //! 4. **A divergence a marker covers on oracle, target, level and class** —
 //!    [`Verdict::XFail`], recording the marker identifier and its documented basis, because
-//!    the deliverable summary must list every expected divergence with its basis.
-//! 5. **A divergence with no covering marker** — [`Verdict::Finding`].
+//!    the deliverable summary must list every expected divergence with its basis. This step
+//!    has a **dependent form** for one situation, and only one: an arm that lost the subject
+//!    of its comparison to a build refusal some *other* arm of the same cell is marked for.
+//!    It is [`Verdict::XFail`] as well, citing the root marker, naming the arm that carries
+//!    it, and stating that no comparison was attempted here — one root event yields one
+//!    explanation rather than one finding per arm. See [`RefusalRoot`].
+//! 5. **A divergence with no covering marker, and no marked root** — [`Verdict::Finding`].
 //! 6. **Anything unexplained** — [`Verdict::Fail`].
 //!
 //! # Why unexpected success fails the run
@@ -116,20 +122,25 @@
 //! exactly the arms that held an authority and lost the comparison to a refusal, and naming an
 //! oracle in a scope narrows a real set rather than a notional one.
 //!
-//! What this asks of an author is one word. A marker meant to excuse a build refusal scopes
-//! **`all oracles`**, because a refusal denies every arm its subject; the scope grammar has that
-//! token, so the intent is written in the register where a reader finds it, instead of being
-//! inferable only from this file. A marker that names a single oracle and then meets a refusal is
-//! reported as non-covering, the oracle dimension is named among the mismatches, and the detail
-//! spells out the `all oracles` remedy — so the corpus is corrected by editing a scope, never by
-//! this module quietly deciding a basis covers arms it never mentioned.
+//! What this does **not** ask of an author is that a refusal marker be widened to `all oracles`.
+//! An earlier form of this module required exactly that and reported a single-oracle marker as
+//! non-covering, which turned a gap in this module into a constraint on the author and contradicted
+//! the frozen contract, whose refusal marker is scoped `oracle_a` alone — rightly, because oracle
+//! (a) is the only arm on which *the reference compiler accepted this program and the compiler under
+//! test did not* is a statement about two compilers. Widening it would have oracles (b) and (c)
+//! claim an authority they never consulted, and that is the dangerous direction: a basis about the
+//! reference compiler says nothing whatever about the cross-backend or golden-record comparisons.
 //!
-//! The relaxed alternative is the dangerous direction, which is why it is not taken: an `oracle_a`
-//! marker recording that the reference compiler accepts a construct bcc rejects would, under it,
-//! also excuse the cross-backend and golden-record arms — two authorities that basis says nothing
-//! whatever about. Staleness detection is unaffected either way: it runs on agreement, through any
-//! oracle the marker's scope names, so a refusal that disappears still produces an unexpected
-//! success and still fails the run until the marker is retired.
+//! Instead, the classifier — not the author — makes every arm of one refusal visible. The arm the
+//! scope names settles the refusal on the marker; every other arm is a **dependent blocked** XFAIL
+//! that cites the root marker, names the arm carrying it, and states that no comparison was
+//! attempted on it. The propagation requires a marker already covering this cell's target,
+//! optimization level and observed class on some arm, so an *undocumented* refusal remains a
+//! finding on every arm. A marker that genuinely speaks for all three arms may still be scoped
+//! `all oracles`, and then each arm settles on it directly; no scope is ever widened by anyone but
+//! the person who wrote it. Staleness detection is unaffected either way: it runs on agreement,
+//! through any oracle the marker's scope names, so a refusal that disappears still produces an
+//! unexpected success and still fails the run until the marker is retired.
 //!
 //! # A recorded exclusion is an expected divergence, not a missing oracle
 //!
@@ -138,23 +149,26 @@
 //! 12, 16 and 16 bytes, x87 80-bit against IEEE binary128 — so cross-backend *value* equality
 //! is meaningless for it while the same-target reference comparison and the golden record stay
 //! entirely meaningful. Such a cell reaches [`Verdict::XFail`]: a documented expected
-//! divergence, citing a covering marker when one names it and otherwise the record's own
-//! recorded reason.
+//! divergence, citing the marker whose scope names the narrowed oracle. That marker is not
+//! optional — a narrowed oracle already claims the authority of an expected divergence, so the
+//! record format requires a marker for it beside the recorded reason, and a narrowing that
+//! reaches here with no such marker is reported as [`Verdict::Fail`] rather than excused.
 //!
 //! It is deliberately **not** [`Verdict::Unavailable`], and the distinction is the whole point
 //! of that verdict. An unavailable oracle is a statement about the *machine* — a tool nobody
 //! installed — which is why `BCC_CONFORMANCE_STRICT` escalates it in continuous integration,
 //! where the toolchain is installed on purpose. A narrowing is a statement about the *corpus*:
-//! a deliberate authoring decision that the record format refuses to accept without a recorded
-//! reason, so an undocumented narrowing cannot reach this module from a parsed record at all.
-//! Filing the second as the first would fail a run over a comparison the corpus never asked
-//! anyone to make.
+//! a deliberate authoring decision that the record format refuses to accept without both a
+//! recorded reason and a marker naming the narrowed oracle, so an undocumented narrowing cannot
+//! reach this module from a parsed record at all. Filing the second as the first would fail a run
+//! over a comparison the corpus never asked anyone to make.
 //!
 //! It is equally not a [`Verdict::Pass`]. Nothing was compared, so no equality is claimed; the
-//! cell is counted and listed with its recorded reason printed, which keeps the set of
-//! comparisons deliberately not made as visible as the set that was. The one shape that is
-//! never excused is a record that *enables* an oracle while the comparison claims exclusion —
-//! that removes a comparison the corpus asks for, and it is [`Verdict::Fail`].
+//! cell is counted and listed with its recorded reason and its marker printed, which keeps the
+//! set of comparisons deliberately not made as visible as the set that was. Two shapes are never
+//! excused: a record that *enables* an oracle while the comparison claims exclusion, which
+//! removes a comparison the corpus asks for; and a narrowing no marker names, which claims the
+//! authority of a documented limitation while naming none. Both are [`Verdict::Fail`].
 //!
 //! # Findings are deliverables, not defects to patch
 //!
@@ -378,14 +392,38 @@ impl fmt::Display for Attribution {
 /// documenting that the reference compiler accepts a construct bcc rejects would silently also
 /// excuse the cross-backend and golden-record arms, which that basis says nothing about.
 ///
-/// # What an author must therefore write
+/// # A refusal is one root event, and the classifier makes every arm of it visible
 ///
-/// A marker intended to excuse a build refusal must scope **`all oracles`**, because a refusal
-/// denies every arm its subject. The scope grammar has that token, so the requirement costs one
-/// word rather than a code exemption, and it makes the intent legible in the register instead of
-/// inferable only from this file. A marker that names one oracle and then meets a refusal is
-/// reported as non-covering, with the oracle dimension named among the mismatches and the
-/// `all oracles` remedy spelled out in the detail — see [`marker_non_coverage`].
+/// An earlier form of this module concluded from the paragraph above that a marker intended to
+/// excuse a build refusal must scope **`all oracles`**, and reported a single-oracle marker as
+/// non-covering with that remedy spelled out in the detail. That conclusion turned a gap in this
+/// module into a constraint on an author, and it contradicted the frozen marker contract, whose
+/// refusal marker is scoped `oracle_a` alone — rightly, because oracle (a) is the only arm on which
+/// "the reference compiler accepted this program and the compiler under test did not" is a statement
+/// about two compilers. Widening the scope would have oracles (b) and (c) claim an authority they
+/// never consulted.
+///
+/// What happens instead is **dependency-aware classification**, built from [`RefusalRoot`]:
+///
+/// - the arm the marker's scope names settles the refusal directly, through [`covering_marker`],
+///   as the expected divergence it is;
+/// - every other arm of the same cell, having no marker of its own, is settled as a **dependent
+///   blocked** outcome by [`dependent_refusal_outcome`]. It is also [`Verdict::XFail`], it cites
+///   the root marker and names the arm that carries it, and it states plainly that no comparison
+///   was attempted on this arm — visible and counted, without claiming an authority it never had;
+/// - **no separate finding is filed** for the blocked arms, because there is one root event and it
+///   is already explained. Measured against a stand-in that rejects the construct: a program refused
+///   on all four targets at all three levels yields **12 `XFAIL` roots** on the marked arm and **21
+///   dependent `XFAIL` arms** — 12 on oracle (c) and 9 on oracle (b), the latter because
+///   [`oracle_applies`] excludes oracle (b) on the baseline target — and **zero** finding
+///   directories, where the un-propagated form produced 21 of them for one root event.
+///
+/// The propagation is deliberately narrow. It requires a marker that already covers this cell's
+/// target, optimization level **and** observed class on some arm; a marker that covers none of
+/// them propagates nothing and every arm remains a finding, which is what keeps an *undocumented*
+/// refusal a finding on all three arms. A marker that genuinely means to speak for all three arms
+/// may still be scoped `all oracles`, and then each arm settles on it directly. No scope is ever
+/// widened by anyone but the person who wrote it.
 ///
 /// Staleness detection is unaffected: if the refusal disappears and the comparisons agree,
 /// [`scope_marker`] finds the marker on any oracle its scope names and the run fails with an
@@ -449,6 +487,14 @@ pub enum Observation<'a> {
         attribution: Attribution,
         /// One line naming what happened, from the build layer that read the diagnostics.
         summary: &'a str,
+        /// The marked arm of this same refusal, when another arm of the cell carries a marker
+        /// covering it.
+        ///
+        /// `None` on every arm when no arm is marked, which keeps an undocumented refusal a
+        /// finding everywhere. Supplied by [`refusal_root`] and never assembled by hand; see the
+        /// [`DivergenceShape`] documentation for what the propagation claims and what it refuses
+        /// to claim.
+        root: Option<RefusalRoot<'a>>,
     },
     /// Something happened that is neither a classified divergence nor a missing oracle.
     ///
@@ -491,7 +537,7 @@ pub fn judge(
     // through to the marker decision below. Reducing rather than duplicating is what keeps one
     // policy in one place; the shape is what lets that one policy match a marker correctly for
     // both, since a refusal and a comparison are answerable to different dimensions.
-    let (class, evidence, shape) = match observation {
+    let (class, evidence, shape, root) = match observation {
         // Step 1: an oracle's tooling is genuinely absent.
         Observation::ToolingAbsent { diagnosis } => {
             return unavailable_tooling_outcome(key, oracle, diagnosis)
@@ -502,6 +548,7 @@ pub fn judge(
             class,
             attribution: Attribution::Environment,
             summary,
+            ..
         } => return unavailable_environment_outcome(key, oracle, *class, summary),
 
         // Step 1, indeterminate scope: nobody could be shown answerable, because the evidence the
@@ -512,6 +559,7 @@ pub fn judge(
             class,
             attribution: Attribution::Indeterminate,
             summary,
+            ..
         } => return unavailable_indeterminate_outcome(key, oracle, *class, summary),
 
         // Step 6: nothing about this is a divergence or a missing oracle.
@@ -519,12 +567,15 @@ pub fn judge(
             return fail_outcome(key, oracle, context, cause)
         }
 
-        // A build failure the caller attributed to the compiler and the program.
+        // A build failure the caller attributed to the compiler and the program. The root travels
+        // with it, because a refusal is one event across every arm of the cell and step 5 needs to
+        // know whether some arm's marker already documents it.
         Observation::Build {
             class,
             attribution: Attribution::Compiler,
             summary,
-        } => (*class, *summary, DivergenceShape::Refused),
+            root,
+        } => (*class, *summary, DivergenceShape::Refused, *root),
 
         Observation::Compared(comparison) => {
             // A comparison attributed to a different oracle than the one being judged would
@@ -572,9 +623,14 @@ pub fn judge(
                 // Nothing was measured, so there is no observed class for a marker to agree
                 // with: the marker is matched on scope alone, and matching it on a class the
                 // comparison never produced would reject every legitimate narrowing.
+                //
+                // A narrowing with no marker naming the narrowed oracle is an inconsistency
+                // rather than an expected divergence — see
+                // [`markerless_exclusion_inconsistency`] for why it cannot be reached from a
+                // parsed record and why it must never be reported as XFAIL when it is.
                 return match scope_marker(manifest, key, oracle) {
                     Some(marker) => xfail_exclusion_outcome(key, oracle, manifest, marker, reason),
-                    None => xfail_recorded_exclusion_outcome(key, oracle, manifest, reason),
+                    None => markerless_exclusion_inconsistency(key, oracle, manifest, reason),
                 };
             }
 
@@ -591,10 +647,14 @@ pub fn judge(
             }
 
             match comparison.class {
+                // No dependency root: this arm made its own comparison and observed its own
+                // divergence, so it is answerable for it. Only a refusal — which removes an arm's
+                // subject rather than disagreeing with it — carries a root.
                 Some(class) => (
                     class,
                     comparison.summary.as_str(),
                     DivergenceShape::Compared,
+                    None,
                 ),
                 // A comparison that is neither equal, nor excluded, nor classified breaks the
                 // comparator's own documented invariant. Reporting it as an agreement would
@@ -633,12 +693,20 @@ pub fn judge(
     // four dimensions — oracle, target, optimization level and class — narrow a real set and all
     // four are matched strictly. `shape` decides only which account the detail gives. See
     // [`DivergenceShape`] for why a refusal is no exception, and what an author writes instead.
-    let marker = covering_marker(manifest, key, oracle, class);
-    match marker {
-        // Step 4: a marker documents this divergence.
-        Some(marker) => xfail_divergence_outcome(key, oracle, class, marker, evidence, shape),
-        // Step 5: no marker covers it, so it is an undocumented divergence — a finding.
-        None => finding_outcome(
+    match (covering_marker(manifest, key, oracle, class), root) {
+        // Step 4: a marker documents this divergence on this arm.
+        (Some(marker), _) => xfail_divergence_outcome(key, oracle, class, marker, evidence, shape),
+        // Step 4, dependent form: no marker names this arm, but the refusal that denied it its
+        // subject is one root event and another arm's marker documents that event. Reported as an
+        // expected divergence citing the root, stating that no comparison was attempted here —
+        // never as an independent finding, which would file one event as three defects. Only a
+        // refusal can reach here, because only [`Observation::Build`] carries a root.
+        (None, Some(root)) if root.oracle() != oracle => {
+            dependent_refusal_outcome(key, oracle, class, &root, evidence)
+        }
+        // Step 5: no marker covers it and no marked root explains it, so it is an undocumented
+        // divergence — a finding.
+        (None, _) => finding_outcome(
             key,
             oracle,
             class,
@@ -742,9 +810,16 @@ pub fn unavailable_oracle(caps: &Capabilities, key: &CellKey, oracle: Oracle) ->
 /// An [`Attribution::Environment`] build failure becomes [`Verdict::Unavailable`] at
 /// environment scope. An [`Attribution::Compiler`] one goes through the same marker logic a
 /// diverging comparison goes through, which is what lets a compile failure on a limitation the
-/// repository **explicitly documents** be an expected divergence instead of a finding — and,
-/// where no such documentation exists, keeps it a finding, because a marker may not be minted
-/// on the strength of an omission from an inventory.
+/// repository **documents** be an expected divergence instead of a finding — and, where no such
+/// documentation exists, keeps it a finding on every arm.
+///
+/// `root` is the dependency context, and it is a parameter rather than something this function
+/// derives so that every caller has to say explicitly whether one exists. Pass
+/// [`refusal_root`]'s answer for a refusal by the compiler under test, where one root event
+/// denies every oracle arm of the cell its subject at once. Pass `None` for a refusal by any
+/// other party — the reference arm's own refusal, for instance, which indicts the test material
+/// rather than the compiler under test and must not borrow a marker written about the compiler
+/// under test.
 pub fn build_failure(
     manifest: &Manifest,
     key: &CellKey,
@@ -752,12 +827,14 @@ pub fn build_failure(
     class: DivergenceClass,
     attribution: Attribution,
     summary: &str,
+    root: Option<RefusalRoot<'_>>,
 ) -> Outcome {
     judge(
         &Observation::Build {
             class,
             attribution,
             summary,
+            root,
         },
         Some(manifest),
         key,
@@ -850,6 +927,62 @@ pub fn covering_marker<'a>(
     manifest
         .marker()
         .filter(|marker| covers(marker, key, oracle, class))
+}
+
+/// The marked arm of a build refusal, and the marker that documents it.
+///
+/// A build refusal produces no artifact, so one root event denies every oracle arm of the cell the
+/// subject of its comparison at once. This names the arm whose own authority the marker speaks for,
+/// so that the arms it does not name can be reported as blocked *by that root* rather than each
+/// filed as an independent undocumented divergence. See the [`DivergenceShape`] documentation for
+/// why that is the correct reading and what it deliberately does not do.
+///
+/// The struct is deliberately inert: it carries a borrowed marker and one oracle, is produced only
+/// by [`refusal_root`], and is consumed only by [`judge`]. There is no way to assemble one that
+/// does not already cover a real cell, class and arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusalRoot<'a> {
+    /// The marker that documents the refusal.
+    marker: &'a ExpectedDivergence,
+    /// The oracle arm the marker's scope names, which settles the refusal directly.
+    oracle: Oracle,
+}
+
+impl<'a> RefusalRoot<'a> {
+    /// The marker that documents the root refusal.
+    pub fn marker(&self) -> &'a ExpectedDivergence {
+        self.marker
+    }
+
+    /// The oracle arm the marker's scope names.
+    pub fn oracle(&self) -> Oracle {
+        self.oracle
+    }
+}
+
+/// Find the marked arm of a refusal of this class for this cell, if any arm is marked.
+///
+/// Searched over [`Oracle::ALL`] in its declared order rather than over the arms this machine can
+/// actually attempt, so that the answer is a pure function of the record, the cell and the observed
+/// class. A marker documents the *refusal*, which happened whether or not a reference driver or an
+/// emulator exists on this machine, and a propagation that changed shape with the installed
+/// toolchain would make two runs of identical inputs disagree about a verdict.
+///
+/// `None` whenever no arm is covered — including when the program carries no marker, when the
+/// marker documents a different class, and when its scope excludes this target or this optimization
+/// level. In every one of those cases the refusal is undocumented for this cell and stays a finding
+/// on every arm, which is the outcome requirement 6 asks for.
+pub fn refusal_root<'a>(
+    manifest: &'a Manifest,
+    key: &CellKey,
+    class: DivergenceClass,
+) -> Option<RefusalRoot<'a>> {
+    let marker = manifest.marker()?;
+    Oracle::ALL
+        .iter()
+        .copied()
+        .find(|oracle| covers(marker, key, *oracle, class))
+        .map(|oracle| RefusalRoot { marker, oracle })
 }
 
 /// What one divergence class means, in one sentence, for the outcome detail.
@@ -1058,9 +1191,13 @@ fn marker_non_coverage(
         DivergenceShape::Compared => "",
         DivergenceShape::Refused => {
             " No artifact was produced for this cell, so this oracle arm lost the subject of its \
-             comparison. A refusal denies every arm its subject, so a marker meant to document one \
-             must scope `all oracles`; a marker naming a single oracle documents that oracle's \
-             comparison and nothing else."
+             comparison. A refusal is one root event across every arm, and an arm blocked by a \
+             refusal some OTHER arm's marker covers is reported as a dependent expected divergence \
+             rather than as a finding — so reaching this text means no arm of this cell is covered \
+             at all, and the mismatch named above is the reason. The remedy is a marker that \
+             matches the observation, in this program's record and in the register both; widening \
+             an existing one is not, because the arms of a refusal are settled against different \
+             authorities and a basis written for one of them says nothing about the others."
         }
     };
     Some(format!(
@@ -1324,16 +1461,19 @@ fn xfail_divergence_outcome(
         DivergenceShape::Refused => format!(
             "expected divergence: no artifact was produced for {key}, so {oracle} lost the subject \
              of its comparison, and that {class} is documented by {reference}, whose scope names \
-             {oracle} among {named}. Matching is strict on every dimension for a refusal exactly \
-             as it is for a comparison: this arm had an authority to compare against — an arm \
-             whose authority this environment cannot supply is reported as unavailable, and one \
-             the record itself disables as a recorded exclusion — so naming an oracle narrows a \
-             real set, and {register} therefore documents precisely the arms it says it does. In \
-             general, {significance}. A marker changes how a divergence is CLASSIFIED, never \
-             whether the feature is EXERCISED: this program was compiled in full and the \
-             compiler's own diagnostics are recorded. If the refusal ever disappears, the \
-             comparison this marker's scope names becomes an unexpected success and fails the run \
-             so that the marker is retired. The refusal was: {evidence}",
+             {oracle} among {named}. This is the ROOT arm of the refusal: matching is strict on \
+             every dimension for a refusal exactly as it is for a comparison, because this arm had \
+             an authority to compare against — an arm whose authority this environment cannot \
+             supply is reported as unavailable, and one the record itself disables as a recorded \
+             exclusion — so naming an oracle narrows a real set, and {register} therefore \
+             documents precisely the arms it says it does. The same refusal denied every other arm \
+             of this cell its subject too; each of those is reported as a dependent blocked arm \
+             citing this marker, so the scope is never widened and no arm is dropped. In general, \
+             {significance}. A marker changes how a divergence is CLASSIFIED, never whether the \
+             feature is EXERCISED: this program was compiled in full and the compiler's own \
+             diagnostics are recorded. If the refusal ever disappears, the comparison this \
+             marker's scope names becomes an unexpected success and fails the run so that the \
+             marker is retired. The refusal was: {evidence}",
             reference = marker_reference(marker),
             named = joined(marker.scope().oracles()),
             register = EXPECTED_DIVERGENCE_REGISTER,
@@ -1388,54 +1528,113 @@ fn xfail_exclusion_outcome(
     )
 }
 
-/// Build the outcome for a narrowing documented by the record's own recorded reason.
+/// Build the outcome for a narrowed oracle that no marker names: an inconsistency, not an
+/// expected divergence.
 ///
-/// Reached when the record disables the oracle and no marker's scope additionally names it. The
-/// verdict is still [`Verdict::XFail`], because the narrowing is still documented — just by the
-/// record's `impl_defined_notes` rather than by a marker — and three facts make that the honest
-/// classification rather than a convenient one:
+/// A record that disables an oracle is claiming the authority of an expected divergence for a
+/// comparison it never makes, and the frozen marker contract answers that claim in one way only:
+/// the record must carry a marker whose scope names the narrowed oracle, beside the
+/// `impl_defined_notes` reason it needs independently. `require_marker_for_narrowed_oracle` in the
+/// record parser enforces exactly that, so **this state is unreachable from a parsed record** —
+/// reaching it means the record was assembled by some route other than the parser, or that this
+/// module and the parser disagree about the contract.
 ///
-/// - **A reason always exists.** The record parser refuses to accept a record that narrows its
-///   oracle coverage without recording why, so an undocumented narrowing cannot reach here from
-///   a parsed record at all. The prohibition on silent exclusion is enforced upstream, in the
-///   format, which is a stronger place for it than a verdict.
-/// - **It is a corpus decision, not a machine deficiency.** The comparator's own worked example
-///   is `long double`, whose representation was measured to differ across the four targets, so
-///   cross-backend *value* equality is meaningless for it while the same-target reference
-///   comparison and the golden record remain entirely meaningful. Reporting that as an
-///   unavailable oracle would file a deliberate, reasoned authoring decision as a missing tool,
-///   and the strict setting — which exists to catch a continuous-integration workflow that
-///   failed to install something — would then fail a run over a comparison the corpus never
-///   asked anyone to make.
-/// - **It is still not a pass, and still loud.** Nothing was compared, so no equality is
-///   claimed; the outcome is counted and listed with its recorded reason printed, which is what
-///   keeps the set of comparisons deliberately not made as visible as the set that was.
+/// It is therefore [`Verdict::Fail`], and the three reasons are the same three that make the
+/// contract worth having:
 ///
-/// The one shape that is *not* excused here is a record that enables the oracle while the
-/// comparison claims exclusion. That really would remove a comparison the corpus asks for, and
-/// it is reported as [`Verdict::Fail`] by [`comparison_inconsistency`] before this is reached.
-fn xfail_recorded_exclusion_outcome(
+/// - **XFAIL here would be a silent exclusion in the clothes of a documented one.** It carries no
+///   identifier a report row could cite, no register entry the bidirectional audit could find, and
+///   no basis resolved against any document. The register's own audit would re-establish "zero
+///   unregistered markers" on a run that had just excused a comparison nobody registered.
+/// - **A reason in prose is not an authority.** `impl_defined_notes` explains an authoring
+///   decision; a marker's basis cites a repository artifact and section, and requirement 5 asks for
+///   the second. Accepting the first as a substitute is what let an exclusion outrank the markers
+///   the same contract refused.
+/// - **A verdict is the wrong place to enforce a format rule.** The prohibition on silent exclusion
+///   belongs upstream, in the record parser, where a record that violates it cannot be loaded at
+///   all. This function's job is to notice that the upstream guarantee did not hold, loudly.
+///
+/// The remedy named in the detail is the two-line one: write the marker in the program's own
+/// record and mirror it in the register. Nothing about the narrowing itself has to change.
+fn markerless_exclusion_inconsistency(
     key: &CellKey,
     oracle: Oracle,
     manifest: &Manifest,
     reason: &str,
 ) -> Outcome {
     let detail = format!(
-        "recorded exclusion: {oracle} was not attempted for {key} because this program's own \
-         expectation record at {record} narrows its oracle coverage. No expected-divergence \
-         marker additionally names this oracle, target and optimization level, so the documented \
-         basis is the record's own recorded reason, which the record format requires before it \
-         will accept any narrowing at all — a narrowing nobody justified cannot be written down. \
-         Nothing was compared, so no equality is claimed and this is not a pass; it is counted \
-         and listed so the comparison deliberately not made stays as visible as the ones that \
-         were. The oracles this program keeps — {kept} — still judge the cell in full, which is \
-         how a property whose value legitimately differs between architectures stays under test \
-         instead of being dropped for being difficult. Recorded reason: {recorded}",
+        "this program's expectation record at {record} disables {oracle}, so nothing was compared \
+         for {key} on that arm, and no expected-divergence marker in the record names {oracle} for \
+         this target and optimization level. A narrowed oracle is reported as an expected \
+         divergence, which claims the authority of a documented limitation; with no marker there is \
+         no identifier for a report row to cite, no entry for {register}'s bidirectional audit to \
+         find, and no basis resolved against any document, so reporting XFAIL here would be a \
+         silent exclusion wearing the clothes of a documented one. The record format requires a \
+         covering marker before it will accept a narrowing at all, which makes this state \
+         unreachable from a parsed record: reaching it means the record did not come through the \
+         parser, or that the parser and this classifier disagree about the contract. Remedy: add \
+         the marker to {record}, scoped to name {oracle}, and mirror it in {register} — the \
+         narrowing itself stays exactly as it is, and its recorded reason is kept beside the \
+         marker rather than replaced by it. Recorded reason: {recorded}",
         record = shown_path(manifest.path()),
-        kept = joined(manifest.enabled_oracles()),
+        register = EXPECTED_DIVERGENCE_REGISTER,
         recorded = inline_reason(reason)
     );
-    Outcome::new(key.clone(), oracle, Verdict::XFail, None, None, detail)
+    Outcome::new(key.clone(), oracle, Verdict::Fail, None, None, detail)
+}
+
+/// Build the outcome for an arm blocked by a marked refusal on another arm of the same cell.
+///
+/// The dependent half of dependency-aware classification. A build refusal produces no artifact, so
+/// one root event denies every oracle arm of the cell its subject at once; the arm the marker's
+/// scope names settles that refusal directly, and this is what the other arms report.
+///
+/// Three properties make it the honest classification rather than a convenient one:
+///
+/// - **It cites a real marker, and says whose arm it belongs to.** The detail names the root
+///   marker with its class, scope and documented basis, and names the arm the scope covers, so a
+///   reader is never left to infer which authority is speaking.
+/// - **It claims nothing about this arm's own authority.** It states that no comparison was
+///   attempted here, so no equality is claimed and no divergence is attributed to an oracle that
+///   never ran. That is the whole reason the root marker is not widened: an `oracle_a` marker
+///   documenting that the reference compiler accepts a construct the compiler under test rejects
+///   says nothing about the cross-backend or golden-record comparisons.
+/// - **It is counted and listed, and it files no finding.** One root event yields one explanation,
+///   not one per arm; the arms remain visible in the reports with their reason, which is what keeps
+///   the set of comparisons not made as visible as the set that was.
+///
+/// The outcome carries the observed class and the root marker's identifier, so the summary can
+/// group every arm of one refusal under the marker that documents it.
+fn dependent_refusal_outcome(
+    key: &CellKey,
+    oracle: Oracle,
+    class: DivergenceClass,
+    root: &RefusalRoot<'_>,
+    evidence: &str,
+) -> Outcome {
+    let detail = format!(
+        "dependent blocked arm: no artifact was produced for {key}, so {oracle} lost the subject of \
+         its comparison and NO COMPARISON WAS ATTEMPTED on this arm. The refusal is one root event \
+         across every arm of this cell, and it is documented by {reference}, whose scope names {named} \
+         — that arm settles the refusal as the expected divergence it is. This arm is reported \
+         beside it rather than as a separate finding, because one event has one explanation; \
+         equally, the marker is NOT widened to cover {oracle}, because its basis speaks for {named} \
+         and would claim an authority this arm never consulted. In general, {significance}. Nothing \
+         is excused about {oracle} itself: if the refusal disappears, this arm compares in full and \
+         a stale marker becomes an unexpected success on the arm that carries it. The refusal was: \
+         {evidence}",
+        reference = marker_reference(root.marker()),
+        named = joined(root.marker().scope().oracles()),
+        significance = class_significance(class)
+    );
+    Outcome::new(
+        key.clone(),
+        oracle,
+        Verdict::XFail,
+        Some(class),
+        Some(String::from(root.marker().id())),
+        detail,
+    )
 }
 
 /// Build the outcome for an undocumented divergence: a finding.

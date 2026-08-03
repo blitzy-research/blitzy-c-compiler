@@ -114,28 +114,36 @@
  * appears in any argument list in this file.
  *
  * WHAT THE TABLE ABOVE DESCRIBES, AND AT WHICH OPTIMIZATION LEVEL.  Every row is
- * a classification the SOURCE requests: eight aggregate shapes, each passed to a
+ * a classification the SOURCE requests: seven aggregate shapes, each passed to a
  * separate static function, on both sides of every target's by-register /
  * by-memory threshold.  Whether a call survives to exercise that classification
  * at run time is a separate question, and it was measured rather than assumed.
- * Counting the program's own static helpers that are still emitted, and the calls
- * to them, in the reference compiler's assembly - `<driver> -O<n> -S -o -
+ * Counting the program's own static helpers still emitted in the reference
+ * compiler's assembly - `<driver> -O<n> -S -o -
  * 004_small_and_large_struct_passing.c`, then grepping for the helper labels:
+ * with the volatile call boundary in place, ALL SEVEN HELPERS ARE EMITTED at -O0,
+ * -O1 and -O2 on x86-64, i686, AArch64 and RISC-V 64 alike, with no .constprop
+ * and no .isra clone anywhere.  Every argument-marshalling path in the table is
+ * therefore exercised as a real indirect call at every one of the twelve cells.
  *
- *   -O0  all 8 helpers, 21 calls   on x86-64, i686, AArch64 and RISC-V 64 alike
- *   -O1  5 helpers / 10 calls on x86-64 and AArch64, 1 / 2 on RISC-V 64,
- *        and 0 / 0 on i686 - every helper inlined away
- *   -O2  1 helper / 2 calls on x86-64, AArch64 and RISC-V 64, 0 / 0 on i686
+ * The measured BEFORE-STATE, recorded because it is the reason the boundary is
+ * there rather than as a description of the program as it now stands.  With
+ * DIRECT calls to these static helpers, the same counting - over all eight of the
+ * program's static functions then, the seven callees plus the element printer -
+ * gave:
  *
- * So the argument-marshalling paths are genuinely exercised as calls at -O0 on
- * all four targets, and only partly above it: the reference compiler inlines
- * these small static helpers, and on i686 it removes them entirely from -O1
- * upward.  That does not make the higher levels idle - all three oracles still
- * compare the same printed member values at every level, so a wrong result is
- * still caught - but a claim that the threshold CALLS survive every level would
- * be false, and the by-register / by-memory classification is what -O0 is for
- * here.  The compiler under test may inline differently again; its own behaviour
- * is not measured on this branch, since no bcc binary is present.
+ *   -O0  all 8 functions, 21 calls  on x86-64, i686, AArch64 and RISC-V 64 alike
+ *   -O1  5 functions / 10 calls on x86-64 and AArch64, 1 / 2 on RISC-V 64,
+ *        and 0 / 0 on i686 - every one inlined away
+ *   -O2  1 function / 2 calls on x86-64, AArch64 and RISC-V 64, 0 / 0 on i686
+ *
+ * so the threshold calls were exercised at -O0 and only partly above it, and on
+ * i686 not at all from -O1 upward.  Those three lines describe a program that no
+ * longer exists; they are kept because they are the measurement that justified
+ * introducing the indirection, and deleting the evidence for a design decision
+ * makes the decision unreviewable.  The compiler under test may inline
+ * differently again; its own behaviour is not measured on this branch, since no
+ * bcc binary is present.
  *
  * Padding discipline: sizeof is never printed and no aggregate is ever
  * memcmp'd.  Only named members are read back, so the fact that struct s16m is

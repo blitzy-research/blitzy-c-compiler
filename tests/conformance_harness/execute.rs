@@ -115,10 +115,17 @@
 //! budget it therefore never reaches — and engages it only when that cost is inside
 //! `OUTER_NET_OVERHEAD_MAX`; `caps.outer_net_tool()` is the resulting decision and the only value
 //! any caller passes here. The decision is stated in the pre-flight capability report and in every
-//! finding's environment fingerprint, so a declined net is visible rather than silent, and
-//! `BCC_CONFORMANCE_OUTER_TIMEOUT` forces it either way. Nothing about the *bound* changes with that
-//! decision: the watchdog below is authoritative in both cases, which is precisely what makes the
-//! outer net's engagement a cost question rather than a correctness one — and it is why the project
+//! finding's environment fingerprint, so a declined net is visible rather than silent.
+//!
+//! The decision is **measured and not configurable**, which is deliberate. An earlier form of it read
+//! an environment variable that could force the net on or off — a variable the project plan's own
+//! environment-variable contract does not declare, whose malformed values silently read as the
+//! default, and which was absent from the fingerprint that is supposed to make a run's supervision
+//! auditable. A cost policy that no document declares and no artifact records is a hidden change to
+//! the command topology of every cell, so the variable was removed rather than documented: the
+//! measurement is the whole decision, and its result is recorded. Nothing about the *bound* changes
+//! either way — the watchdog below is authoritative in both cases, which is precisely what makes the
+//! outer net's engagement a cost question rather than a correctness one, and it is why the project
 //! plan's own degradation table records the fallback as "no behavioural change".
 //!
 //! Which implementation a machine has, its version, and whether that measurement engaged or
@@ -557,9 +564,12 @@ impl RunOutcome {
     /// The argument vector as a single POSIX shell line, quoted so it can be pasted into a
     /// terminal and reproduce this execution.
     ///
-    /// This is the line a finding artifact publishes and a report row names, and it carries no
-    /// wrapper of this module's: pasting it launches the program the way this module launched it,
-    /// with the same argument vector element for element.
+    /// It carries no wrapper of this module's: the vector is the program's own, element for element.
+    ///
+    /// A report row and a `.exit` record both publish it through the reporting funnel, so the copy
+    /// they show has its roots elided and is read rather than pasted; the pasteable form of the same
+    /// invocation is a finding's `commands.sh`, which parameterizes each path as a shell variable and
+    /// can therefore carry real paths into a committed artifact without disclosing where they were.
     ///
     /// A command line is not the whole invocation, though, and the two inputs it does not carry are
     /// both recorded elsewhere in a finding directory rather than left implicit: the **working
@@ -680,11 +690,21 @@ impl RunOutcome {
         // capture from a record that simply predates the accounting.
         record.push_str(&self.stdout_integrity.record_lines("stdout"));
         record.push_str(&self.stderr_integrity.record_lines("stderr"));
-        record.push_str(&format!("argv = {}\n", self.command_line()));
+        // Rendered through the reporting funnel, like every other path in this record: `runner`,
+        // `working_dir` and a finding's `artifact` line are all elided the same way, and an `argv`
+        // line spelling the checkout out in full was the one field that made a `.exit` capture
+        // non-portable — which matters because a capture is committed with a curated finding and
+        // `FINDINGS.md` §5.3 forbids editing one. The pasteable form of this invocation is
+        // `commands.sh`, which parameterizes every path as a shell variable precisely so it can carry
+        // real paths and still be published.
+        record.push_str(&format!("argv = {}\n", public_text(&self.command_line())));
         // Only when it differs, so an ordinary record stays free of a line that repeats the one
         // above it — and so a record that does carry one is worth reading.
         if self.launch_was_wrapped() {
-            record.push_str(&format!("launch = {}\n", self.launch_command_line()));
+            record.push_str(&format!(
+                "launch = {}\n",
+                public_text(&self.launch_command_line())
+            ));
         }
         for note in self.notes() {
             record.push_str(&format!("note = {note}\n"));

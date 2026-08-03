@@ -6,7 +6,7 @@
 
 program            = 006_nested_calls_callee_saved
 area               = 14_abi_calling_convention
-description        = A nine-frame chain of genuinely out-of-line calls in which every frame keeps ten values live across its nested call and prints them only after that call returns, so that a callee-saved register the callee failed to restore changes exactly one frame's output
+description        = A nine-frame chain of genuinely out-of-line calls -- eight pressure frames above one leaf -- in which each pressure frame keeps ten independent values live across its nested call and prints them only after that call returns, so that a callee-saved register the callee failed to restore changes exactly one frame's output
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -19,25 +19,50 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
 Free of undefined and unspecified behaviour by construction:
-- No signed integer overflow. The seed enters at 100 and grows by 10 per level, reaching 180
-  at the deepest frame; each frame's six ints are the seed plus 1 through 6, and the returned
-  totals accumulate to a value in the low tens of thousands -- three orders of magnitude
-  from INT_MAX.
-- Every floating value is a dyadic rational -- the seed 1.0 plus a whole number of quarters
-  -- so it is exactly representable in binary64, and every printed value carries an explicit
-  precision with room to spare, so no rounding decision is taken and i686's x87 extended
-  intermediate precision cannot perturb a result. No non-finite value, no negative zero and
-  no division appears. The one floating-to-integer conversion multiplies by 4.0 first, so
-  its integral part is exact and small.
+- THE SHAPE OF THE CHAIN, stated exactly, because every claim below rests on it. Nine
+  frames: level1 through level8, then leaf_mix. The EIGHT levels are the pressure frames --
+  each reads its own row of the volatile tables, makes its nested call, and prints all ten
+  values afterwards. leaf_mix is the ninth frame and is NOT a pressure frame: it makes no
+  call, so it holds nothing across one, and it owns no table row. The tables are therefore
+  eight rows deep, matching what is consumed rather than the frame count.
+- No signed integer overflow, and the arithmetic is small and enumerable. The seed enters at
+  100 and grows by 10 per level, reaching 180 at leaf_mix, whose result is
+  180 + (int)(9.0 * 4.0) = 216. Each pressure frame returns its callee's result plus the six
+  integers of its own row, and every row sums to -3 (for example 3101 - 3102 + 3103 - 3104 +
+  3105 - 3106), so the chain returns 216 - 8 * 3 = 192 and every intermediate value lies
+  between 192 and 216. The largest magnitude anywhere in the program is the table entry
+  3906 -- six orders of magnitude from INT_MAX.
+- The printed values are NOT derived from the seed. Each pressure frame's ten values are read
+  from static volatile tables: six ints from vlive_i (3101 through 3806, alternating sign),
+  three doubles from vlive_d (1.25 through 24.75), and one pointer from vlive_p designating
+  an entry of plive_target (5101 through 5808). All forty-eight integers, all twenty-four
+  doubles and all eight pointed-to integers are distinct, which is what makes a value
+  restored from the wrong slot name both the frame and the position it came from. Deriving
+  them from the seed instead would let the optimizer rematerialize them after the call and
+  hold nothing across it, which would leave the program asserting ten values while requiring
+  none to survive.
+- Every floating value is a dyadic rational -- a whole number of quarters -- so it is exactly
+  representable in binary64, and every printed value carries an explicit precision with room
+  to spare, so no rounding decision is taken and i686's x87 extended intermediate precision
+  cannot perturb a result. No non-finite value, no negative zero and no division appears. The
+  one floating-to-integer conversion multiplies by 4.0 first, so its integral part is exact
+  and small.
 - No shift operator appears, so no shift count can be out of range.
-- No array indexing and no pointer arithmetic. The only pointer value is the address of a
-  string literal, threaded through the chain as a tag and consumed by printf; it is never
-  printed, never converted to an integer and never modified.
-- No read of uninitialized storage: every local is initialized at its declaration, and the
-  three volatile objects have static initializers.
+- THE ONLY INDEXING IS INTO THE PROGRAM'S OWN STATIC TABLES, with constant subscripts written
+  literally at each use -- vlive_i[6][3] and the like -- so every subscript is inside its
+  declared bound by inspection and no computed index exists. The only pointer values are the
+  address of a string literal threaded through the chain as a tag, and the eight addresses of
+  plive_target elements held in vlive_p; a pointer is dereferenced only to print the int it
+  designates, and none is printed, converted to an integer, or modified. No pointer
+  arithmetic is performed anywhere.
+- No read of uninitialized storage: every local is initialized at its declaration, and every
+  volatile object has a static initializer.
 - No object is modified twice between sequence points.
-- Recursion is absent: every level calls a DIFFERENT function, the depth is a fixed nine
-  frames plus main, and there is no loop anywhere, so termination is structural.
+- Recursion is absent: every level calls a DIFFERENT function and the depth is a fixed nine
+  frames plus main, so termination is structural. The two loops in the program are the two
+  bounded loops in leaf_mix's caller chain -- neither exists; there is no loop anywhere, and
+  the runtime entry point stages its three volatile operands with three straight-line
+  statements.
 - NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and this is enforced structurally
   rather than argued. An access to a volatile object IS an observable side effect and the
   order in which a call's arguments are evaluated is unspecified, so every volatile datum
@@ -74,13 +99,17 @@ the compiler's business and not something a test may assume.
   LP64D           s0-s11 integer, where s0 doubles as the frame pointer, and fs0-fs11
                   floating.
 
-WHAT THE PROGRAM ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. Each frame keeps six ints,
-three doubles and one pointer live ACROSS its nested call and prints them only after that
-call returns. Ten live values is more than the narrowest of those sets can hold, so on every
-target some of them must survive the call somewhere other than a preserved register -- but
-which value goes where is the compiler's choice, and this program does not assert it. What
-it asserts is the OBSERVABLE consequence: if any of the ten fails to survive the call, the
-printed line for that frame changes and the divergence localises to the exact frame.
+WHAT THE PROGRAM ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. Each of the EIGHT pressure
+frames keeps six ints, three doubles and one pointer live ACROSS its nested call and prints
+them only after that call returns; the ninth frame, the leaf, makes no call and so holds
+nothing across one. Ten live values is more than the narrowest of those preserved sets can
+hold, so on every target some of them must survive the call somewhere other than a preserved
+register -- but which value goes where is the compiler's choice, and this program does not
+assert it. What it asserts is the OBSERVABLE consequence: if any of the ten fails to survive
+the call, the printed line for that frame changes and the divergence localises to the exact
+frame. Eighty values are held across a call in total, ten in each of eight frames, and the
+chain's returned total of 192 is printed as well, so a value lost in any frame shows up twice
+-- once in that frame's own line and once in the total.
 
 THE CALL BARRIER. Every call this program makes to the function whose ABI boundary is
 under test goes through a FILE-SCOPE volatile FUNCTION POINTER, and that is load-bearing
@@ -91,11 +120,12 @@ prescribes because it cannot know what will receive them. This is plain standard
 than a compiler attribute, so both sides of oracle (a) honour it for the same reason and
 neither needs to support an extension for the barrier to hold. It also makes the
 function-pointer load the ONLY volatile access in each call expression, which is what
-keeps the one-side-effecting-argument rule satisfied. Measured before-state on this branch: with direct calls, gcc 13.4.0 at
--O2 left only level1 standing -- levels 2 through 8 and the leaf were all inlined into it,
-so the nine frames collapsed to one and the property under test did not exist at that
-optimization level. Measured after: all nine functions are emitted unmodified at -O1 and -O2
-on all four targets, with no .constprop and no .isra clone anywhere.
+keeps the one-side-effecting-argument rule satisfied. Measured before-state on this branch:
+with direct calls, gcc 13.4.0 at -O2 left only level1 standing -- levels 2 through 8 and the
+leaf were all inlined into it, so the nine frames collapsed to one and the property under
+test did not exist at that optimization level. Measured after: all nine functions are emitted
+unmodified at -O0, -O1 and -O2 on all four targets, with no .constprop and no .isra clone
+anywhere.
 
 MEASURED STACK USE, not estimated. From the reference compiler's -O0 prologues on each
 target: x86_64 eight 96-byte frames plus one 48 and one 32, with ten 8-byte return-address
@@ -118,7 +148,8 @@ double has three different representations across the four targets (measured 16,
 16 bytes; x87 80-bit versus IEEE binary128) and is absent from this program entirely --
 using it would import a difference that has nothing to do with parameter passing. That
 type is covered by 13_floating_point/004_long_double_target_restricted, whose record
-disables oracle (b) alone with the measured reason recorded and carries NO marker.
+disables oracle (b) alone, with the measured reason recorded and the expected-divergence
+marker XD-TYPE-LONGDOUBLE-001 scoping that oracle.
 
 No target is dropped, no oracle is disabled and this record carries no expected-divergence
 marker: a cross-backend divergence here is a GENUINE FINDING rather than an

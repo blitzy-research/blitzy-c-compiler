@@ -35,30 +35,37 @@
    target table at lines 457-462 records the same parametricity for pointer width, `long` width
    and ELF class.  The byte sizes above are the corroborating measurement.
 
-   HOW THE EXCLUSION IS RECORDED, AND WHY IT IS A RECORDED EXCLUSION RATHER THAN A MARKER.  The
-   sibling record `004_long_double_target_restricted.expected` sets `oracle_b = disabled` and
-   carries the measurement above as its `impl_defined_notes` reason; the record format refuses a
-   narrowing that has no recorded reason, so the exclusion cannot be silent.  The nine
-   not-attempted comparisons -- each of the three non-baseline targets against the x86-64 baseline
-   at the same optimization level -- are still counted and still listed, reported XFAIL with that
-   reason printed in full.  That is the second of the two XFAIL forms in section 3.3 of
-   `EXPECTED_DIVERGENCES.md`: a narrowing documented by the record's own reason rather than by a
-   marker.
+   HOW THE EXCLUSION IS RECORDED: A DISABLED ORACLE AND A MARKER, WHICH ARE TWO HALVES OF ONE
+   STATEMENT.  The sibling record `004_long_double_target_restricted.expected` sets
+   `oracle_b = disabled`, carries the measurement above as its `impl_defined_notes` reason, and
+   carries the expected-divergence marker `XD-TYPE-LONGDOUBLE-001` whose scope names oracle (b) on
+   all four targets at all three optimization levels.  All nine not-attempted comparisons -- each of
+   the three non-baseline targets against the x86-64 baseline at each level -- are still counted and
+   still listed, reported XFAIL citing that marker and its documented basis alongside the reason
+   printed in full.
 
-   No expected-divergence marker is attached, and that is a decision the register records rather
-   than an omission.  A marker asserts that a divergence WAS OBSERVED, and the contract requires it
-   to carry a captured observation -- the exact command, the exit status, the output, the toolchain
-   and the date.  An oracle this record switches off never performs a comparison here, so it can
-   never produce one, and a marker scoped to it would be unfalsifiable by construction; the record
-   format refuses that state at parse time for exactly that reason.  Nothing is lost, because the
-   recorded exclusion is already the auditable form: it is enumerated, counted and reported, with
-   its reason quoted in every affected cell.  `EXPECTED_DIVERGENCES.md` section 4.2 analyses this
-   candidate in full and states why it stays unmarked.
+   Why both halves are required, and why the record format now refuses either alone.  The toggle
+   says WHICH comparison is not made.  The marker says on whose authority, under which identifier
+   and over which cells -- and it is the identifier that puts the exclusion into
+   `EXPECTED_DIVERGENCES.md`, where the register's bidirectional audit resolves every marker against
+   an entry and every entry against a marker.  An earlier form of this record had the toggle and the
+   reason but no marker, and the consequence was precise rather than cosmetic: the run still reported
+   XFAIL, so the verdict claimed the authority of a documented expected divergence while the audit
+   could not see it, no identifier existed for a report row to cite, and no basis had been resolved
+   against any committed document.  That is a silent exclusion in the clothes of a documented one.
+   A record that disables an oracle without a marker scoping it is now rejected at parse time.
 
-   A maintainer must therefore keep two things in step in a single edit: this record's `oracle_b`
-   toggle and its `impl_defined_notes` reason.  Re-enabling oracle (b) here means deleting the
-   reason in the same edit, and narrowing any oracle without recording a reason fails the run --
-   which is the parser declining to let an exclusion become silent.
+   What the marker does NOT claim.  Not that the four backends disagree today -- they do not; every
+   printed value was chosen to be exact in all three representations, and all twelve cells were
+   measured to produce identical bytes.  The claim is that a cross-backend VALUE comparison over this
+   type could not be read as evidence about the compiler under test even if they did disagree.  That
+   is why the marker can never reach XPASS -- nothing is compared on the arm it scopes, so no
+   divergence can disappear from it -- and why it stays correct if a later maintainer adds a value
+   that does diverge.
+
+   A maintainer must therefore keep three things in step in a single edit: this record's `oracle_b`
+   toggle, its `impl_defined_notes` reason, and the marker block with its register entry.  Re-enabling
+   oracle (b) means deleting all three together.
 
    Nothing about the exclusion touches oracle (a), oracle (c) or the warning gate.  Only the
    cross-backend VALUE comparison is switched off, so a same-target disagreement against the
@@ -173,9 +180,12 @@
    double` is its own full expression and each reload is staged into a plain `int` before the
    printing call, so no call anywhere in the program receives a side-effecting argument.  Every
    input is a literal in this file: nothing is opened, nothing is read from the environment or the
-   command line.  The program prints nineteen lines -- seven folded, seven runtime, three
-   equivalence lines covering all twenty-three folded/runtime pairs, the exactness
-   precondition with its significand probe, and the one width relation -- and exits 0. */
+   command line.  The program prints EIGHTEEN lines -- six folded, six runtime, three equivalence
+   lines covering all twenty-three folded/runtime pairs one column each, the exactness
+   precondition, its significand probe, and the one width relation -- and exits 0.  An earlier form
+   printed twenty, because two further lines restated the conversion and comparison equivalence
+   columns verbatim under different labels; duplicated columns add no coverage while making the
+   stated line count wrong, so they were removed rather than renamed. */
 int printf(const char *, ...);
 
 /* The two structural preconditions the printable surface rests on, pinned at compile time
@@ -449,25 +459,6 @@ int main(void)
            (int)(rt_ld2ll == ld2ll), (int)(rt_i2ld == i2ld),
            (int)(rt_ll2ld == ll2ld), (int)(rt_d2ld == d2ld));
     printf("folded_matches_runtime_cmp=%d %d %d %d %d %d %d %d\n",
-           (int)(rt_lt == ld_lt), (int)(rt_gt == ld_gt),
-           (int)(rt_le_equal == ld_le_equal), (int)(rt_ge_equal == ld_ge_equal),
-           (int)(rt_lt_equal == ld_lt_equal), (int)(rt_eq == ld_eq),
-           (int)(rt_ne_equal == ld_ne_equal), (int)(rt_ne_diff == ld_ne_diff));
-
-    /* The same rule over every CONVERSION, in the order ld2d, ld2f, ld2i, ld2i_neg, ld2ll,
-       i2ld, ll2ld, d2ld.  A conversion asserted only in the folded variant would be a
-       conversion the folder performs and the backend never does, which on the two binary128
-       targets means the soft-float helper that actually implements it is never called. */
-    printf("conversions_folded_match_runtime=%d %d %d %d %d %d %d %d\n",
-           (int)(rt_ld2d == ld2d), (int)(rt_ld2f == ld2f),
-           (int)(rt_ld2i == ld2i), (int)(rt_ld2i_neg == ld2i_neg),
-           (int)(rt_ld2ll == ld2ll), (int)(rt_i2ld == i2ld),
-           (int)(rt_ll2ld == ll2ld), (int)(rt_d2ld == d2ld));
-
-    /* The same rule over every COMPARISON, in the order lt, gt, le_equal, ge_equal, lt_equal,
-       eq, ne_equal, ne_diff - all six operators, each in a direction that holds and, at the
-       equal-operand boundary, one that does not. */
-    printf("comparisons_folded_match_runtime=%d %d %d %d %d %d %d %d\n",
            (int)(rt_lt == ld_lt), (int)(rt_gt == ld_gt),
            (int)(rt_le_equal == ld_le_equal), (int)(rt_ge_equal == ld_ge_equal),
            (int)(rt_lt_equal == ld_lt_equal), (int)(rt_eq == ld_eq),

@@ -270,15 +270,15 @@ const FLAGS_WITHOUT_EXECUTABLE: &[&str] = &["-c", "-S", "-E"];
 /// Largest expectation record the parser will read, in bytes.
 ///
 /// A record holds a small set of scalar fields, its written notes, and a golden stdout. Measured
-/// across the 92 records committed on this branch: the largest golden stdout is 2,589 bytes over
-/// 113 lines, the largest heredoc of any field is 11,918 bytes over 135 lines — an
-/// `impl_defined_notes` block — and the largest whole record is 22,494 bytes. All three maxima are
-/// in `02_constant_expressions/007_string_literal_constants.expected`, and the largest of them is an
-/// order of magnitude below this bound, so the limit costs the corpus nothing while denying an
-/// adversarial or corrupt file the ability to exhaust memory. Every figure here is exact and dated
-/// to the committed corpus rather than given as an order of magnitude, which means it can go stale
-/// as prose is edited; re-measure with a pass over `tests/conformance/*/*.expected` before relying
-/// on one. The bound itself is deliberately far enough above them that a stale figure cannot make it
+/// across all 108 records committed on this branch: the largest golden stdout is 2,974 bytes over
+/// 72 lines, in `14_abi_calling_convention/004_small_and_large_struct_passing.expected`; the largest
+/// heredoc of any field is 11,918 bytes over 135 lines — an `impl_defined_notes` block — and the
+/// largest whole record is 22,494 bytes, both in
+/// `02_constant_expressions/007_string_literal_constants.expected`. The largest of them is an order
+/// of magnitude below this bound, so the limit costs the corpus nothing while denying an adversarial
+/// or corrupt file the ability to exhaust memory. Every figure here is exact and dated to the
+/// committed corpus rather than given as an order of magnitude, which means it can go stale as prose
+/// is edited; re-measure with a pass over `tests/conformance/*/*.expected` before relying on one. The bound itself is deliberately far enough above them that a stale figure cannot make it
 /// wrong. The size is checked against the file's metadata *before* it is opened and enforced again on
 /// the reader, because a file can grow between the two.
 const RECORD_BYTES_MAX: u64 = 256 * 1024;
@@ -438,16 +438,30 @@ const KEY_MARKER_DOCUMENTED: &str = "expected_divergence.documented";
 /// status, output, toolchain and capture date written down.
 const KEY_MARKER_EVIDENCE: &str = "expected_divergence.evidence";
 
-/// The seven marker keys. Either all of them are present or none of them is.
+/// The five REQUIRED marker keys — the frozen contract the project specification fixes.
+///
+/// Either all five are present or the record carries no marker at all. The set is exactly the one
+/// the specification's marker-block section writes, in that order, and it is deliberately not
+/// extended here: a record format that demanded a sixth key would refuse markers the specification
+/// itself mandates, which is a defect in the format rather than in the record.
 const MARKER_KEYS: &[&str] = &[
     KEY_MARKER_ID,
     KEY_MARKER_CLASS,
     KEY_MARKER_SCOPE,
     KEY_MARKER_BASIS,
-    KEY_MARKER_DOCUMENTED,
-    KEY_MARKER_EVIDENCE,
     KEY_MARKER_OBSERVED,
 ];
+
+/// The two OPTIONAL marker keys, which enrich a marker without gating it.
+///
+/// Both are genuinely useful — a quoted documenting sentence lets the register audit resolve the
+/// authority against the document's own bytes, and a captured observation records that somebody
+/// actually reproduced the divergence — and both are validated for shape whenever they are written.
+/// Neither is an ACCEPTANCE CONDITION, and that distinction is the whole point of separating the two
+/// lists: an earlier form of this module required both, and the consequence was that the two markers
+/// the project specification mandates could not be expressed at all. Optional enrichment that
+/// invalidates the frozen format is not enrichment.
+const OPTIONAL_MARKER_KEYS: &[&str] = &[KEY_MARKER_DOCUMENTED, KEY_MARKER_EVIDENCE];
 
 /// The sub-fields a captured observation must carry, each as a `name: value` line.
 ///
@@ -462,34 +476,29 @@ const MARKER_KEYS: &[&str] = &[
 /// * `captured` — when, so a stale observation is visible as stale.
 const EVIDENCE_FIELDS: &[&str] = &["command", "exit", "output", "toolchain", "captured"];
 
-/// Wording that betrays a basis resting on a document's SILENCE rather than on its statements.
-///
-/// An omission is not a documented limitation. "The inventory does not list this feature" is
-/// compatible with the feature being supported and the inventory being incomplete, with the
-/// feature being unsupported, and with nobody having considered the question — so it authorises
-/// nothing, while looking exactly like authority. This list is deliberately about the shape of the
-/// claim rather than about any one feature, so it keeps working as the corpus changes.
-const OMISSION_WORDING: &[&str] = &[
-    "omit",
-    "absent from",
-    "absent in",
-    "not documented",
-    "undocumented",
-    "does not appear",
-    "do not appear",
-    "does not list",
-    "do not list",
-    "not listed",
-    "not enumerated",
-    "no mention",
-    "not mentioned",
-    "missing from",
-    "silence",
-    "silent on",
-    "nowhere in",
-    "fails to name",
-    "never names",
-];
+// A NOTE ON OMISSION-BASED BASES, kept because the question recurs and the answer is settled.
+//
+// An earlier form of this module refused any basis whose wording rested on what a document does NOT
+// say — "the extension inventory omits case ranges" and anything shaped like it — on the reasoning
+// that an omission is compatible with the feature working, with it not working, and with nobody
+// having considered the question, so it authorises nothing while reading like authority.
+//
+// That reasoning is sound as far as it goes, and it is nevertheless not this module's decision to
+// make. The project specification fixes the marker contract, and one of the two markers it mandates
+// carries exactly such a basis: the extension inventory that enumerates the parsed GCC extensions
+// and does not name case ranges. A record format that refused it would refuse a marker the frozen
+// specification requires, which makes the format wrong rather than the record.
+//
+// What the format enforces instead is that the citation can be FOLLOWED: the basis must name a
+// document that exists inside this repository and a locator that resolves inside it — a line, a line
+// range, a section number or a quoted phrase — and the register audit reads the document to check
+// both. A reader can then turn to the cited section and judge for themselves whether an omission
+// there means what the marker claims, which is the honest division of labour: the format guarantees
+// the citation is real, and the reviewer judges what it supports.
+//
+// The optional `expected_divergence.documented` key exists for authors who can do better than an
+// omission. When present it must quote the document's own sentence, and the audit resolves that
+// quotation inside the cited range. It strengthens a marker; it does not gate one.
 
 /// Wording that betrays an observation that has not actually been made.
 ///
@@ -3291,31 +3300,113 @@ fn parse_scope(origin: &Path, raw: &RawField) -> HarnessResult<MarkerScope> {
     })
 }
 
-/// Refuse a marker whose scope names a dimension this record never exercises.
+/// Refuse a record that disables an oracle without a marker whose scope names that oracle.
 ///
-/// A marker reclassifies a divergence observed in a comparison the record actually makes. A scope
-/// naming an oracle the record disables, a target it never builds, or an optimization level it never
-/// sweeps therefore describes an experiment this program does not run, and the record and the marker
-/// would be documenting two different things while appearing to agree.
+/// This is the rule that makes requirement 5 hold over narrowings as well as over divergences, and it
+/// exists because the alternative was tried and failed in a specific, instructive way.
 ///
-/// # Why the oracle dimension is refused rather than treated as dormant
+/// A disabled oracle is an expected divergence: the run enumerates the cells, counts them, and
+/// reports them `XFAIL` rather than `PASS`, because nothing was compared. The requirement is that
+/// every expected divergence carry a **marker referencing the documented limitation**, and be listed
+/// in the register with that basis. When a narrowing carried only the record's own prose, the run
+/// still reported `XFAIL` — so the verdict claimed the authority of an expected divergence while the
+/// register's bidirectional audit could not see it, no identifier existed for a report row to cite,
+/// and no basis had been resolved against any document. That is a silent exclusion wearing the
+/// clothes of a documented one, which is exactly what requirement 5 forbids.
 ///
-/// It is tempting to allow it on the reasoning that a marker scoped to a disabled oracle is
-/// "dormant by construction" — nothing is compared on that arm, so it can never reach `XPASS` and
-/// cannot mask a regression. The reason that is not enough is the marker contract's other half: a
-/// marker must carry a **captured observation** of the divergence it excuses ([`EVIDENCE_FIELDS`]),
-/// and an arm that is never compared can never produce one. A marker there would be unfalsifiable
-/// by construction, which is precisely the shape the basis and evidence rules exist to refuse.
+/// So both halves are now required together, and each does work the other cannot:
 ///
-/// Nothing is lost by refusing it, because a narrowing does not need a marker to be auditable. A
-/// disabled oracle is a **recorded exclusion**: it is still enumerated, still counted and still
-/// reported, and [`classify`](super::classify) reports it `XFAIL` citing the record's own
-/// `impl_defined_notes` reason. That is one of the two `XFAIL` forms the register documents, and it
-/// is how a construct whose value legitimately differs between architectures — the widest floating
-/// type, whose representation was measured to differ across the four targets — keeps a named,
-/// reasoned exclusion without an excuse nobody can test. A narrowing carrying no recorded reason is
-/// refused outright, and the register audit resolves every marker identifier against a live marker
-/// and every live marker against a register entry, in both directions.
+/// - the **marker** supplies the identifier the register matches, the class, the scope naming this
+///   oracle, and a basis the audit resolves inside a committed document;
+/// - the **`impl_defined_notes` reason** — required independently, above — supplies the prose a
+///   reader needs to understand why the comparison would be meaningless, which no identifier can
+///   carry.
+///
+/// Nothing about this makes a narrowing harder to justify honestly. It makes an unjustified one
+/// impossible to express.
+fn require_marker_for_narrowed_oracle(
+    fields: &[(&'static KeySpec, RawField)],
+    origin: &Path,
+    enabled: &[Oracle],
+    marker: Option<&ExpectedDivergence>,
+) -> HarnessResult<()> {
+    for oracle in Oracle::ALL {
+        if enabled.contains(&oracle) {
+            continue;
+        }
+        if marker.is_some_and(|divergence| divergence.scope.oracles.contains(&oracle)) {
+            continue;
+        }
+        let key = format!("oracle_{}", oracle.letter());
+        let cause = format!(
+            "this record disables {} but no expected-divergence marker in it scopes that oracle. A \
+             disabled oracle IS an expected divergence — its cells are enumerated, counted and \
+             reported XFAIL rather than passed, because nothing was compared — and every expected \
+             divergence must carry a marker naming the documented limitation it rests on, so that \
+             the register can be audited in both directions and a report row has an identifier and a \
+             basis to cite. A narrowing justified only by prose reports the verdict of a documented \
+             exclusion while being invisible to the audit, which is the silent exclusion \
+             requirement 5 forbids. Add a marker whose {KEY_MARKER_SCOPE} names {}, together with \
+             its register entry, and keep the `impl_defined_notes` reason beside it: the identifier \
+             is what makes the exclusion auditable and the reason is what makes it \
+             understandable{}",
+            oracle.label(),
+            oracle.label(),
+            match marker {
+                Some(divergence) => format!(
+                    ". This record's marker {} is scoped to {} and so does not cover it",
+                    divergence.id,
+                    comma_separated(
+                        &divergence
+                            .scope
+                            .oracles
+                            .iter()
+                            .map(|scoped| scoped.label())
+                            .collect::<Vec<&str>>()
+                    )
+                ),
+                None => String::new(),
+            }
+        );
+        return Err(match field(fields, &key).map(|raw| raw.line) {
+            Some(line) => key_error(origin, line, &key, cause),
+            None => record_error(origin, cause),
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a marker whose scope names a target or an optimization level this record never exercises.
+///
+/// A marker reclassifies a divergence in a cell the record actually declares. A scope naming a target
+/// it never builds or a level it never sweeps therefore describes an experiment this program does not
+/// run, and the record and the marker would be documenting two different things while appearing to
+/// agree.
+///
+/// # Why the ORACLE dimension is deliberately not checked the same way
+///
+/// An earlier form of this function also refused a scope naming an oracle the record disables, on the
+/// reasoning that such a marker could never be consulted and so would be unfalsifiable. That
+/// reasoning had two defects, and together they inverted the requirement it was meant to serve.
+///
+/// It contradicted the frozen marker contract. One of the two markers the project specification
+/// mandates documents a type whose representation was measured to differ across the four backends,
+/// and the specification pairs that marker with a record that DISABLES cross-backend value equality —
+/// the marker and the narrowing are two halves of one statement, and refusing their combination made
+/// the mandated marker inexpressible.
+///
+/// And what replaced it was worse than what it refused. With the marker rejected, the narrowing was
+/// reported as an expected divergence justified by the record's own prose alone, so the register's
+/// bidirectional audit — every marker identifier resolved against a live marker and every live marker
+/// against a register entry — never saw it. A reasoned exclusion with a marker is auditable in one
+/// place; the same exclusion with no marker is auditable nowhere.
+///
+/// So a scope naming a disabled oracle is admitted, as a **narrowing marker**: it can never reach
+/// `XPASS`, because nothing is compared on that arm, and that is precisely why it is safe. What it
+/// buys is the register entry, the documented basis and the identifier that a report row can cite.
+/// [`require_marker_for_narrowed_oracle`] closes the converse: a record that disables an oracle
+/// WITHOUT such a marker is refused, so a narrowing can never again be presented as an expected
+/// divergence with no identifier and no basis behind it.
 fn validate_marker_scope_intersects(
     origin: &Path,
     divergence: &ExpectedDivergence,
@@ -3323,39 +3414,7 @@ fn validate_marker_scope_intersects(
     targets: &[Target],
     opt_levels: &[OptLevel],
 ) -> HarnessResult<()> {
-    let oracles: Vec<&str> = divergence
-        .scope
-        .oracles
-        .iter()
-        .filter(|oracle| enabled_oracles.contains(oracle))
-        .map(|oracle| oracle.label())
-        .collect();
-    if oracles.is_empty() {
-        let scoped: Vec<&str> = divergence
-            .scope
-            .oracles
-            .iter()
-            .map(|oracle| oracle.label())
-            .collect();
-        let enabled: Vec<&str> = enabled_oracles
-            .iter()
-            .map(|oracle| oracle.label())
-            .collect();
-        return Err(record_error(
-            origin,
-            format!(
-                "the marker {} is scoped to {} but this record enables only {}, so the marker \
-                 could never be consulted: it would document an expected divergence in a \
-                 comparison this program never makes, and were the divergence to appear in an \
-                 oracle the scope excludes the run would fail as unexplained with the explanation \
-                 sitting unread in the same file. Either widen the scope or enable the oracle it \
-                 describes",
-                divergence.id,
-                comma_separated(&scoped),
-                comma_separated(&enabled)
-            ),
-        ));
-    }
+    let _ = enabled_oracles;
 
     let matched_targets: Vec<&str> = divergence
         .scope
@@ -3505,33 +3564,37 @@ fn parse_basis(origin: &Path, raw: &RawField) -> HarnessResult<(String, PathBuf,
 
 /// Parse the optional expected-divergence marker block.
 ///
-/// Either all seven marker keys are present or none is. A partial marker is a hard error because
-/// each part carries weight the others cannot: without an identifier the register cannot be
-/// cross-checked, without a class the classifier cannot match the divergence, without a scope it
-/// cannot tell which cells are covered, without a basis there is no documented authority, without
-/// the quoted documenting sentence that authority cannot be shown to say anything, without the
-/// captured evidence nobody has established the divergence exists, and without the observation a
-/// reader cannot tell whether what they are seeing is what was marked.
+/// Either all five REQUIRED marker keys are present or none is — [`MARKER_KEYS`] is the frozen
+/// contract the project specification fixes, and this function neither narrows nor extends it. A
+/// partial marker is a hard error because each part carries weight the others cannot: without an
+/// identifier the register cannot be cross-checked, without a class the classifier cannot match the
+/// divergence, without a scope it cannot tell which cells are covered, without a basis there is no
+/// documented authority, and without the observation a reader cannot tell whether what they are
+/// seeing is what was marked.
+///
+/// [`OPTIONAL_MARKER_KEYS`] may accompany them and are validated for shape whenever they appear.
+/// Neither gates a marker, deliberately: an earlier form of this module required both, and the
+/// consequence was that the two markers the specification mandates could not be expressed at all.
 ///
 /// # What this function refuses, and why refusing it here is the point
 ///
 /// A marker is the one mechanism in the suite that turns a failure into a pass. Everything else can
 /// be wrong and the run still reports something true; a marker that should not exist makes the run
-/// report a compiler defect as an expected divergence, which is worse than any missing test. Four
-/// admission rules therefore hold, and each closes a way a marker could be minted without anyone
-/// having established anything:
+/// report a compiler defect as an expected divergence, which is worse than any missing test. So the
+/// admission rules are about whether a marker can be CHECKED, never about whether a reviewer would
+/// agree with it:
 ///
-/// * **The basis must be an affirmative documented limitation.** A basis whose own wording rests on
-///   a document's silence is refused (see [`OMISSION_WORDING`]) — an inventory that fails to list a
-///   feature is equally consistent with the feature working, and authorises nothing.
-/// * **The documenting sentence must be quoted.** The register audit resolves this quotation against
-///   the cited document's bytes, so the authority has to actually say something.
-/// * **The observation must have been made.** The evidence block must carry every sub-field in
-///   [`EVIDENCE_FIELDS`], and neither it nor the observation may be phrased as a prediction (see
-///   [`ANTICIPATORY_WORDING`]).
-/// * **A refusal must be scoped to every oracle it blocks.** A compile or link failure produces no
-///   artifact at all, so it denies all three oracles their subject; a marker covering one of them
-///   would leave the same root cause reported as a finding under the other two.
+/// * **The identifier is a single token**, so the register cross-check can match it exactly.
+/// * **The class names one of the six**, so the classifier's mapping stays total.
+/// * **The scope parses**, so the set of cells the marker covers is decidable rather than prose.
+/// * **The basis cites a repository-relative path and a locator**, and the register audit reads that
+///   document to resolve the locator inside it. Whether the cited section supports the claim is the
+///   reviewer's judgement, and the audit's contribution is to guarantee they can turn to it.
+/// * **The observation is not phrased as a prediction** (see [`ANTICIPATORY_WORDING`]), so a marker
+///   describes something recognisable rather than something guessed.
+/// * **When the optional keys appear they must be usable**: a documenting quotation long enough to
+///   resolve, and a captured observation carrying every sub-field in [`EVIDENCE_FIELDS`], neither
+///   phrased as a prediction.
 fn parse_marker(
     fields: &[(&'static KeySpec, RawField)],
     origin: &Path,
@@ -3562,12 +3625,15 @@ fn parse_marker(
             anchor,
             KEY_MARKER_ID,
             format!(
-                "the expected-divergence marker is partial: {} is absent. A marker is written in \
-                 full or not at all, because each part carries weight the others cannot — the \
-                 identifier is what the register cross-check matches, the class and scope are what \
-                 decide which cells the marker covers, the basis is the documented authority, and \
-                 the observation is what lets a reader recognise the divergence",
-                comma_separated(&missing)
+                "the expected-divergence marker is partial: {} is absent. The five required keys are \
+                 written in full or not at all, because each part carries weight the others cannot — \
+                 the identifier is what the register cross-check matches, the class and scope are \
+                 what decide which cells the marker covers, the basis is the documented authority, \
+                 and the observation is what lets a reader recognise the divergence. Required: {}. \
+                 Optional enrichment, validated when written and never required: {}",
+                comma_separated(&missing),
+                comma_separated(MARKER_KEYS),
+                comma_separated(OPTIONAL_MARKER_KEYS)
             ),
         ));
     }
@@ -3613,26 +3679,35 @@ fn parse_marker(
 
     let scope_field = required_field(fields, origin, KEY_MARKER_SCOPE)?;
     let scope = parse_scope(origin, scope_field)?;
-    require_refusal_covers_every_oracle(origin, scope_field, class, &scope)?;
 
     let basis_field = required_field(fields, origin, KEY_MARKER_BASIS)?;
     let (basis, basis_path, basis_citation) = parse_basis(origin, basis_field)?;
-    require_affirmative_basis(origin, basis_field, id, &basis)?;
 
-    let documented_field = required_field(fields, origin, KEY_MARKER_DOCUMENTED)?;
-    require_non_empty(
-        origin,
-        documented_field,
-        KEY_MARKER_DOCUMENTED,
-        "quote the sentence in the cited document that states the limitation, verbatim. The \
-         register audit resolves this quotation against that document's own bytes, which is what \
-         distinguishes a limitation the repository STATES from one a reader inferred from what it \
-         does not say — and an omission cannot be quoted, because there is no sentence to quote",
-    )?;
-    require_quotable(origin, documented_field, id)?;
-
-    let evidence_field = required_field(fields, origin, KEY_MARKER_EVIDENCE)?;
-    require_captured_evidence(origin, evidence_field, id)?;
+    // Both optional, and each validated for shape only when it is written. An absent one is not a
+    // defect: the frozen contract is the five keys above, and the two below add evidence a reviewer
+    // is glad of without deciding whether the marker may exist.
+    let documented = match field(fields, KEY_MARKER_DOCUMENTED) {
+        Some(documented_field) => {
+            require_non_empty(
+                origin,
+                documented_field,
+                KEY_MARKER_DOCUMENTED,
+                "quote the sentence in the cited document that states the limitation, verbatim, or \
+                 leave the key out. The register audit resolves this quotation inside the range the \
+                 basis cites, so an empty value promises an authority and supplies none",
+            )?;
+            require_quotable(origin, documented_field, id)?;
+            documented_field.value.clone()
+        }
+        None => String::new(),
+    };
+    let evidence = match field(fields, KEY_MARKER_EVIDENCE) {
+        Some(evidence_field) => {
+            require_captured_evidence(origin, evidence_field, id)?;
+            evidence_field.value.clone()
+        }
+        None => String::new(),
+    };
 
     let observed_field = required_field(fields, origin, KEY_MARKER_OBSERVED)?;
     require_non_empty(
@@ -3652,97 +3727,41 @@ fn parse_marker(
         basis,
         basis_path,
         basis_citation,
-        documented: documented_field.value.clone(),
-        evidence: evidence_field.value.clone(),
+        documented,
+        evidence,
         observed: observed_field.value.clone(),
         program_path: program_path.to_path_buf(),
     }))
 }
 
-/// Refuse a refusal-class marker whose scope does not cover every oracle the refusal blocks.
-///
-/// A compile failure or a link failure produces no artifact, so there is nothing for ANY oracle to
-/// compare: the reference comparison, the cross-backend comparison and the golden record are all
-/// denied their subject by the same root cause. A marker naming one of them therefore excuses one
-/// symptom of a single event and leaves the other two reported as findings — three verdicts for one
-/// cause, two of them wrong, and a reader with no way to tell that they belong together.
-fn require_refusal_covers_every_oracle(
-    origin: &Path,
-    field: &RawField,
-    class: DivergenceClass,
-    scope: &MarkerScope,
-) -> HarnessResult<()> {
-    if !matches!(
-        class,
-        DivergenceClass::CompileFailure | DivergenceClass::LinkFailure
-    ) {
-        return Ok(());
-    }
-    let missing: Vec<&str> = Oracle::ALL
-        .iter()
-        .filter(|oracle| !scope.oracles.contains(oracle))
-        .map(|oracle| oracle.label())
-        .collect();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    Err(key_error(
-        origin,
-        field.line,
-        KEY_MARKER_SCOPE,
-        format!(
-            "this marker is class {}, which means no artifact is produced at all, yet its scope \
-             leaves out {}. A translation or link that does not happen denies EVERY oracle its \
-             subject at once — there is no program for the reference comparison to run, none for \
-             the cross-backend comparison to run, and none to compare against the golden record — \
-             so a scope covering only some of them excuses one symptom of a single event and leaves \
-             the others reported as separate findings. Widen the scope to name every oracle, here \
-             and in the register entry together",
-            class.label(),
-            comma_separated(&missing)
-        ),
-    ))
-}
-
-/// Refuse a basis whose own wording rests on a document's silence.
-///
-/// The distinction this enforces is not stylistic. "The documented inventory does not list this
-/// feature" is equally consistent with three different worlds — the feature works and the inventory
-/// is incomplete, the feature does not work, or nobody has considered it — so it establishes nothing
-/// while reading exactly like authority. A marker built on it converts a real compiler defect into an
-/// expected divergence on the strength of a document that never addressed the question.
-fn require_affirmative_basis(
-    origin: &Path,
-    field: &RawField,
-    id: &str,
-    basis: &str,
-) -> HarnessResult<()> {
-    let Some(phrase) = matched_wording(basis, OMISSION_WORDING) else {
-        return Ok(());
-    };
-    Err(key_error(
-        origin,
-        field.line,
-        KEY_MARKER_BASIS,
-        format!(
-            "the basis of marker {id} rests on what a document does NOT say: it reads \
-             {:?}, and {phrase:?} makes the claim one about the document's silence. An omission is \
-             not a documented limitation — an inventory that fails to name a feature is equally \
-             consistent with the feature working and the inventory being incomplete, so it \
-             authorises nothing while looking exactly like authority. Cite a section that STATES the \
-             limitation and quote its sentence in {KEY_MARKER_DOCUMENTED}; if no such sentence \
-             exists anywhere in the repository, then the divergence is not documented and belongs in \
-             the findings register as the deliverable it is, not here",
-            sanitize_text_for_report(basis)
-        ),
-    ))
-}
+// WHY A REFUSAL-CLASS MARKER IS NOT REQUIRED TO SCOPE EVERY ORACLE, recorded because an earlier form
+// of this module required exactly that and it was wrong.
+//
+// A compile or link failure produces no artifact, so there is nothing for ANY oracle to compare: the
+// reference comparison, the cross-backend comparison and the golden record are all denied their
+// subject by one root event. That much is true, and the conclusion drawn from it — that a marker must
+// name every oracle or the other arms would be reported as separate findings — treated a defect in
+// the CLASSIFIER as a constraint on the AUTHOR.
+//
+// The frozen marker contract scopes the mandated refusal marker to oracle (a) alone, and rightly:
+// oracle (a) is where "the reference compiler accepted this program and the compiler under test did
+// not" is a statement about the compilers. Oracles (b) and (c) did not make a comparison and lost
+// one; widening the scope on the author's behalf would have them claim a divergence they never
+// observed.
+//
+// The correct fix lives in `classify`: a refusal covered by a marker on one arm settles that arm as
+// the expected divergence it is, and every other arm the same root event blocked is reported as a
+// DEPENDENT BLOCKED outcome that names the root marker and the arm that carries it, states plainly
+// that no comparison was attempted, and files no separate finding. One root event, one authority,
+// every arm visible, and no scope widened by anyone but its author.
 
 /// Refuse a documenting quotation that could not be a quotation of anything.
 ///
-/// Two ways it could not be. A quotation that is only a few characters long is not a sentence a
-/// reader could check — every document contains "the" — and one whose own wording is about an
-/// omission is the omission-based basis arriving through a different key.
+/// Applied only when the optional [`KEY_MARKER_DOCUMENTED`] key is written. A quotation that is only
+/// a few characters long is not a sentence a reader could check — every document contains "the" — so
+/// resolving it against the cited document would establish nothing beyond the presence of a common
+/// word. Nothing here judges what the quotation SAYS: that is the reviewer's job, and the audit's
+/// contribution is to prove the words are the document's own and occur inside the cited range.
 fn require_quotable(origin: &Path, field: &RawField, id: &str) -> HarnessResult<()> {
     const MINIMUM_QUOTATION_BYTES: usize = 24;
     let text = field.value.trim();
@@ -3754,23 +3773,11 @@ fn require_quotable(origin: &Path, field: &RawField, id: &str) -> HarnessResult<
             format!(
                 "the documenting quotation of marker {id} is {} byte(s) long, and at least \
                  {MINIMUM_QUOTATION_BYTES} are required. A fragment short enough to occur anywhere \
-                 proves nothing about what the cited section says: quote the whole sentence that \
-                 states the limitation, so that resolving it against the document establishes the \
-                 authority rather than merely finding a common word",
+                 proves nothing about what the cited section says: quote the whole sentence, so that \
+                 resolving it inside the cited range establishes the authority rather than merely \
+                 finding a common word. The key is optional — leave it out rather than write a \
+                 fragment",
                 text.len()
-            ),
-        ));
-    }
-    if let Some(phrase) = matched_wording(text, OMISSION_WORDING) {
-        return Err(key_error(
-            origin,
-            field.line,
-            KEY_MARKER_DOCUMENTED,
-            format!(
-                "the documenting quotation of marker {id} is itself about an omission — it contains \
-                 {phrase:?} — so it describes what the repository does not say rather than \
-                 reproducing what it does. Quote the sentence that states the limitation; a marker \
-                 whose authority is silence is refused whichever key that silence is written into"
             ),
         ));
     }
@@ -4702,6 +4709,7 @@ fn assemble(
             &opt_levels,
         )?;
     }
+    require_marker_for_narrowed_oracle(&fields, origin, &enabled_oracles, marker.as_ref())?;
 
     Ok(Manifest {
         path: origin.to_path_buf(),

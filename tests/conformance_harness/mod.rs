@@ -1044,22 +1044,32 @@ pub enum Verdict {
     /// The compared outputs agree exactly: identical stdout bytes and identical exit
     /// status.
     Pass,
-    /// A divergence that is documented rather than unexplained. This verdict has two
-    /// forms, and both are reported as XFAIL:
+    /// A divergence that is documented rather than unexplained. This verdict has three
+    /// forms, all reported as XFAIL, and **every one of them cites a marker**:
     ///
     /// - a divergence covered by an **active marker** in the program's own expectation
-    ///   record, citing a limitation the repository already documents; and
-    /// - a comparison the program's own record **deliberately narrows away**, carrying its
-    ///   reasoned exclusion in `impl_defined_notes` — the record format refuses to accept a
-    ///   narrowing without one, so an undocumented exclusion cannot reach this verdict.
+    ///   record, citing a limitation the repository already documents;
+    /// - a comparison the program's own record **deliberately narrows away**, which needs a
+    ///   marker whose scope names the narrowed oracle *and* the reasoned exclusion in
+    ///   `impl_defined_notes` — the record format refuses to accept a narrowing missing
+    ///   either, so an undocumented exclusion cannot reach this verdict; and
+    /// - an arm **blocked by a marked root refusal** on another arm of the same cell. A
+    ///   build that produces no artifact denies every oracle arm its subject at once, so the
+    ///   arm the marker's scope names settles the refusal and the others cite that root,
+    ///   each stating plainly that no comparison was attempted on it. One root event yields
+    ///   one explanation rather than one finding per arm.
     ///
-    /// In neither form does the classification change what the program does. A marker or a
-    /// recorded exclusion changes how a divergence is CLASSIFIED, never whether the feature
-    /// is EXERCISED: the applicable phases are attempted in order — compile, link, run,
-    /// compare — and nothing in the harness may short-circuit a phase because a marker
-    /// exists. Classification happens at the first terminal outcome or the completed
-    /// comparison, so a compile failure, a link failure, a crash or a timeout is classified
-    /// where it occurred rather than after a comparison that could not be reached.
+    /// An XFAIL with no marker identifier is therefore a defect rather than a form: nothing
+    /// in the classifier produces one, and the reports present any such row with a warning
+    /// instead of counting it as an expected divergence.
+    ///
+    /// In no form does the classification change what the program does. A marker changes how
+    /// a divergence is CLASSIFIED, never whether the feature is EXERCISED: the applicable
+    /// phases are attempted in order — compile, link, run, compare — and nothing in the
+    /// harness may short-circuit a phase because a marker exists. Classification happens at
+    /// the first terminal outcome or the completed comparison, so a compile failure, a link
+    /// failure, a crash or a timeout is classified where it occurred rather than after a
+    /// comparison that could not be reached.
     XFail,
     /// A marker is present but the divergence it describes has disappeared.
     ///
@@ -2248,9 +2258,11 @@ fn validated_target_dir() -> Result<Option<PathBuf>, String> {
 ///
 /// - **The package root.** A build root equal to it, or above it, would place this run's
 ///   directories among — or above — the whole checkout, and would point the roots' wholesale purges
-///   at a tree that holds every committed file. Note the asymmetry: the *default* build root is
-///   `<package>/target`, which is inside the package root and entirely legitimate. "Inside the
-///   package" is therefore not the defect; equalling it or containing it is.
+///   at a tree that holds every committed file. A build root *inside* the package is a narrower
+///   question and is answered by [`DISPOSABLE_IN_PACKAGE_SUBTREES`] rather than here: the default
+///   build root is `<package>/target`, which is inside the package and entirely legitimate, while
+///   `<package>/src` is inside the package and would aim a wholesale purge at the compiler's own
+///   source.
 /// - **The committed test tree**, `tests/`. It holds the driver, this harness and the whole corpus,
 ///   and the corpus is *discovered by scanning*, so a directory of build output created inside it
 ///   would be scanned as though it were test material.
@@ -2291,10 +2303,18 @@ fn source_tree_overlap_defect(resolved: &Path) -> Option<String> {
             ));
         }
         if candidate.starts_with(&reference) {
-            // The package root is the one reference a build root may legitimately sit inside, and
-            // the default one does. The narrower trees are never legitimate.
+            // The package root is the one reference a build root may legitimately sit inside — and the
+            // default one does — so being inside it is not the answer on its own. Which *part* of it is
+            // the answer, and that is a separate question with a separate rule.
+            //
+            // An earlier form of this function simply continued here, and the consequence was not
+            // theoretical: `CARGO_TARGET_DIR=<package>/src/scratch` was accepted, and the roots' own
+            // per-run wholesale purge would then have been aimed inside the compiler's source tree.
+            // Constraint C1 forbids this suite from modifying that tree at all, so a configuration
+            // that lets it *delete* part of it is the one path by which a test could violate C1
+            // outright.
             if reference == package {
-                continue;
+                return in_package_subtree_defect(&candidate, &package);
             }
             return Some(format!(
                 "would place the build roots inside {label} ({})",
@@ -2310,6 +2330,64 @@ fn source_tree_overlap_defect(resolved: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// The subtrees of the package a build root may legitimately be placed in.
+///
+/// Exactly one, and it is the one the repository's own `.gitignore` marks as disposable: `/target`,
+/// together with the three `/target/conformance-*` directories this suite writes beneath it. That is
+/// the whole basis for the rule — a build root is created and **purged wholesale on every run**, so the
+/// only place it may sit is a tree the project has already declared to hold nothing worth keeping.
+///
+/// Naming the ignore file as the authority is deliberate. Any other list would be this module's
+/// opinion about which of a checkout's directories are expendable, and would drift the moment the
+/// project's own answer changed; `.gitignore` is where that answer already lives, is reviewed with the
+/// tree it governs, and is what a maintainer would edit if the answer moved.
+const DISPOSABLE_IN_PACKAGE_SUBTREES: &[&str] = &["target"];
+
+/// Why a build root inside the package is not in a disposable subtree of it, or `None`.
+///
+/// Answers the narrow question [`source_tree_overlap_defect`] defers: the candidate is known to be
+/// inside the package, and what remains is whether the first component below the package is one the
+/// project treats as expendable.
+///
+/// The comparison is on that **first component alone**, not on the whole relative path, and that is the
+/// strict reading: `target/anything/at/any/depth` is disposable because `/target` is ignored wholesale,
+/// while `src/target` is refused even though its last component is spelled the same way. A rule keyed
+/// on the leading component cannot be satisfied by burying the right word somewhere deeper.
+///
+/// A candidate that is inside the package but yields **no** component below it cannot arise — that is
+/// the equality case, which the caller has already answered — and is refused here rather than treated
+/// as absent, because a containment check that cannot name what it contains has established nothing.
+fn in_package_subtree_defect(candidate: &Path, package: &Path) -> Option<String> {
+    let Ok(relative) = candidate.strip_prefix(package) else {
+        return Some(String::from(
+            "is inside the package root by containment but yields no path relative to it, so which \
+             part of the checkout it names cannot be established",
+        ));
+    };
+    let Some(first) = relative.components().next() else {
+        return Some(String::from(
+            "names the package root itself once reduced to a real location, so the build roots would \
+             be created among the committed files and purged from among them",
+        ));
+    };
+    let first = first.as_os_str().to_string_lossy().to_string();
+    if DISPOSABLE_IN_PACKAGE_SUBTREES.contains(&first.as_str()) {
+        return None;
+    }
+    Some(format!(
+        "would place the build roots in `{}` inside the package, which the checkout's own .gitignore \
+         does not mark as disposable. A build root is purged wholesale on every run, so it may only \
+         sit beneath {}; a committed tree — the compiler's source, its bundled headers, its \
+         documentation, its tests — must never be the thing a purge walks",
+        sanitize_text_for_report(&first),
+        DISPOSABLE_IN_PACKAGE_SUBTREES
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<String>>()
+            .join(" or ")
+    ))
 }
 
 /// `path` with its longest existing prefix canonicalized and the absent remainder appended.
@@ -4789,6 +4867,39 @@ pub fn public_text(text: &str) -> String {
     sanitize_text_for_report(&symbolize_roots(&redact_secrets(text)))
 }
 
+/// A digest identifying the machine-and-checkout a finding's evidence was produced on.
+///
+/// # What it identifies, exactly
+///
+/// The build root and the package root, digested together and nothing else. Those two paths are
+/// precisely what the exact half of [`disclosure_defects`] knows how to find, so this value answers
+/// the one question that half cannot answer for itself: **were the roots this check knows the roots
+/// the artifact was written against?**
+///
+/// Two consequences follow, and both are wanted:
+///
+/// - Two checkouts on one machine produce different values, because they are different producing
+///   locations and an artifact naming one of them is not portable to the other.
+/// - Two machines that build at identical paths — two containers from one image, say — produce the
+///   same value. That is not a false match: if the roots are identical then the exact half really is
+///   authoritative for that artifact, which is the only claim this value is used to make.
+///
+/// # Why a digest rather than the paths
+///
+/// It is recorded inside a committed artifact, so it must not be the disclosure it exists to reason
+/// about. [`stable_digest`] is a fixed specification rather than the standard library's unstable
+/// hasher, so a value written by one run is recognisable to the next, on any machine and under any
+/// toolchain version — which is what makes it comparable at all.
+pub fn machine_fingerprint() -> String {
+    let build = build_root();
+    let package = manifest_dir();
+    stable_digest(&[
+        &build.to_string_lossy(),
+        "\u{1f}",
+        &package.to_string_lossy(),
+    ])
+}
+
 /// Everything about `text` that would disclose a location or a credential if it were published.
 ///
 /// The scan a **curation** step must pass before a generated finding is copied into the committed
@@ -4798,16 +4909,39 @@ pub fn public_text(text: &str) -> String {
 /// saw that machine, and outlives it, so the absolute location of the checkout that produced it is
 /// disclosure rather than evidence.
 ///
-/// Two classes are reported, and neither is guessed at:
+/// # Two kinds of knowledge, and why both are needed
 ///
-/// - **A location.** The package root or the build root appearing literally. Both are known exactly,
-///   so this cannot false-positive on prose; and the remedy is mechanical, because
+/// The checks divide by what they know rather than by what they look for, and that division is the
+/// whole design:
+///
+/// - **Exact, and only about THIS machine.** The package root and the build root are known to the
+///   byte, so a literal occurrence cannot false-positive on prose, and the remedy is mechanical:
 ///   [`PACKAGE_ROOT_TOKEN`] and [`BUILD_ROOT_TOKEN`] are what the reporting renderer already
-///   substitutes, and `commands.sh` already parameterizes every tool path as a shell variable.
-/// - **A credential.** Any value [`redact_secrets`] recognises, which is every value of every
-///   environment variable whose name marks it as a secret. Reported rather than silently replaced,
-///   because a curated artifact that had a credential in it needs a human to decide what to do about
-///   the credential, not just about the file.
+///   substitutes, and `commands.sh` already parameterizes every tool path as a shell variable. The
+///   same holds for a credential: every value [`redact_secrets`] recognises is a value **this
+///   process** was handed.
+/// - **Portable, and about any machine.** An earlier form of this function had only the exact half,
+///   and that made it a check about the wrong thing. A curated directory is validated on every
+///   machine that runs the suite, and a directory produced on machine A and audited on machine B
+///   passes the exact half trivially: B's roots are not in the text, and A's secrets were never in
+///   B's environment. The check therefore read as an audit of portability while actually asserting
+///   only "not produced here" — the strongest guarantee it could give being the one case where it
+///   was least needed. So a second, machine-independent half recognises the *shapes* private
+///   locations and credentials take on **every** machine, which is the half that still bites when
+///   the producing machine is somebody else's.
+///
+/// A digest of the producing machine's roots is recorded in each finding's `MANIFEST.txt`, so a
+/// curated directory also states whether the exact half applied when it was committed — see
+/// `findings::MANIFEST_SOURCE_MACHINE_PREFIX`. The two halves and that field are one mechanism: the
+/// portable half is what always runs, the exact half is a strengthening available on the producing
+/// machine, and the field is how a reader tells which of the two the committed artifact passed.
+///
+/// # Why a defect never quotes the text it found
+///
+/// Every line returned names the *shape* and the line numbers, never the offending bytes. This
+/// diagnostic is itself report text and is written into a report file, so quoting a home directory
+/// here would republish exactly the disclosure being reported — and a line number is what a curator
+/// needs anyway, since the remedy is to open the artifact and elide the value in place.
 ///
 /// An empty result means the text is safe to commit. The findings are already report-safe.
 pub fn disclosure_defects(text: &str) -> Vec<String> {
@@ -4840,7 +4974,356 @@ pub fn disclosure_defects(text: &str) -> Vec<String> {
              credential itself has been exposed to whatever produced this text and needs rotating",
         ));
     }
+
+    // The portable half, scanned over the text with this machine's own roots already substituted:
+    // the exact half above has reported those, and reporting the same occurrence twice under two
+    // names would read as two problems. Substitution never inserts or removes a newline, so the line
+    // numbers below still address the file as it sits on disk.
+    let portable = symbolize_roots(text);
+    for hits in shape_occurrences(&portable, NON_PORTABLE_LOCATIONS) {
+        defects.push(format!(
+            "{} names {} ({}); a committed artifact is read on machines where that path does not \
+             exist and never did, so elide it in place — replace it with a stable, obviously \
+             substituted placeholder, or with a relative path that still runs",
+            describe_lines(&hits),
+            hits.shape.name,
+            hits.shape.reason
+        ));
+    }
+    for hits in shape_occurrences(&portable, CREDENTIAL_SHAPES) {
+        defects.push(format!(
+            "{} carries {} ({}); a credential must not be committed, and removing it is not \
+             sufficient on its own — it has been exposed to whatever produced this text and needs \
+             rotating",
+            describe_lines(&hits),
+            hits.shape.name,
+            hits.shape.reason
+        ));
+    }
     defects
+}
+
+/// One machine-independent shape a private location or a credential takes in text.
+///
+/// The portable half of [`disclosure_defects`] is a table rather than a sequence of conditions so
+/// that adding a shape is a data change with its own reason attached, and so that every shape is
+/// reported in the same voice. Each entry is a literal `opener` — which makes the scan a substring
+/// search rather than a character walk, and therefore linear in the artifact regardless of how many
+/// shapes the table holds — plus a `confirm` predicate that decides whether an occurrence of that
+/// literal is really the shape.
+///
+/// `confirm` receives the text **before** and **after** the opener within the line, because both
+/// sides carry the evidence for one shape or another: a drive-qualified Windows path is identified by
+/// the letter before its colon, and a home directory by the account component after its slash.
+struct DisclosureShape {
+    /// The literal whose occurrence makes this shape a candidate.
+    opener: &'static str,
+    /// What the shape is, in the words a curator needs in order to go and look at the line.
+    name: &'static str,
+    /// Why an occurrence would disclose something a committed artifact must not carry.
+    reason: &'static str,
+    /// Whether an occurrence of [`Self::opener`] really is this shape, given its surrounding text.
+    confirm: fn(before: &str, after: &str) -> bool,
+}
+
+/// The location shapes that identify a machine, a session or a person on **any** host.
+///
+/// Every entry is a location that is private by construction rather than by convention: a per-account
+/// home, a per-session temporary root, a per-user runtime directory, a mount point, or a path spelled
+/// in another operating system's syntax. Deliberately absent are the system directories a portable
+/// artifact legitimately names — `/usr`, `/bin`, `/lib`, `/opt`, `/etc` — because a reference driver at
+/// `/usr/bin/gcc-13` is the same file on every machine with the same distribution, and reporting it
+/// would train a curator to ignore this check.
+///
+/// Also deliberately absent is the UNC form `\\host\share`: it was measured against this corpus
+/// before being dropped, because `11_literals_and_strings/001_character_escapes.c` legitimately
+/// contains `"\\"` as the escape under test, and a check that fires on a corpus program which is
+/// doing exactly what it was written to do is a check a maintainer learns to suppress. Windows hosts
+/// are out of scope for the suite, so the drive-qualified form is retained only because its confirm
+/// predicate is exact.
+const NON_PORTABLE_LOCATIONS: &[DisclosureShape] = &[
+    DisclosureShape {
+        opener: "/home/",
+        name: "an absolute path inside an account's home directory",
+        reason:
+            "the component after it is a person's account name on the machine that produced this",
+        confirm: opens_path_component,
+    },
+    DisclosureShape {
+        opener: "/Users/",
+        name: "an absolute path inside an account's home directory",
+        reason:
+            "the component after it is a person's account name on the machine that produced this",
+        confirm: opens_path_component,
+    },
+    DisclosureShape {
+        opener: "/root/",
+        name: "an absolute path inside the superuser's home directory",
+        reason: "it says the artifact was produced as root, and that subtree exists nowhere else",
+        confirm: always_confirmed,
+    },
+    DisclosureShape {
+        opener: "/tmp/",
+        name: "an absolute path inside a temporary directory",
+        reason: "a session-scoped name, usually encoding a run, job or process identifier; covers \
+                 /var/tmp by the same spelling",
+        confirm: opens_path_component,
+    },
+    DisclosureShape {
+        opener: "/var/folders/",
+        name: "an absolute path inside a per-account temporary root",
+        reason: "the components below it are derived from the account that owns them",
+        confirm: always_confirmed,
+    },
+    DisclosureShape {
+        opener: "/private/var/",
+        name: "an absolute path spelled through a platform's resolved temporary root",
+        reason:
+            "this spelling is produced by resolving a per-session temporary path to its real path",
+        confirm: always_confirmed,
+    },
+    DisclosureShape {
+        opener: "/run/user/",
+        name: "an absolute path inside a per-account runtime directory",
+        reason: "the numeric component after it is an account's user identifier",
+        confirm: opens_numeric_component,
+    },
+    DisclosureShape {
+        opener: "/Volumes/",
+        name: "an absolute path inside a mounted volume",
+        reason: "a volume name exists only on the machine that mounted it",
+        confirm: opens_path_component,
+    },
+    DisclosureShape {
+        opener: "/media/",
+        name: "an absolute path inside a mounted volume",
+        reason: "a volume name exists only on the machine that mounted it",
+        confirm: opens_path_component,
+    },
+    DisclosureShape {
+        opener: "/mnt/",
+        name: "an absolute path inside a mount point",
+        reason: "a mount point exists only on the machine that mounted it",
+        confirm: opens_path_component,
+    },
+    DisclosureShape {
+        opener: "file://",
+        name: "a file URL",
+        reason:
+            "it names a location on the machine that wrote it; a reader following it reaches a \
+                 different file or none at all",
+        confirm: always_confirmed,
+    },
+    DisclosureShape {
+        opener: ":\\",
+        name: "a drive-qualified path in another operating system's syntax",
+        reason: "a drive letter names a volume on one machine and nothing on any other",
+        confirm: follows_drive_letter,
+    },
+];
+
+/// The credential shapes that are recognisable without knowing the producing machine's environment.
+///
+/// [`redact_secrets`] recognises a credential by its *value*, which it can only do for a variable
+/// **this** process was handed — so it recognises nothing at all in an artifact produced elsewhere.
+/// These six shapes recognise a credential by its *form* instead, and each was chosen for having a
+/// standardized, unmistakable opener: a compact, high-precision set rather than a broad heuristic,
+/// because a generic `secret=` pattern would fire on prose in a curator's own manifest, and a
+/// disclosure check that cries wolf is one that gets skipped at exactly the wrong moment.
+const CREDENTIAL_SHAPES: &[DisclosureShape] = &[
+    DisclosureShape {
+        opener: "-----BEGIN ",
+        name: "a PEM private key block",
+        reason: "the key material itself follows on the lines beneath it",
+        confirm: opens_pem_private_key,
+    },
+    DisclosureShape {
+        opener: "://",
+        name: "a URL carrying credentials in its authority",
+        reason: "the authority holds a user name and a password before the @",
+        confirm: opens_url_userinfo,
+    },
+    DisclosureShape {
+        opener: "Authorization:",
+        name: "an HTTP authorization header",
+        reason: "the scheme after it is followed by the credential itself",
+        confirm: opens_authorization_credential,
+    },
+    DisclosureShape {
+        opener: "AKIA",
+        name: "a cloud access key identifier",
+        reason: "twenty characters in the standardized form for a long-lived access key",
+        confirm: opens_cloud_access_key,
+    },
+    DisclosureShape {
+        opener: "ghp_",
+        name: "a source-forge personal access token",
+        reason: "the standardized prefix for a token that grants repository access",
+        confirm: opens_opaque_token,
+    },
+    DisclosureShape {
+        opener: "github_pat_",
+        name: "a source-forge personal access token",
+        reason: "the standardized prefix for a token that grants repository access",
+        confirm: opens_opaque_token,
+    },
+];
+
+/// Every line of `text` on which one of `shapes` occurs, per shape, bounded for reporting.
+///
+/// Driven line by line so that a hit carries the line number a curator opens the artifact at, and
+/// per shape by substring search so the cost is linear in the artifact rather than in its characters
+/// times the size of the table. A shape with no occurrence is dropped, so an empty result means the
+/// text carries none of them.
+fn shape_occurrences<'a>(text: &str, shapes: &'a [DisclosureShape]) -> Vec<ShapeHits<'a>> {
+    let mut hits: Vec<ShapeHits<'a>> = shapes
+        .iter()
+        .map(|shape| ShapeHits {
+            shape,
+            lines: Vec::new(),
+            total: 0,
+        })
+        .collect();
+    for (index, line) in text.lines().enumerate() {
+        for hit in hits.iter_mut() {
+            let found = line.match_indices(hit.shape.opener).any(|(at, _)| {
+                (hit.shape.confirm)(&line[..at], &line[at + hit.shape.opener.len()..])
+            });
+            if found {
+                hit.total += 1;
+                if hit.lines.len() < MAX_REPORTED_DISCLOSURE_LINES {
+                    hit.lines.push(index + 1);
+                }
+            }
+        }
+    }
+    hits.retain(|hit| hit.total > 0);
+    hits
+}
+
+/// Where one shape was found, and how often.
+struct ShapeHits<'a> {
+    /// The shape these lines carry.
+    shape: &'a DisclosureShape,
+    /// The first [`MAX_REPORTED_DISCLOSURE_LINES`] line numbers, 1-based, in file order.
+    lines: Vec<usize>,
+    /// How many lines carry the shape in total, which may exceed the length of [`Self::lines`].
+    total: usize,
+}
+
+/// How many line numbers a single disclosure defect names before summarizing the remainder.
+///
+/// A curator who has to elide a path will open the file, so the first few locations are enough to
+/// establish what is there and roughly how widespread it is; a defect line naming four hundred line
+/// numbers is not more actionable than one naming five and a count.
+const MAX_REPORTED_DISCLOSURE_LINES: usize = 5;
+
+/// `hits` rendered as the leading clause of a defect: which lines carry it, and how many there are.
+fn describe_lines(hits: &ShapeHits<'_>) -> String {
+    let rendered: Vec<String> = hits.lines.iter().map(|line| line.to_string()).collect();
+    let list = match rendered.split_last() {
+        None => String::from("an unrecorded line"),
+        Some((last, [])) => format!("line {last}"),
+        Some((last, leading)) => format!("lines {} and {last}", leading.join(", ")),
+    };
+    match hits.total.checked_sub(hits.lines.len()) {
+        Some(0) | None => list,
+        Some(remaining) => format!("{list} (and {remaining} further line(s))"),
+    }
+}
+
+/// A path component follows: the opener is a directory prefix rather than a bare mention of it.
+///
+/// Restricted to the characters an account, volume or session name is actually spelled with, so a
+/// quoted or bracketed mention — `"/home/"` in prose, or the `<redacted-path>` a curator substituted
+/// — is not reported as the thing the curator has already dealt with.
+fn opens_path_component(_before: &str, after: &str) -> bool {
+    matches!(
+        after.chars().next(),
+        Some(first) if first.is_ascii_alphanumeric() || first == '_' || first == '-' || first == '.'
+    )
+}
+
+/// A numeric path component follows, which is what a per-account runtime directory is keyed by.
+fn opens_numeric_component(_before: &str, after: &str) -> bool {
+    matches!(after.chars().next(), Some(first) if first.is_ascii_digit())
+}
+
+/// The occurrence is a shape wherever its opener is: no further evidence is needed or available.
+fn always_confirmed(_before: &str, _after: &str) -> bool {
+    true
+}
+
+/// The colon-backslash is preceded by a lone drive letter rather than by the end of a word.
+///
+/// Requires the character before the colon to be a letter and the one before *that* — if the line has
+/// one — not to be part of a word, so `C:\Users` is reported and a sentence ending in a word before a
+/// backslash is not.
+fn follows_drive_letter(before: &str, _after: &str) -> bool {
+    let mut trailing = before.chars().rev();
+    match trailing.next() {
+        Some(letter) if letter.is_ascii_alphabetic() => !matches!(
+            trailing.next(),
+            Some(earlier) if earlier.is_ascii_alphanumeric() || earlier == '_'
+        ),
+        _ => false,
+    }
+}
+
+/// The PEM opener introduces a **private** key rather than a certificate or a public key.
+fn opens_pem_private_key(_before: &str, after: &str) -> bool {
+    after.contains("PRIVATE KEY-----")
+}
+
+/// The URL's authority carries a user name and a password before its `@`.
+///
+/// The authority ends at the first delimiter that can follow it, and a credential is present only when
+/// that span holds both a separator colon and an `@` after it — so `https://example.invalid/path` is
+/// not reported and `https://user:secret@example.invalid` is.
+fn opens_url_userinfo(_before: &str, after: &str) -> bool {
+    let authority = after
+        .split(['/', '?', '#', ' ', '\t', '"', '\''])
+        .next()
+        .unwrap_or_default();
+    let Some((userinfo, _)) = authority.rsplit_once('@') else {
+        return false;
+    };
+    match userinfo.split_once(':') {
+        Some((name, password)) => !name.is_empty() && !password.is_empty(),
+        None => false,
+    }
+}
+
+/// The authorization header names a scheme and is followed by a non-empty credential.
+fn opens_authorization_credential(_before: &str, after: &str) -> bool {
+    let value = after.trim_start();
+    for scheme in ["Bearer ", "Basic ", "Token ", "bearer ", "basic "] {
+        if let Some(credential) = value.strip_prefix(scheme) {
+            if !credential.trim().is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Sixteen uppercase-or-digit characters follow, which is the standardized access-key identifier.
+fn opens_cloud_access_key(_before: &str, after: &str) -> bool {
+    after
+        .chars()
+        .take(16)
+        .take_while(|character| character.is_ascii_digit() || character.is_ascii_uppercase())
+        .count()
+        == 16
+}
+
+/// At least twenty token characters follow, which is what distinguishes a token from its prefix.
+fn opens_opaque_token(_before: &str, after: &str) -> bool {
+    after
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .count()
+        >= 20
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5120,17 +5603,59 @@ pub const REDACTED_PLACEHOLDER: &str = "[redacted]";
 /// [`isolate_child_environment`] stops the value reaching a spawned tool at all, so a child this
 /// suite launched cannot echo one back.
 ///
-/// **What is therefore not redacted, stated plainly.** A credential-bearing value shorter than this,
-/// appearing *bare* — without its variable name beside it — is left in the text. The realistic route
-/// to that is narrow: it needs a tool the suite spawned before isolation applied, or one that read the
-/// value from a file rather than the environment, to print a short secret with no name attached. It is
-/// narrow but not impossible, so it is a residual risk rather than an absence, and the mitigation is
-/// human: a maintainer curating a finding directory for publication inspects its artifacts, which is
-/// exactly what the curation procedure in `tests/conformance/FINDINGS.md` asks for. Lowering this
-/// bound is not the fix — a session identifier of `1` would then rewrite the digit in every count,
-/// every digest and every triple in every artifact, destroying the report's evidence to hide one
-/// character that is not secret.
+/// **What is therefore not redacted, stated plainly.** Two things. A credential-bearing value shorter
+/// than this, appearing *bare* — without its variable name beside it — is left in the text; and a value
+/// that [`is_path_value`] recognises as an absolute filesystem path is left in the text bare as well,
+/// for the reason recorded there. The realistic route to a missed secret is narrow: it needs a tool the
+/// suite spawned before isolation applied, or one that read the value from a file rather than the
+/// environment, to print a short secret with no name attached. It is narrow but not impossible, so it is
+/// a residual risk rather than an absence, and the mitigation is human: a maintainer curating a finding
+/// directory for publication inspects its artifacts, which is exactly what the curation procedure in
+/// `tests/conformance/FINDINGS.md` asks for. Lowering this bound is not the fix — a session identifier
+/// of `1` would then rewrite the digit in every count, every digest and every triple in every artifact,
+/// destroying the report's evidence to hide one character that is not secret.
 const BARE_REDACTION_MIN_CHARS: usize = 8;
+
+/// Whether `value` is an absolute filesystem path rather than an opaque credential.
+///
+/// # The measurement that forced this
+///
+/// The bare-occurrence rule is a substring replacement and cannot tell a credential from ordinary
+/// text spelling the same characters, which is why [`BARE_REDACTION_MIN_CHARS`] exists. That floor is
+/// necessary and, on its own, not sufficient: this container sets
+/// `DBUS_SESSION_BUS_ADDRESS=/dev/null`, whose name contains `SESSION` and whose value is nine
+/// characters — over the floor — and `/dev/null` appears in every generated `commands.sh`, because the
+/// script redirects to it. Every finding directory was therefore reported as carrying a credential, and
+/// no finding could be curated on this machine at all.
+///
+/// # Why a path is not a credential, and why the named form still redacts it
+///
+/// A credential is opaque: it *is* the secret. A path is a location, and a variable whose value is a
+/// path names where a secret lives rather than holding one —
+/// `GOOGLE_APPLICATION_CREDENTIALS=/etc/keys/service.json` discloses a filename, and the credential is
+/// the file's contents, which this function never sees. So excluding a path-valued secret from the
+/// **bare** rule loses no credential, and the association is still elided where it is actually
+/// disclosed: the `NAME=value` rule above is applied at every length and to every value, path or not,
+/// so an environment listing never publishes which variable points where.
+///
+/// Deliberately narrow, so that nothing opaque can slip through it: the value must begin with a
+/// separator and every character must be one a path is spelled with. A credential containing a slash —
+/// a base64 body, say — fails the character test on its padding or its case-mixed alphanumerics only if
+/// it also contains a character outside this set, so the test additionally requires the value to hold no
+/// character outside the conservative set below **and** to contain a separator after its first
+/// character, which a flat token never does.
+fn is_path_value(value: &str) -> bool {
+    let Some(remainder) = value.strip_prefix('/') else {
+        return false;
+    };
+    if !remainder.contains('/') {
+        return false;
+    }
+    remainder.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, '/' | '.' | '-' | '_' | '+' | '~' | '@' | ' ')
+    })
+}
 
 /// Every credential-bearing variable of this process, read once and ordered for repeatability.
 ///
@@ -5179,10 +5704,12 @@ pub fn secret_bearing_variable(name: &str) -> bool {
 /// back in its own output.
 ///
 /// Two shapes are recognised: the `NAME=value` form an environment listing uses, and the bare
-/// occurrence of a value the suite can still see in its own environment. The second is what catches a
-/// banner that prints a token without naming it, and it is the one bounded by
-/// [`BARE_REDACTION_MIN_CHARS`] — for the reason recorded there, which is that a substring rule
-/// shorter than that destroys evidence instead of protecting it.
+/// occurrence of a value the suite can still see in its own environment. The first is applied at every
+/// length and to every value, so the *association* between a variable and what it holds is never
+/// published. The second is what catches a banner that prints a token without naming it, and it is the
+/// narrower of the two by necessity — it is a substring replacement, so it is bounded below by
+/// [`BARE_REDACTION_MIN_CHARS`] and excludes a path-valued secret by [`is_path_value`], both for the
+/// same reason: a substring rule that matches ordinary text destroys evidence instead of protecting it.
 ///
 /// The scope of the guarantee is exactly that, and no wider. This recognises **values this process
 /// can read in its own environment under a credential-bearing name**: it cannot recognise a secret
@@ -5213,7 +5740,7 @@ pub fn redact_secrets(raw: &str) -> String {
             &format!("{name}={value}"),
             &format!("{name}={REDACTED_PLACEHOLDER}"),
         );
-        if value.chars().count() >= BARE_REDACTION_MIN_CHARS {
+        if value.chars().count() >= BARE_REDACTION_MIN_CHARS && !is_path_value(value) {
             text = text.replace(value.as_str(), REDACTED_PLACEHOLDER);
         }
     }
@@ -5293,15 +5820,32 @@ pub enum GroupTermination {
 /// while a `kill` that reports no such process is the postcondition this function exists to
 /// establish.
 ///
-/// One residual hazard is named rather than left implicit. Callers sweep *after* reaping the child
-/// they launched, because sweeping before it would find that child itself still in the group and
-/// report it as a survivor. Between the reap and the signal the group identifier is no longer held
-/// by any process of ours, so in principle another process could become the leader of a group with
-/// that number and be signalled instead. Closing that window would require a group handle the
-/// standard library does not offer. It is left open because the alternative is worse — a
-/// false survivor report on every execution — and because identifiers are allocated sequentially
-/// across the whole process-identifier space, so reuse inside a window of microseconds would
-/// require the allocator to wrap in that time.
+/// # The identifier-reuse hazard, and the check that answers it
+///
+/// Callers sweep *after* reaping the child they launched, because sweeping before it would find that
+/// child itself still in the group and report it as a survivor. Between the reap and the signal the
+/// group identifier is no longer held by any process of ours, so in principle another process could
+/// become the leader of a group with that number — and, without a further check, be signalled
+/// instead. Closing the window itself would require a group handle the standard library does not
+/// offer, and it cannot simply be inverted: sweeping before the reap is what produces a false
+/// survivor report on every single execution.
+///
+/// So the window stays open and the **consequence** is closed, by asking one more question before any
+/// signal is sent. This child was launched as its own group leader, so the group identifier *is* its
+/// process identifier. Having reaped it, that identifier belongs to no process of ours — and if
+/// [`signal_group`] reports that a process with that identifier exists again, the only explanation is
+/// that the number has been handed to something else. In that case nothing is signalled and the
+/// decision is recorded, which turns the hazard from "may deliver an uncatchable signal to an
+/// unrelated process group" into "may decline to sweep, and says so". That is the right direction to
+/// fail in: a descendant this run failed to reap is a leak it reports, while a stranger's process tree
+/// killed by this suite is a consequence no test result could justify.
+///
+/// The extra question costs nothing in the ordinary case, because it is asked only on the path where
+/// the group was found non-empty — and a well-behaved child leaves an empty group, which the first
+/// existence check settles in one invocation. Reuse remains implausible for the reason it always was:
+/// identifiers are allocated sequentially across the whole process-identifier space, so reuse inside a
+/// window of microseconds would require the allocator to wrap in that time. This is what makes the
+/// implausible case safe rather than merely unlikely.
 pub fn terminate_process_group(pgid: u32, kill_tool: Option<&Path>) -> GroupTermination {
     let Some(tool) = kill_tool else {
         return GroupTermination::Unsupervised(String::from(
@@ -5319,9 +5863,24 @@ pub fn terminate_process_group(pgid: u32, kill_tool: Option<&Path>) -> GroupTerm
     // status as a kill that failed for any other reason.
     match signal_group(tool, "-0", &group) {
         None => return GroupTermination::Unsupervised(unswept_reason(tool)),
-        // No member at all: there is nothing to signal, and the postcondition already holds.
+        // No member at all: there is nothing to signal, and the postcondition already holds. This is
+        // the ordinary case and it is settled here, before anything is signalled and before the
+        // ownership question below is asked.
         Some(false) => return GroupTermination::Cleared,
         Some(true) => {}
+    }
+    // The group has a member and the child that led it has been reaped, so the identifier should
+    // belong to no process. If one answers to it, the number has been reused and this group is not
+    // ours to signal.
+    if signal_group(tool, "-0", &pgid.to_string()) == Some(true) {
+        return GroupTermination::Unsupervised(format!(
+            "process group {pgid} still had a member after its leader was reaped, but a process now \
+             answers to identifier {pgid} as well — so the identifier has been reused and this group \
+             is no longer this run's. Nothing was signalled: delivering an uncatchable signal to a \
+             group that belongs to something else is a consequence no test result could justify. A \
+             descendant of this run's child may therefore have survived, and this note is the record \
+             of it"
+        ));
     }
     if signal_group(tool, "-KILL", &group).is_none() {
         return GroupTermination::Unsupervised(unswept_reason(tool));
@@ -5375,10 +5934,15 @@ fn unswept_reason(tool: &Path) -> String {
     }
 }
 
-/// Send one signal to one process group, reporting whether the utility itself succeeded.
+/// Send one signal to one process or process group, reporting whether the utility itself succeeded.
+///
+/// `target` is passed as an operand after `--`, so it is whichever of the two spellings the caller
+/// needs: a negated identifier addresses every process in that group, and a positive one addresses a
+/// single process. [`terminate_process_group`] uses both — the group to sweep it, and the bare
+/// identifier to establish that the group is still its own before sweeping anything.
 ///
 /// `None` means the utility could not be run, could not be waited for, **or was refused because it
-/// is no longer the file that was resolved** — each a different fact from the group being absent,
+/// is no longer the file that was resolved** — each a different fact from the target being absent,
 /// which is why the return type is not a bare boolean. [`unswept_reason`] tells the last of the three
 /// apart from the other two when the caller reports it.
 ///
@@ -5403,9 +5967,9 @@ fn unswept_reason(tool: &Path) -> String {
 /// group, and [`terminate_process_group`] turns it into an `Unsupervised` verdict, which states that
 /// a descendant may have survived rather than claiming a sweep that did not happen. The reap is
 /// bounded too, so a child that cannot be reaped leaves one zombie rather than a stalled run.
-fn signal_group(tool: &Path, signal: &str, group: &str) -> Option<bool> {
+fn signal_group(tool: &Path, signal: &str, target: &str) -> Option<bool> {
     let mut command = Command::new(tool);
-    command.arg(signal).arg("--").arg(group);
+    command.arg(signal).arg("--").arg(target);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
