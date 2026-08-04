@@ -797,7 +797,7 @@ claim should read the program and its record and form their own.
 | Basis | docs/technical-specifications.md, line 511, the type representation is specified with target-parametric sizes covering the floating types including long double |
 | Documented | Type representation with target-parametric sizes |
 | Evidence | (not written) |
-| Observed | The cross-backend value comparison is not attempted for this program: the record disables oracle (b). What the measurement shows, and what the exclusion rests on, is that sizeof(long double) is 16 on x86_64, 12 on i686, 16 on aarch64 and 16 on riscv64, with the two x86 targets carrying the x87 80-bit extended format inside that storage and the other two carrying IEEE binary128 -- three different formats, with different significand widths, exponent ranges and rounding boundaries. A value difference between two backends over this type is therefore an implementation-defined difference of the kind the brief's carve-out names, not a defect in either. |
+| Observed | The cross-backend value comparison is not attempted for this program: the record disables oracle (b). What the measurement shows, and what the exclusion rests on, is that sizeof(long double) is 16 on x86_64, 12 on i686, 16 on aarch64 and 16 on riscv64, with the two x86 targets carrying the x87 80-bit extended format inside that storage and the other two carrying IEEE binary128 -- three storage-and-format pairings over two distinct formats, whose significands are 64 bits against 113 and which therefore round at different places. A value difference between two backends over this type is therefore an implementation-defined difference of the kind the brief's carve-out names, not a defect in either. |
 
 | Aspect | Value |
 |---|---|
@@ -1269,27 +1269,31 @@ genuinely different dimensions** that must never be collapsed into one another:
 - **Structural** — what a reader can count in `tests/conformance/` with a shell. The corpus is
   structurally complete: fourteen areas, 108 sources, 108 records, no unpaired source and no orphan
   record.
-- **Substantiated at this checkpoint** — the narrower, milestone figure. **107 of the 108 records**
-  have been authored or re-substantiated in the checkpoint sequence that produced this state. The
-  remaining one, `13_floating_point/004_long_double_target_restricted.expected`, is a **legacy record
-  pending re-substantiation**: it is committed, parses and is paired with its source, so it is
-  not missing and does not reduce the structural figure, but its prose has not been through this
-  checkpoint's review — and while that is true it is **withheld before its first compile** by the
-  record-substantiation preflight gate, so no cell of it runs and its feature area fails with an
-  explicit non-evidence report rather than publishing verdicts drawn from an unreviewed record. That
-  is requirement 6 refusing to let the suite assert something it has no standing to assert, not a
-  defect; retiring the record's row from the driver's `PENDING_RECORDS` declaration is the whole of
-  the work once its review completes. Its outstanding item is the loose *"three different formats"*
-  wording in its `observed` field and in §4.2's matching `Observed` row — there are **two** formats
-  across three object representations — and because §1.1's forward check compares those two character
-  for character, they must be corrected **in one edit together**.
+- **Substantiated at this checkpoint** — the narrower, milestone figure, which now stands at **all
+  108 records**. The last one outstanding,
+  `13_floating_point/004_long_double_target_restricted.expected`, has completed its review: its
+  written undefined-behaviour argument now carries the excess-intermediate-precision, conversion,
+  literal, printing, characteristic-macro and magnitude obligations it had previously left to the
+  program's own comments; its measured reason for disabling oracle (b) was re-measured, which
+  withdrew the unsupportable claim that the exponent ranges differ — `LDBL_MAX_EXP`, `LDBL_MIN_EXP`,
+  `LDBL_MAX` and `LDBL_MIN` measure identically on all four targets — in favour of the significand
+  widths, 64 bits against 113, that the exclusion actually rests on; and the loose *"three different
+  formats"* wording was corrected to *"three storage-and-format pairings over two distinct formats"*
+  in its `observed` field and in §4.2's matching `Observed` row, in the single edit §1.1's
+  character-for-character forward check requires. The driver's `PENDING_RECORDS` declaration is
+  therefore **empty**, and the record-substantiation preflight gate now reports that every record the
+  corpus holds is entitled to be read as evidence rather than withholding a feature area. The gate
+  and this column are kept, because they are the mechanism rather than the instance: any record whose
+  review has not completed is declared here, withheld before its first compile, and its area fails
+  with an explicit non-evidence report rather than publishing verdicts drawn from unreviewed
+  material — requirement 6 refusing to let the suite assert something it has no standing to assert.
 - **Admitted as evidence about `bcc`** — **zero**, because there is no `bcc` binary on this branch.
 
 | Matrix | Areas | Sources | Records | **Runnable programs** | `bcc` compile-and-run cells | Verdict outcome rows | Comparisons actually performed |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | **Final planned target** | 14 | 108 | 108 | 108 | 1,296 (108 × 4 targets × 3 levels) | 3,564 | 3,555 |
 | **Structural, on this branch** | **14** | **108** | **108** | **108** | **1,296** (108 × 4 × 3) | **3,564** | **3,555** |
-| **Substantiated at this checkpoint** | 14 | — | **107** (1 pending) | **107** | **1,284** (107 × 4 × 3) | **3,531** | **3,531** |
+| **Substantiated at this checkpoint** | 14 | — | **108** (0 pending) | **108** | **1,296** (108 × 4 × 3) | **3,564** | **3,555** |
 | **Admitted as evidence** | 0 | 0 | 0 | **0** | **0** | **0** | **0** |
 
 **A verdict outcome row is not a performed comparison, and this register in particular must not
@@ -1299,9 +1303,11 @@ are §4.2's: oracle (b) on `13_floating_point/004_long_double_target_restricted`
 targets × three optimization levels, which that record **disables** and `XD-TYPE-LONGDOUBLE-001`
 documents. So oracle (b) is **963 performed comparisons plus 9 not-attempted `XFAIL` rows = 972 rows**
 in total, and §3.3 is explicit that a not-attempted row is neither a pass nor a silent skip: nothing
-was compared, so no equality is claimed. For the 107 substantiated records the two figures coincide at
-**3,531**, because the pending record is the only one in the corpus that narrows an oracle — which is
-also how it can be identified mechanically:
+was compared, so no equality is claimed. Those nine rows are the whole of the gap, which is why the
+substantiated row now carries **3,564** verdict rows against **3,555** performed comparisons rather
+than one figure for both: the record that narrows the oracle is itself substantiated, so its nine
+not-attempted rows are counted in the milestone column too — and it remains the one narrowing record
+in the corpus, which is also how it can be identified mechanically:
 
 ```text
 grep -l 'oracle_b *= *disabled' tests/conformance/*/*.expected     # the one narrowing record -> 1
@@ -1323,12 +1329,13 @@ for f in $(find tests/conformance -name '*.c'); do \
   [ -f "${f%.c}.expected" ] || echo "$f"; done | wc -l            # unpaired ->   0
 ```
 
-**The structural row is now the planned row; the substantiated row is one record short of it; and the
+**The structural row is now the planned row; the substantiated row has caught up with it; and the
 admitted row is still zero.** Structurally the corpus is complete: fourteen areas, one hundred and
 eight sources, one hundred and eight records, no unpaired source and no orphan record — so every cell
 figure in that row is arithmetic over a **complete** pairing rather than a nominal projection over a
-partial one. The substantiated row is the same arithmetic over the **107** records this checkpoint has
-reviewed, and it exists so that "complete" is never read as "reviewed". The admitted row counts
+partial one. The substantiated row is the same arithmetic over the **108** records this checkpoint has
+reviewed, so the two now agree; the column is kept separate rather than merged away, because it exists
+so that "complete" is never read as "reviewed" and it is the column the next unreviewed record moves. The admitted row counts
 something different and stricter again — the cells whose result the suite accepts as **evidence about
 `bcc`** — and it is zero for one reason only:
 

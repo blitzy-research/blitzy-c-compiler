@@ -1341,23 +1341,25 @@ is the single easiest way to overstate this suite, so each is defined before it 
 - **Final planned target** — what the suite's design calls for.
 - **Present on this branch (structural)** — what a reader can count in this directory with a shell.
   It equals the planned target in every row: the corpus is structurally complete.
-- **Substantiated at this checkpoint** — the narrower figure that matters for the current milestone.
-  **107 of the 108 expectation records** have been authored or re-substantiated in the checkpoint
-  sequence that produced this state; the remaining one,
+- **Substantiated at this checkpoint** — the narrower figure that matters for the current milestone,
+  and it now stands at **all 108 expectation records**. The last one outstanding,
   [`13_floating_point/004_long_double_target_restricted.expected`](13_floating_point/004_long_double_target_restricted.expected),
-  is a **legacy record still pending re-substantiation**. It is committed, it parses and it is paired
-  with its source — it is not missing, and it does not reduce the structural column — but its prose
-  has not been through this checkpoint's review, so it is counted separately rather than folded in,
-  and while that is true it is **withheld before its first compile** by the record-substantiation
-  preflight gate: no cell of it runs, and its feature area therefore **fails, loudly and with an
-  explicit non-evidence report**, rather than publishing verdicts drawn from a record whose own
-  authority is still under review (see
-  [What every report says about the gates](#what-every-report-says-about-the-gates)). That failure is
-  the mechanism working, not a regression, and retiring the record's row from the driver's pending
-  declaration is the whole of the work once its review completes.
-  Its outstanding items are the loose "three different formats" wording in its `observed` field
-  and the register's matching `Observed` row, which the audit compares character for character and
-  which must therefore be corrected in one edit together.
+  has completed its review: its written undefined-behaviour argument now carries the
+  excess-intermediate-precision, conversion, literal, printing, characteristic-macro and magnitude
+  obligations it had left to the program's own comments; its measured reason for disabling oracle (b)
+  was re-measured, withdrawing the unsupportable claim that the exponent ranges differ — `LDBL_MAX_EXP`,
+  `LDBL_MIN_EXP`, `LDBL_MAX` and `LDBL_MIN` measure identically on all four targets — in favour of the
+  significand widths, 64 bits against 113, that the exclusion actually rests on; and the loose "three
+  different formats" wording was corrected to "three storage-and-format pairings over two distinct
+  formats" in its `observed` field and in the register's matching `Observed` row, in the one edit the
+  character-for-character audit requires. The driver's pending declaration is therefore **empty**, and
+  the record-substantiation preflight gate now reports that every record the corpus holds is entitled
+  to be read as evidence (see
+  [What every report says about the gates](#what-every-report-says-about-the-gates)). The column and
+  the gate are kept because they are the mechanism rather than the instance: a record whose review has
+  not completed is declared, **withheld before its first compile**, and its feature area **fails,
+  loudly and with an explicit non-evidence report**, rather than publishing verdicts drawn from a
+  record whose own authority is still under review.
 - **Admitted as evidence about `bcc`** — the cells whose result the suite accepts as evidence about
   the compiler, and it is **zero**, for one reason only: there is no `bcc` binary on this branch. Read
   it precisely: it is deliberately *not* a count of cells the machinery will attempt, because the
@@ -1367,21 +1369,21 @@ is the single easiest way to overstate this suite, so each is defined before it 
 | --- | --- | --- | --- | --- |
 | Feature areas | 14 | **14** | 14 | **0** |
 | C source programs (`*.c`) | 108 | **108** | — | — |
-| Expectation records (`*.expected`) | 108 | **108** | **107** (1 pending) | — |
-| **Runnable programs** — a source **paired with** its record | **108** | **108** | **107** | **0** |
+| Expectation records (`*.expected`) | 108 | **108** | **108** (0 pending) | — |
+| **Runnable programs** — a source **paired with** its record | **108** | **108** | **108** | **0** |
 | Sources with no record, which contribute nothing | 0 | **0** | 0 | — |
 | Records with no source, which are corpus defects | 0 | **0** | 0 | — |
 | Optimization levels per program | 3 | 3 | 3 | — |
 | Targets per program | 4, unless the record restricts them with a recorded reason | 4, same rule | 4, same rule | — |
-| **`bcc` compile-and-run cells** | **1,296** (108 × 4 × 3) | **1,296** | **1,284** (107 × 4 × 3) | **0** |
-| Reference cells, native | **324** (108 × 3) | **324** | **321** | **0** |
-| Reference cells, cross | up to **972** (108 × 3 × 3) | up to **972** | up to **963** | **0** |
-| Oracle (a) comparisons | **1,296** | **1,296** | **1,284** | **0** |
-| Oracle (b) — verdict rows | **972** | **972** | **963** | **0** |
+| **`bcc` compile-and-run cells** | **1,296** (108 × 4 × 3) | **1,296** | **1,296** (108 × 4 × 3) | **0** |
+| Reference cells, native | **324** (108 × 3) | **324** | **324** | **0** |
+| Reference cells, cross | up to **972** (108 × 3 × 3) | up to **972** | up to **972** | **0** |
+| Oracle (a) comparisons | **1,296** | **1,296** | **1,296** | **0** |
+| Oracle (b) — verdict rows | **972** | **972** | **972** | **0** |
 | Oracle (b) — comparisons actually performed | **963** | **963** | **963** | **0** |
-| Oracle (c) assertions | **1,296** | **1,296** | **1,284** | **0** |
-| **Verdict outcome rows** | **3,564, from 108 runnable programs** | **3,564** | **3,531** | **0** |
-| **Comparisons/assertions actually performed** | **3,555** | **3,555** | **3,531** | **0** |
+| Oracle (c) assertions | **1,296** | **1,296** | **1,296** | **0** |
+| **Verdict outcome rows** | **3,564, from 108 runnable programs** | **3,564** | **3,564** | **0** |
+| **Comparisons/assertions actually performed** | **3,555** | **3,555** | **3,555** | **0** |
 
 **An outcome row is not the same thing as a performed comparison, and the two are published
 separately because the suite deliberately reports cells it did not compare.** Every one of the 3,564
@@ -1390,10 +1392,11 @@ actually made. The other **nine** are the oracle (b) rows of
 `13_floating_point/004_long_double_target_restricted` — three non-baseline targets × three
 optimization levels — whose record **disables** oracle (b) for a measured reason and whose marker
 `XD-TYPE-LONGDOUBLE-001` documents that narrowing. They are reported `XFAIL` as **not attempted**,
-which is neither a pass nor a silent skip: nothing was compared there, so no equality is claimed. For
-the 107 substantiated records the two figures coincide at **3,531**, because the pending record is the
-only one in the corpus that narrows an oracle. Calling all 3,564 "assertions" would credit the suite
-with nine comparisons it does not make.
+which is neither a pass nor a silent skip: nothing was compared there, so no equality is claimed.
+Those nine rows are the whole of the gap, and they are counted in the substantiated column too, because
+the record that narrows the oracle is itself substantiated — which is why that column now reads
+**3,564** rows against **3,555** performed rather than one figure for both. Calling all 3,564
+"assertions" would credit the suite with nine comparisons it does not make.
 
 **Every cell figure multiplies the `Runnable programs` row, never the source count** — and the two
 rows above it exist so that the difference can never hide. A `.c` file with no sibling record is
@@ -1424,10 +1427,12 @@ figure follows by multiplication: 108 × 4 × 3 = 1,296 `bcc` cells, 108 × 3 = 
 cells, 108 × 3 × 3 = 972 cross reference cells and 972 oracle (b) verdict rows, 1,296 oracle (c)
 assertions, so 1,296 + 972 + 1,296 = **3,564 verdict outcome rows**. Subtract the nine oracle (b) rows
 the long-double record declines to compare and **3,555** comparisons are actually performed. The
-substantiated column is the same arithmetic over 107 records — 107 × 4 × 3 = 1,284 cells, 107 × 3 × 3 =
-963 oracle (b) comparisons, so 1,284 + 963 + 1,284 = **3,531**, with verdict rows and performed
-comparisons coinciding because the one record that narrows an oracle is the one being counted out. The
-pending record is identified by the one property that distinguishes it mechanically, which is also
+substantiated column is now the same arithmetic over all 108 records, so it reproduces those figures
+exactly: 1,296 cells, 972 oracle (b) verdict rows of which 963 are performed, 1,296 oracle (c)
+assertions, **3,564** verdict outcome rows and **3,555** performed comparisons. The two figures do not
+coincide there, and that is the point of publishing both: the record that narrows an oracle is itself
+substantiated, so its nine not-attempted rows are inside the milestone column rather than counted out
+of it. That record is identified by the one property that distinguishes it mechanically, which is also
 checkable with a shell:
 
 ```text
@@ -1457,28 +1462,26 @@ is worth recording, because each is what a future regression would be caught by:
    areas.** While any program was unpaired the enumeration failed for it and the audit blocked the
    areas it named. All fourteen areas are now present and every program is paired, and the gate is
    **met**: 108 programs, both gates each, 324 reference-compiler invocations. Note what this gate
-   does and does not distinguish: it is satisfied by all 108 records, the pending one included,
-   because a record's prose being unreviewed is not the same thing as its program failing a gate.
-   The 107/108 distinction is a **review-state** distinction and is tracked in the table above, not
-   here.
+   does and does not distinguish: it is satisfied by all 108 records, and it would still be satisfied
+   by a record whose prose was unreviewed, because a record's prose not having been re-checked is not
+   the same thing as its program failing a gate. That distinction is a **review-state** distinction,
+   tracked by the substantiated column in the table above and by the substantiation gate, not here.
 
 **Measured, not assumed.** The suite has been run on this branch against a **surrogate** compiler
 under test rather than `bcc` — a stand-in that forwards to the reference toolchain — because this
-checkout has none. Under the surrogate **thirteen of the fourteen area tests complete and pass, and
-`13_floating_point` fails**, which is the record-substantiation gate doing its job rather than a
-defect: the pending record's area is withheld before its first compile, so the run records
-**3,432 verdict outcome rows — 3,420 PASS, 0 XFAIL, 12 XPASS, 0 FAIL — over 104 of the 108
-programs**. That is the full structural figure less this area's own 132 rows (4 programs × 33 rows),
-and the nine XFAIL the long-double record would otherwise contribute are absent for the same reason:
-withheld cells are not compared, so they are not excused either. The twelve XPASS are the arms
-`XD-GCCEXT-CASE-RANGES-001` scopes, which a stand-in that accepts case ranges necessarily agrees on,
-so that run is taken with `BCC_CONFORMANCE_ALLOW_XPASS` set — see
+checkout has none. Under the surrogate **all fourteen area tests and all four infrastructure tests
+complete and pass**, every preflight gate holds, and the run records the full structural tally:
+**3,564 verdict outcome rows — 3,543 PASS, 9 XFAIL, 12 XPASS, 0 FINDING, 0 FAIL, 0 UNAVAILABLE — over
+all 108 programs**, with coverage reported as FULL and 14 of 14 area reports aggregated. The nine XFAIL
+are the long-double record's oracle (b) arms, reported as not attempted against
+`XD-TYPE-LONGDOUBLE-001`; the twelve XPASS are the arms `XD-GCCEXT-CASE-RANGES-001` scopes, which a
+stand-in that accepts case ranges necessarily agrees on, so that run is taken with
+`BCC_CONFORMANCE_ALLOW_XPASS` set — see
 [the unexpected-success policy](#the-unexpected-success-policy) for why a surrogate XPASS establishes
-nothing. **Retiring one row from the driver's pending declaration is the whole of what returns that
-area to the run**, at which point the tally is the structural one again. In this checkout itself, with
-no compiler at all, mechanism 1 blocks every area. One caveat travels with every figure measured that
-way: the compiler under test was a surrogate, so none of it is evidence about `bcc`. It is quoted only
-to show that the structural column is arithmetic anyone can reproduce, never as a result.
+nothing. In this checkout itself, with no compiler at all, mechanism 1 blocks every area. One caveat
+travels with every figure measured that way: the compiler under test was a surrogate, so none of it is
+evidence about `bcc`. It is quoted only to show that the structural column is arithmetic anyone can
+reproduce, never as a result.
 
 
 **Never publish a coverage percentage in this file or in either register.** Coverage instrumentation
@@ -1514,16 +1517,16 @@ area anywhere.
 | `10_declarations_and_types` | 10 | 10 of 10 | 10 of 10 | supplementary | present |
 | `11_literals_and_strings` | 4 | 4 of 4 | 4 of 4 | supplementary | present |
 | `12_preprocessor` | 6 | 6 of 6 | 6 of 6 | supplementary | present |
-| `13_floating_point` | 4 | 4 of 4 | **3 of 4** — `004_long_double_target_restricted.expected` pending | supplementary | present |
+| `13_floating_point` | 4 | 4 of 4 | 4 of 4 | supplementary | present |
 | `14_abi_calling_convention` | 6 | 6 of 6 | 6 of 6 | supplementary | present |
-| **Total** | **108** | **108 of 108** | **107 of 108** | | **108 present across all 14 areas** |
+| **Total** | **108** | **108 of 108** | **108 of 108** | | **108 present across all 14 areas** |
 
 The nine mandated areas are the acceptance floor set by the requirements; each carries no fewer
 than six programs. The five supplementary areas were added because they carry the widest
 cross-backend divergence surface. All fourteen are **structurally** present and complete, which is what
 the `State` column here and the structural column of [the enumerable matrix](#the-enumerable-matrix)
-both record; the one record still pending re-substantiation is named in the `Substantiated` column so
-that "complete" is never read as a stronger claim than it is.
+both record; the `Substantiated` column is published beside it so that "complete" is never read as a
+stronger claim than it is, and any record whose review has not completed is named there.
 Every one of the 108 programs carries a record, so the `Records` column and the `Programs` count
 agree in every row; a landed program without a record is the only way the two columns can disagree,
 and the column stays in the table so that such a gap would be auditable at a glance rather than
@@ -2616,14 +2619,14 @@ record mechanically; the *protection* is already in place.
   program** — every area carrying its full planned program count. Every one of the 108 records
   parses under `manifest.rs`, and every `expected_stdout` was derived from measurement rather than
   written by hand. Read both of those claims with the column they belong to: they are
-  **structural** claims, and **107 of the 108 records are substantiated at this checkpoint** —
-  [`13_floating_point/004_long_double_target_restricted.expected`](13_floating_point/004_long_double_target_restricted.expected)
-  is a legacy record still pending re-substantiation, so its prose has not been through this
-  checkpoint's review and it is **withheld from producing evidence about the compiler** until it
-  has (see [the enumerable matrix](#the-enumerable-matrix) for the full four-column reading and
+  **structural** claims, and the review-state claim is published separately: **all 108 records are
+  substantiated at this checkpoint**, the last of them
+  [`13_floating_point/004_long_double_target_restricted.expected`](13_floating_point/004_long_double_target_restricted.expected),
+  whose written argument, re-measured oracle (b) reason and `observed` wording completed their review
+  together with the register row the audit compares them against (see
+  [the enumerable matrix](#the-enumerable-matrix) for the full four-column reading and
   [What every report says about the gates](#what-every-report-says-about-the-gates) for the
-  substantiation gate that withholds it). Its golden was measured like the others; what is
-  outstanding is the review of the record, not the derivation of the bytes;
+  substantiation gate that withholds any record whose review has not completed);
 - `support/`, holding the suite's only fixture;
 - `findings/`, which on this branch holds only `.gitkeep` — the directory is committed so that the
   first curated finding has a tracked home, and its emptiness is the accurate statement that none has

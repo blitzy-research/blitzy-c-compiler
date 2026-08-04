@@ -6,7 +6,7 @@
 
 program            = 004_long_double_target_restricted
 area               = 13_floating_point
-description        = long double arithmetic, conversions and comparisons in a folded and a volatile-runtime variant, restricted to same-target comparison because the type's representation was measured to differ across the four backends
+description        = long double arithmetic, conversions and comparisons in a folded and a volatile-runtime variant, written and run on all four targets at all three optimization levels, with cross-backend value equality alone excluded because the type's representation was measured to differ across the four backends
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -45,16 +45,55 @@ volatile qualification makes the store and the reload actually happen -- without
 targets would evaluate the sums in wider registers and report a different answer from the other two,
 a difference in the test rather than in any compiler.
 
-NO NON-FINITE VALUE, NO NEGATIVE ZERO AND NO SUBNORMAL APPEARS. The exponent ranges of the x87 and
-binary128 formats differ enormously, and identity properties of those values are not what this program
-tests. No division has a zero divisor. The conversions to an integer type truncate 6.25, -6.25 and
-12.5, so each integral part sits far inside its destination range on every target, which is what keeps
-a floating-to-integer conversion defined under C11 6.3.1.4p1.
+EXCESS INTERMEDIATE PRECISION CANNOT MOVE ANY VALUE THIS PROGRAM PRINTS, AND THAT IS A CONSEQUENCE OF
+THE EXACTNESS ABOVE RATHER THAN A SEPARATE HOPE. i686 is the one target measured with
+__FLT_EVAL_METHOD__ == 2 -- x87 evaluates float and double expressions in the wider long double
+format -- while x86_64, aarch64 and riscv64 all measure 0. C11 5.2.4.2.2p9 sanctions exactly that,
+and 6.3.1.8p2 permits an implementation to carry extra range and precision through an intermediate
+result. Neither can shift a printed digit here: every operand and every result of every operation is
+exactly representable in binary64 and therefore in the 64-bit and 113-bit significands too, so no
+operation has a rounding decision available to take, and evaluating an exact computation in a wider
+format returns that same exact value. The one place a wider evaluation WOULD be observable is the
+significand probe, whose entire question is about the double format, and that is exactly why its
+staging object is a volatile double rather than an expression: the assignment discards the extra
+precision 6.3.1.8p2 permits, and the volatile qualification makes the discarding actually happen.
+
+NO NON-FINITE VALUE, NO NEGATIVE ZERO AND NO SUBNORMAL APPEARS, and identity properties of those
+values are not what this program tests. The subnormal threshold in particular is where the two long
+double formats part company: MEASURED, the least positive value is 3.645200e-4951 in x87 80-bit
+extended against 6.475175e-4966 in IEEE binary128, so a program that went near it would be reading a
+target-dependent boundary. Nothing here goes anywhere near either. Every magnitude computed or printed
+sits far inside the finite range of all three representations and vastly above every subnormal
+threshold: the largest is 1234567 and the smallest non-zero is one eighth, against a finite maximum
+measured at 1.189731e+4932 on all four targets, so no operation approaches overflow, underflow or
+gradual underflow anywhere. No division has a zero divisor. The conversions to an integer type
+truncate 6.25, -6.25 and 12.5, so each integral part sits far inside its destination range on every
+target, which is what keeps a floating-to-integer conversion defined under C11 6.3.1.4p1.
 
 NO OBJECT REPRESENTATION IS INSPECTED. A 12-byte or 16-byte object of this type carries padding beyond
 its significant bytes, and reading it byte-wise would be both undefined behaviour and target-dependent,
 so no long double object is examined byte by byte, copied into an object of another type, or
-reinterpreted through overlapping storage or a pointer cast.
+reinterpreted through overlapping storage or a pointer cast. No `LDBL_` characteristic macro is named
+anywhere in the program either -- not the significand width, the epsilon, the maximum or the exponent
+range -- and no header is included from which one could come, so nothing target-dependent about the
+type's own description can reach a comparison.
+
+EVERY CONVERSION IS EXPLICIT, EVERY LITERAL CARRIES THE TYPE IT MEANS, AND EVERY ARGUMENT MATCHES THE
+CONVERSION SPECIFICATION THAT PRINTS IT. The three are one discipline, because a lapse in each is
+punished differently -- by the gate, by the value, and by the standard. Every conversion is written as
+an explicit cast: long double to double, to float, to int and to long long, and int, long long and
+double to long double. Nothing narrows implicitly, and because this record deviates from no gate
+member, -Wconversion and -Wsign-conversion are both ACTIVE, so an implicit narrowing would be rejected
+before any comparison was reached rather than quietly compared. Every long double literal carries the
+L suffix, with exactly two deliberate exceptions, each of which is the property its own line tests:
+the unsuffixed 1.5, whose type is double because widening a double to a long double is what that pair
+of lines measures, and the two dyadic quotients of the significand probe, which are double by
+construction because the probe interrogates the double format. And every argument matches its
+conversion specification exactly -- %.6Lf for a long double, %.6f for a double, %d for an int and
+%lld for a long long, with the one float value converted to double by an explicit cast rather than
+left to the default argument promotion -- because passing a long double where %f is written, or a
+double where %Lf is written, is undefined behaviour under C11 7.21.6.1p9, and a printed digit produced
+that way would say nothing about any compiler.
 
 No signed integer overflow is possible. No shift appears. No object is read before it is written and no
 object is modified twice between sequence points. Every volatile read is staged into a plain local in a
@@ -63,12 +102,13 @@ call receives a side-effecting argument and nothing depends on the unspecified o
 arguments are evaluated.
 
 DETERMINISM. Every floating value printed is printed at a fixed precision with margin, and every
-value in the program is a dyadic rational -- an integer, or an integer plus a quarter, a half or three
-quarters -- so it is exactly representable in binary32 and binary64 alike and no rounding decision is
-ever taken. No non-finite value, no negative zero and no subnormal appears anywhere, so no identity
-property of those values is relied on. No address, no pointer value, no plain char value and no
-target-varying width is printed. Iteration order is fixed by literal bounds. main returns 0, inside
-the 0-125 range the suite requires so that no exit status is truncated.
+value in the program is a dyadic rational -- an integer, or an integer plus a multiple of one eighth,
+the eighths being 3.125 and the accumulated 15.875 -- so it is exactly representable in binary32 and
+binary64 alike and no rounding decision is ever taken. No non-finite value, no negative zero and no
+subnormal appears anywhere, so no identity property of those values is relied on. No address, no
+pointer value, no plain char value and no target-varying width is printed. Iteration order is fixed
+by literal bounds. main returns 0, inside the 0-125 range the suite requires so that no exit status
+is truncated.
 
 HERMETICITY. Every input is a literal in this source. Nothing is opened, nothing is read from the
 environment, the command line, the clock or the file system, and no storage is allocated.
@@ -88,8 +128,14 @@ ORACLE (b) IS DISABLED FOR THIS PROGRAM, AND THE MEASURED REASON IS THE POINT OF
 `long double` has no single representation across the four supported backends. MEASURED:
 sizeof(long double) is 16 on x86_64, 12 on i686, 16 on aarch64 and 16 on riscv64; the two x86 targets
 carry the x87 80-bit extended format inside that storage while the two others carry IEEE binary128.
-Those are different formats with different significand widths, different exponent ranges and different
-rounding boundaries. A value difference between two backends over this type is therefore an
+Those are different formats, and the difference was measured rather than named: the significand is 64
+bits on the two x86 targets against 113 on the other two, so the epsilon is 1.084202e-19 against
+1.925930e-34 and the least positive value 3.645200e-4951 against 6.475175e-4966, which puts every
+rounding boundary in the format at a different place. Note what did NOT differ, because a reason that
+overstated itself would be no better than none: the normal exponent range and the finite maximum
+measured identical on all four targets, at -16381 to 16384 and 1.189731e+4932, so it is the significand
+and the rounding that follows from it -- not the reach of the exponent -- that the exclusion below
+rests on. A value difference between two backends over this type is therefore an
 IMPLEMENTATION-DEFINED difference, which is exactly the carve-out the requirements name -- a
 cross-backend divergence not attributable to type widths, char signedness or the ABI is a defect, and
 one that IS so attributable is not. Comparing the backends' long double values against one another
@@ -121,9 +167,14 @@ today's measurement is what keeps it correct if a later maintainer adds a value.
 WHAT IS DELIBERATELY NOT PRINTED. sizeof(long double) never appears as an absolute value -- it is 16,
 12, 16 and 16, so printing it would break the shared record on i686 immediately -- and exactly one
 target-invariant relation about the type's width is printed instead. No long double characteristic
-appears either: no significand digit count, no epsilon, no maximum and no exponent range, because every
-one of them differs by target. For the same reason no float.h macro is referenced; that header is
-bundled, but every long-double characteristic macro it defines is target-dependent, and exercising the
+appears either. Two of them measured target-dependent and could not be printed at all: the significand
+digit count, 64 against 113, and the epsilon, 1.084202e-19 against 1.925930e-34. Two measured identical
+on all four targets and are still not printed -- the finite maximum, 1.189731e+4932, and the normal
+exponent range, -16381 to 16384 -- because printing a characteristic of a type whose format is
+target-defined would couple this record to a value that agrees today for reasons no line of this
+program controls, and the record would then break on the first target whose format differed rather than
+on the first defect. For the same reason no float.h macro is referenced; that header is bundled, but
+every long-double characteristic macro it defines describes a target-defined format, and exercising the
 bundled set is the job of 12_preprocessor/003_bundled_header_inclusion.c.
 
 THE EXCLUSION CARRIES THE MARKER XD-TYPE-LONGDOUBLE-001, AND THE TWO ARE ONE STATEMENT RATHER THAN
@@ -139,8 +190,10 @@ rejected at parse time.
 WHAT THE MARKER CLAIMS, PRECISELY. Not that the four backends disagree today -- they do not; all
 twelve cells print these bytes, because every printed value was chosen to be exact in all three
 representations. What it claims is that a cross-backend VALUE comparison over this type could not be
-read as evidence about bcc even if they did disagree, because the three representations are
-different formats. That is a statement about what the comparison would MEAN, which is why it stays
+read as evidence about bcc even if they did disagree, because the four backends do not share one
+encoding: two of them hold x87 80-bit extended, in 16 bytes and in 12, and the other two hold IEEE
+binary128 in 16 -- three storage-and-format pairings over two distinct formats, each of which rounds
+at a different place. That is a statement about what the comparison would MEAN, which is why it stays
 correct if a later maintainer adds a value that does diverge -- and it is why the marker can never
 reach XPASS: nothing is compared on the arm it scopes, so no divergence can disappear from it.
 
@@ -183,8 +236,9 @@ expected_divergence.observed <<END
 The cross-backend value comparison is not attempted for this program: the record disables oracle (b).
 What the measurement shows, and what the exclusion rests on, is that sizeof(long double) is 16 on
 x86_64, 12 on i686, 16 on aarch64 and 16 on riscv64, with the two x86 targets carrying the x87 80-bit
-extended format inside that storage and the other two carrying IEEE binary128 -- three different
-formats, with different significand widths, exponent ranges and rounding boundaries. A value
-difference between two backends over this type is therefore an implementation-defined difference of
-the kind the brief's carve-out names, not a defect in either.
+extended format inside that storage and the other two carrying IEEE binary128 -- three
+storage-and-format pairings over two distinct formats, whose significands are 64 bits against 113 and
+which therefore round at different places. A value difference between two backends over this type is
+therefore an implementation-defined difference of the kind the brief's carve-out names, not a defect
+in either.
 END

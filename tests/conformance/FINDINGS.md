@@ -939,18 +939,18 @@ completes and the gate runs to its full 216 results. Were a source to land witho
 record, the enumeration would fail before the first program was gated and the audit would be
 recorded `UNPERFORMED` for the whole corpus, not merely for that one program.
 
-**Do not read a performed gate as 108 records substantiated.** The gate is satisfied by all 108
-programs, the one record still pending re-substantiation included, because a record's prose not yet
-having been re-checked is a different thing from its program failing a gate. **107 of the 108 records**
-have been authored or re-substantiated in the checkpoint sequence that produced this state; the
-outstanding one is
+**Do not read a performed gate as a statement about substantiation.** The two answer different
+questions: this gate is satisfied by all 108 programs, and it would still be satisfied by a program
+whose record's prose had not been re-checked, because a record's prose not yet having been re-checked is
+a different thing from its program failing a gate. **All 108 records** have now been authored or
+re-substantiated in the checkpoint sequence that produced this state; the last one outstanding was
 [`13_floating_point/004_long_double_target_restricted.expected`](13_floating_point/004_long_double_target_restricted.expected),
-which is committed, parses, is paired, runs, and passes both gates — so it removes nothing from the 216
-results here. What remains outstanding in it is a **wording** correction, and
-[`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §8.2 records both the item and the reason it has to
-be made in the same edit as the matching `Observed` row in that file's §4.2: the register audit compares
-the two character-for-character, so correcting either one alone would fail the audit. The count framing
-this distinction feeds is published in the enumerable matrix in §7.2 below.
+and what remained in it was a **wording** correction — the loose *"three different formats"* claim in
+its `observed` field, now *"three storage-and-format pairings over two distinct formats"* — which had to
+be made in the same edit as the matching `Observed` row in
+[`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.2, because the register audit compares the two
+character-for-character and correcting either one alone would fail the audit. The count framing this
+distinction feeds is published in the enumerable matrix in §7.2 below.
 
 That distinction is what to check, and it is not a historical footnote: while the audit is
 unperformed, **no area completes**, and a divergence observed under those conditions is arithmetic
@@ -1004,19 +1004,19 @@ rather than illustrated. Where the suite's breadth has to be referenced, it is r
 
 Four columns, because these are four different numbers and collapsing any of them into another is the
 easiest way to overstate the suite. **Structural** is what a reader can count here with a shell;
-**substantiated** is the narrower milestone figure, 107 of the 108 records having been authored or
-re-substantiated in the checkpoint sequence that produced this state, with the pending one named above;
-**admitted as evidence about `bcc`** is zero, because there is no `bcc` binary on this branch.
+**substantiated** is the narrower milestone figure, and it now stands at all 108 records having been
+authored or re-substantiated in the checkpoint sequence that produced this state; **admitted as evidence
+about `bcc`** is zero, because there is no `bcc` binary on this branch.
 
 | Quantity | Final planned target | Present on this branch (structural) | Substantiated at this checkpoint | Admitted as evidence about `bcc` |
 |---|---:|---:|---:|---:|
 | Feature areas | 14 | **14** | 14 | 0 |
-| Sources, each paired with its `.expected` record | 108 | **108** | **107** (1 record pending) | 0 |
+| Sources, each paired with its `.expected` record | 108 | **108** | **108** (0 records pending) | 0 |
 | Optimization levels per program | 3 | **3** | 3 | — |
 | Targets per program | 4 | **4** | 4 | — |
-| **`bcc` compile-and-run cells** | 1,296 | **1,296** (108 × 4 × 3) | **1,284** (107 × 4 × 3) | **0** |
-| **Verdict outcome rows across the three oracles** | 3,564 | **3,564** | **3,531** | **0** |
-| **Comparisons actually performed** | 3,555 | **3,555** | **3,531** | **0** |
+| **`bcc` compile-and-run cells** | 1,296 | **1,296** (108 × 4 × 3) | **1,296** (108 × 4 × 3) | **0** |
+| **Verdict outcome rows across the three oracles** | 3,564 | **3,564** | **3,564** | **0** |
+| **Comparisons actually performed** | 3,555 | **3,555** | **3,555** | **0** |
 
 **A verdict outcome row is not a comparison that was performed**, and the two are listed separately
 because nine rows separate them. Every one of the 3,564 rows reaches a verdict and appears in the run
@@ -1027,15 +1027,17 @@ summary; **3,555** of them are comparisons actually made. The other **nine** are
 oracle (b) is **963 performed comparisons plus 9 not-attempted `XFAIL` rows = 972 rows**. A
 not-attempted row is neither a pass nor a silent skip: nothing was compared, so no equality is claimed
 — which is exactly the distinction §1.2 draws for a `FINDING` row, applied to the other end of the
-verdict space. For the 107 substantiated records the two figures coincide at **3,531**, because the
-pending record is the only one in the corpus that narrows an oracle.
+verdict space. Those nine rows sit inside the substantiated column too, because the record that narrows
+the oracle is itself substantiated — which is why that column reads **3,564** rows against **3,555**
+performed rather than one figure for both.
 
 **Structurally, the design target and the committed file set agree**: all fourteen area directories are
 present, all 108 sources are paired with a record, and the undefined-behaviour audit — which enumerates
 the corpus globally across all fourteen — performs to its full 216 gate results, so every area can
 complete. Read that as the structural column and nothing more. It is **not** a claim that all 108
-records have been reviewed: 107 have, one is pending, and the two figures are published side by side
-above precisely so that "structurally complete" is never read as "milestone complete". Nor is either
+records have been reviewed — that is the substantiated column's question, and the two figures are
+published side by side above precisely so that "structurally complete" is never read as "milestone
+complete", whichever way they happen to agree today. Nor is either
 column a claim about the compiler — one source landing without its record would make the audit
 unperformable again and take the structural and substantiated figures down together in the same commit,
 which is why [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §8.2 keeps the commands to re-count

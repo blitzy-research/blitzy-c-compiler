@@ -3285,17 +3285,20 @@ struct PendingRecord {
 /// the corpus in both directions by [`substantiation`]. **Retiring an entry is the whole of the work
 /// once its review completes**: delete the row, and the area it named is admitted again on the next
 /// run with no other change anywhere.
-const PENDING_RECORDS: [PendingRecord; 1] = [PendingRecord {
-    area: "13_floating_point",
-    program: "004_long_double_target_restricted",
-    basis: "tests/conformance/README.md, \"The enumerable matrix\" — substantiated column, 107 of \
-            108; and tests/conformance/EXPECTED_DIVERGENCES.md, \"Honest measurement\" — \
-            substantiated at this checkpoint",
-    outstanding: "the loose \"three different formats\" wording in the record's \
-                  expected_divergence observed field and the register's matching Observed row, \
-                  which the marker audit compares character for character and which must \
-                  therefore be corrected in one edit together",
-}];
+///
+/// The set is **empty**, and it is kept rather than deleted because it is the mechanism, not the
+/// instance: the one record it held,
+/// `13_floating_point/004_long_double_target_restricted.expected`, has completed its review. Its
+/// written undefined-behaviour argument now carries the excess-intermediate-precision, conversion,
+/// literal, printing, characteristic-macro and magnitude obligations it had left to the program's
+/// comments; its measured reason for disabling oracle (b) was re-measured, dropping the
+/// unsupportable exponent-range claim in favour of the significand widths — 64 bits against 113 —
+/// that the exclusion actually rests on; and the loose "three different formats" wording was
+/// corrected to "three storage-and-format pairings over two distinct formats" in the record's
+/// `expected_divergence.observed` field and in the register's matching `Observed` row in the one
+/// edit the character-for-character forward check requires. Every record the corpus holds is
+/// therefore substantiated, and the gate below now reports that rather than withholding an area.
+const PENDING_RECORDS: [PendingRecord; 0] = [];
 
 /// What the record-substantiation audit found.
 struct Substantiation {
