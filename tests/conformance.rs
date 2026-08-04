@@ -159,16 +159,17 @@
 //! marker covers and the oracle being judged, so the two can never be confused.
 //!
 //! What follows from a refusal being **one root event** is handled by dependency-aware
-//! classification rather than by widening anything. The corpus carries two active markers —
-//! `XD-GCCEXT-CASE-RANGES-001`, a `compile_failure` scoped `oracle_a`, and
-//! `XD-TYPE-LONGDOUBLE-001`, a `stdout_mismatch` scoped `oracle_b` — and the first is the refusal
-//! case. `classify::refusal_root` names the arm whose marker documents the refusal; that arm settles
-//! it as an expected divergence, and every other arm of the same cell is reported as a **dependent
-//! blocked** expected divergence which cites the root marker, names the arm carrying it, and states
-//! that no comparison was attempted on it. No finding directory is written for the blocked arms,
-//! because one event has one explanation — but the propagation requires a marker that already covers
-//! this cell's target, level and observed class on some arm, so an *undocumented* refusal is still a
-//! finding on every applicable arm, delivered with the refusal's own artifacts.
+//! classification rather than by widening anything. The corpus carries one active marker —
+//! `XD-TYPE-LONGDOUBLE-001`, a `stdout_mismatch` scoped `oracle_b` — so no refusal-class marker is
+//! live today and the path below is a mechanism with no live instance rather than a description of
+//! something a run currently exercises. `classify::refusal_root` names the arm whose marker documents
+//! a refusal; that arm settles it as an expected divergence, and every other arm of the same cell is
+//! reported as a **dependent blocked** expected divergence which cites the root marker, names the arm
+//! carrying it, and states that no comparison was attempted on it. No finding directory is written for
+//! the blocked arms, because one event has one explanation — but the propagation requires a marker
+//! that already covers this cell's target, level and observed class on some arm, so an *undocumented*
+//! refusal is still a finding on every applicable arm, delivered with the refusal's own artifacts.
+//! With no refusal marker in the corpus, that is what every refusal is today.
 //!
 //! Only the standard library is used, every operation is safe, no lint is suppressed, and not one
 //! of the eighteen tests is marked ignored — the repository's ignored-test count is itself the most

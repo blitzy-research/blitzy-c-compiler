@@ -293,23 +293,31 @@ finding is filed for a blocked arm. See [Every validation the parser
 enforces](#every-validation-the-parser-enforces) for the exact spelling.
 
 **What the corpus's marker set actually is, so no reader assumes an excuse exists where none does.**
-The corpus carries exactly **two** markers, both mandated by the suite's frozen brief, and the
-register's own audit re-establishes them on every run — resolving two markers against two registered
-identifiers in both directions, checking that each cited document and locator resolves, and checking
-that each supplied quotation occurs inside its cited range:
+The corpus carries exactly **one** marker, and the register's own audit re-establishes it on every
+run — resolving one marker against one registered identifier in both directions, checking that the
+cited document and locator resolve, and checking that the supplied quotation occurs inside its cited
+range:
 
 | Identifier | Program | Class | Scope | What it documents |
 | --- | --- | --- | --- | --- |
-| `XD-GCCEXT-CASE-RANGES-001` | `08_gcc_extensions/004_case_ranges` | `compile_failure` | `oracle_a; all targets; all opt levels` | The documented GCC extension inventory enumerates the parsed extensions and **omits** case ranges. Oracle (a) settles the refusal; oracles (b) and (c) are dependent blocked arms |
 | `XD-TYPE-LONGDOUBLE-001` | `13_floating_point/004_long_double_target_restricted` | `stdout_mismatch` | `oracle_b; all targets; all opt levels` | `long double` is specified with target-parametric sizes, measured at 16, 12, 16 and 16 bytes. The record disables oracle (b) and this marker is what the format requires beside that narrowing |
 
-One further candidate — the wide and Unicode literal prefixes — is analysed and deliberately left
-**unmarked**, so a divergence there is a **FINDING**. Outside the two markers above, a divergence
-anywhere in the corpus is a FINDING rather than an XFAIL.
+**Two further candidates are analysed and deliberately left unmarked, so a divergence in either is a
+FINDING.** GCC case ranges (`08_gcc_extensions/004_case_ranges`) carried a `compile_failure` marker
+scoped `oracle_a` on the strength of an extension inventory that **omits** the construct; the
+divergence it predicted was never observed, the compiler under test accepted the program, the arm
+agreed, and the resulting `XPASS` failed the run until the marker was retired
+([`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.1 and §8.3). The wide and Unicode literal
+prefixes (`11_literals_and_strings/003_wide_and_unicode_literals`) are likewise unenumerated and
+likewise unmarked. Both programs run all twelve of their cells with all three oracles enabled — an
+unmarked candidate is fully exercised and strictly *less* excused, never skipped.
+
+Outside the one marker above, a divergence anywhere in the corpus is a FINDING rather than an XFAIL.
 [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4 works through all three candidates and states
-per marker how strong its basis is, and §8.5 is the checklist any future marker the brief does not
-name must satisfy — a citation a reader can follow to the passage, and a divergence that has actually
-been observed and reproduced.
+per candidate how strong its basis is, and §8.5 is the checklist any future marker must satisfy — a
+citation a reader can follow to the passage, and a divergence that has actually been observed and
+reproduced. Being named in the suite's brief is not a substitute for either: that is exactly the
+warrant the retired case-range marker was carried on.
 
 **A marker never changes what a program does.** A marker changes how a divergence is *classified*,
 never whether the feature is *exercised*, and nothing in the harness may short-circuit a phase
@@ -585,26 +593,26 @@ bcc: <the diagnostic as it was actually seen>; reference compiler: <what it actu
 END
 ```
 
-**Two live examples, and they are the whole set.** The corpus carries exactly two markers, both
-mandated by the suite's frozen brief, and both are reproduced verbatim in
-[`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.1 and §4.2 rather than paraphrased here — that
-register is the single place the active set is declared, and the audit compares each entry against the
-record character for character:
+**One live example, and it is the whole set.** The corpus carries exactly one marker, and it is
+reproduced verbatim in [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.2 rather than
+paraphrased here — that register is the single place the active set is declared, and the audit compares
+each entry against the record character for character:
 
-- `XD-GCCEXT-CASE-RANGES-001` on `08_gcc_extensions/004_case_ranges`, a `compile_failure` scoped
-  `oracle_a; all targets; all opt levels`;
 - `XD-TYPE-LONGDOUBLE-001` on `13_floating_point/004_long_double_target_restricted`, a
   `stdout_mismatch` scoped `oracle_b; all targets; all opt levels`.
 
 **The oracle clause is scoped to what the basis speaks for, not widened to what a refusal blocks.**
-The case-range marker's class is a build refusal, and a refusal produces no artifact, so every oracle
-arm loses the subject of its comparison. It is still scoped `oracle_a` alone, because oracle (a) is the
-only arm on which *the reference compiler accepted this program and the compiler under test did not* is
-a statement about two compilers. The other two arms are reported as **dependent blocked** expected
-divergences citing that root — see [The verdict taxonomy](#the-verdict-taxonomy). Scope a refusal
-marker `all oracles` only when its basis genuinely speaks for all three arms. A marker for a class that
-*is* a comparison — `stdout_mismatch` or `exit_code_mismatch` — names the oracle that made it, since
-only that arm observed anything.
+One of the four **build-refusal** classes produces no artifact, so every oracle arm loses the subject of
+its comparison — and a marker documenting such a refusal is still scoped to the single arm its basis
+speaks for. That arm is normally `oracle_a`, because oracle (a) is the only one on which *the reference
+compiler accepted this program and the compiler under test did not* is a statement about two compilers.
+The other two arms are reported as **dependent blocked** expected divergences citing that root — see
+[The verdict taxonomy](#the-verdict-taxonomy). Scope a refusal marker `all oracles` only when its basis
+genuinely speaks for all three arms. A marker for a class that *is* a comparison — `stdout_mismatch` or
+`exit_code_mismatch` — names the oracle that made it, since only that arm observed anything. **No
+refusal-class marker is active in the corpus today**, so that path is a mechanism with no live instance;
+the one marker there is documents a comparison its record declines to make, and its scope names the
+oracle it switches off.
 
 **What the format enforces about a basis, and what it deliberately leaves to a reviewer.** A marker
 reclassifies a divergence on the authority of something this repository documents, so the citation
@@ -776,12 +784,13 @@ Each item below is a **hard error**.
     `§0.6.2` or a backtick-quoted phrase from the document, and every locator it carries must resolve.
 - **A basis resting on an omission is permitted, and is not adjudicated by the parser.** A passage
   that enumerates what is implemented and does not name the construct authorises less than an
-  assertion would, and the frozen brief mandates exactly that basis for `XD-GCCEXT-CASE-RANGES-001`.
-  What the format guarantees is that a reader can *follow* the citation — the document resolves, is
-  read, and the locator resolves to a concrete line range — so that the strength of the citation can
+  assertion would, and the frozen brief specifies exactly that basis for the case-range marker it
+  names. What the format guarantees is that a reader can *follow* the citation — the document resolves,
+  is read, and the locator resolves to a concrete line range — so that the strength of the citation can
   be judged where judgement belongs: by a reviewer, against
-  [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4, which states per marker how strong its
-  basis is.
+  [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4, which states per candidate how strong its
+  basis is. Permitting a citation is not endorsing it, and it is not what entitles a marker to exist:
+  that is the observation requirement in the next bullet.
 - `expected_divergence.documented`, **when written**, must carry the authorising passage **quoted
   verbatim**, at least 24 bytes long so it identifies a passage rather than a word, and
   `infra_expected_divergence_register` finds it **inside the range the locator resolves to** — with
@@ -2987,19 +2996,21 @@ produced either:
   extension inventory (the documented set enumerates `__attribute__`, statement expressions,
   `typeof`, computed goto and inline assembly, and omits case ranges). The program is written
   regardless, with all three oracles enabled on all four targets at all three optimization levels.
-  It carries **`XD-GCCEXT-CASE-RANGES-001`**, a `compile_failure` scoped `oracle_a; all targets; all
-  opt levels`, whose basis cites that inventory by file and line. The basis is an **omission**, which
-  authorises less than an assertion would, and neither this file nor
-  [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.1 pretends otherwise — §4.1 states the
-  ambiguity between an implementation gap and a documentation gap, and states what a stronger basis
-  would look like. Two things keep the marker honest. It cannot outlive the divergence: an acceptance
-  makes the cell agree, the verdict becomes **XPASS**, and the run fails until the marker is retired
-  in both places. And it excuses only what its scope names — oracle (a) settles the refusal, oracles
-  (b) and (c) are reported as **dependent blocked** arms citing it, and an accepted-but-*wrong*
-  answer is a `stdout_mismatch`, which this `compile_failure` marker does not cover at all and which
-  is therefore a **FINDING** with its reproducer and exact reproduction commands. Nothing is excluded
-  and nothing beyond the refusal is excused: the marker changes only how a divergence is
-  *classified*, never whether the construct is *exercised*.
+  It carries **no marker**, and it never needed one to satisfy this constraint: what C3 forbids is
+  dropping the feature, and twelve cells run. A `compile_failure` marker scoped `oracle_a` was carried
+  here on the strength of that inventory omission — a basis which authorises less than an assertion
+  would, and neither this file nor
+  [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.1 ever pretended otherwise. It has been
+  **retired**, and the mechanism that retired it is the one that kept it honest: a marker cannot
+  outlive its divergence, so when the compiler under test accepted the program the cell agreed, the
+  verdict became **XPASS**, and the run failed until the marker was withdrawn from both places
+  (§4.1, §8.3). The effect on this program is to make its classification *stricter*, not looser — a
+  refusal is now a **FINDING** where it would have been an XFAIL, and an accepted-but-*wrong* answer
+  is a `stdout_mismatch` that was always a FINDING — and either arrives with its reproducer, both
+  sides' captured output, an environment fingerprint and exact reproduction commands. §4.1 still
+  states the ambiguity between an implementation gap and a documentation gap, and what shape a marker
+  would have to take once a refusal has actually been observed. Nothing is excluded and nothing at all
+  is excused.
 - **[`13_floating_point/004_long_double_target_restricted.c`](13_floating_point/004_long_double_target_restricted.c)**
   — `long double` was measured to have three different representations across the four targets (16,
   12, 16 and 16 bytes; x87 80-bit against IEEE binary128), so cross-backend *value* equality is

@@ -184,8 +184,9 @@ int main(void)
     printf("after_sum=%d\n", sum_prefix(&g_store));
 
     /* The automatic twin, read back and mutated through the same two arms.  Its highest
-     * touched index is 4 against a capacity of 8, and its largest printed value is 121,
-     * so every access is in bounds and no overflow is reachable. */
+     * touched index is 4 against a capacity of 8, and its largest printed value is 242 --
+     * l_after_sum, the sum of 11, 99, 33, 44 and 55 -- so every access is in bounds and no
+     * overflow is reachable. */
     printf("l_count=%d\n", lp->count);
     printf("l_count_via_boundary=%d\n", prefix_count(lp));
     for (i = 0; i < lp->count; i++) {
