@@ -26,16 +26,27 @@ freestanding headers -- stddef.h, stdint.h, stdarg.h, stdbool.h, limits.h, float
 stdalign.h, stdnoreturn.h and iso646.h -- and nothing else. Reason: it is the only place
 the suite exercises include/ at all, and restricting it to <stdarg.h> as area 07 is
 restricted would leave eight of the nine shipped headers included by nothing, which is a
-coverage hole rather than a discipline. All nine are also freestanding headers the
-reference compiler provides, which is what keeps the program compilable under both sides
-of oracle (a). The bonus stdatomic.h is deliberately excluded even though the compiler
-ships it: it is not among the nine required headers, no requirement mandates it, and
-atomics can require -latomic, which is not in the shared flag set.
+coverage hole rather than a discipline. All nine are documented as shipped
+(docs/technical-specifications.md line 19, with the per-header contents tabulated at
+lines 202-214), and all nine are also freestanding headers the reference compiler
+provides, which is what keeps the program compilable under both sides of oracle (a). No
+header outside the nine is included; in particular stdio.h is not included, because bcc
+ships none, so including it would succeed on the reference side and fail on the side
+under test -- a divergence manufactured by the test rather than found in the compiler,
+which is strictly worse than having no test at all. printf is therefore still
+hand-declared, exactly as in every other corpus program. The bonus stdatomic.h is
+deliberately excluded as well, even though the compiler ships it: it is not among the nine
+required headers, no requirement mandates it, and atomics can require -latomic, which is
+not in the shared flag set, so an inclusion would risk a link failure attributable to the
+test.
 
 Free of undefined and unspecified behaviour by construction:
 - No signed integer overflow. Every printed value is a small int, a fixed-width limit
   cast to int, or a 0/1 relation.
 - No shift operator appears, so no shift count can be out of range.
+- The only division-like operator is the unsigned remainder in two of the alignment
+  relations. Its divisor is the non-zero constant 8 and both operands are unsigned, so
+  neither a division by zero nor a sign conversion can arise.
 - No pointer arithmetic and NO POINTER-TO-INTEGER CONVERSION of any kind. The null
   pointer is only ever compared, never printed or converted.
 - No aliasing violation. The only object written after its declaration is the static
@@ -52,66 +63,133 @@ Free of undefined and unspecified behaviour by construction:
   the number of arguments actually supplied.
 - No object is modified twice between sequence points, and nothing depends on
   unspecified evaluation order: every call passes at most one side-effecting argument.
+- printf is hand-declared with a prototype matching its use, and every format specifier
+  matches the promoted type of its argument: every %d receives an int, after an explicit
+  cast wherever the source was size_t, a comparison result or a fixed-width type.
 - offsetof is applied only to a struct with int8_t and int32_t members, never one
   containing int64_t, because the i386 System V ABI aligns int64_t to 4 inside a struct
   while the other three targets align it to 8, so the offsets are 4 and 8 on every
   target and can be asserted exactly.
+- Determinism: no address and no pointer value is printed or converted; no plain-char
+  signedness-dependent value and no raw width-dependent value is printed; no long double
+  appears; no translation-date, translation-time or source-name macro is consulted; and
+  there is no randomness and no locale-dependent formatting. Output is a fixed 21-line
+  sequence, one line per header property claimed, so a single divergent line localizes
+  the defect to one header fact.
 - Hermetic, as constraint C4 requires: every input is a literal in the source. Nothing
   is opened, no socket is created, no environment variable and no program argument is
   read, and no storage is obtained from the heap.
 - main returns 0, inside the 0-125 range the suite requires, so no exit status is
   truncated by the operating system.
-- Verified empirically on this branch: the default strict warning gate produces zero
-  diagnostics at -O0, -O1 and -O2, and the sanitizer gate runs to completion with empty
-  stderr and exit status 0.
+- No deviation from the default warning gate is requested, and none is needed. Verified
+  empirically on this branch: the seven-flag gate -Wall -Wextra -pedantic -Wconversion
+  -Wsign-conversion -Wshadow -Werror produces zero diagnostics at -O0, -O1 and -O2 under
+  every one of the four reference drivers, and the sanitizer gate
+  -fsanitize=undefined,address -fno-sanitize-recover=all compiles clean, runs to
+  completion with empty stderr and exit status 0, and prints the golden stdout byte for
+  byte.
 END
 impl_defined_notes <<END
-ALIGNMENT IS OBSERVED THROUGH A LANGUAGE PROPERTY, NOT THROUGH AN ADDRESS, and this is
-the one implementation-defined hazard this program had to be redesigned around. The
-alignas specifier is applied to a struct MEMBER, so the requirement it imposes becomes a
-property of a TYPE, and alignof reports that property directly: C11 6.7.5p2 makes 8 the
-member's alignment requirement, a structure's requirement is at least that of each of
-its members, and C11 6.2.8p1 makes every alignment a power of two, so
-alignof(struct AlignedHolder) >= 8 holds BY THE LANGUAGE rather than by any target ABI.
+WIDTH NORMALIZATION is the central constraint on this program, and it is what lets all
+four targets stay directly comparable with no target restriction, no disabled oracle and
+no divergence marker. Per the authoritative target table at
+docs/technical-specifications.md lines 457-462, x86_64-linux-gnu has pointer 8 and long 8
+(ELF64), i686-linux-gnu has pointer 4 and long 4 (ELF32), and aarch64-linux-gnu and
+riscv64-linux-gnu have pointer 8 and long 8 (ELF64). size_t, ptrdiff_t and intptr_t follow
+the pointer, so each is 4 bytes on i686 and 8 bytes on the other three -- measured on this
+branch as 4, 4, 4 on i686 against 8, 8, 8 on each of the others. Every fact that depends
+on one of those widths is therefore printed ONLY as a 0/1 relation -- size_t_eq_ptr,
+ptrdiff_eq_ptr, intptr_eq_ptr -- or as an inequality with margin -- int_max_ge_32767,
+dbl_dig_ge_10. Each relation is 1 on all four targets precisely BECAUSE the widths move
+together, so the line still carries a real claim about the headers while staying
+byte-identical everywhere.
+
+NO RAW WIDTH-DEPENDENT VALUE IS PRINTED ANYWHERE, and the exclusion is drawn by name
+rather than left to intention. sizeof(void *), sizeof(size_t), sizeof(ptrdiff_t) and
+sizeof(intptr_t) appear only inside the three relations above, where each is consumed by a
+comparison and never reaches the output. sizeof(long), sizeof(max_align_t), LONG_MAX,
+ULONG_MAX, SIZE_MAX, PTRDIFF_MAX, INTPTR_MAX, UINTPTR_MAX and every LDBL_ macro are absent
+from the program entirely. The widest aligned type is the clearest case for why the rule is
+drawn this widely: it was measured at 32 bytes on x86_64, aarch64 and riscv64 and 48 bytes
+on i686, so printing it would have manufactured a divergence that says nothing about the
+compiler.
+
+STRUCT MEMBER OFFSETS. The struct that offsetof is applied to carries only int8_t and
+int32_t members. That is deliberate and measured: the i386 System V ABI aligns int64_t to
+4 inside a struct while the other three targets align it to 8, so a struct containing an
+int64_t yields a member offset of 4 on i686 against 8 on each of the other three -- both
+measured on this branch -- and would turn a correct compiler into an apparent divergence.
+With int32_t members the offsets are 4 and 8 on every target, so offsetof_b and offsetof_c
+are asserted as exact values rather than hedged. alignof(int32_t) == 4 and
+alignof(int8_t) == 1 likewise hold on all four targets, which is why those two are exact
+values too.
+
+ALIGNMENT IS OBSERVED THROUGH A LANGUAGE PROPERTY, NOT THROUGH AN ADDRESS, and this is the
+one implementation-defined hazard the program had to be redesigned around. The corpus
+rules permit an alignment residue and forbid printing an address; this program satisfies
+that rule a fortiori, by performing no pointer-to-integer conversion at all. The alignas
+specifier is applied to a struct MEMBER, so the requirement it imposes becomes a property
+of a TYPE, and alignof reports that property directly: C11 6.7.5p2 makes 8 the member's
+alignment requirement, a structure's requirement is at least that of each of its members,
+and C11 6.2.8p1 makes every alignment a power of two, so alignof(struct AlignedHolder) >= 8
+holds BY THE LANGUAGE rather than by any target ABI.
+
 EVERY ONE OF THE THREE ALIGNMENT FACTS IS PRINTED AS A RELATION RATHER THAN AS AN EXACT
 VALUE, and that is what the language actually guarantees: an implementation may align more
-strictly than requested, and 6.7.2.1p15 lets it insert additional padding between members,
-so alignof >= 8, offsetof nonzero and divisible by 8, and sizeof divisible by 8 are
-guaranteed while alignof == 8 and offsetof == 8 are not. The relations still fail exactly
-when the request is ignored -- the member would then sit at offset 1, which is neither
-divisible by 8 nor consistent with a structure alignment of 8 -- so nothing is given up by
-declining to pin the padding this implementation happened to choose. An earlier form of this check converted the object's address to uintptr_t
-and asserted its residue modulo 8 was zero, justified by uintptr_t being pointer-width
+strictly than requested, and C11 6.7.2.1p15 lets it insert additional padding between
+members, so alignof >= 8, an offset that is nonzero and divisible by 8, and a size
+divisible by 8 are guaranteed while alignof == 8 and offsetof == 8 are not. The relations
+still fail exactly when the request is ignored -- the member would then sit at offset 1,
+which is neither divisible by 8 nor consistent with a structure alignment of 8 -- so
+nothing is given up by declining to pin the padding this implementation happened to
+choose.
+
+An earlier form of this check converted the alignas-qualified object's address to uintptr_t
+and asserted that its residue modulo 8 was zero, justified by uintptr_t being pointer-width
 on every target so that the conversion crossed no width boundary. Equal width does not
-carry that conclusion: C11 7.20.1.4p1 and 6.3.2.3p6 guarantee only that a pointer
-converted to uintptr_t and back COMPARES EQUAL to the original, never that the integer's
-low bits are the address's low bits. Whether a residue reflects alignment is a property
-of the target ABI, not of the header set this program is testing, so the residue has
-been removed rather than defended with an ABI citation. Nothing is lost: alignas and
-alignof are both still exercised, the alignas-qualified storage is still written and
-read back, and address-residue observation is owned by
-10_declarations_and_types/007_alignof_alignas.c, whose subject that is and which carries
-the two-step pointer-carrier discipline the observation needs.
+carry that conclusion: C11 7.20.1.4p1 and 6.3.2.3p6 guarantee only that a pointer converted
+to uintptr_t and back COMPARES EQUAL to the original, never that the integer's low bits are
+the address's low bits. Whether a residue reflects alignment is a property of the target ABI
+rather than of the header set this program tests, so the residue was removed rather than
+defended with an ABI citation, and the alignas-qualified OBJECT is exercised instead by a
+defined byte round trip through an unsigned char lvalue, which reads and writes storage
+without observing an address. Nothing is lost: alignas and alignof are both still
+exercised, the qualified storage is still written and read back, and address-residue
+observation is owned by 10_declarations_and_types/007_alignof_alignas.c, whose subject that
+is and which carries the two-step pointer-carrier discipline the observation needs.
 
-WIDTH NORMALIZATION is the other central constraint. The four targets do not agree on
-pointer or long width -- i686 has a 4-byte pointer and 4-byte long while x86_64, aarch64
-and riscv64 have 8 of each (docs/technical-specifications.md lines 457-462) -- and
-size_t, ptrdiff_t and intptr_t follow the pointer. Every fact that depends on one of
-those widths is therefore printed ONLY as a 0/1 relation (size_t_eq_ptr, ptrdiff_eq_ptr,
-intptr_eq_ptr) or as an inequality with margin (int_max_ge_32767, dbl_dig_ge_10). Each
-relation is 1 on all four targets precisely BECAUSE the widths move together, so the
-line still carries a real claim about the headers while staying byte-identical
-everywhere. No pointer-width or long-width quantity is printed as a value anywhere.
+CHARACTER SIGNEDNESS. Plain char is never used for a printed value: signedness was
+measured signed on x86_64 and i686 and unsigned on aarch64 and riscv64, so the character
+limits are read through SCHAR_MIN and SCHAR_MAX and fixed-width values through int8_t,
+each of which is -128 and 127 on all four targets.
 
-Plain char signedness (measured signed on x86_64 and i686, unsigned on aarch64 and
-riscv64) is avoided by reading the character limits through SCHAR_MIN and SCHAR_MAX and
-fixed-width values through int8_t. long double is absent entirely, its representation
-having been measured at 16, 12, 16 and 16 bytes across the four targets; that type
-belongs to 13_floating_point/004_long_double_target_restricted.
+long double IS DELIBERATELY ABSENT. Its representation was measured at 16, 12, 16 and 16
+bytes across the four targets -- x87 80-bit against IEEE binary128 -- so naming it would
+forfeit the byte-identical output this nine-header probe depends on. The type is not
+dropped from the suite: it is written and run by
+13_floating_point/004_long_double_target_restricted, whose own record excludes
+cross-backend value equality alone and carries the marker XD-TYPE-LONGDOUBLE-001 scoped to
+oracle (b) that the record format requires beside any narrowing. That division of labour is
+why this record needs no marker of its own.
 
-No target is dropped, no oracle is disabled and no marker is carried. Measured on this
-branch with gcc 13.4.0 and the matching cross drivers under QEMU user-mode 10.1.0:
-stdout is byte-identical and the exit status is 0 in all twelve cells.
+THE BONUS ATOMICS HEADER IS EXCLUDED, and the exclusion is recorded here as well as in
+ub_notes because it is a narrowing of what this probe covers rather than an
+undefined-behaviour argument: stdatomic.h is not among the nine required headers, no
+requirement mandates it, and atomics can require -latomic, which is not in the shared flag
+set -- so including it would risk a link failure attributable to the test rather than to
+the compiler. The nine required headers are covered in full; the bonus header is the one
+member of the shipped set this program does not reach, and that is the whole of the gap.
+
+STANDARD-VERSION AND ARCHITECTURE PREDEFINED MACROS are not examined here; they are the
+subject of 004_predefined_macros in this area, which asserts them only as relations.
+
+NOTHING IS NARROWED. No target is dropped, no oracle is disabled, no warning-gate
+deviation is requested and no marker is carried, so this block records the properties that
+were normalized away rather than a coverage exclusion -- which is the point of recording
+them: it makes the set of comparisons deliberately not made as visible as the set that
+was. Measured on this branch with gcc 13.4.0 and the matching gnu17 cross drivers under
+QEMU user-mode 10.1.0: all twelve cells -- four targets by three optimization levels --
+produce byte-identical stdout and exit status 0.
 END
 expected_stdout    <<END
 char_bit=8

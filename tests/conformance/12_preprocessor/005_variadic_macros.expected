@@ -36,6 +36,15 @@ Stringizing is deterministic rather than incidental. 6.10.3.2p2 deletes white sp
 token and after the last and collapses each remaining run to a single space, so the two-token list
 stringizes to the same text under every conforming implementation.
 
+ARITY OF THE STRINGIZING MACRO. The stringizing macro is itself declared variadic, and that is a
+correctness requirement rather than a stylistic choice. A one-parameter stringizing macro handed a
+comma-separated list is an arity error, not a comparison: measured on the same list this program
+stringizes, gcc 13.4.0 reports `passed 2 arguments, but takes just 1` and clang 20.1.8 reports "too
+many arguments provided to function-like macro invocation". Declaring it variadic is what lets one
+macro legally receive an empty list, a single token and several tokens, which is precisely the
+three-way coverage the golden record asserts. Reducing it to a single named parameter would convert
+three live assertions into a compile failure owned by this test rather than by either compiler.
+
 DETERMINISM. Every printed value is an int printed with %d or a string constant written in this
 source, so nothing target-varying, address-derived, time-derived, random or locale-dependent can
 reach stdout. No plain char value is printed: char signedness was measured as signed on x86_64 and
@@ -59,6 +68,17 @@ NO HEADER IS INCLUDED and printf is declared by hand as `int printf(const char *
 only freestanding headers and ships no standard I/O header, so naming one would fail on the bcc side
 of oracle (a) while succeeding on the reference side -- a spurious divergence caused by the test
 rather than by a compiler.
+
+NOT EVEN <stdarg.h> IS INCLUDED, which in a program about variadic macros is worth stating rather
+than leaving to inference. The corpus sanctions exactly two header exceptions and this program is
+neither of them: every program in area 07_variadics may include <stdarg.h> and nothing else, and
+12_preprocessor/003_bundled_header_inclusion.c may include the nine required bundled headers. Nor
+does this program need one. What is under test here is the preprocessor's expansion of a variadic
+macro, and that expansion is complete before any runtime argument-retrieval machinery could be
+reached; every helper the expansions call is ordinary fixed-arity C, so a divergence can only have
+come from the expansion itself. The runtime va_list path is exercised in area 07 instead, where a
+defect in it cannot be mistaken for a preprocessor defect. A maintainer who added the header would
+widen this program's failure surface without widening what it tests.
 END
 impl_defined_notes <<END
 THREE SPELLINGS ARE EXCLUDED, EACH NARROWLY AND EACH FOR A STATED REASON. No target, no optimization

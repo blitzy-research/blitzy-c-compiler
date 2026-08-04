@@ -1,12 +1,13 @@
 # Expectation record for 12_preprocessor/004_predefined_macros.c
 #
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
+# Reproduce one cell by hand with no harness, no Cargo and no Rust toolchain: render the
+# three command templates below, substituting the target triple, the optimization level,
+# the source path, the output path, and the target's runner (empty on the natively
+# executing target, that target's emulator otherwise).
 
 program            = 004_predefined_macros
 area               = 12_preprocessor
-description        = Predefined macros asserted only as normalized relations: the standard conformance and version macros, source-position macros, architecture-macro consistency, and the tie between the preprocessor's view of the target and the code generator's pointer width
+description        = Predefined macros asserted only as normalized relations: the standard conformance and version macros, the source-position macros, architecture-macro consistency, and the tie between the preprocessor's view of the target and the code generator's pointer width
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,75 +19,191 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-This program contains no undefined and no unspecified behaviour. The only arithmetic is a bounded
-increment over the characters of a string literal and a sum of four operands each of which is 0 or 1,
-so no signed overflow is reachable. No shift operator appears, so no shift count can be out of range.
-There is no cast between object pointer types, no union and no type-punning, so no aliasing rule is
-stressed. The helper walks a string literal and stops at its terminator, so no pointer is formed past
-the end of an object and none is dereferenced outside one; no string literal is modified. Every object
-is initialized at its declaration. No object is modified twice between sequence points. Every call
-receives a single argument that has no side effect at all, so nothing depends on unspecified
-evaluation order.
+This program contains no undefined and no unspecified behaviour, and the argument below is the human
+half of that guarantee; the two reference-compiler gates named at the end are the machine half.
 
-DETERMINISM. Every printed value is an int printed with %d or a string constant written in this
-source, so nothing target-varying, address-derived, time-derived, random or locale-dependent can
-reach stdout. No plain char value is printed: char signedness was measured as signed on x86_64 and
-i686 and unsigned on aarch64 and riscv64, so a plain-char value would diverge for a reason that is
-not a defect. No raw type width is printed: sizeof(long) and sizeof(void *) were measured as 4 on
-i686 and 8 on the other three targets. Iteration order is fixed by literal bounds. main returns 0,
-inside the 0-125 range the suite requires so that no exit status is truncated.
+TRANSLATION-TIME ARITHMETIC. Every controlling expression in this source either tests a macro with
+`defined`, compares one against a small constant, or sums four operands each of which is 0 or 1 by
+construction. The preprocessor evaluates such expressions in the widest integer type available to
+it, so no operand and no intermediate result can approach an overflow. No shift, division or modulo
+operator appears in any controlling expression, so no shift count can be out of range and no
+division by zero is reachable. An identifier that survives macro replacement in a preprocessor
+conditional is replaced by zero rather than diagnosed, and every conditional here is written so that
+outcome is a defined 0 rather than an error.
+
+RUN-TIME CODE. The only function besides `main` is `slen`, which walks a string literal from index 0
+and stops at its terminating null byte. No pointer is formed past the end of an object, none is
+dereferenced outside one, and no string literal is modified. There is no cast between object pointer
+types, no union and no type punning, so no aliasing rule is stressed. `n` is initialized at its
+declaration, so no uninitialized storage is read. The only arithmetic is that bounded increment and
+a sum of four 0-or-1 operands, so no signed overflow is reachable. No object is modified twice
+between sequence points.
+
+CALLS. Every call passes a single argument, and no argument expression has any side effect at all,
+so nothing depends on unspecified evaluation order. `printf` is hand-declared as
+`int printf(const char *, ...);`, a prototype that matches every use: each call site supplies one
+`%d` conversion specification and one argument of type `int`, several of them explicitly cast to
+`int` from the `_Bool`-valued result of a comparison. No `%s` and no other conversion specification
+appears anywhere in the program, so no string is interpolated into the output and no argument of any
+other type reaches the variadic path.
+
+THE ARCHITECTURE CONDITIONALS FALL BACK TO ZERO RATHER THAN DIAGNOSING. Each of the four
+architecture blocks carries an alternative arm that defines a zero fallback instead of raising
+`#error`. That choice is deliberate rather than lax. A diagnostic would mean that a compiler which
+happens not to define the architecture macro spellings this program knows about fails to translate
+the program at all, converting an informative output difference into an uninformative compile
+failure on both oracles at once. With the zero fallback the program always compiles and always runs
+under both compilers, and any macro gap surfaces instead as a comparable difference with a precise
+diff -- report the difference, never work around it. No `#error` and no `#warning` appears on any
+path, so nothing is written to standard error, which this suite captures into finding artifacts but
+never compares.
+
+DETERMINISM. Every printed value is an `int` printed with `%d`, so nothing target-varying,
+address-derived, time-derived, random or locale-dependent can reach standard output. No address and
+no pointer value is printed. No plain `char` value is printed: `char` signedness was measured as
+signed on x86_64 and i686 and unsigned on aarch64 and riscv64, so a plain-`char` value would diverge
+for a reason that is not a defect. No raw type width is printed: `sizeof(long)` and `sizeof(void *)`
+are 4 on i686 and 8 on the other three targets. No literal predefined-macro value is printed either,
+which is the whole design of the program and is argued in `impl_defined_notes`. `__DATE__` and
+`__TIME__` are never used anywhere in the source: they are timestamps, and a timestamp would make
+byte-exact comparison impossible on the second run. `__FILE__` is used exactly once, inside a
+non-emptiness relation, so its raw value -- an absolute or relative workspace path that differs from
+cell to cell -- never reaches standard output; that was confirmed by building and running the
+program from two directories with different absolute paths and observing byte-identical output.
+`__LINE__` is likewise reduced to a positivity relation, so no literal line number is emitted and no
+later edit to the comments above can change a printed value. Iteration order is fixed by the
+terminator of a string literal. Output is a fixed eight-line sequence, one line per relation
+claimed, so a single divergent line localizes a defect to one construct. `main` returns 0, inside
+the 0-125 range the operating system delivers intact.
 
 HERMETICITY. Every input is a literal in this source. Nothing is opened, nothing is read from the
-environment, the command line, the clock or the file system, and no storage is allocated, so a cell
-is reproducible from this source and this record alone.
+environment, the command line, the clock or the file system, no socket is created, and no storage is
+allocated, so a cell is reproducible from this source and this record alone and touches nothing
+outside its own workspace.
 
-GATE. The default warning gate applies unmodified and no `ub_audit_flags` key appears:
--Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. The program was verified
-clean under that gate with all four reference drivers and with the alternate reference compiler, and
-it builds and runs clean under -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
-reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched.
+NO HEADER IS INCLUDED, and that is why `printf` is declared by hand. bcc bundles only freestanding
+headers and ships no hosted standard input/output header -- a search of `docs/` for `stdio` returns
+no match -- so naming one would fail on the bcc side of oracle (a) while succeeding on the reference
+side: a spurious divergence caused by the test rather than by a compiler.
 
-NO HEADER IS INCLUDED and printf is declared by hand as `int printf(const char *, ...);`. bcc bundles
-only freestanding headers and ships no standard I/O header, so naming one would fail on the bcc side
-of oracle (a) while succeeding on the reference side -- a spurious divergence caused by the test
-rather than by a compiler.
+GATE. The default warning gate applies unmodified and no `ub_audit_flags` key appears, because none
+is needed: -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. The program was
+verified clean under that gate with all four reference drivers at all three optimization levels and
+with the alternate reference compiler this suite may select, and it builds and runs clean under
+-fsanitize=undefined,address -fno-sanitize-recover=all with output identical to the golden record
+below. Both gates are reference-compiler-only and are never applied to bcc, so requirement 3's
+shared-flag discipline is untouched.
 END
 impl_defined_notes <<END
-WHICH MACROS MAY BE ASSERTED AS INVARIANTS, AND WHICH MAY NOT. This is the whole design of the
-program, and it is a soundness requirement rather than a stylistic preference.
+THIS PROGRAM ASSERTS RELATIONS, NEVER LITERAL VALUES, AND THIS NOTE RECORDS WHY. It narrows nothing:
+all four targets are swept, all three optimization levels are swept, all three oracles are enabled,
+the default warning gate applies unmodified, and no expected-divergence marker is attached. What
+follows is therefore not an excuse for a missing comparison. It is the record of how the comparison
+was made comparable in the first place, and it is the reason this program discriminates instead of
+diverging on every run.
 
-Only macros the C standard itself requires are invariants here: __STDC__ and __STDC_VERSION__ (C11
-6.10.8.1), and the source-position macros __LINE__ and __FILE__ (same clause). A conforming
-implementation must define each of them, so a divergence in one is a real conformance gap and a
-legitimate finding.
+WHICH MACROS MAY BE ASSERTED AS INVARIANTS, AND WHICH MAY NOT. This is a soundness requirement rather
+than a stylistic preference. Only macros the C standard itself requires are invariants here:
+`__STDC__` and `__STDC_VERSION__`, and the source-position macros `__LINE__` and `__FILE__`. A
+conforming implementation must define each of them, so a divergence in one is a real conformance gap
+and a legitimate finding.
 
-The architecture macros are NOT invariants, and an earlier form of this program wrongly made them one
-by asserting that exactly one of __x86_64__, __i386__, __aarch64__ and __riscv is defined. Those are
-spellings of a particular compiler family; no clause obliges any implementation to define them, and
-this repository documents no per-target predefined-macro contract for the compiler under test. That
-assertion would therefore have accused a correct compiler of a defect merely for spelling its
-architecture macro differently, or for leaving the choice to a target header. They are still
-exercised, because dropping them would be excluding a feature for being awkward, but only through
-assertions no correct compiler can fail: that NO MORE THAN ONE of the four is defined, which is a
-consistency property rather than a naming one, and that ANY macro that IS defined agrees with the
-pointer width the code generator actually produced, written as a two-sided implication so that an
-undefined macro satisfies it vacuously. Together those still catch the defect worth catching -- a
-preprocessor that disagrees with its own back end, or that claims two architectures at once -- while a
-differently spelled or absent macro set passes.
+ARCHITECTURE MACROS DIFFER PER TARGET BY DESIGN, AND ARE NOT INVARIANTS. `__x86_64__`, `__i386__`,
+`__aarch64__` and `__riscv` are spellings of a particular compiler family. Printing any of them, or
+printing a value derived directly from one, would guarantee a cross-backend difference that says
+nothing whatever about compiler correctness, so the program prints a normalized derived result
+instead and never a macro name or a macro value. An earlier form of this program went one step too
+far in the other direction and asserted that EXACTLY ONE of the four is defined. No clause obliges
+any implementation to define them, and this repository documents no per-target predefined-macro
+contract for the compiler under test, so that assertion would have accused a correct compiler of a
+defect merely for spelling its architecture macro differently, or for leaving the choice to a target
+header. The macros are still exercised -- dropping them would be excluding a feature for being
+awkward -- but only through assertions no correct compiler can fail: that NO MORE THAN ONE of the
+four is defined, which is a consistency property rather than a naming one, and that ANY macro that IS
+defined agrees with the pointer width the code generator actually produced, written as a two-sided
+implication so that an undefined macro satisfies it vacuously. Together those two still catch the
+defect worth catching -- a preprocessor that disagrees with its own back end, or one that claims two
+architectures at once -- while a differently spelled or absent macro set passes.
 
-The strict-conformance macro is asserted NOWHERE, in either direction, for the same reason:
-__STRICT_ANSI__ is a compiler-family spelling with no standard mandate, so requiring its absence would
-be a false oracle and requiring its presence would be another. Whether GNU extensions are on offer is
-exercised where it belongs, in feature area 08, by programs that USE an extension.
+THE DOCUMENTATION GAP, AND WHY IT DECIDES THE DESIGN. The repository documentation nowhere enumerates
+the macros any compiler predefines. A search across `docs/` for `predefined`, `__STDC`, `__x86_64__`,
+`__i386__`, `__aarch64__`, `__riscv`, `__GNUC` and `__STDC_HOSTED` returns no match for any of the
+eight spellings, in any of the three documents the directory contains. There is consequently no
+documented authority stating which predefined macros bcc defines or what values they take. That is
+the direct reason this program asserts relations rather than literals, and it has a second
+consequence that matters more: an expected-divergence marker requires a documented basis, and a
+documented basis cannot be manufactured out of silence. No marker could legitimately be attached here
+even if a per-target difference were observed, so a difference is reported as a FINDING -- and
+because the relations are normalized, that finding is a precise, actionable one rather than a wall of
+per-target noise nobody can triage.
 
-WIDTH NORMALIZATION. No macro value and no type width is printed as an absolute. The one place a width
-appears is inside a relation, `sizeof(void *) == 4u`, whose truth value is compared against an
-architecture macro rather than printed, and `sizeof(void *) == sizeof(long)`, which is a genuine
-four-target invariant even though the shared value differs between the 32-bit target and the other
-three. The line-number macro is reduced to positivity and the file-name macro to non-emptiness, so no
-workspace path can reach the output and no later edit to the comments above can change a printed
-value.
+LANGUAGE MODE AND THE ABSENCE OF A -std FLAG. bcc's documented command line
+(docs/technical-specifications.md lines 21 and 81) is -c, -o, -I, -D, -U, -L, -l, -g, -O0, -O1, -O2,
+-shared, -fPIC, -mretpoline, -fcf-protection, -static and --target. There is no -std flag in it, so
+no -std flag is ever passed in any differential invocation, on either side, and the reference
+compiler therefore runs in its own default mode. That mode was measured rather than assumed:
+`__STDC_VERSION__` is 201710L, `__STDC__` is 1, and `__STRICT_ANSI__` is absent -- gnu17, which
+already offers the GNU extensions the corpus exercises elsewhere. Two of this program's eight
+assertions rest on that measurement, so it is recorded here.
+
+WHY THE STRICT-CONFORMANCE MACRO IS ASSERTED NOWHERE, IN EITHER DIRECTION. The measurement above
+records that `__STRICT_ANSI__` is absent under the reference compiler, and bcc, having no -std flag,
+can never be placed in a strict-ANSI mode either. It would therefore be tempting to assert its
+absence as a relation expected to hold on both sides, and an earlier form of this program did exactly
+that. It is still the wrong assertion. `__STRICT_ANSI__` is a compiler-family spelling that no clause
+obliges an implementation to define or to omit, so a correct compiler is free to define it for
+reasons of its own; requiring its absence would be a false oracle, and requiring its presence would
+be another. An observation about one compiler's default mode is not a conformance requirement on
+every compiler, and only relations that hold of any correct implementation are asserted here. Whether
+GNU extensions are actually on offer is exercised where it belongs -- in feature area 08, by programs
+that USE an extension -- rather than inferred here from the presence or absence of a macro.
+
+THE STANDARD-VERSION ASSERTIONS ARE INEQUALITIES, NOT LITERALS: `__STDC_VERSION__ >= 199901L` and
+`__STDC_VERSION__ >= 201112L`. The reference compiler reports 201710L, as measured above, and the
+compiler under test is required to handle the full C11 standard rather than merely C99
+(docs/technical-specifications.md lines 758-762, the C11 and GCC Extensions Compliance Rule). Both
+sides therefore satisfy both relations while neither is pinned to a particular edition, which is what
+lets the two be compared at all: a literal assertion would have to name one edition and would fail
+whichever side did not implement precisely that one, reporting an edition difference as a defect.
+
+MACROS DELIBERATELY NOT EXAMINED, EACH FOR A STATED REASON. `__STDC_HOSTED__` is excluded because bcc
+bundles only freestanding headers and ships no hosted input/output header, so it may legitimately
+report 0 where the reference compiler reports 1; that is a hosted-versus-freestanding difference
+rather than a preprocessing one, and only relations that hold under both compilers are asserted here.
+`__GNUC__`, `__GNUC_MINOR__` and `__VERSION__` are excluded because whether bcc claims compatibility
+with that compiler family through them is undocumented, so a difference would be uninformative -- and
+because `__VERSION__` carries a version string that would differ between any two compilers and
+between any two releases of one. `__DATE__` and `__TIME__` are excluded outright because they are
+timestamps: byte-exact comparison against a golden record would fail on the second run by
+construction. `__COUNTER__`, `__BASE_FILE__`, `__INCLUDE_LEVEL__`, the `__SIZEOF_*` family,
+`__CHAR_BIT__` and `__INT_MAX__` are excluded for the same relations-only reason -- each either has no
+standard mandate or carries a target-varying literal value, and printing one would manufacture a
+difference rather than detect one. None of these exclusions removes a target, an optimization level
+or an oracle from this program's matrix; each removes one macro spelling from the set of things
+asserted about, and each is named here so the set not examined is as visible as the set that is.
+
+WIDTH RELATIONS, AND WHY BOTH OF THEM ARE FOUR-TARGET INVARIANTS. Per the target table at
+docs/technical-specifications.md lines 457-462, `x86_64-linux-gnu` has pointer 8 and `long` 8
+(ELF64), `i686-linux-gnu` has pointer 4 and `long` 4 (ELF32), `aarch64-linux-gnu` has pointer 8 and
+`long` 8 (ELF64), and `riscv64-linux-gnu` has pointer 8 and `long` 8 (ELF64). Pointer width therefore
+equals `long` width on all four targets even though the shared value differs between the 32-bit
+target and the other three, which makes `pointer_width_eq_long_width` a genuine invariant printed as
+1 rather than a target-varying number. The line `arch_id_agrees_with_pointer_width` uses the same
+table from the other direction, to tie the preprocessor's view of the target to the code generator's:
+the 32-bit target is the only one of the four whose pointers are four bytes wide, so on it both sides
+of the implication hold, and on the other three neither does. No raw width value is printed anywhere;
+the one place a width literal appears at all is inside the relation `sizeof(void *) == 4u`, whose
+truth value is combined with an architecture macro and never printed, and it is written unsigned so
+that comparing it against the unsigned result of `sizeof` cannot trip a sign-comparison diagnostic
+under the audit gate.
+
+SOURCE-POSITION MACRO HANDLING. The raw value of `__FILE__` is never printed, because the path
+differs per cell workspace and would break byte-exact comparison; only the path-independent relation
+`slen(__FILE__) > 0` reaches the output. The raw value of `__LINE__` is never printed either, only its
+positivity. The complementary technique -- substituting a virtual file name and line number with a
+`#line` directive, which makes the source-position macros' literal values deterministic and therefore
+directly comparable -- is not omitted from the corpus: it belongs to program 006 of this area, which
+prints those substituted values outright.
 END
 expected_stdout    <<END
 stdc_is_one=1

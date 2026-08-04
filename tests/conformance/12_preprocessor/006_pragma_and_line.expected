@@ -18,50 +18,77 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-This program contains no undefined and no unspecified behaviour. The only indexing is into a string
-literal at index 0 and at index len - 1, where len is the length this program just computed for that
-same literal, so both are in bounds. There is no signed overflow, no shift, no division, no aliasing
-violation, no read of uninitialised storage, no object modified twice between sequence points, and no
-argument of any call has a side effect. No pointer value is converted to an integer and no address is
-printed.
+This program contains no undefined and no unspecified behaviour. There is no signed overflow: every
+computed value is a small non-negative int, the difference of two line numbers, or the 0-or-1 result
+of a comparison. There is no shift operator, no division and no modulo. No object is read before it is
+written -- both int locals are initialised at their points of declaration from the line-number macro
+-- no object is modified twice between sequence points, no pointer value is converted to an integer,
+and no address is printed. No structure object is ever created: the structure types are named only
+inside sizeof and alignof, so no member is accessed and no padding byte is read.
+
+THE ONLY INDEXING IS IN BOUNDS, stated at length because it is the one place a bound could be
+stressed. Two subscripts are applied to the file-name macro's string literal: index 0, which every
+non-empty string has, and index len - 1, where len is the length this same program has just computed
+for that same literal. The literal there is the virtual name a line directive supplied above, so len
+is 14 and both subscripts name a character of the literal rather than its terminator or anything past
+it. The length helper reads the next character only while the previous one was not the terminator, so
+it stops on the terminator and never forms a pointer past the end. Its counter is an int and the only
+strings it walks are a handful of characters long, so neither an overflow nor a narrowing conversion
+can arise. No aliasing rule is stressed anywhere: there is no cast between object types, no union, and
+no pointer arithmetic other than those two subscripts.
 
 NEITHER PRAGMA CAN AFFECT WHAT THE PROGRAM DOES, and that is what makes the two assertions about them
 sound. C11 6.10.6p1 requires an implementation to IGNORE a pragma it does not recognise, so the
 invented, namespaced pragma between the two identical structure declarations must leave their layout
 untouched -- which is exactly what the size and alignment equalities assert. And a diagnostic-control
 pragma changes only which messages the translator emits: standard error is captured into finding
-artifacts but never compared, so recognising or ignoring it leaves every printed byte identical.
-Both assertions therefore hold under every conforming implementation and are broken only by one that
-acts on a request it was required to discard.
+artifacts but never compared, so recognising or ignoring it leaves every printed byte identical. Both
+assertions therefore hold under every conforming implementation and are broken only by one that acts
+on a request it was required to discard.
+
+NO DIAGNOSTIC DIRECTIVE APPEARS ON ANY PATH. The file contains exactly six directives -- four pragmas
+and two line directives -- and neither an error directive nor a warning directive is among them, on
+any branch, because the file has no conditional compilation at all. An error directive would make
+translation fail by design, and a warning directive would write to standard error, which this suite
+captures into finding artifacts but never compares; either one would therefore be untestable noise
+rather than a comparison. Measured: every one of the twelve cells produced zero bytes on standard
+error.
 
 A line directive numbers the line that FOLLOWS it, so every printing call that reads the line-number
 macro sits on the line immediately after its own directive: the printed number is the one the
 directive set rather than a function of where the rest of this file happens to sit, and the first two
-reads are on adjacent lines, so their difference is one wherever they appear.
+reads are on adjacent lines, so their difference is one wherever they appear. Measured with the
+reference compiler: after the directive selecting 700 the macro reads 700 on the next line and 701 on
+the line after it, and after the directive selecting 900 it reads 900 on the next line.
 
-DETERMINISM. Every printed value is an int printed with %d or a string constant written in this
-source, so nothing target-varying, address-derived, time-derived, random or locale-dependent can
-reach stdout. No plain char value is printed: char signedness was measured as signed on x86_64 and
-i686 and unsigned on aarch64 and riscv64, so a plain-char value would diverge for a reason that is
-not a defect. No raw type width is printed: sizeof(long) and sizeof(void *) were measured as 4 on
-i686 and 8 on the other three targets. Iteration order is fixed by literal bounds. main returns 0,
-inside the 0-125 range the suite requires so that no exit status is truncated.
+DETERMINISM. Ten of the eleven printed values are an int written with the %d specifier. The eleventh
+is the only %s in the program, and its argument is the file-name macro AFTER a line directive has
+supplied a virtual name, so what it prints is a string constant written in this source rather than a
+path the harness chose -- which is the whole reason it is safe to print in full. Before that directive
+the same macro is reduced to the relation "is not empty" and its value never reaches stdout. Nothing
+target-varying, address-derived, time-derived, random or locale-dependent is printed. No plain char
+value is printed: char signedness was measured as signed on x86_64 and i686 and unsigned on aarch64
+and riscv64, so a plain-char value would diverge for a reason that is not a defect. No raw type width
+is printed: sizeof(long) and sizeof(void *) were measured as 4 on i686 and 8 on the other three
+targets. No structure size and no alignment is printed as an absolute value. No translation-date and
+no translation-time macro is used. Iteration order is fixed by the literal the length helper walks.
+main returns 0, inside the 0-125 range the suite requires so that no exit status is truncated.
 
 HERMETICITY. Every input is a literal in this source. Nothing is opened, nothing is read from the
-environment, the command line, the clock or the file system, and no storage is allocated, so a cell
-is reproducible from this source and this record alone.
+environment, the command line, the clock or the file system, no storage is allocated, and printf is
+the only library routine called, so a cell is reproducible from this source and this record alone.
 
 GATE. The default warning gate applies unmodified and no `ub_audit_flags` key appears:
--Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. The program was verified
-clean under that gate with all four reference drivers and with the alternate reference compiler, and
-it builds and runs clean under -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
-reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched.
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. Measured clean -- exit status
+0 with not one diagnostic -- with all four reference drivers and with the alternate reference compiler,
+and clean under -fsanitize=undefined,address -fno-sanitize-recover=all, which compiled, ran, exited 0
+and printed nothing on standard error. Both gates are reference-compiler-only and are never applied to
+the compiler under test, so requirement 3's shared-flag discipline is untouched.
 
-NO HEADER IS INCLUDED and printf is declared by hand as `int printf(const char *, ...);`. bcc bundles
-only freestanding headers and ships no standard I/O header, so naming one would fail on the bcc side
-of oracle (a) while succeeding on the reference side -- a spurious divergence caused by the test
-rather than by a compiler.
+NO HEADER IS INCLUDED and printf is declared by hand as `int printf(const char *, ...);`. The compiler
+under test bundles only freestanding headers and ships no standard I/O header, so naming one would
+fail on its side of the reference comparison while succeeding on the reference side -- a spurious
+divergence caused by the test rather than by a compiler.
 END
 impl_defined_notes <<END
 WHY THE PACKING PRAGMA WAS REMOVED, AND WHY NO GATE DEVIATION REPLACED IT.
@@ -87,9 +114,26 @@ authority than a pragma no document mentions.
 
 What replaced it takes its authority from the standard rather than from any implementation's
 documentation: 6.10.6p1's closing requirement that an unrecognised pragma is ignored, asserted through
-the size and alignment of two otherwise identical structure declarations that straddle one. Neither
-size nor alignment is printed as an absolute value -- only the equality of the two -- so no
-implementation-defined layout choice can reach the output while the requirement stays observable.
+the size and the alignment of two otherwise identical structure declarations that straddle one.
+NEITHER SIZE NOR ALIGNMENT IS PRINTED AS AN ABSOLUTE VALUE -- only the equality of the two -- so no
+implementation-defined layout choice can reach the output while the requirement stays observable. Each
+structure holds one unsigned int between two unsigned char members, and every layout a conforming
+implementation may choose for that, on any of the four targets, satisfies both equalities, because the
+two declarations are identical in every respect.
+
+WHAT THE EQUALITIES DO AND DO NOT REPORT, recorded because it decides how a future divergence must be
+read, and because it is what stops a maintainer "improving" this program by printing the sizes
+themselves. An implementation that simply ignores the unrecognised pragma -- which is what the
+standard demands -- passes. The equalities fall to 0 only for an implementation that acted on a
+request it was required to discard. An implementation that instead REJECTS the unrecognised pragma
+outright does not fail the equalities at all: it fails to translate, and because 6.10.6p1's
+requirement to ignore is normative rather than permissive, that compile failure is a genuine finding
+rather than an implementation choice. This is also why the record carries no expected-divergence
+marker. Both directives in this program are documented as supported by the compiler under test -- its
+preprocessor directive handler names pragma and line among the directives it processes, and its source
+map tracks line-directive overrides -- so there is no documented limitation available to cite, and a
+divergence here must be delivered as a finding with its minimized reproducer instead of being
+classified away as expected.
 
 MEASURED, AND WHY THIS RECORD DECLARES NO `ub_audit_flags` DEVIATION. Both reference compilers
 diagnose an unknown pragma under the gate's -Wall, through -Werror=unknown-pragmas, and the reference
@@ -100,17 +144,41 @@ immediately afterwards. That is strictly better than a recorded deviation: the s
 to a single line rather than to a translation unit, it is visible where it applies, and the audit gate
 stays at full strength for this program as for every other -- which matters, because the gate is what
 establishes the undefined-behaviour freedom that makes every divergence this suite reports meaningful.
+Verified: the full gate, -Werror included, accepts this program with zero diagnostics under all four
+reference drivers and under the alternate reference compiler.
 
-WIDTH NORMALIZATION AND THE VIRTUAL FILE NAME. Every printed value is an int. No structure size and no
-alignment is printed as an absolute -- only the equality of two of them -- so an implementation's
-layout choices cannot reach the output. The harness copies each program into its own per-cell
-workspace, so the real source path differs between cells; before the first line directive the
-file-name macro is therefore reduced to the relation "is not empty", and afterwards the directive
-supplies a virtual name written in this source, which is a compile-time constant and is therefore
-printed in full, byte for byte, alongside its length and its first and last characters -- each of
-those three relations localising a different kind of corruption, a truncation, a lost first byte or a
-lost terminator, to its own line. That virtual name designates no file, is never opened, and must
-never be created.
+THE FILE-NAME MACRO IS PATH-DEPENDENT AND IS NEVER PRINTED RAW. The harness copies each program into
+its own per-cell workspace, so the real source path differs between cells and between targets, and
+printing it would break byte-exact comparison in all twelve of them at once. Before the first line
+directive the macro is therefore reduced to the relation "is not empty". Afterwards a line directive
+supplies a virtual name written in this source, which is a compile-time constant rather than anything
+the file system chose, so it is printed in full, byte for byte, alongside its length and its first and
+its last character -- each of those three relations localising a different kind of corruption, a
+truncation, a lost first byte or a lost terminator, to its own line. Printing the whole name is the
+part that matters: an earlier form printed only the length and the two endpoints, and any misspelling
+of the same length beginning with v and ending with c would have passed every oracle in all twelve
+cells, leaving a defect in how the directive's string literal reaches the macro invisible. Verified by
+building and running this source from two different absolute paths, one of them deeply nested, and once
+more through a relative path: stdout was byte-identical every time, which is the proof that no path
+reaches it. The recorded length of 14 is the exact character count of the virtual name written in the
+directive, and it must be recounted if that name is ever changed. That name designates no file, is
+never opened, and must never be created, so hermetic execution is preserved.
+
+WHY THE DIAGNOSTIC-PREFIX EFFECT OF A LINE DIRECTIVE IS NOT ASSERTED. A line directive also changes
+the file name and the line number a translator prints in front of its own diagnostics, and that is an
+effect a reader might expect a preprocessor test to check. It is deliberately not checked, because
+this suite compares stdout bytes and the raw wait status only and never compares standard error:
+diagnostic wording legitimately differs between compilers, so comparing it would produce a flood of
+divergences that say nothing about code correctness. The directive's effect is therefore observed
+solely through the two source-position macros on stdout, which is where it is comparable at all.
+
+WIDTH AND SIGNEDNESS NORMALIZATION, AND THE RESULT IT BUYS. Every printed value is an int or the
+virtual name; no raw width, no plain-char value and no layout value is printed. The measured
+consequence is what justifies this record's scope: all twelve cells -- four targets times three
+optimization levels, each linked statically and executed natively on the host target or under that
+target's emulator -- produced byte-identical stdout, exit status 0, and nothing on standard error.
+That is why this record restricts no target, disables no oracle and needs no marker: after this
+normalization there is no implementation-defined difference left for one of them to describe.
 END
 expected_stdout    <<END
 line_delta=1
