@@ -206,8 +206,8 @@ use super::{
     read_file_bounded, redact_secrets, remove_entry, require_contained_corpus_file,
     require_directory_chain_below, require_replaceable, run_generation, sanitize_text_for_report,
     shown_path, stable_digest, CellKey, CompilerSide, DivergenceClass, HarnessError, HarnessResult,
-    OptLevel, Oracle, Outcome, Replaceable, Target, Verdict, CAPTURE_RETAINED_BYTES_MAX,
-    DIGEST_HEX_DIGITS, MAX_INSPECTED_FILE_BYTES,
+    MarkerClass, OptLevel, Oracle, Outcome, Replaceable, Target, Verdict,
+    CAPTURE_RETAINED_BYTES_MAX, DIGEST_HEX_DIGITS, MAX_INSPECTED_FILE_BYTES,
 };
 
 /// The reproducer: a **verbatim**, byte-for-byte copy of the corpus program.
@@ -307,6 +307,63 @@ pub const DISCLOSURE_CLEAN: &str = "clean";
 /// requires to be non-empty and to name entries that exist in the directory. `FINDINGS.md` §5.3 forbids
 /// redacting a compared stream, so naming one here is itself reported.
 pub const DISCLOSURE_REDACTED_PREFIX: &str = "redacted: ";
+
+/// The [`MANIFEST_NAME`] line recording whether the reproducer was minimized, and on whose judgement.
+///
+/// # The same shape as the disclosure attestation, for the same reason
+///
+/// Requirement 6 asks for a reproducer "minimized as far as practical", and *practical* is a
+/// judgement about one program that no validator can make: whether a construct still needs the loop
+/// around it, whether a helper function is load-bearing or scenery, whether removing a line would
+/// leave a reproducer that no longer recognisably exercises the feature. `FINDINGS.md` §5.1 states
+/// plainly that minimization is manual or scripted and happens during curation, never during a run —
+/// a run writes a verbatim copy of the corpus program, because reduction is unbounded in time and its
+/// result is not reproducible byte for byte, and a finding directory is meant to be diffed between
+/// runs.
+///
+/// [`Minimization`] already describes all of that in prose, and the prose was accurate. What was
+/// missing is that nothing recorded the *status* in a field the curated audit reads back. The
+/// disclosure review was gated exactly this way and minimization was not, so a generated directory
+/// could be promoted with its `disclosure_review` corrected and its verbatim reproducer filed
+/// unexamined — under outward-facing documents that call a curated finding's reproducer minimized.
+/// One half of the deliverable was an admission step and the other was an assumption.
+///
+/// So minimization becomes an admission step too. A run writes [`MINIMIZATION_NOT_PERFORMED`],
+/// truthfully, and [`curated_finding_defects`] rejects exactly that value: promotion requires a human
+/// to state which of the two legitimate outcomes applies, and §5.1 makes both legitimate — the
+/// reproducer was reduced, or it was examined and judged already as small as the difference needs.
+/// Neither is assumed, and the second is not a loophole: it is a recorded judgement with a reason
+/// attached, which is what "as far as practical" means when the corpus is already close to minimal by
+/// construction.
+///
+/// The accepted curated values are [`MINIMIZATION_REDUCED_PREFIX`] and
+/// [`MINIMIZATION_VERBATIM_PREFIX`], each followed by a non-empty reason.
+pub const MANIFEST_MINIMIZATION_PREFIX: &str = "minimization = ";
+
+/// The [`MANIFEST_MINIMIZATION_PREFIX`] value a **generated** directory carries: verbatim, unexamined.
+///
+/// Written rather than omitted for the reason the disclosure field is written rather than omitted: an
+/// absent field is indistinguishable from an older manifest, and any other value would claim a
+/// judgement nobody made. `reproducer.c` beneath the generated root is a byte-for-byte copy of the
+/// corpus program, and this value says so where the audit can read it.
+pub const MINIMIZATION_NOT_PERFORMED: &str = "not-performed (a curation step: FINDINGS.md §5.1)";
+
+/// The [`MANIFEST_MINIMIZATION_PREFIX`] value stating the reproducer was reduced, before how.
+///
+/// Followed by a non-empty description of the method — the reducer and version, or "by hand" and what
+/// was removed. `FINDINGS.md` §5.1 requires the reduction to be performed on a copy and every artifact
+/// to be regenerated from the reduced program afterwards, which the curated audit's reproducer-digest
+/// comparison independently enforces: a manifest claiming a reduction whose captures were copied
+/// forward from the unreduced run fails that comparison rather than this field.
+pub const MINIMIZATION_REDUCED_PREFIX: &str = "reduced: ";
+
+/// The [`MANIFEST_MINIMIZATION_PREFIX`] value stating the verbatim reproducer was judged minimal.
+///
+/// Followed by a non-empty reason. This is the outcome §5.1 anticipates as ordinary — "there is
+/// usually very little left to remove", because every corpus program exercises one semantic concern
+/// and prints one line per property it claims — and it is an outcome rather than a default precisely
+/// because a human has to look at the program and write down why.
+pub const MINIMIZATION_VERBATIM_PREFIX: &str = "verbatim-by-judgement: ";
 
 /// The [`MANIFEST_NAME`] line recording the digest of the reproducer the evidence was produced from.
 ///
@@ -666,7 +723,6 @@ fn budget_refusal(
 ///
 /// Returns the rendered artifacts and the reservation that must be settled once the write ends,
 /// either way.
-#[allow(clippy::too_many_arguments)]
 fn reserve_contribution(
     context: &str,
     finding: &Finding,
@@ -795,7 +851,6 @@ impl MergedArtifacts {
     /// whole correctness argument: reading a per-oracle field off `finding` here would reintroduce the
     /// defect this type exists to remove, because `finding` is whichever contribution happens to be
     /// filing.
-    #[allow(clippy::too_many_arguments)]
     fn render(
         context: &str,
         finding: &Finding,
@@ -833,14 +888,32 @@ impl MergedArtifacts {
                 minimization,
                 fixed,
                 merged,
-                &capture_bytes,
-                &inventory,
+                &DirectoryInventory {
+                    captures: &capture_bytes,
+                    artifacts: &inventory,
+                },
             ),
             commands,
             diff,
             capture_bytes,
         })
     }
+}
+
+/// What a finding directory holds, accounted for: its captures by size and its artifacts by digest.
+///
+/// Grouped rather than passed as two parameters because they are one answer to one question — what
+/// is in this directory — and the manifest publishes them as two adjacent sections. Keeping them
+/// together is also what stops a later edit from computing one from the merged contributions and the
+/// other from the bytes about to be written, which would let the two halves of the same inventory
+/// describe different states of the same directory.
+struct DirectoryInventory<'a> {
+    /// Every captured stream this directory holds, by artifact-relative name and exact size, with
+    /// each name appearing once however many oracles contributed it.
+    captures: &'a [(String, u64)],
+    /// One `artifact = ` line per merged artifact: its name, its exact size and the digest of the
+    /// bytes about to be written.
+    artifacts: &'a [String],
 }
 
 /// The artifacts of a finding directory whose bytes do not depend on which oracle is filing.
@@ -1386,29 +1459,50 @@ impl Capture {
     /// mechanism enforced it. So the expectation is returned in two parts: a sentence naming the
     /// outcome as the suite observed it, and the **classification** a reproduction should record for
     /// it, in the vocabulary [`SH_BOUNDED`] writes — [`TERMINATION_EXITED`],
-    /// [`TERMINATION_SIGNALLED`] or [`TERMINATION_TIMEOUT`].
+    /// [`TERMINATION_AMBIGUOUS`] or [`TERMINATION_TIMEOUT`].
     ///
     /// A timeout has a classification here where it could not have a number. That is the point of the
     /// vocabulary: [`TIMEOUT_UTILITY_STATUS`] and a signalled `137` are both plausible *numbers* for
     /// an expiry, so naming either as the expectation would be untrue half the time — whereas the
     /// script derives `timeout` from having performed the kill itself and can therefore be compared
-    /// against directly. The one distinction the shell genuinely cannot make is between a signal
-    /// death and a program that exited with `128 + n` of its own accord; the sentence beside the
-    /// classification says which the harness observed, which is where that difference is kept.
+    /// against directly.
+    ///
+    /// # Why an ordinary exit of 128 or more shares one classification with a signal death
+    ///
+    /// The one distinction a shell genuinely cannot make is between a signal death and a program that
+    /// returned `128 + n` of its own accord, so **both** are given [`TERMINATION_AMBIGUOUS`] and the
+    /// same number. Splitting them would put an unverifiable claim in the expectation and, in the
+    /// exit-code direction, would make a correct reproduction read as a failed one: the script would
+    /// answer `ambiguous 130` for a program the harness recorded as `exited with 130`, the two would
+    /// compare unequal, and the reader would be sent after a disagreement between the harness and its
+    /// own script. The sentence beside the classification still says which of the two the harness
+    /// observed — that is where the distinction the raw wait status makes is kept — and the capture's
+    /// `.exit` entry records the status itself.
     fn shell_expectation(&self) -> (String, Option<String>) {
         if let Some(run) = &self.run {
             return match run.termination() {
-                Termination::Exited(code) => (
+                // An ordinary exit BELOW the signal base is the only one a shell can attribute
+                // outright, so it is the only one that keeps the `exited` classification.
+                Termination::Exited(code) if code < SHELL_SIGNAL_STATUS_BASE => (
                     format!("exited with {code}"),
                     Some(format!("{TERMINATION_EXITED} {code}")),
                 ),
+                Termination::Exited(code) => (
+                    format!(
+                        "exited with {code} of its own accord, which a shell cannot distinguish \
+                         from a death by signal {} because `wait` reports both as {code}",
+                        code.saturating_sub(SHELL_SIGNAL_STATUS_BASE)
+                    ),
+                    Some(format!("{TERMINATION_AMBIGUOUS} {code}")),
+                ),
                 Termination::Signalled(signal) => (
                     format!(
-                        "killed by signal {signal}, which a shell reports as {}",
+                        "killed by signal {signal}, which a shell reports as {} and cannot \
+                         distinguish from a program that returned that value itself",
                         SHELL_SIGNAL_STATUS_BASE.saturating_add(signal)
                     ),
                     Some(format!(
-                        "{TERMINATION_SIGNALLED} {}",
+                        "{TERMINATION_AMBIGUOUS} {}",
                         SHELL_SIGNAL_STATUS_BASE.saturating_add(signal)
                     )),
                 ),
@@ -2057,14 +2151,22 @@ impl Finding {
         // second time here and the note cannot drift away from the decision it explains.
         let marker_note = manifest.marker().map(|marker| {
             let scope_covers = marker.covers(&key, comparison.oracle);
-            let gap = match (scope_covers, marker.class() == class) {
+            let gap = match (scope_covers, marker.class() == MarkerClass::Observed(class)) {
                 // The case Issue-1's class-blind precondition suppressed: documented for one class,
-                // in scope for this arm, and silent about what actually happened.
-                (true, false) => format!(
-                    "whose scope covers this cell but whose class does not — it documents {} while \
-                     a {class} was observed",
-                    marker.class()
-                ),
+                // in scope for this arm, and silent about what actually happened. A marker classed
+                // `comparison_excluded` lands here too, and says the more specific thing: it
+                // documents an arm this record does not compare, so it claims no observation that
+                // could excuse the one that was made.
+                (true, false) => match marker.class() {
+                    MarkerClass::ComparisonExcluded => format!(
+                        "whose scope covers this cell but which documents a comparison this record \
+                         declines to make rather than an observation — a {class} was observed"
+                    ),
+                    MarkerClass::Observed(documented) => format!(
+                        "whose scope covers this cell but whose class does not — it documents \
+                         {documented} while a {class} was observed"
+                    ),
+                },
                 (false, true) => format!(
                     "which documents this very class but whose scope does not cover this cell — it \
                      covers {}",
@@ -3018,9 +3120,50 @@ const SH_MKTEMP_MSG: &str = "created with `mktemp -d` under a 077 umask";
 /// Every helper name the generated script may reach, in roughly the order it first uses them.
 ///
 /// Emitted into a single `unset -f` so an inherited exported shell function cannot stand in for one of
-/// them. `command` is included deliberately: unsetting a *function* by that name leaves the builtin
-/// intact, and the builtin is what the rest of the script relies on to bypass function lookup.
-const SH_HELPERS: &str = "command printf mktemp rm mv env cmp cat diff kill test wc dd";
+/// them, and every one of them is additionally invoked through `command`, which suppresses function
+/// lookup on its own. [`verify_helper_protection`] enforces that pairing over the rendered text, so
+/// this list and the script's actual invocations cannot drift apart.
+///
+/// # What decides membership
+///
+/// A POSIX shell resolves a command name by looking for a **special** built-in first, then a
+/// function, then a **regular** built-in or a file on the search path. A function can therefore stand
+/// in for anything that is not a special built-in — which is why `cd`, `pwd`, `umask`, `ulimit` and
+/// `wait` belong here even though every one of them is a built-in, and why `set`, `unset`, `exec`,
+/// `trap`, `exit`, `export`, `shift`, `break` and `:` deliberately do not: no function can shadow
+/// those, so naming them would suggest a protection that was never needed. `sleep` is an ordinary
+/// external utility and is here for the ordinary reason.
+///
+/// `command` is included deliberately: unsetting a *function* by that name leaves the built-in
+/// intact, and the built-in is what every other invocation in the script relies on.
+///
+/// `setsid` is here even though the script never invokes it by name — it is reached through
+/// `"$SETSID"`, whose value comes from a `command -v setsid` probe. That probe is exactly why the
+/// name belongs: `command -v` reports a **function** by that name as though it were the utility, so an
+/// inherited definition would have the script conclude `setsid` is available, set `$SETSID` to it, and
+/// then fail when `env` looked for a program of that name — silently downgrading the process-group
+/// kill the watchdog depends on. Removing the definition makes the probe answer about the utility
+/// alone. The same reasoning covers `wc` and `dd`, which are probed the same way.
+///
+/// `[` is absent because a POSIX function name must be a valid name and `[` is not one, so no
+/// conforming shell can define a function that shadows it. A shell that accepts the definition
+/// anyway is covered separately — see [`SH_HELPERS_ODD`] — rather than in this list, whose members
+/// must all be names a `unset -f` cannot object to.
+const SH_HELPERS: &str = "command printf mktemp rm mv env cmp cat diff kill test wc dd \
+                          cd pwd umask ulimit sleep wait setsid";
+
+/// Helper names a POSIX shell cannot define a function for, unset separately for the shells that can.
+///
+/// `[` is the whole of it. POSIX restricts a function name to a valid name, so `[` cannot be shadowed
+/// in a conforming shell — but `bash` accepts `[ () { … }` outside POSIX mode, and a script invited to
+/// run on a reader's machine should not rest a safety property on which shell they happen to have.
+///
+/// It is emitted as its own `unset -f`, and that separation is the point rather than tidiness: a shell
+/// entitled to reject the name would reject the **whole** invocation it appeared in, so folding it
+/// into [`SH_HELPERS`] would risk a single refusal leaving every helper in that list still shadowable.
+/// Two invocations mean the failure of one cannot cost the other. Both are written `2>| /dev/null || :`
+/// for the same reason.
+const SH_HELPERS_ODD: &str = "'['";
 
 /// The shell function through which every reproduced invocation is run.
 ///
@@ -3088,14 +3231,36 @@ const SH_BOUNDED: &str = "bounded_run";
 /// Classification written out of band for a command that chose its own exit status.
 const TERMINATION_EXITED: &str = "exited";
 
-/// Classification written out of band for a command a signal ended.
+/// Classification written out of band for a status a shell cannot attribute.
 ///
-/// A shell folds a signal death into `128 + signal`, and a program that itself exited with such a
-/// number is indistinguishable from one that was signalled — a property of `wait`, not of this
-/// suite. The harness compares raw wait status and so keeps the two apart; the script says which it
-/// saw in the terms a shell can actually observe, and the recorded expectation beside it names what
-/// the harness observed.
-const TERMINATION_SIGNALLED: &str = "signalled";
+/// # Why a signal death and an ordinary exit share one token
+///
+/// The other three are written on the strength of something the script DID — it killed the command,
+/// it saw a stream breach its quota — or of a number a shell can attribute without ambiguity. A
+/// status of [`SHELL_SIGNAL_STATUS_BASE`] or more is the one case where neither holds. `wait` folds a
+/// signal death into `128 + signal`, and a program is equally entitled to `return 130` of its own
+/// accord; the two arrive as the same number, and nothing available to a POSIX shell separates them.
+/// This is a property of `wait`, not of this suite — the harness itself keeps them apart, because it
+/// compares the raw wait status a shell never sees.
+///
+/// Writing `signalled 130` there would therefore state a fact the script never established, in the
+/// one place a reader is least able to check it. Worse, it would make a **correct** reproduction read
+/// as a failed one: a program that genuinely returned 130 is recorded by the suite as having exited
+/// with 130, so a script answering `signalled 130` would compare unequal to the expectation beside it
+/// and report that the divergence had not reproduced — sending a maintainer after a disagreement
+/// between the harness and its own script rather than between two compilers.
+///
+/// So the script names the ambiguity instead, and [`Capture::shell_expectation`] returns this same
+/// token for **both** an ordinary exit at or above the base and a signal death, because those are
+/// exactly the two cases a reproduction cannot tell apart and an expectation must state what a
+/// reproduction can observe. Which of the two the harness saw is not lost: it is in the sentence
+/// beside the classification, and in the raw wait status the capture's own `.exit` entry records.
+///
+/// Nothing in the corpus reaches this path in a healthy run — a record's `expect_exit` is capped at
+/// [`MAX_CONTRACT_EXIT_CODE`], well below the base. It is reached on the side of a finding that
+/// crashed or returned an unusual status, which is precisely where a reproduction must be
+/// trustworthy.
+const TERMINATION_AMBIGUOUS: &str = "ambiguous";
 
 /// Classification written out of band for a command the script's own watchdog terminated.
 ///
@@ -3501,7 +3666,6 @@ fn assemble_commands(
     id: &FindingId,
     merged: &BTreeMap<Oracle, Contribution>,
 ) -> HarnessResult<String> {
-    let _ = context;
     // Re-declared in oracle order from every contribution, so the preamble covers every block the
     // script carries. `declare` is first-wins on both the name and the value, so the names the blocks
     // were rendered against are exactly the names declared here — see [`Contribution`].
@@ -3564,12 +3728,14 @@ fn assemble_commands(
     )));
     script.push_str("#\n");
     script.push_str(&comment(&format!(
-        "Scratch output goes to ${VAR_WORK}. By default the script creates that directory for itself \
-         with `mktemp -d` under a 077 umask — an unpredictable name, created exclusively, readable \
-         only by you — and removes it again however the script exits. Set {VAR_KEEP}=1 to keep it, \
-         or set {VAR_WORK} to an existing directory of your own, which the script then writes into \
-         but never creates and never removes. Nothing this script names is written outside it; the tools \
-         it runs keep their own temporaries wherever they normally do."
+        "Scratch output goes to ${VAR_WORK}, and that directory is ALWAYS one the script creates for \
+         itself with `mktemp -d` under a 077 umask — an unpredictable name, created exclusively, \
+         readable only by you — and removes again however the script exits. Set {VAR_KEEP}=1 to keep \
+         it. Setting {VAR_WORK} to an existing directory of your own does not change that: the \
+         script creates its private directory INSIDE the one you named, writes only there, and \
+         removes only that private child on exit — the directory you supplied is neither created nor \
+         removed. Nothing this script names is written outside its private directory; the tools it \
+         runs keep their own temporaries wherever they normally do."
     )));
     script.push_str(&comment(&format!(
         "A fixed scratch name such as ./repro-work is deliberately not used. Its path would be \
@@ -3625,7 +3791,7 @@ fn assemble_commands(
         "case \"$0\" in\n    */*) {VAR_FINDING_DIR}=${{0%/*}} ;;\n    *) {VAR_FINDING_DIR}=. ;;\nesac\n"
     ));
     script.push_str(&format!(
-        "{VAR_FINDING_DIR}=$(CDPATH= cd -- \"${VAR_FINDING_DIR}\" && pwd) || exit 1\n"
+        "{VAR_FINDING_DIR}=$(CDPATH= command cd -- \"${VAR_FINDING_DIR}\" && command pwd) || exit 1\n"
     ));
     script.push_str(&format!(
         "{VAR_SOURCE}=\"${VAR_FINDING_DIR}/{REPRODUCER_SOURCE_NAME}\"\n"
@@ -3659,7 +3825,479 @@ fn assemble_commands(
         )));
         script.push_str(&contribution.comparison_block);
     }
+    // The last thing done to the script, and the first thing that can refuse it. Everything above
+    // has been assembled from a dozen renderers and from per-oracle blocks built at comparison time,
+    // so this is the only place the whole of what a reader will execute exists at once — which is
+    // where the claim the preamble makes about inherited shell functions has to be checked.
+    verify_helper_protection(context, &script)?;
     Ok(script)
+}
+
+/// Shell grammar: words that are syntax rather than a command name.
+///
+/// `if`, `then`, `while` and the rest cannot be shadowed because a shell never resolves them as
+/// commands at all. `[` is the one judgement call: POSIX requires a function name to be a valid
+/// *name* and `[` is not one, so no conforming shell can define a function that shadows it — while
+/// writing `command [ … ]` at every one of the script's three dozen conditionals would cost the
+/// reader's comprehension of the file they are being invited to run. The shells that accept the
+/// definition anyway are covered by [`SH_HELPERS_ODD`].
+const SH_RESERVED_WORDS: &[&str] = &[
+    "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done", "case", "esac",
+    "in", "!", "{", "}", "[",
+];
+
+/// POSIX special built-ins, which a function can never stand in for.
+///
+/// A shell resolves a special built-in *before* it looks for a function, so every name here is immune
+/// by construction. Naming one in [`SH_HELPERS`] would assert a protection that was never needed,
+/// which is why [`verify_helper_protection`] refuses that: a safety list padded with entries that do
+/// nothing is a safety list nobody can audit.
+const SH_SPECIAL_BUILTINS: &[&str] = &[
+    ":", ".", "break", "continue", "eval", "exec", "exit", "export", "readonly", "return", "set",
+    "shift", "times", "trap", "unset",
+];
+
+/// True when a command-position word needs no protection because nothing can shadow it.
+fn sh_word_is_unshadowable(word: &str) -> bool {
+    SH_RESERVED_WORDS.contains(&word) || SH_SPECIAL_BUILTINS.contains(&word)
+}
+
+/// Prove that every utility the rendered script invokes is protected against an inherited function.
+///
+/// # Why the check is over the rendered text rather than at each call site
+///
+/// The preamble tells the reader, in the script they are about to run, that an inherited exported
+/// shell function cannot stand in for any helper it uses. That is a claim about the **whole** file,
+/// and it was previously kept true by hand: a helper list written in one place and three dozen
+/// invocations written in a dozen renderers, with nothing tying the two together. The failure mode is
+/// not hypothetical — it is a later edit adding one `sleep` or one `cat` and the claim quietly
+/// becoming false, with no diagnostic anywhere, because a bare invocation works perfectly on a
+/// machine that exports no such function.
+///
+/// So the invariant is checked where it can actually be checked: over the text, once assembled. Every
+/// word at a command position must be one of
+///
+/// - a reserved word ([`SH_RESERVED_WORDS`]) or a POSIX special built-in
+///   ([`SH_SPECIAL_BUILTINS`]) — neither is shadowable;
+/// - a function this script itself defines ([`sh_script_functions`]);
+/// - `command` itself, which is the protection;
+/// - the operand of `command` or of `exec`, both of which bypass function lookup — `exec` is admitted
+///   without a `command` prefix precisely because it performs no function lookup, and because
+///   `exec command env …` does not work: `command` is a built-in, so there is nothing for `exec` to
+///   replace the shell with;
+/// - a member of [`SH_HELPERS`] reached through `command`;
+/// - a variable expansion, an assignment, or a path — the tool paths the preamble declares, which are
+///   the compiler and emulator invocations the finding is about.
+///
+/// Anything else is refused, and refused as an error rather than a warning: a finding whose
+/// reproduction script cannot be shown to hold this property is not a deliverable this suite has
+/// standing to publish.
+///
+/// # Errors
+///
+/// When a command-position word is neither exempt nor a `command`-protected member of the helper
+/// list. The message names the word and the line, because that is what an author needs.
+fn verify_helper_protection(context: &str, script: &str) -> HarnessResult<()> {
+    let helpers: Vec<&str> = SH_HELPERS.split_whitespace().collect();
+    let functions = sh_script_functions();
+    for (number, line) in script.lines().enumerate() {
+        let number = number + 1;
+        let trimmed = line.trim_start();
+        // Comments carry prose, and the script is more comment than command by volume. A `#` line is
+        // not a command list and nothing in it is ever executed.
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        for word in sh_command_words(line) {
+            if sh_word_is_unshadowable(&word.name)
+                || functions.contains(&word.name.as_str())
+                || word.name == SH_COMMAND_BUILTIN
+            {
+                continue;
+            }
+            // Both halves of the pairing are required of every utility, and they close different
+            // gaps. `command` stops the lookup at the invocation; `unset -f` removes the definition
+            // before any invocation happens. A name with only the first is protected here and
+            // nowhere else — the script's own preamble claims the definition is gone — and a name
+            // with only the second is one `unset -f` refusal away from being shadowable again. So
+            // membership in the list is demanded of a protected word too, which is what ties the
+            // list and the invocations together rather than leaving them to be kept in step by hand.
+            let listed = helpers.contains(&word.name.as_str());
+            if word.protected && listed {
+                continue;
+            }
+            // A tool path, a variable expansion or an assignment-only command: none of them is a
+            // bare NAME, so none can resolve to a function. `sh_command_words` yields a word here
+            // only when it looked like a plain name, so anything that reaches this point is a
+            // genuine utility invocation that is missing one of the two protections.
+            let missing = if word.protected {
+                "is reached through `command`, but is absent from SH_HELPERS, so the script's                  `unset -f` does not remove an inherited definition of it"
+            } else {
+                "is invoked without a `command` prefix, so an inherited exported shell function of                  that name would run in its place"
+            };
+            return Err(HarnessError::new(
+                context,
+                format!(
+                    "the reproduction script would invoke {:?} at line {number} and it {missing}.                      {:?} is neither a shell reserved word, a POSIX special built-in, nor a                      function this script defines, so it is a utility and needs both protections:                      add it to SH_HELPERS and write the invocation `command {}`. Anything less                      leaves the script's own preamble claiming a property it does not have. This is                      refused rather than warned about because a finding is a deliverable: a                      reproduction script whose stated safety property cannot be established is not                      one this suite has standing to publish. The line is: {}",
+                    word.name,
+                    word.name,
+                    word.name,
+                    line.trim()
+                ),
+            ));
+        }
+    }
+    // The list's own hygiene, checked in the other direction: an entry that cannot be shadowed at all
+    // asserts a protection that was never needed, and a safety list padded with such entries is one
+    // no reader can audit.
+    for word in helpers.iter() {
+        if sh_word_is_unshadowable(word) {
+            return Err(HarnessError::new(
+                context,
+                format!(
+                    "SH_HELPERS names {word:?}, which is a shell reserved word or a POSIX special \
+                     built-in and therefore cannot be shadowed by a function at all. Naming it \
+                     asserts a protection that was never needed, which makes the rest of the list \
+                     harder to audit; remove it"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The name `command`, which is both a helper and the mechanism that protects the others.
+const SH_COMMAND_BUILTIN: &str = "command";
+
+/// Check the reproduction script's inherited-function protection without needing a finding.
+///
+/// [`verify_helper_protection`] runs whenever a `commands.sh` is assembled, which is the right place
+/// for it and the wrong *only* place: a healthy run produces no finding at all, so on the runs that
+/// matter most the check would never execute and a regression could sit in the renderers for as long
+/// as the suite stayed green. This assembles the finding-independent scaffolding — every renderer that
+/// emits a helper invocation, which is all of them but the per-cell build-and-run and comparison
+/// blocks — and verifies that, so the invariant is asserted on **every** run.
+///
+/// The per-cell blocks are not skipped in the sense of being unchecked; they are checked by
+/// [`verify_helper_protection`] on the script they end up in, and they are also the blocks that
+/// consist of the recorded tool invocations rather than of helpers.
+///
+/// Returns the number of scaffolding lines examined, so the caller can report a figure rather than a
+/// bare assurance.
+///
+/// # Errors
+///
+/// As [`verify_helper_protection`]: an unprotected helper invocation in the scaffolding.
+pub fn verify_reproduction_scaffolding(context: &str) -> HarnessResult<usize> {
+    let mut script = String::from("#!/bin/sh\n");
+    script.push_str("set -eu\n");
+    script.push_str(&render_script_own_environment());
+    script.push_str(&render_scratch_setup());
+    script.push_str(&render_isolated_environment());
+    script.push_str(&render_working_directory());
+    script.push_str(&render_bounded_run_function());
+    verify_helper_protection(context, &script)?;
+    Ok(script.lines().count())
+}
+
+/// Every function the generated script defines for itself.
+///
+/// Derived from the constants that name them rather than written out again, so a renamed function
+/// cannot leave the verifier looking for the old name and reporting the new one as an unprotected
+/// utility.
+fn sh_script_functions() -> Vec<&'static str> {
+    vec![
+        SH_REFUSE_EXISTING,
+        SH_CLEANUP,
+        SH_ISOLATED,
+        SH_BOUNDED,
+        SH_CAPTURE_BYTES,
+        SH_CAPTURE_ACCOUNT,
+    ]
+}
+
+/// One word found at a command position, and whether it was reached through `command` or `exec`.
+struct ShellCommandWord {
+    /// The word itself, which is always a plain shell NAME — the only shape a function can shadow.
+    name: String,
+    /// True when `command` or `exec` immediately preceded it, either of which bypasses function
+    /// lookup.
+    protected: bool,
+}
+
+/// Extract the command-position words of one rendered line.
+///
+/// # Why a purpose-built scan rather than a shell parser
+///
+/// The only text this ever reads is text the renderers in this module produced, so the grammar it has
+/// to cope with is exactly the grammar they emit. That is a far smaller language than POSIX shell,
+/// and a scan written for it is auditable in a way that a partial general parser would not be — a
+/// general parser that silently mis-parsed a construct would report the script safe, which is the one
+/// outcome a safety check must never produce.
+///
+/// What it therefore handles, each because the renderers emit it:
+///
+/// - **Command-list separators.** A command position follows the start of the line, `;`, `|`, `&&`,
+///   `||`, `&`, `(`, `{`, and the reserved words that introduce a command (`if`, `then`, `else`,
+///   `do`, `elif`, `while`, `until`, `!`).
+/// - **Command substitution.** `$(…)` opens a fresh command position, which is where
+///   `authority_status=$(command cat …)` and `WORK=$(command umask 077; command mktemp -d)` live.
+/// - **Assignment prefixes.** `CDPATH= command cd …` and `WORK=…` — a word containing `=` before any
+///   quote is an assignment, so it is skipped and the position stays open.
+/// - **`trap` actions.** The single-quoted operand of `trap` is a command LIST that runs later, so it
+///   is scanned as one. This is the one place a quoted string is looked inside, and it is why the
+///   `kill` in each signal handler is checked rather than hidden.
+/// - **Quoting elsewhere.** A quoted word is an argument, never a command name, so quotes are opaque:
+///   the prose inside a `printf` message can never be mistaken for a command.
+///
+/// - **Expansions.** `$((…))` is arithmetic and holds no command, so it is skipped whole — without
+///   that distinction its inner `$(` would look like a command substitution and every arithmetic
+///   operand would be reported as an unprotected invocation. `${…}` is a parameter expansion and is
+///   likewise skipped, so its brace cannot be mistaken for the `{` that opens a command list.
+///
+/// A word that is not a plain NAME — `"$BCC"`, `$WORK/x.out`, `./a.out`, `-static` — is not yielded
+/// at all, because no shell function can be named any of those and the tool paths the preamble
+/// declares are exactly of that shape. `[` is in that category too: it is not a NAME, which is the
+/// same reason POSIX forbids a function called `[`, so it never reaches the check.
+fn sh_command_words(line: &str) -> Vec<ShellCommandWord> {
+    let mut found: Vec<ShellCommandWord> = Vec::new();
+    let characters: Vec<char> = line.chars().collect();
+    let mut index = 0usize;
+    // True while the next plain word would be a command name. A line begins at a command position.
+    let mut at_command = true;
+    // Carried across an assignment prefix and across `command`/`exec`, both of which leave the
+    // position open for the word that follows.
+    let mut protected = false;
+    while index < characters.len() {
+        let character = characters[index];
+        match character {
+            ' ' | '\t' => index += 1,
+            ';' | '|' | '&' | '(' | '{' => {
+                at_command = true;
+                protected = false;
+                index += 1;
+            }
+            ')' | '}' => {
+                at_command = false;
+                index += 1;
+            }
+            '\'' | '"' => {
+                // A quoted word is an argument. Skipped whole, so no prose inside it is ever read as
+                // a command — the one exception being a `trap` action, handled where `trap` is seen.
+                index = sh_skip_quoted(&characters, index);
+                at_command = false;
+            }
+            '$' => {
+                index = sh_skip_expansion(&characters, index, &mut at_command, &mut protected);
+            }
+            '#' if at_command => break,
+            '<' | '>' => {
+                // A redirection and its operand say nothing about command position.
+                index += 1;
+                while index < characters.len() && matches!(characters[index], '>' | '|' | '&') {
+                    index += 1;
+                }
+            }
+            _ => {
+                let start = index;
+                while index < characters.len()
+                    && !matches!(
+                        characters[index],
+                        ' ' | '\t'
+                            | ';'
+                            | '|'
+                            | '&'
+                            | '('
+                            | ')'
+                            | '{'
+                            | '}'
+                            | '\''
+                            | '"'
+                            | '<'
+                            | '>'
+                            | '$'
+                    )
+                {
+                    index += 1;
+                }
+                let word: String = characters[start..index].iter().collect();
+                if !at_command {
+                    continue;
+                }
+                if word.contains('=') {
+                    // An assignment prefix. The command position stays open for the word after it.
+                    continue;
+                }
+                if word == SH_COMMAND_BUILTIN || word == SH_EXEC_BUILTIN {
+                    // Both bypass function lookup for whatever follows. `command`'s own `-v` and
+                    // `-p` options are skipped by the `-` guard below, which leaves the position
+                    // open and protected. `exec` is yielded as well, so the exemption it relies on
+                    // is stated in one table rather than implied by an absence.
+                    if word == SH_EXEC_BUILTIN {
+                        found.push(ShellCommandWord {
+                            name: word,
+                            protected,
+                        });
+                    }
+                    protected = true;
+                    continue;
+                }
+                if word.starts_with('-') {
+                    // An option to `command`, so the position is still open.
+                    continue;
+                }
+                if word == SH_TRAP_BUILTIN {
+                    // The action is a command list. Scanned recursively, which is what puts the
+                    // `command kill` inside each signal handler under this check.
+                    found.push(ShellCommandWord {
+                        name: word,
+                        protected,
+                    });
+                    if let Some(action) = sh_trap_action(&characters, index) {
+                        found.extend(sh_command_words(&action));
+                    }
+                    break;
+                }
+                let is_plain_name = !word.is_empty()
+                    && word
+                        .chars()
+                        .all(|item| item.is_ascii_alphanumeric() || item == '_');
+                if is_plain_name {
+                    found.push(ShellCommandWord {
+                        name: word.clone(),
+                        protected,
+                    });
+                }
+                // A word that INTRODUCES a command leaves the position open, so whatever follows it
+                // is examined rather than skipped. Getting this wrong is the dangerous direction: a
+                // position wrongly treated as closed makes an unprotected invocation invisible,
+                // which is a safety check that reports success. `for` and `case` are deliberately
+                // absent — the word after each is a variable name and a subject, not a command.
+                if SH_INTRODUCES_COMMAND.contains(&word.as_str()) {
+                    at_command = true;
+                    protected = false;
+                } else {
+                    at_command = false;
+                    protected = false;
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The `exec` special built-in, which replaces the shell and performs no function lookup.
+const SH_EXEC_BUILTIN: &str = "exec";
+
+/// The `trap` special built-in, whose action operand is a command list rather than an argument.
+const SH_TRAP_BUILTIN: &str = "trap";
+
+/// The words after which a command name may appear directly.
+///
+/// Every one of them is a reserved word that introduces a command list, so the position stays open
+/// across it. Kept separate from [`SH_RESERVED_WORDS`], which answers a different question — that
+/// table says which words need no protection, and this one says which words do not consume the
+/// position.
+const SH_INTRODUCES_COMMAND: &[&str] = &["if", "then", "elif", "else", "do", "while", "until", "!"];
+
+/// Skip one `$`-expansion, returning the index just past it.
+///
+/// Three shapes, and the distinction between the first two is what stops arithmetic from being read
+/// as a command:
+///
+/// - `$((…))` — arithmetic. Skipped whole, counting nested parentheses, so `$(( (X * 4) / 512 ))`
+///   ends where it really ends. It holds operands, never a command.
+/// - `$(…)` — command substitution. Opens a fresh command position; the closing parenthesis the main
+///   scan meets later closes it again.
+/// - `${…}` and `$NAME` — parameter expansion. Skipped whole, so neither the brace nor the name is
+///   mistaken for a command list or a command.
+fn sh_skip_expansion(
+    characters: &[char],
+    at: usize,
+    at_command: &mut bool,
+    protected: &mut bool,
+) -> usize {
+    let next = characters.get(at + 1).copied();
+    if next == Some('(') && characters.get(at + 2).copied() == Some('(') {
+        // Arithmetic expansion. `depth` counts the two opening parentheses already consumed.
+        let mut index = at + 3;
+        let mut depth = 2usize;
+        while index < characters.len() && depth > 0 {
+            match characters[index] {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            index += 1;
+        }
+        *at_command = false;
+        return index;
+    }
+    if next == Some('(') {
+        *at_command = true;
+        *protected = false;
+        return at + 2;
+    }
+    if next == Some('{') {
+        let mut index = at + 2;
+        while index < characters.len() && characters[index] != '}' {
+            index += 1;
+        }
+        *at_command = false;
+        return index.saturating_add(1).min(characters.len());
+    }
+    // `$NAME`, `$?`, `$$`, `$!`, `$@` — one expansion, and no command inside it.
+    let mut index = at + 1;
+    while index < characters.len()
+        && (characters[index].is_ascii_alphanumeric()
+            || matches!(characters[index], '_' | '?' | '$' | '!' | '@' | '#' | '*'))
+    {
+        index += 1;
+    }
+    *at_command = false;
+    index.max(at + 1)
+}
+
+/// Skip a single- or double-quoted word, returning the index just past its closing quote.
+///
+/// An unterminated quote returns the end of the line, which is the conservative answer: the renderers
+/// never emit one, and treating the remainder as quoted cannot make an unprotected invocation look
+/// protected — it can only stop the scan early, and the verifier is checked against a rendered script
+/// whose every line is complete.
+fn sh_skip_quoted(characters: &[char], open: usize) -> usize {
+    let quote = characters[open];
+    let mut index = open + 1;
+    while index < characters.len() {
+        if characters[index] == '\\' && quote == '"' {
+            index += 2;
+            continue;
+        }
+        if characters[index] == quote {
+            return index + 1;
+        }
+        index += 1;
+    }
+    characters.len()
+}
+
+/// The single-quoted action of a `trap`, as a command list ready to be scanned.
+///
+/// Returns `None` when the operand is not single-quoted — `trap - HUP` and `trap {SH_CLEANUP} EXIT`
+/// are both of that shape, and neither carries a command list to look inside.
+fn sh_trap_action(characters: &[char], from: usize) -> Option<String> {
+    let mut index = from;
+    while index < characters.len() && matches!(characters[index], ' ' | '\t') {
+        index += 1;
+    }
+    if index >= characters.len() || characters[index] != '\'' {
+        return None;
+    }
+    let end = sh_skip_quoted(characters, index);
+    // Without the quotes: the content is what runs when the signal arrives.
+    let inner: String = characters[index + 1..end.saturating_sub(1)]
+        .iter()
+        .collect();
+    Some(inner)
 }
 
 /// Render the scratch-directory setup a reproduction script performs before it builds anything.
@@ -3774,12 +4412,21 @@ fn render_script_own_environment() -> String {
     text.push_str("export CDPATH\n");
     text.push_str(&comment(
         "A shell that exports FUNCTIONS through the environment would let an inherited function named \
-         after a helper win over both the builtin and the file on the vetted path above. Removing any \
-         such definition is one line and covers every helper uniformly; the ones whose misuse would be \
-         most damaging are additionally invoked through `command`, which suppresses function lookup on \
-         its own.",
+         after a helper win over both the builtin and the file on the vetted path above. Every helper \
+         this script names is therefore protected TWICE, and the two measures cover different gaps: \
+         the definition is removed here, and each invocation is additionally written `command <name>`, \
+         which suppresses function lookup whether or not this line found anything to remove. The list \
+         covers every name that is not a POSIX SPECIAL builtin -- including cd, pwd, umask, ulimit and \
+         wait, each of which is a builtin a function may still shadow. set, unset, exec, trap, exit, \
+         export, shift, break and : are absent because no function can shadow a special builtin.",
     ));
     text.push_str(&format!("unset -f {SH_HELPERS} 2>| /dev/null || :\n"));
+    text.push_str(&comment(
+        "`[` on its own line, because a shell entitled to refuse the name would refuse the whole \
+         invocation it appeared in and leave the list above still shadowable. POSIX forbids a function \
+         named `[`; this covers the shells that permit one anyway.",
+    ));
+    text.push_str(&format!("unset -f {SH_HELPERS_ODD} 2>| /dev/null || :\n"));
     text.push_str(&comment(
         "noclobber: every redirection below creates its target exclusively, so none can write \
          through a file — or a symbolic link, including a dangling one — that is already at the name.",
@@ -3794,7 +4441,7 @@ fn render_script_own_environment() -> String {
          that never unsets anything.",
     ));
     text.push_str("set -C\n");
-    text.push_str("umask 077\n\n");
+    text.push_str("command umask 077\n\n");
     text
 }
 
@@ -3810,7 +4457,7 @@ fn render_scratch_setup() -> String {
     text.push_str("    for candidate in \"$@\"; do\n");
     text.push_str("        if [ -e \"$candidate\" ] || [ -L \"$candidate\" ]; then\n");
     text.push_str(
-        "            printf 'refusing to write %s: something is already at that name, and a \
+        "            command printf 'refusing to write %s: something is already at that name, and a \
          redirection would write through it\\n' \"$candidate\" >&2\n",
     );
     text.push_str("            exit 1\n");
@@ -3852,7 +4499,7 @@ fn render_scratch_setup() -> String {
     )));
     text.push_str("if ! command -v mktemp >| /dev/null 2>&1; then\n");
     text.push_str(
-        "    printf 'mktemp is required: this script always writes into a private directory it \
+        "    command printf 'mktemp is required: this script always writes into a private directory it \
          creates itself, and mktemp is what creates one exclusively under an unpredictable name\\n' \
          >&2\n",
     );
@@ -3861,30 +4508,30 @@ fn render_scratch_setup() -> String {
     text.push_str(&format!("if [ -n \"${{{VAR_WORK}:-}}\" ]; then\n"));
     text.push_str(&format!("    if [ -L \"${VAR_WORK}\" ]; then\n"));
     text.push_str(&format!(
-        "        printf '{VAR_WORK} is a symbolic link (%s); it is refused rather than followed, \
+        "        command printf '{VAR_WORK} is a symbolic link (%s); it is refused rather than followed, \
          because every scratch write would go through it\\n' \"${VAR_WORK}\" >&2\n"
     ));
     text.push_str("        exit 1\n");
     text.push_str("    fi\n");
     text.push_str(&format!("    if [ ! -d \"${VAR_WORK}\" ]; then\n"));
     text.push_str(&format!(
-        "        printf '{VAR_WORK} is not an existing directory (%s); create it yourself, or unset \
+        "        command printf '{VAR_WORK} is not an existing directory (%s); create it yourself, or unset \
          {VAR_WORK} to let this script make a private one\\n' \"${VAR_WORK}\" >&2\n"
     ));
     text.push_str("        exit 1\n");
     text.push_str("    fi\n");
     text.push_str(&format!(
-        "    {VAR_WORK_PARENT}=\"${VAR_WORK}\"\n    {VAR_WORK}=$(umask 077; command mktemp -d \
+        "    {VAR_WORK_PARENT}=\"${VAR_WORK}\"\n    {VAR_WORK}=$(command umask 077; command mktemp -d \
          \"${VAR_WORK_PARENT}/{SCRATCH_TEMPLATE}\") || exit 1\n"
     ));
     text.push_str("else\n");
     text.push_str(&format!(
-        "    {VAR_WORK}=$(umask 077; command mktemp -d) || exit 1\n"
+        "    {VAR_WORK}=$(command umask 077; command mktemp -d) || exit 1\n"
     ));
     text.push_str("fi\n");
     text.push_str(&format!("if [ -z \"${VAR_WORK}\" ]; then\n"));
     text.push_str(
-        "    printf 'mktemp -d produced no directory, so there is nowhere safe to write\\n' >&2\n",
+        "    command printf 'mktemp -d produced no directory, so there is nowhere safe to write\\n' >&2\n",
     );
     text.push_str("    exit 1\n");
     text.push_str("fi\n");
@@ -3892,16 +4539,20 @@ fn render_scratch_setup() -> String {
     text.push_str(&format!("trap {SH_CLEANUP} EXIT\n"));
     for signal in ["HUP", "INT", "TERM"] {
         text.push_str(&format!(
-            "trap '{SH_CLEANUP}; trap - {signal}; kill -{signal} $$' {signal}\n"
+            "trap '{SH_CLEANUP}; trap - {signal}; command kill -{signal} $$' {signal}\n"
         ));
     }
     text.push_str(&format!(
         "command printf 'scratch directory: %s\\n' \"${VAR_WORK}\"\n"
     ));
     text.push_str(&format!("if [ -n \"${{{VAR_WORK_PARENT}:-}}\" ]; then\n"));
+    // The PARENT is what this line is about, so the parent is what it prints. Naming the variable
+    // without expanding it — which is what this line used to do — printed the word `WORK` and told a
+    // reader nothing about the directory they had supplied, in the one message whose whole purpose is
+    // to distinguish the directory the script created from the one it did not.
     text.push_str(&format!(
-        "    command printf 'it was created inside the %s you supplied, which is not itself \
-         removed\\n' {VAR_WORK}\n"
+        "    command printf 'it was created inside %s, the directory you supplied, which is itself \
+         neither created nor removed by this script\\n' \"${VAR_WORK_PARENT}\"\n"
     ));
     text.push_str("fi\n");
     text.push_str(&format!(
@@ -3938,7 +4589,9 @@ fn render_working_directory() -> String {
          absolute — ${VAR_WORK}/… or ${VAR_SOURCE} — so this changes where the tools write and \
          nothing else."
     )));
-    text.push_str(&format!("CDPATH= cd -- \"${VAR_WORK}\" || exit 1\n\n"));
+    text.push_str(&format!(
+        "CDPATH= command cd -- \"${VAR_WORK}\" || exit 1\n\n"
+    ));
     text
 }
 
@@ -4029,7 +4682,7 @@ fn render_isolated_environment() -> String {
     text.push_str(&format!("{SH_ISOLATED}() {{\n"));
     text.push_str("    if ! command -v env >| /dev/null 2>&1; then\n");
     text.push_str(
-        "        printf 'env is required: the recorded run cleared the environment before spawning, \
+        "        command printf 'env is required: the recorded run cleared the environment before spawning, \
          and reproducing a build under an inherited environment would reproduce a different \
          invocation\\n' >&2\n",
     );
@@ -4055,7 +4708,7 @@ fn render_isolated_environment() -> String {
         "    if [ \"$_i_blocks\" -lt {FILE_LIMIT_FLOOR_BLOCKS} ]; then\n        \
          _i_blocks={FILE_LIMIT_FLOOR_BLOCKS}\n    fi\n"
     ));
-    text.push_str("    if ! ulimit -f \"$_i_blocks\" 2>| /dev/null; then\n");
+    text.push_str("    if ! command ulimit -f \"$_i_blocks\" 2>| /dev/null; then\n");
     text.push_str(
         "        command printf '%s\\n' 'note: this shell would not set a file-size limit, so a \
          runaway command is bounded only by the byte quota polled once a second' >&2\n",
@@ -4109,7 +4762,7 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
         // which is what lets the comparison be a string equality rather than a case analysis.
         if let Some(classification) = expected_status {
             block.push_str(&format!(
-                "printf '%s\\n' {} > \"${VAR_WORK}/{stem}.status\"\n",
+                "command printf '%s\\n' {} > \"${VAR_WORK}/{stem}.status\"\n",
                 posix_quote(&classification)
             ));
         }
@@ -4162,7 +4815,7 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
             &format!("\"${VAR_WORK}/{stem}.compile.stderr\""),
         ));
         block.push_str(&format!(
-            "printf 'build %s : %s (recorded: %s)\\n' {} \"$termination\" {}\n",
+            "command printf 'build %s : %s (recorded: %s)\\n' {} \"$termination\" {}\n",
             posix_quote(&stem),
             posix_quote(&describe_compile_termination(compile))
         ));
@@ -4190,7 +4843,7 @@ fn render_capture_block(capture: &Capture, variables: &ShellVariables) -> String
                 &format!("\"${VAR_WORK}/{stem}.stderr\""),
             ));
             block.push_str(&format!(
-                "printf 'run   %s : %s (recorded: %s)\\n' {} \"$termination\" {}\n",
+                "command printf 'run   %s : %s (recorded: %s)\\n' {} \"$termination\" {}\n",
                 posix_quote(&stem),
                 posix_quote(&expectation)
             ));
@@ -4358,11 +5011,21 @@ fn render_bounded_run_function() -> String {
     )));
     text.push_str(&comment(&format!(
         "The classification is written to the status file as one of `{TERMINATION_EXITED} <n>`, \
-         `{TERMINATION_SIGNALLED} <n>` or `{TERMINATION_TIMEOUT}`, and `{TERMINATION_TIMEOUT}` is \
-         written only when this function performed the kill. That is the whole reason the watchdog is \
-         here rather than a bare `{TERMINATION_TIMEOUT}` prefix: a utility reports expiry as \
+         `{TERMINATION_AMBIGUOUS} <n>`, `{TERMINATION_TIMEOUT}` or `{TERMINATION_FLOODED}`, and the \
+         last two are written only when this function performed the kill. That is the whole reason \
+         the watchdog is here rather than a bare timeout prefix: a utility reports expiry as \
          {TIMEOUT_UTILITY_STATUS}, a program is entitled to return {TIMEOUT_UTILITY_STATUS} of its \
          own accord, and no reading of the number can tell those apart."
+    )));
+    text.push_str(&comment(&format!(
+        "A status of {SHELL_SIGNAL_STATUS_BASE} or more is recorded as `{TERMINATION_AMBIGUOUS} <n>` \
+         rather than as a death by signal, and that is not caution but accuracy: `wait` folds a \
+         signal death into {SHELL_SIGNAL_STATUS_BASE} + signal, a program is entitled to return such \
+         a number itself, and nothing a POSIX shell can observe separates the two. The expectation \
+         printed beside each comparison uses the same word for both cases, so a program that really \
+         did return such a status still compares EQUAL here; which of the two the recorded run \
+         actually saw is in the `Termination:` line of this script and in outputs/*.exit, where the \
+         raw wait status the harness compared is written down."
     )));
     text.push_str(&comment(&format!(
         "${VAR_TIMEOUT}, when the preamble declares one, is applied at \
@@ -4473,7 +5136,7 @@ fn render_bounded_run_function() -> String {
     text.push_str("    _b_waited=0\n");
     text.push_str("    _b_killed=0\n");
     text.push_str("    while [ \"$_b_waited\" -lt \"$_b_budget\" ]; do\n");
-    text.push_str("        kill -0 \"$_b_child\" 2>| /dev/null || break\n");
+    text.push_str("        command kill -0 \"$_b_child\" 2>| /dev/null || break\n");
     // The volume check, on the same poll as the liveness check: one `sleep` already paces this loop,
     // so measuring here costs two `wc` invocations per second and no extra waiting. Only reachable
     // when `wc` is present; where it is not, `_b_over` stays 0 and the degradation is printed once,
@@ -4488,24 +5151,24 @@ fn render_bounded_run_function() -> String {
     text.push_str("                break\n");
     text.push_str("            fi\n");
     text.push_str("        fi\n");
-    text.push_str("        sleep 1\n");
+    text.push_str("        command sleep 1\n");
     text.push_str("        _b_waited=$(( _b_waited + 1 ))\n");
     text.push_str("    done\n");
     // One kill for two reasons, deliberately: a flood and an expiry both mean "this invocation must
     // stop now", and routing them through the same group signal is what keeps a flooding program from
     // outliving the script the way a hanging one would. Which of the two happened is decided below,
     // from `_b_over` and `_b_killed`, never from a status.
-    text.push_str("    if kill -0 \"$_b_child\" 2>| /dev/null; then\n");
+    text.push_str("    if command kill -0 \"$_b_child\" 2>| /dev/null; then\n");
     text.push_str("        _b_killed=1\n");
     // The group this script created, confirmed to exist before it is signalled. `setsid` makes the
     // child a group leader, so the group is the child's PID; `kill -0` on the negated PID proves the
     // group is there and signallable rather than assuming the launch took that path.
     text.push_str(&format!(
-        "        if [ -n \"${{{VAR_SETSID}:-}}\" ] && kill -0 \"-$_b_child\" 2>| /dev/null; then\n"
+        "        if [ -n \"${{{VAR_SETSID}:-}}\" ] && command kill -0 \"-$_b_child\" 2>| /dev/null; then\n"
     ));
-    text.push_str("            kill -9 \"-$_b_child\" 2>| /dev/null || :\n");
+    text.push_str("            command kill -9 \"-$_b_child\" 2>| /dev/null || :\n");
     text.push_str("        else\n");
-    text.push_str("            kill -9 \"$_b_child\" 2>| /dev/null || :\n");
+    text.push_str("            command kill -9 \"$_b_child\" 2>| /dev/null || :\n");
     // The stated degradation, printed in the script the reader is running: without a group of its own
     // only the direct child can be signalled safely, so a program behind a timeout utility may outlive
     // the bound. A bound that quietly does less than it claims is worse than none.
@@ -4518,7 +5181,7 @@ fn render_bounded_run_function() -> String {
     text.push_str("    fi\n");
     // Reaped whichever path was taken, so the script leaves no zombie behind.
     text.push_str("    status=0\n");
-    text.push_str("    wait \"$_b_child\" || status=$?\n");
+    text.push_str("    command wait \"$_b_child\" || status=$?\n");
     // Accounted for after the reap, so nothing is still writing to either file while it is measured
     // and truncated. Both streams are accounted for even when neither breached, because the produced
     // and retained figures are evidence in their own right: a reader comparing two runs needs to know
@@ -4543,9 +5206,14 @@ fn render_bounded_run_function() -> String {
     //
     // `capture_over_quota` is consulted as well as `_b_over`, and that is what keeps the answer right
     // when the file-size backstop fires before the poll does: the kernel signals the producer, the
-    // shell sees a signal death, and reporting `signalled 153` would describe the mechanism instead
-    // of the event. A stream that exceeded its quota means the invocation flooded, however it was
+    // shell sees a status of 153, and reporting that number would describe the mechanism instead of
+    // the event. A stream that exceeded its quota means the invocation flooded, however it was
     // stopped.
+    //
+    // The last two branches are where the shell's own ambiguity is admitted rather than papered over.
+    // Anything at or above the signal base is `ambiguous <n>`, because a signal death and a program
+    // that returned that number are the same number to `wait`; only a status below the base is
+    // attributable, and only that one is called `exited`.
     text.push_str("    if [ \"$_b_over\" -eq 1 ] || [ \"$capture_over_quota\" -gt 0 ]; then\n");
     text.push_str(&format!("        termination={TERMINATION_FLOODED}\n"));
     text.push_str("    elif [ \"$_b_killed\" -eq 1 ]; then\n");
@@ -4554,14 +5222,14 @@ fn render_bounded_run_function() -> String {
         "    elif [ \"$status\" -ge {SHELL_SIGNAL_STATUS_BASE} ]; then\n"
     ));
     text.push_str(&format!(
-        "        termination=\"{TERMINATION_SIGNALLED} $status\"\n"
+        "        termination=\"{TERMINATION_AMBIGUOUS} $status\"\n"
     ));
     text.push_str("    else\n");
     text.push_str(&format!(
         "        termination=\"{TERMINATION_EXITED} $status\"\n"
     ));
     text.push_str("    fi\n");
-    text.push_str("    printf '%s\\n' \"$termination\" > \"$_b_status\"\n");
+    text.push_str("    command printf '%s\\n' \"$termination\" > \"$_b_status\"\n");
     text.push_str("}\n");
     text
 }
@@ -4719,7 +5387,7 @@ fn render_comparison_block(finding: &Finding, captures: &[&Capture]) -> String {
              the absence itself is the divergence.",
         ));
         block.push_str(&format!(
-            "printf '\\nRESULT: %s was never observed, so there is nothing to compare against — \
+            "command printf '\\nRESULT: %s was never observed, so there is nothing to compare against — \
              that absence is the finding. The side that was observed is reproduced above, and its \
              captured streams are in {OUTPUTS_DIR_NAME}/ beside this script.\\n' {}\n",
             posix_quote(&missing)
@@ -4796,29 +5464,33 @@ fn render_comparison_block(finding: &Finding, captures: &[&Capture]) -> String {
         // --- stdout --------------------------------------------------------------------------
         block.push_str("if command -v cmp >| /dev/null 2>&1; then\n");
         block.push_str(&format!(
-            "    if cmp {authority_file} {subject_file}; then\n"
+            "    if command cmp {authority_file} {subject_file}; then\n"
         ));
-        block.push_str("        printf 'stdout: identical here\\n'\n");
+        block.push_str("        command printf 'stdout: identical here\\n'\n");
         block.push_str("    else\n");
-        block.push_str("        printf 'stdout: DIFFERS\\n'\n");
+        block.push_str("        command printf 'stdout: DIFFERS\\n'\n");
         block.push_str("        differed=1\n");
         block.push_str("    fi\n");
         block.push_str("else\n");
         block.push_str(&format!(
-            "    printf 'stdout: cmp is unavailable; compare %s and %s by hand\\n' \
+            "    command printf 'stdout: cmp is unavailable; compare %s and %s by hand\\n' \
              {authority_file} {subject_file}\n"
         ));
         block.push_str("    differed=1\n");
         block.push_str("fi\n\n");
 
         // --- termination ---------------------------------------------------------------------
-        block.push_str(&format!("authority_status=$(cat {authority_status})\n"));
-        block.push_str(&format!("subject_status=$(cat {subject_status})\n"));
+        block.push_str(&format!(
+            "authority_status=$(command cat {authority_status})\n"
+        ));
+        block.push_str(&format!("subject_status=$(command cat {subject_status})\n"));
         block.push_str("if [ \"$authority_status\" = \"$subject_status\" ]; then\n");
-        block.push_str("    printf 'status: identical here (both %s)\\n' \"$authority_status\"\n");
+        block.push_str(
+            "    command printf 'status: identical here (both %s)\\n' \"$authority_status\"\n",
+        );
         block.push_str("else\n");
         block.push_str(
-            "    printf 'status: DIFFERS (authority %s, subject %s)\\n' \"$authority_status\" \
+            "    command printf 'status: DIFFERS (authority %s, subject %s)\\n' \"$authority_status\" \
              \"$subject_status\"\n",
         );
         block.push_str("    differed=1\n");
@@ -4847,31 +5519,31 @@ fn render_comparison_block(finding: &Finding, captures: &[&Capture]) -> String {
     // answer "no" from evidence it holds only in part.
     block.push_str("if [ \"$captures_truncated\" -gt 0 ] && [ \"$differed\" -eq 0 ]; then\n");
     block.push_str(
-        "    printf '\\nRESULT: INCONCLUSIVE — %s captured stream(s) reached the byte quota and \
+        "    command printf '\\nRESULT: INCONCLUSIVE — %s captured stream(s) reached the byte quota and \
          were truncated, so no difference was found in what was retained but the streams are held \
          only in part.\\n' \"$captures_truncated\"\n",
     );
     block.push_str(&format!(
-        "    printf 'This is NOT a report that the divergence failed to reproduce. Raise \
+        "    command printf 'This is NOT a report that the divergence failed to reproduce. Raise \
          ${VAR_CAPTURE_BYTES_MAX} and ${VAR_FINDING_BYTES_MAX} until no capture is truncated, then \
          run this script again.\\n'\n"
     ));
     block.push_str("elif [ \"$differed\" -eq 0 ]; then\n");
     block.push_str(
-        "    printf '\\nRESULT: neither stdout nor status differed here, so the recorded \
+        "    command printf '\\nRESULT: neither stdout nor status differed here, so the recorded \
          divergence did NOT reproduce.\\n'\n",
     );
     block.push_str(&format!(
-        "    printf 'Compare {ENVIRONMENT_NAME} against your toolchain before concluding the \
+        "    command printf 'Compare {ENVIRONMENT_NAME} against your toolchain before concluding the \
          compiler changed.\\n'\n"
     ));
     block.push_str("else\n");
     block.push_str(
-        "    printf '\\nRESULT: the recorded divergence reproduced, which is the finding.\\n'\n",
+        "    command printf '\\nRESULT: the recorded divergence reproduced, which is the finding.\\n'\n",
     );
     block.push_str("    if [ \"$captures_truncated\" -gt 0 ]; then\n");
     block.push_str(
-        "        printf 'Note: %s captured stream(s) were truncated at the byte quota. The \
+        "        command printf 'Note: %s captured stream(s) were truncated at the byte quota. The \
          difference above is real - the bytes that differed differed - but the streams beside this \
          script are prefixes.\\n' \"$captures_truncated\"\n",
     );
@@ -5089,7 +5761,6 @@ fn bound_text(text: &str) -> String {
 /// restraint is the point — the suite's authority comes from having compared two independent
 /// implementations and reported what it saw, and a guess recorded beside the evidence in the same
 /// voice would be indistinguishable from a measurement to every later reader.
-#[allow(clippy::too_many_arguments)]
 fn assemble_manifest(
     finding: &Finding,
     id: &FindingId,
@@ -5097,8 +5768,7 @@ fn assemble_manifest(
     minimization: &Minimization,
     fixed: &FixedArtifacts<'_>,
     merged: &BTreeMap<Oracle, Contribution>,
-    capture_bytes: &[(String, u64)],
-    artifact_inventory: &[String],
+    inventory: &DirectoryInventory<'_>,
 ) -> String {
     let observers: Vec<Oracle> = merged.keys().copied().collect();
     let reproducer_digest = digest_hex_of_bytes(fixed.reproducer);
@@ -5135,6 +5805,14 @@ fn assemble_manifest(
     // audit rather than remaining an instruction in a document.
     text.push_str(&format!(
         "{MANIFEST_DISCLOSURE_PREFIX}{DISCLOSURE_NOT_PERFORMED}\n"
+    ));
+    // The minimization status, in the same field shape and for the same reason. `reproducer.c` beneath
+    // the generated root is a verbatim copy of the corpus program — which the section below states in
+    // prose as well — and this line is what lets the curated audit refuse a promotion that never
+    // examined it. Written next to the disclosure line deliberately: the two are the pair of
+    // judgements FINDINGS.md requires of a curator, and a reader looking for one should find both.
+    text.push_str(&format!(
+        "{MANIFEST_MINIMIZATION_PREFIX}{MINIMIZATION_NOT_PERFORMED}\n"
     ));
     text.push_str(&format!("area             = {}\n", finding.key().area()));
     text.push_str(&format!("program          = {}\n", finding.key().program()));
@@ -5222,8 +5900,8 @@ fn assemble_manifest(
     }
 
     text.push_str(&finding.contract.render());
-    text.push_str(&render_artifact_inventory(artifact_inventory));
-    text.push_str(&render_capture_inventory(merged, capture_bytes));
+    text.push_str(&render_artifact_inventory(inventory.artifacts));
+    text.push_str(&render_capture_inventory(merged, inventory.captures));
 
     text.push_str("\nARTIFACTS IN THIS DIRECTORY\n---------------------------\n");
     text.push_str(&format!(
@@ -6467,6 +7145,15 @@ const CURATED_TEXT_ARTIFACTS: &[&str] = &[
 /// stream. Editing a `.stdout` or an `.exit` capture makes the divergence unfalsifiable — the finding
 /// *is* the difference between those bytes — so §5.3 forbids it, and a manifest that declares it is
 /// reporting a destroyed deliverable rather than a protected one.
+///
+/// - [`MANIFEST_MINIMIZATION_PREFIX`] must state a minimization outcome, and is audited in the same
+///   shape for the same reason. A run writes [`MINIMIZATION_NOT_PERFORMED`] — its `reproducer.c` is a
+///   verbatim copy of the corpus program — so that value is rejected here too, and promotion requires a
+///   curator to record either [`MINIMIZATION_REDUCED_PREFIX`] with what a reduction removed or
+///   [`MINIMIZATION_VERBATIM_PREFIX`] with why the program is already as small as the difference needs.
+///   Both outcomes are legitimate under `FINDINGS.md` §5.1 and both carry a reason, so the field cannot
+///   be satisfied by a bare prefix. This closes the asymmetry that let one of the two curation
+///   judgements be gated while the other was assumed by the documents describing the deliverable.
 fn portability_defects(manifest_text: &str, directory: &Path) -> Vec<String> {
     let mut defects: Vec<String> = Vec::new();
     match manifest_line_value(manifest_text, MANIFEST_SOURCE_MACHINE_PREFIX) {
@@ -6553,6 +7240,69 @@ fn portability_defects(manifest_text: &str, directory: &Path) -> Vec<String> {
              published, whether a hand-written paragraph names a person — so it is recorded rather \
              than re-derived",
             MANIFEST_DISCLOSURE_PREFIX.trim_end()
+        )),
+    }
+
+    // The minimization attestation, audited in the same shape as the disclosure one above. Requirement
+    // 6 asks for a reproducer minimized as far as practical, and *practical* is a judgement about one
+    // program — so it is recorded by the curator rather than guessed here. A run writes
+    // MINIMIZATION_NOT_PERFORMED truthfully, and that value is refused, which is what makes the
+    // judgement a step the audit can see was taken instead of an assumption the documents make.
+    let reduction = manifest_line_value(manifest_text, MANIFEST_MINIMIZATION_PREFIX);
+    match reduction.as_deref() {
+        // Matched on the prefixes with their trailing space removed, which is load-bearing rather than
+        // incidental: `manifest_line_value` trims the value it returns, so a curator who typed the
+        // vocabulary word and stopped leaves `reduced:` — which does not begin with `reduced: `. Match
+        // the spaced form and this arm never sees that line at all; it falls through to the
+        // unknown-value arm and is told its correct vocabulary word is not one of the outcomes, which
+        // is both wrong and the least helpful thing to say to someone who was one word from right.
+        Some(value)
+            if value.starts_with(MINIMIZATION_REDUCED_PREFIX.trim_end())
+                || value.starts_with(MINIMIZATION_VERBATIM_PREFIX.trim_end()) =>
+        {
+            // Both outcomes are legitimate and both carry a reason, so an empty one is the single
+            // failure mode left: a prefix with nothing after it records that a curator opened the
+            // field and not that they examined the program.
+            let prefix = match value.starts_with(MINIMIZATION_REDUCED_PREFIX.trim_end()) {
+                true => MINIMIZATION_REDUCED_PREFIX.trim_end(),
+                false => MINIMIZATION_VERBATIM_PREFIX.trim_end(),
+            };
+            if value[prefix.len()..].trim().is_empty() {
+                defects.push(format!(
+                    "its {MANIFEST_NAME} states `{}{}` and gives no reason after it. Both outcomes \
+                     are judgements about this one program — what a reduction removed, or why the \
+                     verbatim program is already as small as the difference needs — and a reader \
+                     comparing two curated findings can act on the reason and not on the prefix",
+                    MANIFEST_MINIMIZATION_PREFIX.trim_end(),
+                    sanitize_text_for_report(prefix)
+                ));
+            }
+        }
+        Some(MINIMIZATION_NOT_PERFORMED) => defects.push(format!(
+            "its {MANIFEST_NAME} still carries the state a run writes — the reproducer is a verbatim \
+             copy of the corpus program and the minimization step in {FINDINGS_REGISTER} §5.1 has not \
+             been performed. Requirement 6 asks for a reproducer minimized as far as practical, and a \
+             generated directory states this value precisely so that promoting one cannot leave that \
+             judgement unmade. Replace it with `{MINIMIZATION_REDUCED_PREFIX}<method and what was \
+             removed>` when the reproducer was reduced — on a copy, with every artifact regenerated \
+             from the reduced program — or with `{MINIMIZATION_VERBATIM_PREFIX}<reason>` when the \
+             verbatim program was examined and judged already minimal, which §5.1 anticipates as the \
+             ordinary outcome because each corpus program exercises one semantic concern"
+        )),
+        Some(value) => defects.push(format!(
+            "its {MANIFEST_NAME} states `{}{}`, which is not one of the outcomes this field holds. \
+             Use `{MINIMIZATION_REDUCED_PREFIX}<method>` or `{MINIMIZATION_VERBATIM_PREFIX}<reason>`; \
+             a value outside that vocabulary records an opinion rather than an outcome the audit can \
+             read back",
+            MANIFEST_MINIMIZATION_PREFIX.trim_end(),
+            sanitize_text_for_report(value)
+        )),
+        None => defects.push(format!(
+            "its {MANIFEST_NAME} states no `{}` line, so nothing records whether the reproducer was \
+             minimized as {FINDINGS_REGISTER} §5.1 and requirement 6 require. The reproducer a run \
+             files is a verbatim copy of the corpus program, so the absence of this line is not \
+             evidence that reduction was unnecessary — it is the absence of the judgement",
+            MANIFEST_MINIMIZATION_PREFIX.trim_end()
         )),
     }
     defects
@@ -6784,12 +7534,14 @@ pub fn write(finding: &Finding, caps: &Capabilities) -> HarnessResult<FindingArt
         finding,
         &id,
         fresh,
-        &reproducer_bytes,
-        &record_bytes,
-        &manifest,
-        &commands,
-        &environment,
-        &diff,
+        &DirectoryPayload {
+            reproducer: &reproducer_bytes,
+            record: &record_bytes,
+            manifest: &manifest,
+            commands: &commands,
+            environment: &environment,
+            diff: &diff,
+        },
     );
     let (directory, entries) = match published {
         Ok(published) => published,
@@ -6821,18 +7573,12 @@ pub fn write(finding: &Finding, caps: &Capabilities) -> HarnessResult<FindingArt
 /// Separated from [`write`] so that every failure inside it reaches one place, where the reservation
 /// this contribution holds is given back. A partial write leaving a charge behind would let a run
 /// refuse a later finding on the strength of bytes that are not there.
-#[allow(clippy::too_many_arguments)]
 fn publish_artifacts(
     context: &str,
     finding: &Finding,
     id: &FindingId,
     fresh: bool,
-    reproducer_bytes: &[u8],
-    record_bytes: &[u8],
-    manifest: &str,
-    commands: &str,
-    environment: &str,
-    diff: &str,
+    payload: &DirectoryPayload<'_>,
 ) -> HarnessResult<(PathBuf, Vec<PathBuf>)> {
     let context = String::from(context);
     let context = context.as_str();
@@ -6842,27 +7588,27 @@ fn publish_artifacts(
     // Written in the order REQUIRED_ARTIFACTS lists, so the returned paths and the completeness
     // check read in the same sequence as the documented artifact table.
     let source = guarded_path(context, &directory, &[REPRODUCER_SOURCE_NAME])?;
-    write_bytes(context, &source, reproducer_bytes)?;
+    write_bytes(context, &source, payload.reproducer)?;
     entries.push(source.clone());
 
     let record = guarded_path(context, &directory, &[REPRODUCER_RECORD_NAME])?;
-    write_bytes(context, &record, record_bytes)?;
+    write_bytes(context, &record, payload.record)?;
     entries.push(record.clone());
 
     let manifest_path = guarded_path(context, &directory, &[MANIFEST_NAME])?;
-    write_text(context, &manifest_path, manifest)?;
+    write_text(context, &manifest_path, payload.manifest)?;
     entries.push(manifest_path);
 
     let commands_path = guarded_path(context, &directory, &[COMMANDS_NAME])?;
-    write_text(context, &commands_path, commands)?;
+    write_text(context, &commands_path, payload.commands)?;
     entries.push(commands_path);
 
     let environment_path = guarded_path(context, &directory, &[ENVIRONMENT_NAME])?;
-    write_text(context, &environment_path, environment)?;
+    write_text(context, &environment_path, payload.environment)?;
     entries.push(environment_path);
 
     let diff_path = guarded_path(context, &directory, &[DIFF_NAME])?;
-    write_text(context, &diff_path, diff)?;
+    write_text(context, &diff_path, payload.diff)?;
     entries.push(diff_path);
 
     for capture in ordered_captures(finding) {
@@ -6871,6 +7617,29 @@ fn publish_artifacts(
 
     require_complete(context, &directory, finding.key())?;
     Ok((directory, entries))
+}
+
+/// The six merged artifacts of a finding directory, in the order they are written.
+///
+/// Grouped rather than passed as six parameters because they are one payload with one ordering
+/// obligation: `REQUIRED_ARTIFACTS` fixes the sequence, the returned entry list is expected to read
+/// in that sequence, and the completeness check reads it again. Six positional slices of two
+/// interchangeable types — two `&[u8]` and four `&str` — is precisely the shape in which a
+/// transposition compiles cleanly and writes the diff into `environment.txt`. Named fields make that
+/// mistake unrepresentable, and the declaration order below is the write order.
+struct DirectoryPayload<'a> {
+    /// The reproducer, a verbatim copy of the corpus program.
+    reproducer: &'a [u8],
+    /// Its expectation record, likewise verbatim.
+    record: &'a [u8],
+    /// The manifest, which publishes the digests of the other five.
+    manifest: &'a str,
+    /// The pasteable compile-and-run script for every cell involved.
+    commands: &'a str,
+    /// The environment fingerprint.
+    environment: &'a str,
+    /// The computed difference, with the first divergent line located.
+    diff: &'a str,
 }
 
 /// Write one finding's artifacts and return the outcome a report should carry for it.

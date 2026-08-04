@@ -102,7 +102,8 @@ impl_defined_notes <<END
 Every construct exercised here is documented as supported - docs/technical-specifications.md
 lines 93, 94 and 493 name #ifdef, #ifndef, #if, #elif, #else and #endif evaluation and the
 preprocessor constant-expression evaluator with integer arithmetic and defined(), and
-docs/project-guide.md line 79 lists the same - so this program carries no
+docs/project-guide.md's "C11 Frontend -- Preprocessor" row lists the same - so this program
+carries no
 expected-divergence marker and a divergence under any oracle is a genuine finding.
 
 The measured target differences are handled by construction, so this program needs no

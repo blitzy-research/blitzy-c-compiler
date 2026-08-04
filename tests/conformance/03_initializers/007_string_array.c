@@ -30,8 +30,8 @@
    character array, so its value is a byte count identical on all four targets;
    sizeof is deliberately never taken of g_ptr.  No header is named: bcc ships
    no stdio.h, its bundled set being the nine required freestanding headers plus
-   a bonus stdatomic.h, ten files in all (docs/project-guide.md line 212), so
-   printf is declared by hand. */
+   a bonus stdatomic.h, ten files in all (docs/project-guide.md, "9 bundled
+   freestanding headers"), so printf is declared by hand. */
 int printf(const char *, ...);
 
 /* Exact width, no room for a terminator: g_exact_u, g_exact_s, g_grid_exact.

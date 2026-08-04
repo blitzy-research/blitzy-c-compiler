@@ -94,13 +94,13 @@ boundary values the typing rule turns on, so writing them out is what the progra
 keeps the program single-file reproducible.
 NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, printf, is declared by
 hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
-bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so a directive
-naming that header would fail on the bcc side of oracle (a) while succeeding on the reference side --
-a spurious divergence caused by the test rather than by the compiler under test. Nothing in the file
-is a GCC extension, so no include exception and no gate deviation is available to area 02 and none is
-needed; the corpus has exactly two header exceptions, area 07's stdarg.h and the dedicated
-bundled-header probe in area 12.
-THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
+bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md, "9 bundled freestanding
+headers"), so a directive naming that header would fail on the bcc side of oracle (a) while
+succeeding on the reference side -- a spurious divergence caused by the test rather than by the
+compiler under test. Nothing in the file is a GCC extension, so no include exception and no gate
+deviation is available to area 02 and none is needed; the corpus has exactly two header exceptions,
+area 07's stdarg.h and the dedicated bundled-header probe in area 12. THIS RECORD DECLARES NO
+WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
 is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
 -Wconversion -Wsign-conversion -Wshadow -Werror in the single native compile-only invocation the
 suite's warning gate makes, and it builds and runs clean under the sanitizer gate

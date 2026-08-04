@@ -1,9 +1,9 @@
 /* No header is brought in and no preprocessor directive appears anywhere in this
  * file.  bcc ships no stdio.h: its bundled set is the nine required freestanding
- * headers plus a bonus stdatomic.h, ten files in all (docs/project-guide.md line
- * 212), and no standard I/O header is among them, so naming one would fail against
- * bcc while succeeding against the reference compiler.  printf is declared by hand
- * instead.
+ * headers plus a bonus stdatomic.h, ten files in all (docs/project-guide.md, "9
+ * bundled freestanding headers"), and no standard I/O header is among them, so
+ * naming one would fail against bcc while succeeding against the reference
+ * compiler.  printf is declared by hand instead.
  *
  * Every bitfield below is declared on an explicit unsigned int or signed int base
  * type, because a field declared on unqualified int has implementation-defined

@@ -66,10 +66,10 @@ socket, environment variable, clock, random source or locale is consulted, and i
 fixed by literal loop bounds, so every cell is reproducible from this source and this record alone.
 No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
 bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no standard
-I/O header (docs/project-guide.md line 212), so naming one would fail on the bcc side of oracle (a)
-while succeeding on the reference side -- a spurious divergence caused by the test rather than by a
-compiler. This area is granted no header exception; the corpus has exactly two, area 07's stdarg.h
-and the dedicated bundled-header probe in area 12.
+I/O header (docs/project-guide.md, "9 bundled freestanding headers"), so naming one would fail on
+the bcc side of oracle (a) while succeeding on the reference side -- a spurious divergence caused by
+the test rather than by a compiler. This area is granted no header exception; the corpus has exactly
+two, area 07's stdarg.h and the dedicated bundled-header probe in area 12.
 This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
 under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
 -Werror in the single native compile-only invocation the suite's warning gate makes, with no

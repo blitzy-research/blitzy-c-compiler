@@ -40,10 +40,10 @@
  *
  * No header is brought in and no preprocessor directive appears anywhere in this file: bcc
  * ships no stdio.h, its bundled set being the nine required freestanding headers plus a bonus
- * stdatomic.h, ten files in all (docs/project-guide.md line 212, the one place the repository
- * states the full ten-file inventory; the table at docs/technical-specifications.md lines
- * 202-214 enumerates only the nine required headers and does not list stdatomic.h).  printf
- * is declared by hand instead. */
+ * stdatomic.h, ten files in all (docs/project-guide.md, "9 bundled freestanding headers", the
+ * one place the repository states the full ten-file inventory; the table at
+ * docs/technical-specifications.md lines 202-214 enumerates only the nine required headers
+ * and does not list stdatomic.h).  printf is declared by hand instead. */
 int printf(const char *, ...);
 
 /* struct outer nests an aggregate between two scalars, which is what lets a designator

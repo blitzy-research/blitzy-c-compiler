@@ -10,8 +10,8 @@
  * <stdarg.h> is included because va_copy cannot be reached without it, and it
  * belongs to both compilers' freestanding header sets.  printf is hand-declared,
  * because bcc ships no stdio.h: its bundled set is the nine required freestanding
- * headers plus a bonus stdatomic.h, ten files in all (docs/project-guide.md line
- * 212), and no standard I/O header is among them.
+ * headers plus a bonus stdatomic.h, ten files in all (docs/project-guide.md, "9
+ * bundled freestanding headers"), and no standard I/O header is among them.
  *
  * Every floating literal and every floating sum here is a dyadic rational exactly
  * representable in IEEE binary64, so %.6f renders the same bytes everywhere, and

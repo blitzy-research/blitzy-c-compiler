@@ -221,14 +221,14 @@
  *
  * NO HEADER IS NAMED, and no preprocessor directive appears anywhere below.
  * bcc ships no stdio.h -- its bundled set is the nine required freestanding
- * headers plus a bonus stdatomic.h, ten files in all (docs/project-guide.md
- * line 212) -- so naming it here would fail against bcc while succeeding
- * against the reference compiler, a divergence caused by the test rather than
- * by the compiler.  float.h and limits.h are bundled and are still not named:
- * every boundary value above is written out as a literal in this file, and the
- * bundled set is exercised by 12_preprocessor/003_bundled_header_inclusion.c,
- * whose subject that is.  The single libc prototype this program needs is
- * hand-declared below.
+ * headers plus a bonus stdatomic.h, ten files in all (docs/project-guide.md,
+ * "9 bundled freestanding headers") -- so naming it here would fail against
+ * bcc while succeeding against the reference compiler, a divergence caused by
+ * the test rather than by the compiler.  float.h and limits.h are bundled and
+ * are still not named: every boundary value above is written out as a literal
+ * in this file, and the bundled set is exercised by
+ * 12_preprocessor/003_bundled_header_inclusion.c, whose subject that is.  The
+ * single libc prototype this program needs is hand-declared below.
  *
  * DELIBERATELY ELSEWHERE, so this program does not duplicate it: floating
  * arithmetic and folding belong to 001_float_double_arithmetic.c and

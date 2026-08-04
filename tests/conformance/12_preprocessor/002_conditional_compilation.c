@@ -9,7 +9,7 @@
  *       expression evaluator for #if directives (integer arithmetic, defined())"
  *   docs/technical-specifications.md line 493 - expression.rs is specified to evaluate
  *       integer arithmetic, the defined() operator, logical and comparison operators
- *   docs/project-guide.md line 79 - the preprocessor component covers
+ *   docs/project-guide.md, the "C11 Frontend -- Preprocessor" row - it covers
  *       #define/#undef and #if/#ifdef/#elif/#else/#endif
  * Every feature exercised here is therefore documented as supported, so a divergence is
  * a genuine FINDING and no expected-divergence marker belongs to this program.

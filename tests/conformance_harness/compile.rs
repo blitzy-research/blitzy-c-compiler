@@ -144,7 +144,9 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -158,11 +160,13 @@ use super::sandbox::{
 };
 use super::{
     bcc_requires_explicit_target, bcc_target_arguments, corpus_root, ensure_within,
-    is_bcc_target_selector, is_forbidden_for_side, isolate_child_environment, own_process_group,
-    posix_command_line, public_text, redact_secrets, require_regular_file,
-    sanitize_text_for_report, shown_path, terminate_process_group, CaptureIntegrity, CompilerSide,
-    DivergenceClass, GroupTermination, HarnessError, HarnessResult, OptLevel, Target,
-    BCC_TARGET_FLAG, CAPTURE_CHUNK_BYTES, CAPTURE_RETAINED_BYTES_MAX, DIFFERENTIAL_FLAGS_MINIMAL,
+    infrastructure_breach, infrastructure_breach_refusal, is_bcc_target_selector,
+    is_forbidden_for_side, isolate_child_environment, measure_tree, own_process_group,
+    posix_command_line, public_text, reap_bounded, record_infrastructure_breach, redact_secrets,
+    require_regular_file, sanitize_text_for_report, shown_path, terminate_process_group,
+    CaptureIntegrity, CompilerSide, DivergenceClass, GroupTermination, HarnessError, HarnessResult,
+    OptLevel, Provenance, SideRecord, Target, TreeLimits, BCC_TARGET_FLAG, CAPTURE_CHUNK_BYTES,
+    CAPTURE_RETAINED_BYTES_MAX, DIFFERENTIAL_FLAGS_MINIMAL,
 };
 
 /// The flag that names the artifact, spelled once so the argument builder, the allow-list and
@@ -199,6 +203,64 @@ const CAPTURE_BYTES_MAX: u64 = CAPTURE_RETAINED_BYTES_MAX;
 /// waiting costs no measurable processor time.
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
+/// Bytes one cell workspace may hold while a compilation is still in flight.
+///
+/// The captured pipes are already bounded in memory, and a workspace kept after a failing cell is
+/// already bounded by the retention ceilings in `sandbox.rs`. Neither of those bounds the **disk**
+/// while a compiler is running: a driver that writes without end fills the build volume during its
+/// budget, and up to fourteen feature areas do that concurrently, so the volume is gone before any
+/// post-cell accounting is reached.
+///
+/// The figure is deliberately far above anything legitimate. A cell workspace holds the copied
+/// program and its record, up to two statically linked executables of roughly three quarters of a
+/// megabyte each, four captured streams and two status records — call it a few megabytes at the very
+/// most. Sixty-four is therefore about twenty times the honest worst case and still leaves the volume
+/// intact when every concurrent worker reaches it at once, which is the property that matters: this
+/// is a ceiling on a runaway, not a budget for a build.
+///
+/// The artifact is measured as part of the workspace rather than separately, because it is *in* the
+/// workspace: one ceiling over the directory covers the artifact, the compiler's temporary files and
+/// anything else the driver leaves behind, and cannot disagree with itself the way two would.
+const WORKSPACE_LIVE_BYTES_MAX: u64 = 64 * 1024 * 1024;
+
+/// Entries one cell workspace may hold while a compilation is still in flight.
+///
+/// A count ceiling as well as a byte ceiling, because the two failures look nothing alike: a million
+/// empty files cost almost no bytes and still exhaust a filesystem's inodes and make the directory
+/// unreadable. A legitimate cell workspace holds roughly a dozen entries, so this is two orders of
+/// magnitude of headroom.
+const WORKSPACE_LIVE_ENTRIES_MAX: u64 = 256;
+
+/// How often the workspace is measured while a child is being watched.
+///
+/// Not on every poll: the wait polls every [`WAIT_POLL_INTERVAL`], and walking a directory that often
+/// would cost more than the compilation it is protecting. Fifty milliseconds is the balance, and the
+/// two sides of it are worth stating because they pull in opposite directions.
+///
+/// The interval is the **overshoot**: a runaway is stopped at the ceiling plus whatever it can write
+/// before the next scan, and a fast volume can write a great deal in a quarter of a second. The cost
+/// is twenty walks a second of a directory holding about a dozen entries — a readdir and a handful of
+/// metadata reads, tens of microseconds — which is immaterial beside a compilation measured in tens
+/// of milliseconds. Since a whole compile-and-run pair takes roughly seventy milliseconds, this also
+/// means an ordinary cell is scanned at least once, so the mechanism is exercised by the matrix itself
+/// rather than only by the pathological case it exists for.
+const WORKSPACE_SCAN_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Ceilings on the live workspace measurement itself.
+///
+/// The measurement is a bound, so it needs bounds of its own: it runs while a child is being watched,
+/// and a walk that took an unbounded amount of time would delay the very watchdog it serves.
+///
+/// The entry ceiling is deliberately well above [`WORKSPACE_LIVE_ENTRIES_MAX`], so that a workspace
+/// over the live ceiling is *seen* to be over it rather than merely reported as unmeasurable. The
+/// depth ceiling is generous against a compiler's temporary sub-directory and refuses the deep tree
+/// a hostile one could build. Fifty milliseconds is far more than a walk of a dozen entries needs.
+const WORKSPACE_TREE_LIMITS: TreeLimits = TreeLimits {
+    depth_max: 8,
+    entries_max: 4096,
+    elapsed_max: Duration::from_millis(50),
+};
+
 /// Time allowed for the capture threads to deliver after the child has been waited on.
 ///
 /// Without it, a compilation that finished just inside its budget could have its diagnostics
@@ -206,6 +268,14 @@ const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(2);
 /// divergence has to be read from. With it, the whole invocation is still bounded, at the
 /// budget plus this grace.
 const CAPTURE_GRACE: Duration = Duration::from_secs(2);
+
+/// Time allowed for a cancelled capture thread to notice, once the grace above has already elapsed.
+///
+/// A second and much shorter window, because cancellation is cooperative: the flag is observed by the
+/// drain between reads, so a reader that is between reads stops promptly while one blocked inside a
+/// read cannot be interrupted by anything the standard library offers. Long enough to observe the
+/// former, short enough not to extend the invocation's bound in any way that matters.
+const CAPTURE_CANCEL_GRACE: Duration = Duration::from_millis(250);
 
 /// Characters of a captured diagnostic quoted in a failure summary.
 ///
@@ -1164,6 +1234,40 @@ impl CompileOutcome {
         self.failure.as_ref().is_some_and(BuildFailure::is_harness)
     }
 
+    /// The structured account of this build, as the fields a report column carries.
+    ///
+    /// # Why the build layer supplies this rather than the report layer deriving it
+    ///
+    /// Everything here is already held in this type — the exact argument vector, the termination, the
+    /// entry names its captured diagnostics were written under — and none of it used to reach a
+    /// report. A refused build was reduced to a single `summary` line at the classifier boundary, so a
+    /// row reading `XFAIL` or `FINDING` for a compile refusal named the shape of the refusal and not
+    /// one fact a maintainer could act on: not the command, not how the compiler ended, not where its
+    /// diagnostics were kept. Deriving it here rather than at the sink keeps the knowledge of this
+    /// type's shape inside this file, which is the only place that shape can change.
+    ///
+    /// A refused build has a subject and no authority: no artifact was produced, so nothing was judged
+    /// against anything. That is why this returns a one-sided provenance rather than an empty pair.
+    ///
+    /// `command_line` is the vetted argument vector as it was assembled, not the spawned form: the
+    /// spawned form may carry a timeout wrapper this suite added, and a maintainer reproducing the
+    /// cell wants the compiler's own line. The wrapper is visible in the workspace's status record
+    /// beside the captures this points at.
+    pub fn provenance(&self) -> Provenance {
+        let (_, stderr_name, status_name) = self.compiler.compile_evidence_names();
+        Provenance::of_subject(SideRecord::new(
+            format!(
+                "{} building for {} at {}",
+                self.compiler.label(),
+                self.target.triple(),
+                self.opt.flag()
+            ),
+            public_text(&self.command_line),
+            self.describe(),
+            format!("{stderr_name} and {status_name} in this cell's workspace"),
+        ))
+    }
+
     /// One line describing this outcome for a report or a failure message.
     ///
     /// **Deliberately free of any measured time.** This line reaches a report file and a finding
@@ -1953,8 +2057,9 @@ fn cross_check_against_template(
 /// The decision is `caps.outer_net_tool()`, which `env.rs` reached once for the whole run by
 /// **measuring** the discovered implementation rather than merely finding it: an outer net that never
 /// fires still charges for supervising every child it wraps, and the implementation measured in this
-/// environment charges about 103 ms per invocation — roughly 569 s across the matrix, against about
-/// 188 s of actual work. An implementation inside the ceiling is engaged and one above it is
+/// environment charges about 103 ms per invocation — roughly 569 s across the matrix, which is more
+/// wall time than the suite's own measured run takes (a 345–476 s band on the four-core machine
+/// recorded in `tests/conformance/README.md`). An implementation inside the ceiling is engaged and one above it is
 /// declined, with the decision and its evidence stated in the pre-flight report and in every
 /// finding's environment fingerprint. This function therefore asks one question and never
 /// re-litigates it.
@@ -2207,6 +2312,20 @@ fn spawn_bounded(
             ),
         ));
     }
+    // The last question before the launch after the tools have been confirmed, and it is about this
+    // run rather than about the files: a run that has already leaked a process, or that holds a
+    // capture pipe it cannot prove is closed, must not add another child to the pile. The fault
+    // recurs per cell, and the matrix is thousands of cells across concurrent workers.
+    if let Some(breach) = infrastructure_breach() {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{}. The command would have been: {}",
+                infrastructure_breach_refusal(breach),
+                posix_command_line(argv)
+            ),
+        ));
+    }
     let started = Instant::now();
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -2231,7 +2350,7 @@ fn spawn_bounded(
     let deadline = started + bound;
     let stdout_reader = child.stdout.take().map(spawn_capped_reader);
     let stderr_reader = child.stderr.take().map(spawn_capped_reader);
-    let watched = await_child_within_deadline(&mut child, deadline);
+    let watched = await_child_within_deadline(&mut child, deadline, working_directory);
     // Measured before the harvest, so the reported duration is how long the compilation took and
     // not how long its diagnostics took to arrive.
     let duration = started.elapsed();
@@ -2255,6 +2374,32 @@ fn spawn_bounded(
     }
     if let Some(note) = stderr.note.as_ref() {
         notes.push(format!("the compiler's standard error {note}"));
+    }
+    // Raised only after the group has been swept and both readers harvested, so the refusal reports a
+    // finished cleanup rather than causing one to be skipped. A workspace that crossed its live
+    // ceiling is not an observation about the compiler's *output*: the child was stopped part-way
+    // through writing, so its artifact is a fragment and its diagnostics are a prefix. Comparing
+    // either would be reporting a divergence in a program that was never allowed to finish, which is
+    // why this is a refusal in the shape `execute.rs` already uses for a capture that overflowed.
+    if let Some(overflow) = watched.overflow {
+        return Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "the invocation was terminated because {overflow}. The child and its whole process \
+                 group were signalled and reaped, so nothing of it is still writing. This is \
+                 reported as a failure of the suite rather than as a divergence, because the \
+                 compilation was stopped part-way and produced no result to compare: the artifact is \
+                 a fragment and the diagnostics are a prefix. Fourteen feature areas conclude cells \
+                 concurrently, so the ceiling exists to keep one runaway invocation from taking the \
+                 build volume — and with it every other cell's evidence — before any post-cell \
+                 accounting could run. The command was: {}{}",
+                posix_command_line(argv),
+                match notes.as_slice() {
+                    [] => String::new(),
+                    recorded => format!(". Recorded notes: {}", recorded.join("; ")),
+                }
+            ),
+        ));
     }
     Ok(Capture {
         stdout_integrity: stdout.integrity(),
@@ -2285,15 +2430,39 @@ fn spawn_bounded(
 /// carried back to the caller so an attribution built on this text can decline to be certain. The
 /// send failure is still discarded, and only that: it means the caller reached its deadline and
 /// moved on, which the caller already knows because it is the party that timed out.
-fn spawn_capped_reader<R>(stream: R) -> Receiver<StreamHarvest>
+///
+/// The reader is also **cancellable**. The caller that gives up sets the flag, and the drain observes
+/// it around every read, so a reader nobody is waiting for stops instead of following a runaway
+/// writer for the rest of the run — releasing its thread and its end of the pipe. What that cannot do
+/// is interrupt a read already blocked in the kernel; [`harvest_within_deadline`] says what closes
+/// that consequence instead.
+fn spawn_capped_reader<R>(stream: R) -> CappedReader
 where
     R: Read + Send + 'static,
 {
     let (sender, receiver) = mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&cancelled);
     thread::spawn(move || {
-        let _ = sender.send(drain_capped(stream));
+        let _ = sender.send(drain_capped(stream, &observed));
     });
-    receiver
+    CappedReader {
+        harvest: receiver,
+        cancelled,
+    }
+}
+
+/// One pipe being drained on its own thread, and the switch that asks that thread to stop.
+///
+/// A record rather than a bare receiver, because giving up on a reader and being able to *tell* it so
+/// are two halves of one operation: a caller holding only the receiver can stop waiting but cannot
+/// stop the reading, which is how a thread and a descriptor per cell accumulate across a matrix of
+/// 1,296 of them.
+struct CappedReader {
+    /// Delivers the harvest exactly once, when the drain ends for any reason.
+    harvest: Receiver<StreamHarvest>,
+    /// Set by the caller when it has stopped waiting; observed by the drain around every read.
+    cancelled: Arc<AtomicBool>,
 }
 
 /// Read one stream to its end, retaining a bounded prefix and counting everything.
@@ -2301,7 +2470,7 @@ where
 /// Split out from the thread body so the retention rule is stated once and can be read without
 /// the concurrency around it: every byte is read, a prefix up to [`CAPTURE_BYTES_MAX`] is kept,
 /// and the count of what the child actually produced is exact regardless of how much was kept.
-fn drain_capped<R>(mut stream: R) -> StreamHarvest
+fn drain_capped<R>(mut stream: R, cancelled: &AtomicBool) -> StreamHarvest
 where
     R: Read,
 {
@@ -2312,6 +2481,17 @@ where
     let mut drained = false;
     let mut note = None;
     loop {
+        // Asked around every read, so a reader whose caller has given up stops at its next
+        // opportunity — after the read already in flight returns, or before the next one begins —
+        // rather than draining a stream nothing will ever look at.
+        if cancelled.load(Ordering::Relaxed) {
+            note = Some(format!(
+                "was cancelled after the collection grace elapsed, so it was not read to its end; \
+                 the {} byte(s) collected before the cancellation are reported",
+                retained.len()
+            ));
+            break;
+        }
         match stream.read(&mut chunk) {
             Ok(0) => {
                 drained = true;
@@ -2367,25 +2547,54 @@ where
 /// that never existed and a reader that did not deliver in time are both reported as undrained,
 /// with the reason attached, because a compiler whose diagnostics were lost to a deadline must
 /// never be mistaken for a compiler that printed nothing.
+///
+/// # Giving up is not the same as walking away
+///
+/// A reader that has not delivered by the deadline is **cancelled** and then given one short further
+/// window, [`CAPTURE_CANCEL_GRACE`], to act on it. That is what releases the thread and the pipe
+/// descriptor in the case where the reader is between reads. A reader wedged inside a read cannot be
+/// released at all — the standard library offers nothing that interrupts one from another thread, and
+/// this suite may add no dependency that does — so that case records a run-level breach and the run
+/// stops scheduling cells behind it. One held descriptor reported loudly is diagnosable; 1,296
+/// accumulating quietly are not.
 fn harvest_within_deadline(
-    reader: Option<Receiver<StreamHarvest>>,
+    reader: Option<CappedReader>,
     deadline: Instant,
     role: &str,
 ) -> StreamHarvest {
-    let Some(receiver) = reader else {
+    let Some(reader) = reader else {
         return StreamHarvest::absent(&format!(
             "was never opened, so no {role} could be collected; this is a condition of the \
              machine rather than a silent compiler"
         ));
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
-    match receiver.recv_timeout(remaining) {
+    match reader.harvest.recv_timeout(remaining) {
         Ok(harvest) => harvest,
-        Err(error) => StreamHarvest::absent(&format!(
-            "did not arrive within the collection grace: {}; the {role} it may have carried is \
-             absent from this record rather than empty",
-            sanitize_text_for_report(&error.to_string())
-        )),
+        Err(error) => {
+            let waited = sanitize_text_for_report(&error.to_string());
+            reader.cancelled.store(true, Ordering::Relaxed);
+            match reader.harvest.recv_timeout(CAPTURE_CANCEL_GRACE) {
+                // The cancellation was observed, so the reader has ended and its harvest is whatever
+                // it had gathered. Reported as undrained through the note the drain itself attached.
+                Ok(harvest) => harvest,
+                Err(_) => {
+                    let detail = format!(
+                        "the compiler's {role} reader did not deliver within the collection grace \
+                         ({waited}) and had still not stopped {} ms after it was cancelled, so its \
+                         thread and its end of the pipe remain held by whatever survived the group \
+                         sweep",
+                        CAPTURE_CANCEL_GRACE.as_millis()
+                    );
+                    record_infrastructure_breach(detail.clone());
+                    StreamHarvest::absent(&format!(
+                        "did not arrive within the collection grace: {waited}; the {role} it may \
+                         have carried is absent from this record rather than empty, and the reader \
+                         could not be stopped"
+                    ))
+                }
+            }
+        }
     }
 }
 
@@ -2401,6 +2610,12 @@ struct WatchedChild {
     status: Option<ExitStatus>,
     /// Cleanup and observation shortfalls, each already sanitized for a report.
     notes: Vec<String>,
+    /// Set when the child was stopped because its workspace crossed a live disk ceiling.
+    ///
+    /// Held apart from `timed_out` because the two are different facts with different remedies: a
+    /// child that outlived its budget is a timeout, which is one of the suite's divergence classes,
+    /// while one stopped for filling the disk produced no observation at all and is refused.
+    overflow: Option<String>,
 }
 
 /// Wait for a child until the deadline, killing and reaping it if it outlives one.
@@ -2415,14 +2630,23 @@ struct WatchedChild {
 /// timeout would attribute a fault in this process's bookkeeping to the compiler it was watching.
 /// Both absences now carry a note saying which of the two occurred, so the distinction survives
 /// into the record a maintainer reads.
-fn await_child_within_deadline(child: &mut Child, deadline: Instant) -> WatchedChild {
+fn await_child_within_deadline(
+    child: &mut Child,
+    deadline: Instant,
+    workspace: &Path,
+) -> WatchedChild {
+    let mut scanned_at = Instant::now();
+    // The first incomplete workspace measurement, if any, and only the first: the scan repeats four
+    // times a second, and one sentence per scan would bury the notes that describe the compilation.
+    let mut unverified: Option<String> = None;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 return WatchedChild {
                     timed_out: false,
                     status: Some(status),
-                    notes: Vec::new(),
+                    notes: unverified.into_iter().collect(),
+                    overflow: None,
                 }
             }
             Ok(None) => {}
@@ -2434,22 +2658,106 @@ fn await_child_within_deadline(child: &mut Child, deadline: Instant) -> WatchedC
                      timeout",
                     sanitize_text_for_report(&error.to_string())
                 )];
+                notes.extend(unverified);
                 notes.extend(terminate_and_reap(child));
                 return WatchedChild {
                     timed_out: false,
                     status: None,
                     notes,
+                    overflow: None,
                 };
             }
         }
         if Instant::now() >= deadline {
+            let mut notes: Vec<String> = unverified.into_iter().collect();
+            notes.extend(terminate_and_reap(child));
             return WatchedChild {
                 timed_out: true,
                 status: None,
-                notes: terminate_and_reap(child),
+                notes,
+                overflow: None,
             };
         }
+        if scanned_at.elapsed() >= WORKSPACE_SCAN_INTERVAL {
+            scanned_at = Instant::now();
+            match scan_workspace(workspace) {
+                WorkspaceScan::Within => {}
+                WorkspaceScan::Unverified(detail) => {
+                    unverified.get_or_insert(detail);
+                }
+                WorkspaceScan::Exceeded(detail) => {
+                    let mut notes: Vec<String> = unverified.into_iter().collect();
+                    notes.extend(terminate_and_reap(child));
+                    return WatchedChild {
+                        timed_out: false,
+                        status: None,
+                        notes,
+                        overflow: Some(detail),
+                    };
+                }
+            }
+        }
         thread::sleep(WAIT_POLL_INTERVAL);
+    }
+}
+
+/// What one live measurement of the cell workspace established.
+#[derive(Debug)]
+enum WorkspaceScan {
+    /// The workspace was measured whole and is inside both ceilings.
+    Within,
+    /// The workspace is inside both ceilings *as measured*, but the measurement was not complete, so
+    /// "inside" is a lower bound rather than a fact. Carries a sentence for the outcome's notes.
+    Unverified(String),
+    /// A ceiling was positively exceeded. Carries a sentence naming which and by what.
+    Exceeded(String),
+}
+
+/// Measure the cell workspace and say whether a live ceiling has been crossed.
+///
+/// # Positive evidence only, which is the opposite of the retention accounting's rule
+///
+/// A ceiling is enforced here only on what was actually measured. A walk that could not read a
+/// directory, or that stopped at one of its own ceilings, does **not** stop the compilation — even
+/// though the very same incompleteness makes `sandbox.rs`'s retention accounting refuse an entry
+/// outright. The two rules are opposite because the two questions are:
+///
+/// - Retention asks *may I claim this fits inside the run's budget?* An entry nobody could measure
+///   cannot be claimed, so it fails closed, or the ceiling stops meaning anything.
+/// - This asks *is something running away with the disk right now?* A compiler deleting its own
+///   temporary file between the listing and the measurement makes an entry vanish mid-walk, which is
+///   an ordinary race and not a runaway. Failing closed on it would terminate honest compilations on
+///   a busy machine and manufacture findings against a compiler that did nothing wrong.
+///
+/// A genuine runaway produces positive evidence by definition — bytes on the disk or entries in the
+/// directory — so requiring it costs nothing. What incompleteness does earn is a **note**, once per
+/// invocation, so that a reader is never left to assume the ceiling was checked against a whole
+/// measurement when it was checked against a lower bound.
+fn scan_workspace(workspace: &Path) -> WorkspaceScan {
+    let measured = measure_tree(workspace, WORKSPACE_TREE_LIMITS);
+    if measured.bytes > WORKSPACE_LIVE_BYTES_MAX {
+        return WorkspaceScan::Exceeded(format!(
+            "the cell workspace held at least {} byte(s) while the compilation was still running, \
+             which is past the {WORKSPACE_LIVE_BYTES_MAX}-byte ceiling on a workspace in flight",
+            measured.bytes
+        ));
+    }
+    if measured.entries > WORKSPACE_LIVE_ENTRIES_MAX {
+        return WorkspaceScan::Exceeded(format!(
+            "the cell workspace held at least {} entr(y/ies) while the compilation was still \
+             running, which is past the {WORKSPACE_LIVE_ENTRIES_MAX}-entry ceiling on a workspace in \
+             flight",
+            measured.entries
+        ));
+    }
+    match measured.shortfall() {
+        None => WorkspaceScan::Within,
+        Some(shortfall) => WorkspaceScan::Unverified(sanitize_text_for_report(&format!(
+            "the live measurement of the cell workspace was incomplete — {shortfall} — so the \
+             ceilings on a workspace in flight were tested against a lower bound; the compilation \
+             was allowed to continue, because stopping it on the strength of a measurement that \
+             could not be completed would terminate an honest invocation on a busy machine"
+        ))),
     }
 }
 
@@ -2462,19 +2770,27 @@ fn await_child_within_deadline(child: &mut Child, deadline: Instant) -> WatchedC
 /// an external utility whose absence must not leave the child alive, so the built-in kill is the
 /// guarantee that at least the process this module started is stopped.
 ///
-/// A failure of either the kill or the wait is *ordinarily* not a failure at all — a kill fails
-/// when the child has already exited and a wait fails when it has already been reaped — so those
-/// two are still absorbed. What is no longer absorbed is a group signal that could not be
-/// attempted, because that one means sub-processes may still be running, which is a fact about
-/// the machine a maintainer needs rather than one this function may quietly decide for them.
+/// A failure of the kill is *ordinarily* not a failure at all — a kill fails when the child has
+/// already exited — so it is still absorbed, and the reap that follows is what proves the child is
+/// gone. What is no longer absorbed is a reap that could not be completed inside its deadline, or a
+/// group signal that could not be attempted: each means a process may still be running, which is a
+/// fact about the machine a maintainer needs rather than one this function may quietly decide for
+/// them.
+///
+/// The reap is bounded rather than a plain wait for the reason the whole cleanup path exists: it is
+/// what makes the per-cell budget a real bound, so a wait here without a deadline of its own would
+/// turn the mechanism that stops a hung compiler into a hang that nothing outside it would catch.
 fn terminate_and_reap(child: &mut Child) -> Vec<String> {
     let group = child.id();
-    let _ = child.kill();
-    let _ = child.wait();
-    // Swept after the wait, never before: a killed-but-unwaited child is a zombie, and a zombie
+    let reaped = reap_bounded(child);
+    // Swept after the reap, never before: a killed-but-unwaited child is a zombie, and a zombie
     // still answers an existence probe, so sweeping first would report a survivor that is nothing
     // of the kind.
     let mut notes = Vec::new();
+    if let Some(note) = reaped.note() {
+        record_infrastructure_breach(String::from(note));
+        notes.push(sanitize_text_for_report(&redact_secrets(note)));
+    }
     match terminate_process_group(group, kill_tool()) {
         GroupTermination::Cleared => {}
         GroupTermination::Survivors(detail) | GroupTermination::Unsupervised(detail) => {

@@ -9,3 +9,25 @@
 /target/conformance-work/
 /target/conformance-report/
 /target/conformance-findings/
+
+# Differential conformance suite — transient artifacts of the golden-record
+# regeneration tool, which are the only ones written INSIDE the corpus rather
+# than beneath the build directory.
+#
+# The lock directory is created before a regeneration run and removed by the
+# script's exit trap. It survives only a kill -9 or a power loss, and the script
+# reclaims a stale one on the next run and says so — but while it is there it
+# must not dirty `git status`, and it must never be committable.
+tests/conformance/.regen-lock/
+# A rewrite is staged beside the record it will replace and installed by a single
+# rename, so staging state exists only for the moment between building it and
+# installing it. Ignored for the same reason as the lock: an interrupted run must
+# not leave something a later `git add` could pick up.
+#
+# The script stages into an unpredictably named `.regen.XXXXXX` DIRECTORY created
+# by `mktemp -d` in the record's own directory — atomic creation is what makes the
+# name safe to use — so the directory form is what has to be ignored. The file form
+# is listed beside it because a staging file beside the record is the other shape
+# this has taken, and ignoring both costs nothing and cannot go stale.
+tests/conformance/**/.regen.*/
+tests/conformance/**/*.expected.regen.*

@@ -39,11 +39,11 @@
  *
  * No header is named and printf is hand-declared.  bcc ships no stdio.h: its
  * bundled set is the nine required freestanding headers plus a bonus stdatomic.h,
- * ten files in all (docs/project-guide.md line 212).  _Static_assert and _Alignof
- * are C11 KEYWORDS needing no header; stdalign.h would only add the lowercase
- * alignas/alignof spellings.  Every assertion uses the two-argument form with a
- * message, because the message-less form is C23 and the mandatory -pedantic
- * -Werror gate rejects it.
+ * ten files in all (docs/project-guide.md, "9 bundled freestanding headers").
+ * _Static_assert and _Alignof are C11 KEYWORDS needing no header; stdalign.h
+ * would only add the lowercase alignas/alignof spellings.  Every assertion uses
+ * the two-argument form with a message, because the message-less form is C23 and
+ * the mandatory -pedantic -Werror gate rejects it.
  *
  * WARNING-GATE NOTE FOR MAINTAINERS.  This program is clean under the full default
  * gate with no deviation, and one detail must not be simplified away: the pair

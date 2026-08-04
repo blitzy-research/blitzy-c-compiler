@@ -192,7 +192,9 @@ supplied from outside, and pretending otherwise is what caused the thrash logged
 specification fixes each of them for a named program by identifier, class, scope and basis, and
 requires the record beside that program to carry it. That is a requirement this register enforces, not
 an inference it may withdraw — exactly as §2.4.1 admits an omission-based basis because refusing it
-would refuse a marker the specification mandates. What is *required* of such a marker is **disclosure**
+would refuse a marker the specification mandates. (That latitude is a property of the format rather
+than a description of the corpus: neither active marker relies on it today, §4.1 having moved to the
+affirmative compliance rule that fixes the required extension set.) What is *required* of such a marker is **disclosure**
 rather than deletion: leave `evidence` unwritten, and say in `observed` which half of the pair is
 measured and which is not. What is *not* suspended is §3.1. An unconfirmed marker on a construct that
 works produces `XPASS` and **fails the run**, naming the marker and both places it lives, so the gap is
@@ -206,8 +208,10 @@ for the format rather than two that can disagree.
 
 ### 2.2 The six legal divergence classes
 
-These are the **only** accepted values of `expected_divergence.class`. The class space is closed:
-adding a seventh is a compile error in the harness until every decision point handles it.
+These six are the **only** observational values of `expected_divergence.class`. The divergence-class
+space is closed: adding a seventh is a compile error in the harness until every decision point
+handles it. One further value exists and names **no** observation — `comparison_excluded`, §2.2.1 —
+so the accepted set of the `class` key is these six plus that one.
 
 | Class | The observation it names |
 |---|---|
@@ -221,6 +225,34 @@ adding a seventh is a compile error in the harness until every decision point ha
 Standard error is never compared, by any oracle, so no marker may describe a difference in
 diagnostic text. Diagnostic wording legitimately differs between compilers; comparing it would
 produce a flood of divergences that say nothing about code correctness.
+
+#### 2.2.1 `comparison_excluded` — the one class that names no observation
+
+| Class | What it names |
+|---|---|
+| `comparison_excluded` | **No comparison is attempted** on the arm this marker scopes, because the program's own record disables that oracle for a reason recorded in its `impl_defined_notes` (§3.3). It is a coverage restriction with an identifier and a resolved basis, not an observation. |
+
+**Why it has to exist, which is a defect this register learned the hard way.** A narrowing marker used
+to be written with an observational class — `stdout_mismatch` was the natural choice for a *value*
+comparison that had been switched off — and that spelling asserted, in the one field a report row
+quotes, that two completed runs had disagreed on bytes. Nothing had run. Every automated check passed
+anyway, and necessarily so: a class is only ever *matched* against an observation, and the arm in
+question produces none, so the false statement sat in a machine-checked field that no machine could
+contradict. A reader auditing this register was told an observation had been made.
+
+**What the parser now enforces, in both directions.** A marker scoped to *any* oracle its record
+disables **must** carry this class; a marker carrying this class **must** scope only oracles its record
+disables. A mixed scope is therefore inexpressible, and that is intended — a marker either explains
+what a comparison saw or explains why a comparison is not made, and one marker cannot honestly do
+both. Splitting such a marker in two costs one register entry and buys an unambiguous account of each
+arm.
+
+**What it changes about classification: nothing, by construction.** The harness compares an observed
+divergence against `Observed(<class>)`, and this value is not of that shape, so no observed divergence
+can ever be excused by it — the type system rather than a convention is what guarantees that. It
+therefore cannot reach `XPASS` either (§3.3), because nothing is compared on the arm it scopes. What it
+buys is exactly what §3.3 says a narrowing needs: an identifier a report row can cite and a basis the
+bidirectional audit resolves.
 
 ### 2.3 The scope grammar
 
@@ -340,6 +372,13 @@ docs/project-guide.md, the open risk register entry that this limitation belongs
   reader gives up on. Requiring **at least one** is what stops a citation from being unfalsifiable
   prose: "the section that documents this limitation" names nothing a run or a reader can turn to, so
   it is refused rather than accepted on trust.
+- **A quoted phrase or a section number is preferred to a line number in a document the project still
+  edits.** All four forms resolve, so this is a durability rule rather than a validity rule: inserting
+  one table row into a cited document shifts every line beneath it, and a line locator then names the
+  row *above* the one intended while still resolving — the audit widens a single-line citation by one
+  line either side, so the drift passes the machine check and misleads only the reader. A phrase moves
+  with the passage it quotes. Both live markers cite that way, and §7 records which form each cited
+  document takes and why.
 - **One canonical rendering, reproduced verbatim.** The string in the program's record is the
   canonical one. Wherever this register mirrors it — the summary-table row in §4 and the structured
   entry's **Basis** field — it must be reproduced **character for character**, including punctuation
@@ -365,7 +404,8 @@ any basis whose wording rested on what a document does *not* say — "omits", "a
 list" and their kin — reasoning that an omission from an inventory is evidence only that nobody wrote
 something down. As an argument about **strength** that is correct, and §4.1 states it plainly about the
 very marker it applies to. As an **admission rule** it was wrong twice over: it refused a marker the
-project specification mandates, whose basis is exactly such an omission; and by refusing it, the
+project specification mandates, whose basis was exactly such an omission at the time; and by
+refusing it, the
 exclusion the marker documented ended up reported `XFAIL` with no identifier, no register entry and no
 resolved citation behind it, which is less auditable than the marker it rejected. A format that
 cannot express its own specification's markers is the thing that needs changing. Admission is not
@@ -408,6 +448,13 @@ Anticipatory wording — "is expected to", "will reject", "anticipated", "no ver
 — is refused, because prose in the future tense excuses a cell on nobody's observation. Recording what
 the divergence *is* rather than what somebody expects is what lets the next reader tell whether the
 failure in front of them is the one that was marked.
+
+**The field has two legitimate shapes, one per marker class.** For a marker classed with one of the six
+observational classes, it describes the divergence a comparison produced. For a marker classed
+`comparison_excluded` (§2.2.1) there **is** no comparison, so describing one would be the very defect
+this key exists to prevent; what it records instead is the measurement of the construct that the
+exclusion rests on, and it says in as many words that no comparison is attempted on the scoped arm.
+Both shapes state what was observed; they differ in what the observation is *of*.
 
 ## 3. Unexpected success, retirement, and markers that could never be consulted
 
@@ -512,9 +559,14 @@ or deviate from the default warning gate — and:
   justified cannot be reviewed; and
 - **no oracle may be switched off without a marker whose scope names it**, because the cells are
   reported `XFAIL`, which already claims the authority of an expected divergence, and requirement 5
-  requires an expected divergence to carry a marker referencing the documented limitation.
+  requires an expected divergence to carry a marker referencing the documented limitation; and
+- **such a marker must be classed `comparison_excluded`** (§2.2.1), because the arm it scopes is not
+  compared, so naming one of the six observational classes there would assert an observation nobody
+  made. The rule holds in the other direction too: that class is refused on an arm the record
+  compares, where a divergence has a shape and the marker must say which shape it excuses.
 
-The second rule was added after the first proved insufficient in a specific way. A revision of this
+The second and third rules were each added after the rule before it proved insufficient in a specific
+way. A revision of this
 suite had the reason but no marker, and reported those cells `XFAIL` citing the prose. The verdict was
 therefore indistinguishable from a marked expected divergence, while §1.1's bidirectional audit could
 not see the exclusion at all, no identifier existed for a report row to cite, and no basis had been
@@ -522,6 +574,14 @@ resolved against any committed document. That is a silent exclusion wearing the 
 one — which is the exact outcome requirement 5 forbids. The two halves now do different work: the
 marker supplies the identifier, the class, the scope and the resolved basis; the reason supplies the
 prose that explains why the comparison would be meaningless.
+
+The third rule closed what the second left open. With a marker required, the narrowing became
+auditable — but the `class` field still had to be filled from the six observational values, and the
+one that fitted a suppressed *value* comparison was `stdout_mismatch`. So the marker documented the
+arm the record switches off as though two completed runs had disagreed on bytes, and no check could
+catch it, because a class is matched only against an observation and that arm makes none.
+`comparison_excluded` is the value that states what is actually true, and the parser now requires it
+exactly where an observation is impossible.
 
 A narrowed cell is still classified and still reported; it is never a silent skip:
 
@@ -561,16 +621,18 @@ levels; what a marker changes is how a divergence would be *classified*, never w
 | § | Candidate | Marker | Program | Verdict if it diverges |
 |---|---|---|---|---|
 | 4.1 | GCC case ranges | `XD-GCCEXT-CASE-RANGES-001` | `08_gcc_extensions/004_case_ranges.c` | `XFAIL` on oracle (a) for a `compile_failure`, with oracles (b) and (c) reported as dependent blocked arms of the same root refusal (§2.3); `FINDING` for a wrong answer, which the class does not cover |
-| 4.2 | `long double` across the backends | `XD-TYPE-LONGDOUBLE-001` | `13_floating_point/004_long_double_target_restricted.c` | `XFAIL` on oracle (b), which the record disables and the marker documents; `FINDING` on oracle (a) or (c), because nothing about representation excuses a same-target disagreement |
+| 4.2 | `long double` across the backends | `XD-TYPE-LONGDOUBLE-001` — class `comparison_excluded` (§2.2.1) | `13_floating_point/004_long_double_target_restricted.c` | `XFAIL` on oracle (b), which the record disables and the marker documents; `FINDING` on oracle (a) or (c), because nothing about representation excuses a same-target disagreement |
 | 4.3 | Wide and Unicode literal prefixes | *(none)* | `11_literals_and_strings/003_wide_and_unicode_literals.c` | `FINDING` |
 
 **How strong each basis is, stated per entry rather than assumed.** §2.4.1 is explicit that the audit
 guarantees a citation can be *followed*, not that the cited section *supports* the claim. So each
 entry below says in prose how much its own basis carries — including §4.3's, which carries none,
-because what a candidate *would* have to cite is what a future author needs. §4.1's rests on an
-inventory's silence and is the weaker of the two markers by a wide margin; §4.2's rests on an
-affirmative design statement plus direct measurement. A reviewer should weigh them differently, and
-can, because every citation named here resolves to a line they can open.
+because what a candidate *would* have to cite is what a future author needs. §4.1's rests on the
+compliance rule that fixes the **required** GCC extension set, so it establishes the boundary of the
+documented obligation without establishing that `bcc` refuses the construct; §4.2's rests on an
+affirmative design statement plus direct measurement, and documents a comparison the record declines to
+make rather than one it performed. A reviewer should weigh them differently, and can, because every
+citation named here resolves to a line they can open.
 
 **What the audit establishes about these two entries, and what it leaves to a reviewer, stated here so
 the distinction is not lost between sections.** On every run the audit proves that each marker is
@@ -593,10 +655,10 @@ marker changes how a divergence would be *classified*, never whether the feature
 | Class | compile_failure |
 | Scope | oracle_a; all targets; all opt levels |
 | Program | 08_gcc_extensions/004_case_ranges |
-| Basis | docs/project-guide.md, line 206, the documented GCC extension inventory enumerates the parsed extensions and omits case ranges |
-| Documented | __attribute__, statement expressions, typeof, computed goto, inline assembly all parsed |
+| Basis | docs/technical-specifications.md, line 761, the C11 + GCC Extensions Compliance Rule states which GCC extensions are explicitly required and case ranges are not among them |
+| Documented | GCC extensions explicitly required: `__attribute__`, `__builtin_*` intrinsics, inline assembly (`asm`/`__asm__` with operand constraints), statement expressions, `typeof`/`__typeof__`, computed goto, `__extension__` |
 | Evidence | (not written) |
-| Observed | The divergence this marker covers is a refusal by the compiler under test to translate the case-range label form: no artifact is produced, so oracle (a) has nothing to compare, while the reference compiler accepts the same source and prints the eighteen-line golden record this file carries for it, beginning cr_bucket_neg=10 and ending cr_runtime_hex=12. The reference half of that pair is measured on this branch, with gcc 13.4.0 on all four targets at all three optimization levels. The compiler-under-test half carries no independent capture, which is why expected_divergence.evidence is left unwritten: the only compiler under test this checkout can offer forwards every invocation to the pinned reference driver, so its agreement measures the environment -- one toolchain compared with itself -- and speaks to neither bcc nor case ranges. The marker is present because the frozen project specification fixes it for this program by identifier, class, scope and basis; the register's section 3.1 XPASS safeguard is what keeps that honest, and only a real independent bcc observation retires it. |
+| Observed | WHAT THIS MARKER COVERS, AND WHAT STANDS BEHIND EACH HALF OF IT. It covers exactly one divergence: a refusal by the compiler under test to translate the case-range label form, on oracle (a) alone. A refusal produces no artifact, so oracle (a) has nothing to compare, while the reference compiler accepts the same source and prints the eighteen-line golden record this file carries for it, beginning cr_bucket_neg=10 and ending cr_runtime_hex=12. The reference half is measured on this branch: gcc 13.4.0 accepts this program and prints those bytes on all four targets at all three optimization levels. The compiler-under-test half carries no independent capture, and expected_divergence.evidence is left unwritten rather than filled in from something weaker -- this checkout holds the corpus and no bcc, and the only compiler under test it can offer forwards every invocation to the pinned reference driver for the requested target, so that compiler's agreement is a measurement of the environment, one toolchain compared with itself, and it speaks to neither bcc nor case ranges. A run of that shape has been performed here and is recorded for exactly what it is: non-independent environment evidence, which settles nothing in either direction. So no such refusal has been captured on this branch, and this field describes the divergence the marker is scoped to explain rather than one a capture attests. The marker is present because the frozen project specification fixes it for this program by identifier, class, scope and basis, and its basis is the affirmative compliance rule cited above, which fixes the required GCC extension set and does not place case ranges inside it. The register's section 3.1 XPASS safeguard is what keeps carrying it honest: where the compiler under test accepts the construct, the arm this marker scopes agrees, the verdict is XPASS and the run FAILS, naming the marker and both places it lives. Only a real, independent bcc observation retires it. |
 
 | Aspect | Value |
 |---|---|
@@ -631,8 +693,9 @@ the question in neither direction.**
 **Why the marker is present anyway, and why that is not the same mistake as minting one on a guess.**
 The project specification is frozen and fixes this marker for this program by identifier, class, scope
 and basis. Carrying it is a requirement of the specification rather than an inference this register may
-withdraw — the same ground on which §2.4.1 admits the omission-based citation, since a format that
-cannot express its own specification's markers is the thing that needs changing. What the specification
+withdraw — the same ground on which §2.4.1 admits an omission-based citation, since a format that
+cannot express its own specification's markers is the thing that needs changing, though this marker no
+longer needs that latitude now that it cites the compliance rule. What the specification
 does **not** do is suspend §3.1, and §3.1 is what keeps carrying the marker honest: where the compiler
 under test accepts the construct, this marker's arm agrees, the verdict is `XPASS` and **the run
 fails**, naming the marker and both places it lives. So the unconfirmed half is not quietly excused; it
@@ -654,37 +717,46 @@ with its character and negative forms `case '0' ... '9':` and `case -20 ... -11:
 single-value form `case 5 ... 5:`, and a range group that deliberately falls through.
 
 **What the documentation actually says, stated so a reader can check it without trusting this file.**
-Five separate inventories enumerate the GCC extensions the frontend handles, and none of them names
-case ranges:
+The cited basis is the **governing compliance rule**, and it is affirmative rather than silent. Four
+further inventories enumerate the same extension set, and none of the five names case ranges:
 
 | Where | What it AFFIRMS |
 |---|---|
-| `docs/project-guide.md` line 206 — the Compliance and Quality Review row for "C11 frontend with GCC extensions", marked **Pass** | A **verification record**: on the evidence of 19 frontend files, 33,834 lines and 789 unit plus 189 integration tests, the constructs parsed are "`__attribute__`, statement expressions, `typeof`, computed goto, inline assembly **all parsed**". It states what was checked and found to work, and the list is closed at five named constructs |
-| `docs/project-guide.md` line 323 — the Production Readiness Assessment | The implementation is "**feature-complete** for all AAP-specified capabilities", and "the remaining work is **exclusively** validation, testing, and packaging — **no core implementation gaps exist**". Nothing outside the verified surface is pending |
+| `docs/technical-specifications.md` line 761 — the **basis this marker cites**, inside the section headed "C11 + GCC Extensions Compliance Rule" at line 758 | A **requirement**: "GCC extensions explicitly required: `__attribute__`, `__builtin_*` intrinsics, inline assembly (`asm`/`__asm__` with operand constraints), statement expressions, `typeof`/`__typeof__`, computed goto, `__extension__`", with line 762 adding that "These extensions are not optional; they are required for compiling real-world codebases like SQLite, Lua, and Redis". It fixes the extension set the implementation must provide, and case ranges are outside it |
+| `docs/project-guide.md` §5, the Compliance and Quality Review row `C11 frontend with GCC extensions`, marked **Pass** | A **verification record**: on the evidence of 19 frontend files, 33,834 lines and 789 unit plus 189 integration tests, the constructs parsed are "`__attribute__`, statement expressions, `typeof`, computed goto, inline assembly **all parsed**". It states what was checked and found to work, and the list is closed at five named constructs |
+| `docs/project-guide.md` §8, the `Production Readiness Assessment` | The implementation is "**feature-complete** for all AAP-specified capabilities", and "the remaining work is exclusively validation, testing, and packaging — no core implementation gaps exist". Nothing outside the verified surface is pending |
+| `docs/technical-specifications.md` lines 13, 107 and 506 | The same seven-item extension set, in the capability summary, the module inventory and the file-creation specification for the extension parser |
+| `docs/project-guide.md` §2.1, the `C11 Frontend — Parser` row | The same five-construct parsed list for the parser subsystem |
 
 A recursive, case-insensitive search of `docs/` for `case range` returns **zero** matches.
 
-**How weak that basis is, stated plainly rather than glossed.** The five inventories are silent, and
-silence is the whole of the evidence this marker's basis rests on. It is said here rather than left to
-a reader to discover, because §2.4.1 leaves the weighing of a basis to a reviewer and this is the
-reviewer's material:
+**Exactly how strong that basis is, stated plainly rather than glossed.** It establishes a boundary,
+not a behaviour, and the difference matters. It is said here rather than left to a reader to discover,
+because §2.4.1 leaves the weighing of a basis to a reviewer and this is the reviewer's material:
 
-- **The authority is an omission, and an omission is weak.** Nothing in the repository states that the
-  frontend rejects case ranges; the inventories simply do not mention them. An omission is consistent
-  with the feature working and the inventory being incomplete, with the feature not working, and with
-  nobody having considered the question. It also cannot be *corrected away* by the inventory being
-  extended, so a marker resting on it can outlive its reason — which is one more reason §3.1 matters
-  here rather than less.
-- **What the marker therefore claims is correspondingly narrow.** Not that `bcc` must reject case
-  ranges. Only that IF it does, the refusal is traceable to a documented gap rather than being
-  unexplained — which is the distinction requirement 5 draws, and the ambiguity the project
-  specification flagged for a maintainer to resolve. It is a pointer to an open question, never an
-  assertion that the question is closed.
-- **The citation is followable**, at `docs/project-guide.md` line 206, whose enumeration
-  "`__attribute__`, statement expressions, `typeof`, computed goto, inline assembly all parsed" is a
-  closed list of five constructs that omits the sixth. A reader can turn to that row and weigh it in
-  one click, which is what §2.4.1 promises of a citation and all it promises. Whether that silence
-  supports this marker is the reviewer's call, and this register does not pretend to have made it.
+- **What it affirms is the boundary of the documented obligation.** The cited rule states which GCC
+  extensions are *required*, says in the next line that those extensions are not optional, and does
+  not place case ranges inside the set. An implementation that declines the construct is therefore
+  within its documented scope — and that is a statement the cited line makes, not a silence a reader
+  has to interpret.
+- **What it does not affirm is that `bcc` refuses them.** A construct outside the required set may
+  still be implemented, and nothing in the repository says whether this one is. So the marker claims
+  only that IF `bcc` refuses case ranges, the refusal falls outside the documented obligation and is
+  traceable to it rather than being unexplained — which is the distinction requirement 5 draws, and
+  the ambiguity the project specification flagged for a maintainer to resolve. It is a pointer to an
+  open question, never an assertion that the question is closed.
+- **This is a strictly stronger footing than the marker's earlier one.** The basis previously cited the
+  project guide's inventory row and rested on that inventory's **silence** about the construct, which
+  is compatible with the feature working and the inventory being incomplete, with the feature not
+  working, and with nobody having considered the question — and which could not be *corrected away*,
+  so a marker resting on it could outlive its reason. Citing the requirement instead replaces an
+  inference from silence with a statement the document makes. Silence remains what the four
+  corroborating inventories add, and they are recorded above as corroboration rather than as authority.
+- **The citation is followable**, at `docs/technical-specifications.md` line 761, and the record's
+  optional `documented` key quotes that line's own requirement sentence, which §1.1 resolves inside the
+  cited range on every run. A reader can turn to the compliance rule and weigh it in one click, which
+  is what §2.4.1 promises of a citation and all it promises. Whether it supports this marker is the
+  reviewer's call, and this register does not pretend to have made it.
 - **No captured observation exists, and the record says so in the observation itself.**
   `expected_divergence.evidence` is not written, because no command on this branch has produced the
   refusal — the checkout carries the corpus and no `bcc`, and the surrogate that stands in for it
@@ -713,27 +785,24 @@ member of the gate is retained, `-Werror` included, so no other class of defect 
 downgraded. A gate deviation is not a divergence: the gate is a property of the **test material**, is
 driven by the reference compiler only, and renders no verdict about `bcc`.
 
-**What would make this basis stronger, recorded so the next reviewer need not rederive it.** Two
-**affirmative** statements in the same document bear on the same question: line 206's Compliance and
-Quality Review row, which records a passing verdict over an enumerated set of parsed constructs, and
-line 323's Production Readiness Assessment, which states the implementation is feature-complete with
-remaining work *"exclusively validation, testing, and packaging"* and *"no core implementation gaps
-exist"*. Read together, the first fixes the surface the implementation is documented to parse and the
-second states that nothing outside that surface remains to be implemented — so a construct absent from
-the first is arguably documented as absent from the *compiler* rather than merely unmentioned by the
-*documentation*. That reading is materially stronger than the omission this marker cites, and a
-maintainer who accepts it may widen the basis to cite both lines. It is recorded as available rather
-than as in force, because a marker's basis should be the narrowest claim that does the job, and
-widening it is a decision for whoever has the evidence.
+**What would make this basis stronger still, recorded so the next reviewer need not rederive it.** One
+step remains available, and it is a different kind of statement from the one cited: a sentence naming
+the construct **directly** — an entry in the out-of-scope table of `docs/technical-specifications.md`
+§0.6.2, or a line saying case ranges are not implemented. That would assert the limitation itself
+rather than the boundary of the obligation, and it is the only reading that would let the marker claim
+`bcc` refuses the construct. No such sentence exists in the repository today; a recursive, case-insensitive search of
+`docs/project-guide.md` and `docs/technical-specifications.md` for `case range` returns zero
+matches, and the only mentions anywhere under `docs/` are in this suite's own methodology page.
 
-Three further readings corroborate the same absence without being an argument for it:
-`docs/technical-specifications.md` line 761 closes the **required** extension set at seven constructs
-— `__attribute__`, `__builtin_*` intrinsics, inline assembly with operand constraints, statement
-expressions, `typeof`/`__typeof__`, computed goto and `__extension__` — and line 762 adds that "these
-extensions are not optional", so the required set and the verified set agree and neither contains case
-ranges; `docs/project-guide.md` line 81 repeats the same five-construct parsed list for the parser
-subsystem; and a recursive, case-insensitive search of `docs/` for `case range` returns **zero**
-matches.
+A second, weaker widening is also available. Two project-guide statements read together — §5’s
+Compliance and Quality Review row, which records a passing verdict over an enumerated set of parsed
+constructs, and §8’s Production Readiness Assessment, which states the implementation is
+feature-complete with remaining work *"exclusively validation, testing, and packaging"* and *"no core
+implementation gaps exist"* — support the inference that a construct absent from the verified surface
+is documented as absent from the *compiler* rather than merely unmentioned by the *documentation*. A
+maintainer who accepts that inference may widen the basis to cite those rows beside the compliance
+rule. Both widenings are recorded as available rather than as in force, because a marker's basis should
+be the narrowest claim that does the job, and widening it is a decision for whoever has the evidence.
 
 **The ambiguity a real `bcc` will settle, deliberately not resolved here.** It is not yet known whether
 the silence is an **implementation gap** (the frontend does not accept case ranges, and the
@@ -782,22 +851,43 @@ marker, its `oracle_b` scope, its class, its basis and the measured reason in th
 identifier in both directions, compares all eight fields against the record character for character,
 reads the cited document, and resolves the locator and the quotation inside it. That is the whole of
 what any automated check establishes here. Whether the cited passage **semantically supports switching
-an oracle off for this type** is a reviewer's judgement (§2.4.1), and the program and record that govern
-the exclusion have **not** been reviewed at the checkpoint that published this section. So nothing below
-is presented as an adjudicated finding of sufficiency: the exclusion is *recorded with a followable
-basis and a measured reason*, and it remains **pending that review**. A reader who needs the stronger
-claim should read the program and its record and form their own.
+an oracle off for this type** remains a reviewer's judgement (§2.4.1) rather than something a run can
+settle, and this entry does not present itself as an adjudicated finding of sufficiency: it records an
+exclusion *with a followable basis and a re-measured reason*, and a reader who needs the stronger claim
+should read the program and its record and form their own.
+
+**The review of that program and record has completed, and this section is published on the far side of
+it** — §8.2's substantiation column and the driver's now-empty `PENDING_RECORDS` declaration say the
+same thing, and all three are meant to be read together. Three defects that review found were corrected
+in the record rather than merely noted, and each bore directly on this entry:
+
+- the record's written undefined-behaviour argument claimed that character-type access to this type's
+  **object representation** would be undefined behaviour. It would not — C11 6.2.6.1p4 and 6.5p7 permit
+  it — and the true objection is that the padding bytes are unspecified (6.2.6.1p6) and that both the
+  padding's extent and the significant bytes' encoding are target-dependent, so a byte image is not a
+  portable oracle. The record now says that, and the program inspects no representation either way;
+- the measured reason for disabling oracle (b) was **re-measured**, which withdrew the unsupportable
+  claim that the formats' exponent ranges differ and put the significand widths, 64 bits against 113,
+  in its place. The record now states the non-difference explicitly — the normal exponent range and the
+  finite maximum measured identical on all four targets, at -16381 to 16384 and 1.189731e+4932 — so the
+  exclusion rests on the significand and the rounding that follows from it. The measured reason below is
+  that re-measurement, not the claim it replaced;
+- this marker's class was `stdout_mismatch`, an observational class, on an arm the record **switches
+  off**. It now reads `comparison_excluded` (§2.2.1), and the parser requires that class exactly where
+  no comparison is attempted.
+
+Nothing about the exclusion itself changed: the same oracle, the same nine cells, the same basis.
 
 | Field | Value |
 |---|---|
 | Identifier | XD-TYPE-LONGDOUBLE-001 |
-| Class | stdout_mismatch |
+| Class | comparison_excluded |
 | Scope | oracle_b; all targets; all opt levels |
 | Program | 13_floating_point/004_long_double_target_restricted |
 | Basis | docs/technical-specifications.md, line 511, the type representation is specified with target-parametric sizes covering the floating types including long double |
 | Documented | Type representation with target-parametric sizes |
 | Evidence | (not written) |
-| Observed | The cross-backend value comparison is not attempted for this program: the record disables oracle (b). What the measurement shows, and what the exclusion rests on, is that sizeof(long double) is 16 on x86_64, 12 on i686, 16 on aarch64 and 16 on riscv64, with the two x86 targets carrying the x87 80-bit extended format inside that storage and the other two carrying IEEE binary128 -- three storage-and-format pairings over two distinct formats, whose significands are 64 bits against 113 and which therefore round at different places. A value difference between two backends over this type is therefore an implementation-defined difference of the kind the brief's carve-out names, not a defect in either. |
+| Observed | NO CROSS-BACKEND VALUE COMPARISON IS ATTEMPTED FOR THIS PROGRAM: the record above disables oracle (b), and this marker's class is comparison_excluded precisely so that this field describes no comparison result. What was observed is a measurement of the TYPE, made with the four pinned reference drivers: sizeof(long double) is 16 on x86_64, 12 on i686, 16 on aarch64 and 16 on riscv64, with the two x86 targets carrying the x87 80-bit extended format inside that storage and the other two carrying IEEE binary128 -- three storage-and-format pairings over two distinct formats, whose significands are 64 bits against 113 and which therefore round at different places. Measured beside it: the twelve cells this program does run print byte-identical stdout, because every value printed was chosen to be exact in all three representations, so the exclusion is about what a cross-backend value comparison over this type would MEAN rather than about any difference this program exhibits. A value difference between two backends over this type is an implementation-defined difference of the kind the brief's carve-out names, not a defect in either. |
 
 | Aspect | Value |
 |---|---|
@@ -1159,8 +1249,8 @@ becoming an oversight that nobody can distinguish from carelessness.
 
 | Documented limitation | Where it is documented | Why no marker |
 |---|---|---|
-| Shared-library / dynamic-loader validation gap | `docs/project-guide.md` line 109 (remaining work: shared library end-to-end validation) and line 246 (open risk: shared library dynamic loader incompatibility, "Open — Requires runtime validation") | **Outside this suite's oracles.** Every test binary is built with `-static`, which is also the one linkage mode both compilers spell identically and the reason emulator execution needs no sysroot. No cell ever produces or loads a shared object, so the limitation cannot manifest here and a marker would describe a comparison the suite never makes. |
-| DWARF debugger-validation gap | `docs/project-guide.md` line 110 (remaining work: DWARF v4 debugger compatibility testing) and line 247 (open risk: DWARF v4 debugger parsing failures, "Open — Requires manual testing") | **Outside this suite's oracles.** No debugger is ever invoked and `-g` appears in no differential invocation; the suite compares stdout bytes and exit status only. Debug information is therefore never observed, so nothing here could diverge on it. |
+| Shared-library / dynamic-loader validation gap | `docs/project-guide.md` §2.2 (remaining work: `Shared Library (-shared) End-to-End Validation`) and §6 (open risk: `Shared library dynamic loader incompatibility`, "Open — Requires runtime validation") | **Outside this suite's oracles.** Every test binary is built with `-static`, which is also the one linkage mode both compilers spell identically and the reason emulator execution needs no sysroot. No cell ever produces or loads a shared object, so the limitation cannot manifest here and a marker would describe a comparison the suite never makes. |
+| DWARF debugger-validation gap | `docs/project-guide.md` §2.2 (remaining work: `DWARF v4 Debugger Compatibility Testing (GDB/LLDB)`) and §6 (open risk: `DWARF v4 debugger parsing failures`, "Open — Requires manual testing") | **Outside this suite's oracles.** No debugger is ever invoked and `-g` appears in no differential invocation; the suite compares stdout bytes and exit status only. Debug information is therefore never observed, so nothing here could diverge on it. |
 | Error detection — the rejection of invalid programs | Not a repository limitation but a **noted non-goal** of this suite | **Not measurable by either mandated oracle.** Both oracles require the program to compile and run successfully before anything can be compared, so an invalid program produces no comparable output. It is a valuable future axis — naming it here makes its absence deliberate rather than an omission — but it is a different kind of test suite, not an expected divergence. |
 
 **Out of scope entirely, and therefore not expected divergences either.** The following are in the
@@ -1198,15 +1288,20 @@ the divergence is a **finding**, not an expected divergence.
 
 **`docs/project-guide.md`**
 
-| Lines | Section | What it authorises a marker to say |
+This document is edited as the project progresses — inserting one table row shifts every line below
+it — so its rows are cited **by section and row title** rather than by line number. Both forms
+resolve (§2.4), and the phrase form survives an edit to the document it cites, which is the property
+a basis needs.
+
+| Where | Section | What it authorises a marker to say |
 |---|---|---|
-| 81, 206 | The parser subsystem row and the requirement conformance matrix, both enumerating the GCC extensions that are parsed | The same extension-inventory basis as above, from the guide's side |
-| 109, 110, 111 | Remaining work: shared library end-to-end validation; DWARF v4 debugger compatibility testing; **C11 Standard Corner Case Compliance Testing** — the item this whole suite exists to close | That a validation activity is documented as outstanding |
-| 246, 247, 248 | The open risk register: shared library dynamic loader incompatibility ("Open — Requires runtime validation"); DWARF v4 debugger parsing failures ("Open — Requires manual testing"); and **C11 corner case non-compliance** — *"edge cases in complex declarators and type conversions may remain"*, status *"Open — Requires targeted testing"* | That a class of non-compliance is documented as an open, unmitigated risk |
+| §2.1 `C11 Frontend — Parser`, and §5 `C11 frontend with GCC extensions` | The parser subsystem row and the requirement conformance matrix, both enumerating the GCC extensions that are parsed | The same extension-inventory basis as above, from the guide's side |
+| §2.2 `Shared Library (-shared) End-to-End Validation`, `DWARF v4 Debugger Compatibility Testing (GDB/LLDB)`, `C11 Standard Corner Case Compliance Testing` | Remaining work: shared library end-to-end validation; DWARF v4 debugger compatibility testing; and **the C11 corner-case item this whole suite exists to close** | That a validation activity is documented as outstanding |
+| §6 `Shared library dynamic loader incompatibility`, `DWARF v4 debugger parsing failures`, `C11 corner case non-compliance` | The open risk register: the first "Open — Requires runtime validation"; the second "Open — Requires manual testing"; and the third — *"edge cases in complex declarators and type conversions may remain"*, status *"Open — Requires targeted testing"* | That a class of non-compliance is documented as an open, unmitigated risk |
 
 The last row deserves emphasis, because it is the reason this suite exists at all: the repository
 already records C11 corner-case non-compliance as an open risk whose mitigation is *targeted
-testing*, and names the corresponding work item at line 111. This register is where the outcome of
+testing*, and names the corresponding work item in §2.2. This register is where the outcome of
 that targeted testing becomes auditable.
 
 ## 8. Provenance, constraints and maintenance
@@ -1241,7 +1336,7 @@ text of any rule added later.
 | Constraint | What it requires | Consequence here |
 |---|---|---|
 | **C1 — no compiler source change** | `src/**`, `include/**`, `build.rs`, `Cargo.toml` and `Cargo.lock` are read-only reference material. | Nothing in this suite modifies any of them. **This directory contains no `.rs` file at any depth** — that is precisely what keeps Cargo blind to it, so it is never a build target and the package manifest needs no change at all. |
-| **C2 — no existing test weakened** | No existing test may be deleted, skipped, weakened or relaxed; no `#[ignore]` attribute may be added or removed. | No marker in this register changes an existing test, and the suite declares no ignored test and no harness test function of its own, so it can move neither the repository's test count nor its ignored count — which is the part that is mechanical here. The count itself, **exactly 13 ignored**, is a whole-repository property no integration test can read, so it is measured by the health gate (`cargo test 2>&1 \| grep "test result"`) once this suite and the compiler are on one branch. |
+| **C2 — no existing test weakened** | No existing test may be deleted, skipped, weakened or relaxed; no `#[ignore]` attribute may be added or removed. | No marker in this register changes an existing test, and the suite declares no ignored test and no harness test function of its own, so it can move neither the repository's test count nor its ignored count — which is the part that is mechanical here. The count itself, **exactly 13 ignored**, is a whole-repository property no integration test can read, so it is measured by the health gate once this suite and the compiler are on one branch — by **aggregating** the `test result:` line every test binary prints, never by grepping for one of them, because no single line carries the repository-wide figure. The suite contract records the exact command. |
 | **C3 — never exclude a feature because it is difficult** | If a feature cannot be tested, say so explicitly and explain why, rather than dropping it. | **Every entry in §4 exists because of C3.** Case ranges (§4.1) are absent from every documented inventory and are tested anyway, with all three oracles enabled and all twelve cells scheduled; they carry `XD-GCCEXT-CASE-RANGES-001`, whose class covers a refusal on oracle (a) alone, so a wrong answer there is a FINDING and whether the construct is *exercised* is not what a marker decides either way. The wide and Unicode literal prefixes (§4.3) are likewise unenumerated and likewise fully tested, with **no marker**, so any divergence there is a FINDING. And `long double` (§4.2) has three different representations across four targets and is written and run rather than dropped, with cross-backend value equality excluded for the reason its own record states **and** for the marker that record is required to carry beside it — which is why its nine oracle (b) arms report `XFAIL` citing `XD-TYPE-LONGDOUBLE-001` while oracle (a) and oracle (c) judge all twelve cells in full. That narrowing is *recorded and machine-checked* rather than adjudicated here: §2.4.1 applies, so whether the cited passage supports the exclusion is a reviewer's judgement made against §4.2, not something this row asserts. Where a comparison genuinely cannot be made, the exclusion is narrowed to a **single oracle**, the program keeps running under the remaining oracles, and the reason is recorded in the program's own record — never here alone. |
 | **C4 — contained execution** | Generated programs may not reach the network or any path outside the sandbox working directory. | Discharged by two separate mechanisms, and keeping them apart is what makes the claim checkable. **Corpus-authoring policy:** every input is a literal in the program source; no program opens a socket or reads a file, and the whole corpus has exactly **one** fixture file — the header used by the include-path flag probe. **Path discipline:** each cell is launched with its own workspace as its working directory, and the harness confines every path it constructs to roots beneath the build directory. **Environment isolation:** every child is spawned with the environment cleared and a small fixed set installed in its place — a search path restricted to the `PATH` entries that are absolute and not writable by an untrusted account, a fixed C locale, `TZ=UTC`, `TERM=dumb`, the strictest sanitizer options, and the cell's workspace under `HOME`, `TMPDIR`, `TMP` and `TEMP` — so no credential and no behaviour-changing variable reaches a program the suite does not control, and a compiler driver cannot be made to execute a substituted `cc1` or `as` from a directory tool resolution refused. None of the three is an operating-system sandbox: there is no namespace, `chroot`, seccomp filter, landlock profile or network restriction around any child; a tool that hard-codes a temporary path rather than reading `TMPDIR` keeps its own temporaries where it always did; and whether a crash writes a core image outside the workspace is decided by the host's `kernel.core_pattern` and core-size limit rather than by the harness — see `README.md` §"C4 — Contained execution". Untrusted input must be run under an external sandbox. |
 
@@ -1280,7 +1375,13 @@ genuinely different dimensions** that must never be collapsed into one another:
   widths, 64 bits against 113, that the exclusion actually rests on; and the loose *"three different
   formats"* wording was corrected to *"three storage-and-format pairings over two distinct formats"*
   in its `observed` field and in §4.2's matching `Observed` row, in the single edit §1.1's
-  character-for-character forward check requires. The driver's `PENDING_RECORDS` declaration is
+  character-for-character forward check requires. Two further defects that review found were then
+  corrected in the same record: its claim that character-type access to the type's **object
+  representation** would be undefined behaviour was withdrawn as false — such access is permitted, and
+  the real objection is that the padding bytes are unspecified and that padding and encoding are both
+  target-dependent — and its marker's class moved from the observational `stdout_mismatch` to
+  `comparison_excluded` (§2.2.1, §4.2), because the arm that marker scopes is the one the record
+  switches off. The driver's `PENDING_RECORDS` declaration is
   therefore **empty**, and the record-substantiation preflight gate now reports that every record the
   corpus holds is entitled to be read as evidence rather than withholding a feature area. The gate
   and this column are kept, because they are the mechanism rather than the instance: any record whose
@@ -1389,10 +1490,14 @@ machinery producing it works. Neither is a **result**, and one caveat travels wi
 them — the compiler under test was a surrogate, so nothing observed is evidence about `bcc`.
 
 So the rows stay separate, and each keeps a distinction the others cannot: what the corpus
-**represents** is fully counted, what this checkpoint has **reviewed** is one record short of it, and
-what has been **established about `bcc`** remains nothing at all. `README.md` §"The enumerable matrix"
-carries the same basis in more detail; the two documents are written to be checked against each other
-and against the files.
+**represents** is fully counted, what this checkpoint has **reviewed** now matches it record for
+record — every one of the 108, none pending — and what has been **established about `bcc`** remains
+nothing at all. Read the first two rows agreeing as the fact it is rather than as a reason to merge
+them: they are different *claims* that happen to carry the same figure at this checkpoint, one about
+which files exist and one about which of them have been through review, and the second will fall behind
+the first again the moment a program lands with a record whose review has not completed. `README.md`
+§"The enumerable matrix" carries the same basis in more detail; the two documents are written to be
+checked against each other and against the files.
 
 
 ### 8.3 Retirement log
@@ -1416,7 +1521,7 @@ identifier is spent and must not be reused for a different divergence (§2.3).
 |---|---|
 | 2026-08-04 | **The GCC case-range marker on `08_gcc_extensions/004_case_ranges.c` was reinstated, superseding the retirement recorded immediately below, and the two sentences of this register that had licensed that retirement were corrected.** A security review of the marker authorities found the retirement unsound on its evidence: the `XPASS` that triggered it came from a compiler under test that **forwards every invocation to the reference toolchain**, so the twelve agreements were one toolchain compared with itself — evidence about the environment, and about neither `bcc` nor case ranges. Reference-versus-itself agreement cannot establish that a real `bcc` supports the construct, so it cannot retire a marker the **frozen** project specification fixes for this program by identifier, class, scope and basis. Three edits put the register back in line with its own contract. The marker block returned to the record and the summary row and structured entry returned to §4.1, with the `observed` field now stating explicitly which half of the pair is measured (the reference half, `gcc` 13.4.0, four targets, three levels) and which carries no independent capture, and with `expected_divergence.evidence` left unwritten rather than filled in from the surrogate. §1.1's "Observed — not anticipatory" row and §2.1 no longer claim that an unobserved divergence must carry **no marker at all** — the rule the parser enforces is about *wording*, and generalising it into an existence rule is what made a specified marker unwritable and produced the four reversals logged here. And §3.2 now states the retirement precondition the omission left implicit: the `XPASS` must come from the **real** compiler under test, with `BCC_CONFORMANCE_ALLOW_XPASS` as the sanctioned response for a surrogate environment (§3.1). **Nothing was weakened to achieve this.** No parser rule, no classifier rule and no scope grammar changed; anticipatory wording is still refused at parse time; §8.5 step 1 still applies in full to every marker an author mints of their own accord; and §3.1 still fails a run on `XPASS` by default, which is precisely what keeps an unconfirmed marker a loud state rather than a silent pass. The program, its matrix, its three enabled oracles, its gate deviation and its golden record are **untouched** — twelve cells still run, exactly as they did before and after every previous reversal. |
 | 2026-08-04 | **The GCC case-range marker on `08_gcc_extensions/004_case_ranges.c` was retired, on the strength of a run rather than an argument, and the marker contract was left exactly as it stands.** The reinstatement recorded immediately below put the marker back in the record and in this register while the divergence it described had still never been observed — this branch carries the corpus and no `bcc` binary. The first run with a compiler under test settled it: the program compiled, the arm the marker scoped agreed with the reference compiler byte for byte on all four targets at all three optimization levels, and §3.1 did what it exists to do — twelve `XPASS` outcomes, a failing run, and a message naming the marker and both places to retire it. §3.2's two deletions have been performed: every `expected_divergence.*` key is gone from the record, and this register's summary row and structured entry are gone with it, so no identifier survives here that the reverse check cannot resolve. **The program, its matrix, its three enabled oracles, its gate deviation and its golden record are untouched** — twelve cells still run, and the whole analysis the marker carried is preserved in §4.1 and in the program's own `impl_defined_notes`, together with the exact shape a reinstatement must take. Two things are recorded rather than glossed. The compiler under test was a **surrogate** forwarding to the reference toolchain (§8.2), so the observation establishes that the predicted divergence is absent from the only compiler under test available, not that `bcc` accepts case ranges. And the retirement was said not to rest on the `XPASS` alone, but on a reading of §1.1's "Observed — not anticipatory" rule as an existence rule rather than a wording rule — **that reasoning is superseded by the entry above**, which corrected the two sentences it rested on and reinstated the marker. **Nothing was weakened to achieve this** — no rule in §2 was relaxed, the classifier was not touched, and the classification available to a case-range divergence moved in the strict direction: a refusal is now a `FINDING` where it would have been an `XFAIL`, delivered with a reproducer, both sides' output, an environment fingerprint and exact commands, which is better material for settling §4.1's open ambiguity than an excuse would have been. |
-| 2026-08-03 | **Both specified markers were reinstated, and the contract that had made them inexpressible was corrected.** The withdrawal recorded immediately below had added two required keys (`documented`, `evidence`), refused any basis resting on an **omission**, and required a refusal-class marker to scope every oracle its refusal blocks. Between them those three rules made the two markers the frozen specification mandates by identifier, class, scope and basis impossible to write — the case-range marker's basis *is* an inventory omission and its scope *is* `oracle_a` alone — so the contract was not enforcing the specification but overruling it. The corrections: `documented` and `evidence` became **optional enrichment** rather than acceptance conditions (§2.1); an omission-based basis is **admitted**, with the format enforcing only that the citation can be *followed* to a resolvable locator and that a supplied quotation occurs inside the cited range, leaving the strength of the citation to a reviewer reading §4 (§2.4.1); and the `all oracles` requirement was replaced by **dependency-aware classification** in the classifier, where the marked arm settles a refusal and every other arm of the cell is reported as a dependent blocked expected divergence citing that root (§2.3). One rule moved the other way and became **stricter**: a record that disables an oracle must now carry a marker whose scope names it, because a disabled oracle is already reported `XFAIL` and had been claiming that authority on prose alone — so `XD-TYPE-LONGDOUBLE-001` is now required rather than merely permitted, and a markerless narrowing is a `FAIL` (§3.3). Every program, matrix, oracle toggle and golden record is **untouched** by all of this. |
+| 2026-08-03 | **Both specified markers were reinstated, and the contract that had made them inexpressible was corrected.** The withdrawal recorded immediately below had added two required keys (`documented`, `evidence`), refused any basis resting on an **omission**, and required a refusal-class marker to scope every oracle its refusal blocks. Between them those three rules made the two markers the frozen specification mandates by identifier, class, scope and basis impossible to write — the case-range marker's basis *was* an inventory omission at the time, before §4.1 moved it to the affirmative compliance rule, and its scope *is* `oracle_a` alone — so the contract was not enforcing the specification but overruling it. The corrections: `documented` and `evidence` became **optional enrichment** rather than acceptance conditions (§2.1); an omission-based basis is **admitted**, with the format enforcing only that the citation can be *followed* to a resolvable locator and that a supplied quotation occurs inside the cited range, leaving the strength of the citation to a reviewer reading §4 (§2.4.1); and the `all oracles` requirement was replaced by **dependency-aware classification** in the classifier, where the marked arm settles a refusal and every other arm of the cell is reported as a dependent blocked expected divergence citing that root (§2.3). One rule moved the other way and became **stricter**: a record that disables an oracle must now carry a marker whose scope names it, because a disabled oracle is already reported `XFAIL` and had been claiming that authority on prose alone — so `XD-TYPE-LONGDOUBLE-001` is now required rather than merely permitted, and a markerless narrowing is a `FAIL` (§3.3). Every program, matrix, oracle toggle and golden record is **untouched** by all of this. |
 | 2026-08-03 | The GCC case-range marker on `08_gcc_extensions/004_case_ranges.c` was **withdrawn, and the marker contract was changed so that it could not be reinstated in that shape — a change that was itself reversed the same day by the entry above.** Two independent defects were identified, either sufficient on its own: its basis rested on an **omission** from the documented extension inventory — silence, which authorises nothing and which extending the inventory would remove without disturbing the excuse — and its `observed` field described the divergence as **anticipated**, in the future tense, with no command, status, output or toolchain behind it. The parser was made to refuse both, a refusal-class marker was required to cover every oracle its refusal blocks, and `documented` and `evidence` were made required keys. **None of those four rules is in force any longer** — the entry above reversed three of them and kept the anticipatory-wording refusal, which is the one that survived on its own merits and is still enforced (§1.1). The second defect identified here was real and was fixed in the marker rather than in the contract: the reinstated marker's `observed` field states what was seen, in the present tense, and no longer describes the divergence as predicted. The program, its matrix, its oracle toggles and its golden record were **untouched** throughout. The analysis is preserved in §4.1 and in the program's own `impl_defined_notes`. |
 | 2026-08-02 | The GCC case-range marker on `08_gcc_extensions/004_case_ranges.c` was **reinstated**, superseding the withdrawal recorded below. The suite's brief specifies that marker by identifier, class, scope and basis, and requires the record beside that program to carry it, so its presence is a requirement of the brief rather than an inference drawn in this register. Its anticipatory nature is not hidden: §4.1 states in as many words that no `bcc` verdict has yet been recorded on this branch, that the marker is therefore anticipatory, and that an acceptance produces the `XPASS` that fails the run — with §3.2's two-deletion retirement as the remedy. The program, its matrix, its oracle toggles and its golden record are again **untouched**, so the feature remains fully under test either way. |
 | 2026-08-01 | The GCC case-range marker on `08_gcc_extensions/004_case_ranges.c` was **withdrawn without the divergence it described ever having been observed**. It had been minted on the strength of an omission from the documented extension inventory, which §4 and §8.5 step 2 both establish is not a documented limitation. Because nothing had been observed or reproduced, the marker risked failing a run on `XPASS` — on the test material rather than the compiler — and would meanwhile have blinded the suite to a real regression in exactly that construct. The program, its matrix, its oracle toggles and its golden record are **untouched**, so the feature remains fully under test; a divergence there is now a `FINDING` until an explicit documented limitation and a real observation both exist. The analysis the marker carried is preserved in §4.1 and in the program's own `impl_defined_notes`. |
@@ -1428,7 +1533,7 @@ identifier is spent and must not be reused for a different divergence (§2.3).
 | [`README.md`](README.md) | The suite contract: the three oracles, the verdict taxonomy, the environment variables, the artifact locations, the `.expected` record format (including the marker block), and how to reproduce any cell by hand |
 | [`FINDINGS.md`](FINDINGS.md) | The register of **undocumented** divergences. Its curated set is empty on this branch, which is what a suite with no compiler under test can honestly report. Each entry points at a finding directory holding a **verbatim** reproducer — a byte-for-byte copy of the corpus program — its recorded minimization status, and exact reproduction commands. Automated reduction is never performed during a run; reduction is a supervised activity performed on the copy before a finding is promoted to the curated set |
 | [`../conformance.rs`](../conformance.rs) | The suite driver, including `infra_expected_divergence_register`, the test that keeps this file and the corpus honest in both directions |
-| `docs/testing/differential-conformance.md` (**planned**, not present on this branch — named as plain text for that reason) | The documentation-site page: methodology, oracle definitions, the build matrix, the verdict taxonomy and the deliverable summary format |
+| [`../../docs/testing/differential-conformance.md`](../../docs/testing/differential-conformance.md) | The documentation-site page, committed and published in the MkDocs navigation: methodology, oracle definitions, the build matrix, the verdict taxonomy and the deliverable summary format |
 
 ### 8.5 Add-a-marker checklist
 
@@ -1443,12 +1548,16 @@ you skip one:
    **locator the audit can resolve** (a line, a line range, a `§` section number or a
    backtick-quoted phrase, §2.4). Where a passage in that range authorises the marker, put it
    **verbatim** in the optional `expected_divergence.documented`, which the audit then resolves
-   **inside the cited range** rather than anywhere in the file. An **omission** from an inventory is
-   admitted as a basis — the frozen contract mandates exactly that form for case ranges — and the
-   audit does not adjudicate its strength; what it enforces is that a reader can follow the citation
-   to the passage and judge for themselves, and §4 states plainly, per marker, how strong the basis
-   is. Admission is not endorsement: an omission is the weakest basis this format accepts, and a
-   marker resting on one owes its register entry an explicit statement to that effect. **If there is
+   **inside the cited range** rather than anywhere in the file. Prefer a statement the document
+   actually makes: §4.1's marker began on an inventory's silence and now cites the compliance rule
+   that fixes the **required** extension set, which is a claim a reader can weigh rather than a gap
+   they must interpret. An **omission** from an inventory is nevertheless admitted as a basis — the
+   frozen contract's case-range marker was minted in exactly that form, and a format that cannot
+   express its own specification's markers is the thing that needs changing — and the audit does not
+   adjudicate its strength; what it enforces is that a reader can follow the citation to the passage
+   and judge for themselves, and §4 states plainly, per marker, how strong the basis is. Admission is
+   not endorsement: an omission is the weakest basis this format accepts, and a marker resting on one
+   owes its register entry an explicit statement to that effect. **If there is
    no citable document at all, there is no expected divergence:** the correct outcome is a finding,
    recorded in the committed findings register [`FINDINGS.md`](FINDINGS.md) with its reproducer.
 3. **Add the five required `expected_divergence.*` keys** to the program's `.expected` record, plus
@@ -1463,9 +1572,11 @@ you skip one:
    and launched, so only the arm that compared the two runs observed anything, and the marker names
    that arm exactly as a `stdout_mismatch` marker does. Scope it `all oracles` only when the basis genuinely speaks for all
    three arms. If instead the marker documents a comparison the record deliberately **does not
-   make**, scope it to the oracle the record disables and say so in `observed` — that marker is
-   **required**, not optional, is dormant by construction, is consulted on exactly the
-   not-attempted cells, and must move together with the toggle and the recorded reason (§3.3, §4.2).
+   make**, scope it to the oracle the record disables, class it **`comparison_excluded`** (§2.2.1) —
+   the parser requires that class there and refuses an observational one — and say in `observed` what
+   was measured about the construct rather than about a comparison. Such a marker is **required**, not
+   optional, is dormant by construction, is consulted on exactly the not-attempted cells, and must
+   move together with the toggle and the recorded reason (§3.3, §4.2).
 4. **Add the summary-table row in §4 and a structured entry** in the shape §1.3 defines: a heading
    naming the marker, then a table stating Identifier, Class, Scope, Program, Basis and Observed.
    Reproduce the record's basis string **verbatim** in both places — one canonical rendering,

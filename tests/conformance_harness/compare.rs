@@ -135,7 +135,10 @@ use std::fmt;
 
 use super::execute::{RunOutcome, Termination, MAX_CONTRACT_EXIT_CODE};
 use super::manifest::Manifest;
-use super::{sanitize_text_for_report, shown_path, CellKey, DivergenceClass, Oracle, Target};
+use super::{
+    sanitize_text_for_report, shown_path, CellKey, DivergenceClass, Oracle, Provenance, SideRecord,
+    Target,
+};
 
 /// Lines of context shown on each side of the divergent line.
 ///
@@ -916,6 +919,15 @@ pub struct Comparison {
     pub oracle: Oracle,
     /// The recorded reason this comparison was not attempted, and `None` when it was.
     pub excluded: Option<String>,
+    /// The structured account of both sides, filled on **every** comparison.
+    ///
+    /// Deliberately not derived from [`Comparison::detail`] and not a subset of it. The detail is
+    /// prose whose shape differs between an agreement and a divergence; this carries the same fields
+    /// either way, which is what lets `classify.rs` hand a machine-readable provenance to every
+    /// outcome and `report.rs` publish a populated command column on a PASS row.
+    ///
+    /// `None` only for a comparison that was never attempted, where there is nothing to record.
+    pub provenance: Option<Provenance>,
 }
 
 impl Comparison {
@@ -926,6 +938,15 @@ impl Comparison {
     /// having to reason about the field table above.
     pub fn attempted(&self) -> bool {
         self.excluded.is_none()
+    }
+
+    /// Attach the structured account of the two sides.
+    ///
+    /// Applied by each oracle after the agreement or divergence has been built, so the two shapes
+    /// share one construction path and neither can be given a different set of fields than the other.
+    fn attach_provenance(mut self, provenance: Provenance) -> Comparison {
+        self.provenance = Some(provenance);
+        self
     }
 
     /// Append an advisory to both renderings.
@@ -987,6 +1008,7 @@ fn agreed(oracle: Oracle, key: &CellKey, confirmation: &str, context: &[String])
         detail,
         oracle,
         excluded: None,
+        provenance: None,
     }
 }
 
@@ -1057,6 +1079,7 @@ fn diverged(
         detail,
         oracle,
         excluded: None,
+        provenance: None,
     }
 }
 
@@ -1104,27 +1127,20 @@ fn compare_executions(
     );
     let stdout = locate_stdout_divergence(expected.stdout(), actual.stdout());
 
+    // Both sides' full execution record, on BOTH paths. An agreement used to carry the side label,
+    // the termination and a byte count and to stop there, which made a passing row unreproducible:
+    // the one thing a reader needs in order to re-run a cell by hand is the command line, and it was
+    // present only when the cell had already failed. There is no reason for the asymmetry — the
+    // record is already in hand either way — and its cost was that most rows of a run could not be
+    // acted on at all.
+    let context = vec![
+        row("expected side", &sanitize_text_for_report(expected_label)),
+        row("expected execution", &expected.describe()),
+        row("actual side", &sanitize_text_for_report(actual_label)),
+        row("actual execution", &actual.describe()),
+    ];
+
     let mut comparison = if status.is_none() && stdout.is_none() {
-        let context = vec![
-            row(
-                "expected side",
-                &format!(
-                    "{}, {}, {} stdout bytes",
-                    sanitize_text_for_report(expected_label),
-                    render_termination(expected.termination()),
-                    expected.stdout().len()
-                ),
-            ),
-            row(
-                "actual side",
-                &format!(
-                    "{}, {}, {} stdout bytes",
-                    sanitize_text_for_report(actual_label),
-                    render_termination(actual.termination()),
-                    actual.stdout().len()
-                ),
-            ),
-        ];
         agreed(
             oracle,
             key,
@@ -1137,20 +1153,67 @@ fn compare_executions(
             &context,
         )
     } else {
-        // A divergence gets the full execution record of both sides, because the command line it
-        // carries is what lets a reader reproduce the cell without the harness.
-        let context = vec![
-            row("expected side", &sanitize_text_for_report(expected_label)),
-            row("expected execution", &expected.describe()),
-            row("actual side", &sanitize_text_for_report(actual_label)),
-            row("actual execution", &actual.describe()),
-        ];
         diverged(oracle, key, status.as_ref(), stdout.as_ref(), &context)
     };
 
     note_exit_code_contract(&mut comparison, expected_label, expected);
     note_exit_code_contract(&mut comparison, actual_label, actual);
-    comparison
+    comparison.attach_provenance(
+        Provenance::of_pair(
+            side_of_run(actual_label, actual),
+            side_of_run(expected_label, expected),
+        )
+        .with_first_difference(first_difference_of(status.as_ref(), stdout.as_ref())),
+    )
+}
+
+/// One executed side, as the fields a report column carries.
+///
+/// The termination is rendered with its raw wait status attached, because the two are one fact: a
+/// status of 139 and "killed by signal 11" are the same ending seen from two sides, and a consumer
+/// that has only the rendered form cannot tell a normal exit of 139 from a signal.
+fn side_of_run(label: &str, run: &RunOutcome) -> SideRecord {
+    SideRecord::new(
+        label,
+        run.launch_command_line(),
+        format!(
+            "{} (raw wait status {}, {} stdout byte(s))",
+            render_termination(run.termination()),
+            run.raw_wait_status(),
+            run.stdout().len()
+        ),
+        capture_reference(run),
+    )
+}
+
+/// Where a run's raw streams can be read, named rather than quoted.
+///
+/// The working directory is the cell workspace, and the entry names are the ones
+/// [`RunOutcome::persist`] wrote, so this points a reader at bytes that exist rather than reproducing
+/// them into a line-oriented report. Empty when the run had no workspace to persist into.
+fn capture_reference(run: &RunOutcome) -> String {
+    match run.working_dir() {
+        Some(directory) => format!(
+            "{} (stdout, stderr and exit records)",
+            shown_path(directory)
+        ),
+        None => String::new(),
+    }
+}
+
+/// The located first difference, as one line, or the empty string for an agreement.
+fn first_difference_of(
+    status: Option<&StatusDivergence>,
+    stdout: Option<&StdoutDivergence>,
+) -> String {
+    match (status, stdout) {
+        (Some(status), Some(stdout)) => {
+            format!("{}; and {}", status.summary, stdout.summary())
+        }
+        (Some(status), None) => status.summary.clone(),
+        (None, Some(stdout)) => stdout.summary(),
+        (None, None) => String::new(),
+    }
 }
 
 /// Oracle (a): compare bcc against an external reference C compiler.
@@ -1258,31 +1321,26 @@ pub fn oracle_c(actual: &RunOutcome, manifest: &Manifest, key: &CellKey) -> Comp
         ),
     );
 
+    // The record's own row, then the cell's FULL execution record, on both paths. An agreement here
+    // used to print the termination and a byte count and omit both the command line and the raw wait
+    // status -- so a golden PASS could not be re-run by hand, and could not distinguish a normal exit
+    // from a signal that happened to carry the same number.
+    let context = vec![record_row, row("actual execution", &actual.describe())];
+
     let mut comparison = if status.is_none() && stdout.is_none() {
-        let context = vec![
-            record_row,
-            row(
-                "actual side",
-                &format!(
-                    "{}, {} stdout bytes",
-                    render_termination(actual.termination()),
-                    actual.stdout().len()
-                ),
-            ),
-        ];
         agreed(
             oracle,
             key,
             &format!(
                 "stdout matches the recorded golden output byte for byte ({} bytes) and the exit \
-                 code is the recorded {}",
+                 code is the recorded {} (raw wait status {})",
                 actual.stdout().len(),
-                manifest.expect_exit()
+                manifest.expect_exit(),
+                actual.raw_wait_status()
             ),
             &context,
         )
     } else {
-        let context = vec![record_row, row("actual execution", &actual.describe())];
         diverged(oracle, key, status.as_ref(), stdout.as_ref(), &context)
     };
 
@@ -1298,7 +1356,25 @@ pub fn oracle_c(actual: &RunOutcome, manifest: &Manifest, key: &CellKey) -> Comp
         ));
     }
     note_exit_code_contract(&mut comparison, actual_label, actual);
-    comparison
+    comparison.attach_provenance(
+        Provenance::of_pair(
+            side_of_run(actual_label, actual),
+            // The authority ran no process: its bytes are committed in the record. The command field
+            // is therefore empty by construction rather than unknown, and the record's own path takes
+            // the place a command line would occupy for an executed side.
+            SideRecord::new(
+                expected_label,
+                String::new(),
+                format!(
+                    "{} as recorded ({} expected stdout byte(s))",
+                    render_termination(expected_termination),
+                    manifest.expected_stdout_bytes().len()
+                ),
+                shown_path(manifest.path()),
+            ),
+        )
+        .with_first_difference(first_difference_of(status.as_ref(), stdout.as_ref())),
+    )
 }
 
 /// Record that one oracle was not attempted for a cell, because the program's own expectation
@@ -1376,6 +1452,7 @@ pub fn excluded_by_manifest(oracle: Oracle, manifest: &Manifest, key: &CellKey) 
         detail,
         oracle,
         excluded: Some(reason),
+        provenance: None,
     };
 
     if manifest.oracle_enabled(oracle) {
@@ -1517,6 +1594,7 @@ pub fn build_refusal(
         detail,
         oracle,
         excluded: None,
+        provenance: None,
     }
 }
 

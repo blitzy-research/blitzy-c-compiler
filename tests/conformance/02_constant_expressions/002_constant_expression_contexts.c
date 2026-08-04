@@ -37,9 +37,9 @@
  *
  * No header is named and printf is hand-declared.  bcc ships no stdio.h: its
  * bundled set is the nine required freestanding headers plus a bonus stdatomic.h,
- * ten files in all (docs/project-guide.md line 212), so naming stdio.h would fail
- * against bcc while succeeding against the reference compiler.  _Static_assert is
- * a C11 keyword and needs no header either.
+ * ten files in all (docs/project-guide.md, "9 bundled freestanding headers"), so
+ * naming stdio.h would fail against bcc while succeeding against the reference
+ * compiler.  _Static_assert is a C11 keyword and needs no header either.
  *
  * Two consequences of the default warning gate shape the code.  Every
  * _Static_assert carries its message string, because the message-less form is C23

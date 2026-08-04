@@ -27,8 +27,8 @@
  * dereferenced past an object's end.  Loop bounds are
  * literal, so iteration order is fixed.  No header is named -- bcc ships no
  * stdio.h, its bundled set being the nine required freestanding headers plus a
- * bonus stdatomic.h, ten files in all (docs/project-guide.md line 212) -- and
- * printf is declared by hand instead. */
+ * bonus stdatomic.h, ten files in all (docs/project-guide.md, "9 bundled freestanding
+ * headers") -- and printf is declared by hand instead. */
 int printf(const char *, ...);
 
 static int g_scalar = 42;

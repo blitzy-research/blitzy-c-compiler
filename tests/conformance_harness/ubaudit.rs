@@ -233,11 +233,12 @@ use super::execute::{
 use super::manifest::{self, Manifest};
 use super::sandbox::{self, Workspace, COMMANDS_NAME, PROGRAM_SOURCE_NAME};
 use super::{
-    comma_separated, ensure_within, is_bcc_target_selector, is_ub_audit_gate_member,
-    is_ub_audit_gate_removable, posix_command_line, redact_secrets, require_regular_file,
+    comma_separated, ensure_within, is_bcc_target_selector, is_sanctioned_source_suppression,
+    is_ub_audit_gate_member, is_ub_audit_gate_removable, posix_command_line, read_file_bounded,
+    redact_secrets, require_regular_file, sanctioned_source_suppression_warnings,
     sanitize_text_for_report, shown_path, ub_audit_gate_required, HarnessError, HarnessResult,
-    EXTENSION_AREA, PROGRAM_COUNT, UB_AUDIT_GATE_DEFAULT, UB_AUDIT_GATE_MANDATORY,
-    UB_AUDIT_GATE_REMOVABLE,
+    EXTENSION_AREA, MAX_INSPECTED_FILE_BYTES, PROGRAM_COUNT, UB_AUDIT_GATE_DEFAULT,
+    UB_AUDIT_GATE_MANDATORY, UB_AUDIT_GATE_REMOVABLE,
 };
 
 /// The sanitizer gate, in the order the flags are passed.
@@ -1058,6 +1059,12 @@ pub struct ProgramAudit {
     /// the human half's coverage as a count and name each program that owes one, which is a
     /// different question from whether any gate failed and is not answerable from the gate results.
     ub_notes_recorded: bool,
+    /// The diagnostics this program's own source switches off with a diagnostic-control directive.
+    ///
+    /// Empty for every program that carries none. A non-empty list is a relaxation of the same gate
+    /// that `dropped` records, made in the program rather than in the invocation — so it is reported
+    /// beside the command-line deviations rather than left for a reader to find in the source.
+    suppressions: Vec<String>,
     /// The two gate results.
     warning: GateResult,
     sanitizer: GateResult,
@@ -1092,6 +1099,11 @@ impl ProgramAudit {
     /// The default-gate members this program drops.
     pub fn dropped_flags(&self) -> &[String] {
         &self.dropped
+    }
+
+    /// The diagnostics this program suppresses from inside its own source, in the order found.
+    pub fn source_suppressions(&self) -> &[String] {
+        &self.suppressions
     }
 
     /// The recorded reason for the deviation, when this program deviates.
@@ -1368,11 +1380,24 @@ impl AuditReport {
         areas
     }
 
-    /// Every program whose warning gate deviates from the default, in corpus order.
+    /// Every program whose warning gate is relaxed at all, in corpus order.
+    ///
+    /// Both kinds of relaxation qualify, and that is the point of collecting them in one place: a
+    /// dropped flag and an in-source `#pragma GCC diagnostic ignored` switch off a gate member to the
+    /// same effect, differing only in where they are written. Reporting only the first would leave the
+    /// relaxation a reader is least able to find out of the one list that exists to enumerate them.
     pub fn deviations(&self) -> Vec<&ProgramAudit> {
         self.programs()
             .iter()
-            .filter(|audit| audit.deviated())
+            .filter(|audit| audit.deviated() || !audit.source_suppressions().is_empty())
+            .collect()
+    }
+
+    /// Every program that suppresses a diagnostic from inside its own source, in corpus order.
+    pub fn source_suppressions(&self) -> Vec<&ProgramAudit> {
+        self.programs()
+            .iter()
+            .filter(|audit| !audit.source_suppressions().is_empty())
             .collect()
     }
 
@@ -1738,8 +1763,9 @@ impl AuditReport {
     fn render_deviations_into(&self, out: &mut String) {
         let deviations = self.deviations();
         out.push_str(&format!(
-            "recorded warning-gate deviations ({})\n",
-            deviations.len()
+            "recorded warning-gate relaxations ({}, of which {} are in-source suppressions)\n",
+            deviations.len(),
+            self.source_suppressions().len()
         ));
         out.push_str("-------------------------------------\n");
         if deviations.is_empty() {
@@ -1755,9 +1781,19 @@ impl AuditReport {
              recorded\n  with its reason in the program's own expectation record. Only {} may be \
              dropped at all, and\n  exactly two categories are sanctioned: the supported-extension \
              area drops {EXTENSION_ONLY_REMOVABLE},\n  and the one deliberate \
-             narrowing-conversion program drops the two conversion diagnostics.\n\n",
+             narrowing-conversion program drops the two conversion diagnostics.\n",
             comma_separated(&ub_audit_gate_required()),
             comma_separated(UB_AUDIT_GATE_REMOVABLE),
+        ));
+        out.push_str(&format!(
+            "  An IN-SOURCE suppression is the same relaxation written in the program instead of the \
+             command line,\n  and is held to the same standard: it must be registered in the \
+             record's `{MANIFEST_SOURCE_SUPPRESSION_KEY}` key,\n  sanctioned for that exact \
+             program, bracketed by a matched push/pop, and explained by a reason naming the\n  \
+             warning. The audit reads the source and fails the gate for a directive the record does \
+             not register,\n  for a registration with no directive behind it, and for any \
+             suppression that is not bracketed.\n  The sanctioned warnings are {}.\n\n",
+            comma_separated(&sanctioned_source_suppression_warnings()),
         ));
         for audit in deviations {
             out.push_str(&format!("  {}\n", sanitize_line(&audit.label())));
@@ -1768,6 +1804,17 @@ impl AuditReport {
             out.push_str(&format!(
                 "    dropped : {}\n",
                 sanitize_line(&audit.dropped_flags().join(" "))
+            ));
+            // Printed for every relaxed program, not only for the ones that carry a directive, so a
+            // reader comparing two entries can see that one relaxes the gate from the command line
+            // and the other from inside the file rather than inferring it from a missing line.
+            out.push_str(&format!(
+                "    in source: {}\n",
+                if audit.source_suppressions().is_empty() {
+                    String::from("(none)")
+                } else {
+                    sanitize_line(&audit.source_suppressions().join(" "))
+                }
             ));
             match audit.reason() {
                 Some(reason) => {
@@ -2237,6 +2284,14 @@ struct GateDecision {
     /// in the report, so a reader is told which programs lack one instead of inferring it from the
     /// absence of a failure.
     ub_notes_recorded: bool,
+    /// The diagnostics this program's own source switches off with a diagnostic-control directive,
+    /// once the registration in its record and the directives in the file have been reconciled.
+    ///
+    /// Empty for every program that carries none, which is all but one of them. A directive the
+    /// record does not register, or a registration with no directive behind it, is a defect rather
+    /// than an entry here — so a non-empty list means the exception was declared, sanctioned,
+    /// explained and actually present.
+    suppressions: Vec<String>,
     /// Everything wrong with the record, each phrased as a sentence an author can act on. A
     /// non-empty list fails the warning gate.
     defects: Vec<String>,
@@ -2378,16 +2433,22 @@ fn decide_warning_gate(manifest: &Manifest) -> GateDecision {
         deviated,
         reason,
         ub_notes_recorded,
+        // Filled by `reconcile_source_suppressions`, which needs the program text this function
+        // never reads. Left empty here so the record-side decision stays a pure function of the
+        // record, exactly as this function's name says.
+        suppressions: Vec::new(),
         defects,
     }
 }
 
-/// Find the recorded reason for a gate deviation, and the dropped flags nothing accounts for.
+/// Find the recorded reason for a gate relaxation, and the relaxations nothing accounts for.
 ///
-/// Returns the paragraphs that justify the removal, in a deterministic order, together with the
-/// list of dropped flags no paragraph names. A non-empty second element is what fails the gate: a
-/// record that narrows the audit without saying which flag it removed, or why, has recorded nothing
-/// that could be reviewed.
+/// Takes whichever diagnostics this program relaxes — the gate members it drops on the command line,
+/// the warnings it suppresses in its own source, or both — because the obligation is identical for
+/// each and the paragraph that discharges it is read from the same field. Returns the paragraphs that
+/// justify them, in a deterministic order, together with the list of relaxations no paragraph names.
+/// A non-empty second element is what fails the gate: a record that narrows the audit without saying
+/// which diagnostic it relaxed, or why, has recorded nothing that could be reviewed.
 ///
 /// Exactly one field is searched: `impl_defined_notes`, the **single canonical field** for the
 /// reason behind a gate deviation. `ub_notes` is deliberately **not** consulted, and the difference
@@ -2412,8 +2473,282 @@ fn decide_warning_gate(manifest: &Manifest) -> GateDecision {
 ///
 /// Returns `(None, empty)` when nothing was dropped, since a gate that deviates in no way needs no
 /// reason at all.
-fn explain_deviation(manifest: &Manifest, dropped: &[String]) -> (Option<String>, Vec<String>) {
-    if dropped.is_empty() {
+/// A diagnostic-control directive found in a program's source, and where it was found.
+struct SourceDirective {
+    /// One-based line number, so a diagnostic sends an author straight to it.
+    line: usize,
+    /// The operation the directive performs: `push`, `pop`, `ignored`, `warning`, `error`, or
+    /// whatever unrecognised word stood in that position.
+    operation: String,
+    /// The warning the operation names, when it names one.
+    warning: Option<String>,
+    /// The directive as written, for a diagnostic that has to quote it.
+    text: String,
+}
+
+/// Every diagnostic-control directive in a program's source, in the order they appear.
+///
+/// # What counts, and why the net is drawn this wide
+///
+/// Both `#pragma GCC diagnostic …` and `_Pragma("GCC diagnostic …")` are recognised, and so are the
+/// `clang` spellings of each: the gate is driven by whichever reference driver the environment
+/// supplies, and a directive that only one vendor honours still relaxes the gate on that vendor. The
+/// scan also recognises `#pragma GCC system_header`, whose effect is to suppress *every* diagnostic
+/// for the remainder of the file — it is caught here precisely so that it can be refused, rather than
+/// slipping past a scan that only looked for the word `ignored`.
+///
+/// Deliberately textual, and deliberately not a C preprocessor. A directive inside a `#if 0` block or
+/// a comment would be reported even though it has no effect, which is the safe direction to be wrong
+/// in: the cost is a spurious defect an author removes in one edit, whereas a missed directive is a
+/// gate reported as fully applied when it was not. The corpus forbids nothing that would make this a
+/// nuisance — one program carries directives at all, and every one of them is live code.
+fn scan_source_directives(text: &str) -> Vec<SourceDirective> {
+    let mut found: Vec<SourceDirective> = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = index + 1;
+        let trimmed = raw.trim();
+        // The two spellings a translation unit can carry. `_Pragma` is stripped down to the same
+        // shape as the `#pragma` form so that one parser handles both.
+        let body = if let Some(rest) = trimmed.strip_prefix('#') {
+            let rest = rest.trim_start();
+            match rest.strip_prefix("pragma") {
+                Some(body) => String::from(body.trim_start()),
+                None => continue,
+            }
+        } else if let Some(open) = trimmed.find("_Pragma") {
+            let after = &trimmed[open + "_Pragma".len()..];
+            let Some(quoted) = after.find('"').and_then(|start| {
+                after[start + 1..]
+                    .find('"')
+                    .map(|end| &after[start + 1..start + 1 + end])
+            }) else {
+                continue;
+            };
+            String::from(quoted.trim())
+        } else {
+            continue;
+        };
+
+        let mut words = body.split_whitespace();
+        let Some(vendor) = words.next() else {
+            continue;
+        };
+        if vendor != "GCC" && vendor != "clang" {
+            continue;
+        }
+        let Some(subject) = words.next() else {
+            continue;
+        };
+        if subject != "diagnostic" && subject != "system_header" {
+            continue;
+        }
+        // `system_header` takes no operand, so its own name is the operation. Recording it that way
+        // keeps the refusal below a single rule rather than a special case.
+        let operation = if subject == "system_header" {
+            String::from("system_header")
+        } else {
+            String::from(words.next().unwrap_or_default())
+        };
+        let warning = words
+            .next()
+            .map(|operand| String::from(operand.trim_matches('"')))
+            .filter(|operand| !operand.is_empty());
+        found.push(SourceDirective {
+            line,
+            operation,
+            warning,
+            text: String::from(trimmed),
+        });
+    }
+    found
+}
+
+/// Reconcile the directives in a program's source with the registration in its record.
+///
+/// # The gap this closes
+///
+/// [`decide_warning_gate`] validates the gate a record *asks for*, and that was the whole of the
+/// model. A `#pragma GCC diagnostic ignored "-Wsomething"` in the program relaxes the very same gate
+/// to the very same effect — a diagnostic `-Werror` would have made fatal is not raised — and it was
+/// invisible to that validation, so a program could be reported as having satisfied the full default
+/// gate while a member of it had been switched off across part of the file. Requirement 1's guarantee
+/// is that undefined-behaviour freedom is machine-enforced; an exception the machine cannot see is not
+/// enforced.
+///
+/// So an in-source suppression is admitted on the same terms as a command-line deviation, and refused
+/// on the same terms too. Six conditions:
+///
+/// - **Whole-file suppression is refused outright.** `system_header` silences every diagnostic for the
+///   rest of the translation unit. No bracketing makes that reviewable, and no reason justifies it
+///   here, so it is not registrable at all.
+/// - **Every unrecognised operation is refused.** The scan reports the word it found in the operation
+///   position; anything but `push`, `pop`, `ignored`, `warning` or `error` is a directive whose effect
+///   this audit cannot reason about, and an effect it cannot reason about is one it must not certify.
+/// - **`ignored` and `warning` are suppressions and must be registered.** `warning` demotes a
+///   diagnostic that `-Werror` would have made fatal, which is a relaxation even though the diagnostic
+///   is still printed. `error` is a strengthening and needs no registration.
+/// - **The registration and the source must agree in both directions.** A directive the record does
+///   not name fails; so does a registered warning with no directive behind it, because a stale
+///   registration is documented knowledge that has stopped being true and would silently authorise a
+///   future directive nobody reviewed.
+/// - **Every suppression must be bracketed by a matched `push`/`pop`.** An unbalanced pair leaves the
+///   suppression in force to the end of the file, which is `system_header` by another route. The
+///   depth is tracked so that an unmatched `pop` is caught as well.
+/// - **Every suppression must be sanctioned for this exact program.** Checked here as well as in the
+///   parser, because this module is the one that runs the gate and must not rest the guarantee it
+///   publishes on another module's diligence.
+///
+/// Returns the reconciled suppression list and the defects, which the caller folds into the gate
+/// decision — so any of these failures fails the warning gate before a compiler is spawned.
+fn reconcile_source_suppressions(
+    manifest: &Manifest,
+    area: &str,
+    program: &str,
+    directives: &[SourceDirective],
+) -> (Vec<String>, Vec<String>) {
+    let mut defects: Vec<String> = Vec::new();
+    let registered: Vec<&str> = manifest
+        .source_suppressions()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut observed: Vec<String> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut unbracketed: Vec<String> = Vec::new();
+
+    for directive in directives {
+        match directive.operation.as_str() {
+            "push" => depth += 1,
+            "pop" => {
+                depth -= 1;
+                if depth < 0 {
+                    defects.push(format!(
+                        "line {} of the program pops a diagnostic state that was never pushed: {}. \
+                         An unmatched pop restores whatever state preceded this translation unit \
+                         rather than the state the file established, so what the gate is in force for \
+                         after it cannot be read off the file",
+                        directive.line, directive.text
+                    ));
+                    depth = 0;
+                }
+            }
+            "system_header" => defects.push(format!(
+                "line {} of the program declares itself a system header: {}. That suppresses EVERY \
+                 diagnostic for the remainder of the translation unit, which is not an exception \
+                 this audit can bound or review, and it is therefore not registrable at any grain. \
+                 Remove the directive; if a specific diagnostic reports well-defined behaviour, \
+                 suppress that one diagnostic between a matched push and pop and register it in the \
+                 record's `{key}`",
+                directive.line,
+                directive.text,
+                key = MANIFEST_SOURCE_SUPPRESSION_KEY
+            )),
+            "ignored" | "warning" => {
+                let Some(warning) = directive.warning.as_deref() else {
+                    defects.push(format!(
+                        "line {} of the program relaxes a diagnostic without naming which: {}. A \
+                         relaxation that cannot be named cannot be registered, sanctioned or \
+                         reviewed",
+                        directive.line, directive.text
+                    ));
+                    continue;
+                };
+                if depth == 0 {
+                    unbracketed.push(format!("{warning} at line {}", directive.line));
+                }
+                if !observed.iter().any(|known| known == warning) {
+                    observed.push(String::from(warning));
+                }
+                if !registered.contains(&warning) {
+                    defects.push(format!(
+                        "line {} of the program suppresses {warning} with a diagnostic-control \
+                         directive that the record does not register: {}. THE WARNING GATE IS ONLY \
+                         AS STRONG AS WHAT IT CAN SEE: this directive switches off a member of the \
+                         gate for part of the translation unit, so a program carrying it and \
+                         reported as having satisfied the full default gate would make this audit's \
+                         central claim untrue. Register it in the record as `{key} = {warning}`, \
+                         state the reason in `impl_defined_notes` naming that exact spelling, and add \
+                         the (area, program, warning) triple to \
+                         UB_AUDIT_SOURCE_SUPPRESSIONS_SANCTIONED if it is not already sanctioned",
+                        directive.line,
+                        directive.text,
+                        key = MANIFEST_SOURCE_SUPPRESSION_KEY
+                    ));
+                }
+                if !is_sanctioned_source_suppression(area, program, warning) {
+                    defects.push(format!(
+                        "line {} of the program suppresses {warning}, which is not sanctioned for \
+                         {area}/{program}. An exception of this kind is admitted for one construct \
+                         in one file, never corpus-wide: the sanctioned warnings are {}, each for a \
+                         named program only",
+                        directive.line,
+                        comma_separated(&sanctioned_source_suppression_warnings())
+                    ));
+                }
+            }
+            "error" => {
+                // A strengthening. It needs no registration, because it can only make the gate
+                // stricter than the audit believes it to be, and this audit's guarantee is a lower
+                // bound rather than an exact description.
+            }
+            other => defects.push(format!(
+                "line {} of the program carries a diagnostic-control directive this audit does not \
+                 recognise, whose operation is {other:?}: {}. An effect that cannot be reasoned \
+                 about cannot be certified, so the directive is refused rather than assumed harmless. \
+                 The recognised operations are push, pop, ignored, warning and error",
+                directive.line, directive.text
+            )),
+        }
+    }
+
+    if depth != 0 {
+        defects.push(format!(
+            "the program pushes the diagnostic state {depth} more time(s) than it pops it, so every \
+             suppression it makes stays in force to the end of the translation unit. A suppression \
+             that is not bracketed is the whole-file suppression this audit refuses, reached by \
+             another route: close each push with a matching pop around the declarations that need it"
+        ));
+    }
+    if !unbracketed.is_empty() {
+        defects.push(format!(
+            "the program suppresses {} outside any push/pop bracket, so the relaxation applies from \
+             that line to the end of the translation unit rather than to the declarations that need \
+             it. Bracket each one, so every other diagnostic — and that same diagnostic everywhere \
+             else in the file — stays in force",
+            comma_separated(
+                &unbracketed
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<&str>>()
+            )
+        ));
+    }
+    for warning in &registered {
+        if !observed.iter().any(|seen| seen == *warning) {
+            defects.push(format!(
+                "the record registers the in-source suppression of {warning}, but the program \
+                 carries no diagnostic-control directive that suppresses it. A STALE REGISTRATION IS \
+                 WORSE THAN NONE: it is documented knowledge that has stopped being true, and it \
+                 authorises a future directive nobody reviewed. If the suppression is no longer \
+                 needed — which is the good outcome — delete the `{key}` line from the record and the \
+                 paragraph that explained it",
+                key = MANIFEST_SOURCE_SUPPRESSION_KEY
+            ));
+        }
+    }
+    (observed, defects)
+}
+
+/// The record key an in-source suppression is registered under, named here for the diagnostics above.
+///
+/// A literal rather than a re-export, because `manifest.rs` keeps its key table private and one
+/// spelling in a message is not worth widening that surface. The register audit reads every record
+/// against that table, so a divergence between the two would be caught by the first record that used
+/// the wrong spelling.
+const MANIFEST_SOURCE_SUPPRESSION_KEY: &str = "ub_audit_source_suppressions";
+
+fn explain_deviation(manifest: &Manifest, relaxed: &[String]) -> (Option<String>, Vec<String>) {
+    if relaxed.is_empty() {
         return (None, Vec::new());
     }
     let source = manifest.impl_defined_notes().unwrap_or_default();
@@ -2424,13 +2759,13 @@ fn explain_deviation(manifest: &Manifest, dropped: &[String]) -> (Option<String>
         if text.is_empty() {
             continue;
         }
-        let names_a_dropped_flag = dropped.iter().any(|flag| text.contains(flag.as_str()));
-        if names_a_dropped_flag && !paragraphs.iter().any(|kept| kept == text) {
+        let names_a_relaxation = relaxed.iter().any(|flag| text.contains(flag.as_str()));
+        if names_a_relaxation && !paragraphs.iter().any(|kept| kept == text) {
             paragraphs.push(String::from(text));
         }
     }
 
-    let unexplained: Vec<String> = dropped
+    let unexplained: Vec<String> = relaxed
         .iter()
         .filter(|flag| !source.contains(flag.as_str()))
         .cloned()
@@ -2459,6 +2794,7 @@ fn undecidable_gate(error: &HarnessError) -> GateDecision {
         // A record that could not be read states no argument either, and reporting the argument as
         // present because the field could not be inspected is the one answer no reader could act on.
         ub_notes_recorded: false,
+        suppressions: Vec::new(),
         defects: vec![format!(
             "the expectation record could not be read, so the gate this program asks for is unknown: \
              {error}"
@@ -2494,10 +2830,61 @@ fn audit_program(
         .as_ref()
         .ok()
         .map(|manifest| manifest.path().to_path_buf());
-    let decision = match &loaded {
+    let mut decision = match &loaded {
         Ok(manifest) => decide_warning_gate(manifest),
         Err(error) => undecidable_gate(error),
     };
+    // The source is read here and not inside `decide_warning_gate`, which is deliberately a pure
+    // function of the record. The gate a program is compiled under is decided by TWO things — the
+    // flag list and the directives in the file — and until this reconciliation the second was
+    // invisible, so a program could satisfy every record-side check while a member of the gate was
+    // switched off across part of the translation unit. A read failure is itself a defect: a program
+    // whose text cannot be inspected is one whose gate cannot be established, and certifying it on
+    // the strength of its record alone is exactly the assumption this closes.
+    if let Ok(manifest) = &loaded {
+        let scan_context = format!(
+            "reading {} to establish whether it relaxes the warning gate from inside",
+            shown_path(source)
+        );
+        match read_file_bounded(&scan_context, source, MAX_INSPECTED_FILE_BYTES) {
+            Ok(bytes) => {
+                // Lossy rather than strict: a corpus program is ASCII by rule, and a byte sequence
+                // that was not valid UTF-8 must still be scanned for a directive rather than skipped.
+                let text = String::from_utf8_lossy(&bytes);
+                let directives = scan_source_directives(&text);
+                let (suppressions, defects) =
+                    reconcile_source_suppressions(manifest, area, program, &directives);
+                decision.defects.extend(defects);
+                // The recorded reason is recomputed over BOTH relaxations once the suppressions are
+                // known. `decide_warning_gate` could only see the dropped flags, so a program that
+                // relaxes the gate solely from its source would otherwise be reported with no reason
+                // at all — which the deviations table states as a defect, and which would be a false
+                // accusation: the parser has already refused any record whose notes do not name the
+                // suppressed warning, so the paragraph exists and the report must show it.
+                if !suppressions.is_empty() {
+                    let mut relaxed = decision.dropped.clone();
+                    relaxed.extend(suppressions.iter().cloned());
+                    let (reason, unexplained) = explain_deviation(manifest, &relaxed);
+                    decision.reason = reason;
+                    for warning in unexplained {
+                        decision.defects.push(format!(
+                            "the warning gate is relaxed for {warning} but the record's \
+                             `impl_defined_notes` does not name it anywhere, so the relaxation has no \
+                             recorded reason. A RELAXATION WITHOUT A RECORDED REASON IS ITSELF A \
+                             DEFECT IN THE TEST, whether it is written on the command line or as a \
+                             diagnostic-control directive in the program"
+                        ));
+                    }
+                }
+                decision.suppressions = suppressions;
+            }
+            Err(error) => decision.defects.push(format!(
+                "the program source could not be read, so this audit cannot establish whether it \
+                 carries a diagnostic-control directive that relaxes the warning gate from inside: \
+                 {error}"
+            )),
+        }
+    }
     // A record that could not be read states no expectation, so the sanitizer run is judged against
     // the ordinary successful exit. Every record in the corpus declares this value explicitly.
     let expect_exit = loaded
@@ -2564,6 +2951,7 @@ fn audit_program(
         dropped: decision.dropped,
         reason: decision.reason,
         ub_notes_recorded: decision.ub_notes_recorded,
+        suppressions: decision.suppressions,
         warning,
         sanitizer,
     })

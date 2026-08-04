@@ -26,7 +26,8 @@
  * Variadic macros are documented as supported. docs/technical-specifications.md
  * line 491 describes the preprocessor's macro module as providing
  * "stringification (`#`), token pasting (`##`), variadic macros
- * (`__VA_ARGS__`)", and docs/project-guide.md line 79 lists "macro expansion
+ * (`__VA_ARGS__`)", and docs/project-guide.md's "C11 Frontend -- Preprocessor" row
+ * lists "macro expansion
  * (object-like, function-like, variadic, stringification, token pasting)".
  * Every construct below is the ISO C form of exactly that documented capability,
  * which is what makes the citation load-bearing: the documentation covers what is

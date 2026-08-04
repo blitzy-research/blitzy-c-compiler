@@ -108,7 +108,11 @@
 //! polls its child on a 100 ms granularity. A trivial artifact costs 0.5 ms bare, 103 ms under the
 //! utility, and 108 ms through this module — so the supervision added here is under 5 ms and the
 //! rest is the utility. Across the matrix's 5,508 bounded invocations that is roughly **569 s** of
-//! wall time spent on a net that never fires in a healthy run, against about 188 s of actual work.
+//! wall time spent on a net that never fires in a healthy run — more than the suite's own measured
+//! run takes, which `tests/conformance/README.md` records as a **345–476 s** band on a four-core
+//! machine. The comparison is deliberately against a measured band rather than against a figure
+//! extrapolated from a per-pair sample, because extrapolating one would understate the denominator
+//! and so overstate how bad the ratio is.
 //!
 //! So the outer net is **qualified by behaviour** before it is engaged. `env.rs` measures the
 //! discovered implementation once per run — supervising a child that exits immediately, under a
@@ -275,10 +279,12 @@ use super::sandbox::{
     REFERENCE_EXIT_NAME, REFERENCE_STDERR_NAME, REFERENCE_STDOUT_NAME,
 };
 use super::{
-    ensure_within, isolate_child_environment, own_process_group, posix_command_line, public_text,
+    ensure_within, infrastructure_breach, infrastructure_breach_refusal, isolate_child_environment,
+    own_process_group, posix_command_line, public_text, reap_bounded, record_infrastructure_breach,
     redact_secrets, require_regular_file, sanitize_text_for_report, shown_path,
     terminate_process_group, CaptureIntegrity, CellKey, DivergenceClass, GroupTermination,
-    HarnessError, HarnessResult, Target, CAPTURE_CHUNK_BYTES, CAPTURE_RETAINED_BYTES_MAX,
+    HarnessError, HarnessResult, ReapOutcome, Target, CAPTURE_CHUNK_BYTES,
+    CAPTURE_RETAINED_BYTES_MAX,
 };
 
 /// The highest exit code a corpus program may be expected to return.
@@ -321,6 +327,16 @@ pub const CAPTURE_STREAM_BYTES_MAX: usize = CAPTURE_RETAINED_BYTES_MAX as usize;
 /// waited on forever.
 const CAPTURE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
+/// How long a cancelled reader is given to notice, once the drain grace has already elapsed.
+///
+/// A second, much shorter window, and it exists because cancellation here is cooperative. The
+/// standard library offers no way to interrupt a read that is already blocked in the kernel — the
+/// crates that could are forbidden outright — so the flag is observed by the reader between reads.
+/// A reader that is between reads, or that receives one more byte from the process still holding the
+/// pipe, therefore stops promptly and drops its end; one wedged inside a read does not, and that is
+/// the case the run-level breach exists to make loud rather than invisible.
+const CAPTURE_CANCEL_GRACE: Duration = Duration::from_millis(250);
+
 /// The first interval between completion polls, kept short so that a cell costing a few
 /// milliseconds is not delayed by the wait itself.
 const POLL_INTERVAL_INITIAL: Duration = Duration::from_micros(250);
@@ -337,6 +353,16 @@ const POLL_INTERVAL_MAX: Duration = Duration::from_millis(10);
 /// the child was killed at the budget.
 const POISONED_CAPTURE_BUFFER: &str =
     "the shared capture buffer was poisoned by a panic in another thread";
+
+/// Note recorded when a reader stops because its caller cancelled it.
+///
+/// Distinct from every other reason a drain ends, because it says something different: the bytes
+/// held are what had arrived before the caller gave up, and the stream was not read to its end. It
+/// reaches the same place a read error does, so a capture stopped this way is never mistaken for a
+/// complete one.
+const CANCELLED_CAPTURE_READER: &str =
+    "the reader was cancelled after its caller stopped waiting for it, so the stream was not read \
+     to its end";
 
 /// How a child process ended.
 ///
@@ -1544,6 +1570,18 @@ fn execute_bounded(
         ));
     }
 
+    // The third and last question before the spawn. The two above ask whether the *files* are still
+    // the ones that were vetted; this one asks whether this run is still able to account for what it
+    // has already launched. A run that has leaked a process, or that holds a capture pipe it cannot
+    // prove is closed, must not add another child to the pile — the fault recurs per cell, and the
+    // matrix has thousands of them.
+    if let Some(breach) = infrastructure_breach() {
+        return Err(HarnessError::new(
+            format!("launching {}", posix_command_line(&launch_argv)),
+            infrastructure_breach_refusal(breach),
+        ));
+    }
+
     let started = Instant::now();
     let mut child = command.spawn().map_err(|error| {
         HarnessError::new(
@@ -1900,16 +1938,20 @@ fn missing_pipe(child: &mut Child, group: u32, argv: &[String], stream: &str) ->
 /// must never do is *replace* the caller's diagnostic, which is why it is a note and not an error.
 fn abandon(child: &mut Child, group: u32) -> Option<String> {
     // A kill that fails because the child has already exited is the ordinary case here, and the
-    // reap that follows proves it: only a reap that also failed leaves anything behind.
-    let _ = child.kill();
-    let reaped = child.wait();
+    // reap that follows proves it: only a reap that also failed leaves anything behind. The reap is
+    // bounded rather than a plain wait, because this runs on the cleanup path that a per-cell budget
+    // depends on — an unbounded wait here would turn the mechanism that stops a hung program into a
+    // hang with nothing outside it left to fire.
+    let reaped = reap_bounded(child);
     let swept = terminate_process_group(group, kill_tool());
 
     let mut details = Vec::new();
-    if let Err(error) = reaped {
-        details.push(format!(
-            "the child could not be reaped: {error}, so it may remain as a zombie"
-        ));
+    if let Some(note) = reaped.note() {
+        // Latched as well as reported. A child this module launched and cannot account for is not a
+        // property of the program under test; it is a process left on the machine, and whatever
+        // produced it recurs on the cells that would follow.
+        record_infrastructure_breach(String::from(note));
+        details.push(String::from(note));
     }
     match &swept {
         GroupTermination::Cleared => {}
@@ -1965,6 +2007,14 @@ struct CaptureState {
     produced: AtomicU64,
     /// Set once the quota has discarded anything at all.
     truncated: AtomicBool,
+    /// Set by the caller when it has stopped waiting for this reader and wants it to stop reading.
+    ///
+    /// Observed by the drain loop around every read, so a reader whose caller has given up stops at
+    /// its next opportunity instead of continuing to drain a stream nothing will ever look at — and
+    /// drops the pipe, releasing the descriptor. It cannot interrupt a read already blocked in the
+    /// kernel, which is why the caller also records a breach when a cancelled reader still does not
+    /// finish.
+    cancelled: AtomicBool,
 }
 
 /// A pipe being drained on its own thread.
@@ -1989,6 +2039,15 @@ impl StreamCapture {
     /// into bytes nothing may compare.
     fn reached_ceiling(&self) -> bool {
         self.state.truncated.load(Ordering::Relaxed)
+    }
+
+    /// Ask the reader to stop reading, because its caller is no longer waiting for it.
+    ///
+    /// Cooperative by necessity — see [`CAPTURE_CANCEL_GRACE`] — and worth doing anyway: a reader
+    /// that stops draining a stream nobody will read gives up its descriptor and its thread instead
+    /// of following a runaway writer for the rest of the run.
+    fn cancel(&self) {
+        self.state.cancelled.store(true, Ordering::Relaxed);
     }
 }
 
@@ -2015,6 +2074,7 @@ fn spawn_reader<R: Read + Send + 'static>(mut source: R) -> StreamCapture {
         buffer: Mutex::new(Vec::new()),
         produced: AtomicU64::new(0),
         truncated: AtomicBool::new(false),
+        cancelled: AtomicBool::new(false),
     });
     let sink = Arc::clone(&state);
     let (report, finished) = mpsc::channel();
@@ -2046,6 +2106,12 @@ fn spawn_reader<R: Read + Send + 'static>(mut source: R) -> StreamCapture {
 fn pump<R: Read>(source: &mut R, sink: &CaptureState) -> Option<String> {
     let mut chunk = [0_u8; CAPTURE_CHUNK_BYTES];
     loop {
+        // Asked around every read rather than only at the top, so a reader that has been given up on
+        // stops at its very next opportunity — after the read that was already in flight returns, or
+        // before the next one begins.
+        if sink.cancelled.load(Ordering::Relaxed) {
+            return Some(String::from(CANCELLED_CAPTURE_READER));
+        }
         match source.read(&mut chunk) {
             Ok(0) => return None,
             Ok(count) => {
@@ -2088,6 +2154,10 @@ struct DrainedStream {
 /// different remedies: a reader abandoned at the deadline means a process is still holding the
 /// pipe, while a stream the quota truncated means the program produced more than any corpus
 /// program should.
+///
+/// A reader that has not delivered by the deadline is **cancelled and then given a second, short
+/// window**, rather than simply abandoned — see [`cancel_and_report`] for what that establishes and
+/// what it cannot.
 fn drain(capture: StreamCapture, role: &str, deadline: Instant) -> DrainedStream {
     let remaining = deadline.saturating_duration_since(Instant::now());
     let (drained, mut note) = match capture.finished.recv_timeout(remaining) {
@@ -2098,15 +2168,7 @@ fn drain(capture: StreamCapture, role: &str, deadline: Instant) -> DrainedStream
                 "the {role} pipe reported a read error and the capture may be short: {message}"
             )),
         ),
-        Err(RecvTimeoutError::Timeout) => (
-            false,
-            Some(format!(
-                "the {role} pipe was still open {} ms after the child was reaped and its group \
-                 swept, so the capture holds only what had arrived by then; a process that \
-                 inherited the pipe survived an uncatchable signal",
-                CAPTURE_DRAIN_GRACE.as_millis()
-            )),
-        ),
+        Err(RecvTimeoutError::Timeout) => (false, Some(cancel_and_report(&capture, role))),
         Err(RecvTimeoutError::Disconnected) => (
             true,
             Some(format!(
@@ -2140,6 +2202,55 @@ fn drain(capture: StreamCapture, role: &str, deadline: Instant) -> DrainedStream
         bytes,
         note,
     }
+}
+
+/// Cancel a reader that did not deliver in time, give it one short window, and report what remains.
+///
+/// Three things happen here, in this order, and each closes something the previous one leaves open:
+///
+/// 1. **Cancel.** The reader is told to stop. A reader between reads — or one that receives one more
+///    byte from whatever is still holding the pipe — then returns, drops its end of the pipe and
+///    ends its thread, instead of following a writer this run has stopped caring about for as long
+///    as that writer keeps writing.
+/// 2. **Wait once more, briefly.** [`CAPTURE_CANCEL_GRACE`] is the window in which a cancellation
+///    that will be noticed *is* noticed. It is short deliberately: the two-second drain grace has
+///    already elapsed, so this is not another chance for a slow program, only long enough to observe
+///    a reader acting on the flag.
+/// 3. **Latch a breach if it still has not ended.** This is the honest part. The standard library
+///    cannot interrupt a read already blocked in the kernel, and the crates that could are forbidden
+///    outright, so a wedged reader keeps its thread and its descriptor until the process holding the
+///    write end finally exits. What can be guaranteed is that the run stops *adding* to it: a reader
+///    this module cannot prove has ended is a resource it cannot account for, so the cells that
+///    would have followed are refused. One leaked descriptor reported loudly is a diagnosable fault;
+///    1,296 of them accumulating quietly is not.
+fn cancel_and_report(capture: &StreamCapture, role: &str) -> String {
+    capture.cancel();
+    let ended = matches!(
+        capture.finished.recv_timeout(CAPTURE_CANCEL_GRACE),
+        Ok(_) | Err(RecvTimeoutError::Disconnected)
+    );
+    let opening = format!(
+        "the {role} pipe was still open {} ms after the child was reaped and its group swept, so the \
+         capture holds only what had arrived by then; a process that inherited the pipe survived an \
+         uncatchable signal",
+        CAPTURE_DRAIN_GRACE.as_millis()
+    );
+    if ended {
+        return format!(
+            "{opening}. The reader was cancelled and stopped within a further {} ms, so its thread \
+             and its end of the pipe are released",
+            CAPTURE_CANCEL_GRACE.as_millis()
+        );
+    }
+    let detail = format!(
+        "{opening}. The reader was cancelled and had still not stopped {} ms later, so its thread \
+         and its end of the pipe remain held by whatever survived; a read already blocked in the \
+         kernel cannot be interrupted from another thread by anything the standard library offers, \
+         and this suite may add no dependency that could",
+        CAPTURE_CANCEL_GRACE.as_millis()
+    );
+    record_infrastructure_breach(detail.clone());
+    detail
 }
 
 /// Take everything a capture buffer holds, recovering the bytes even from a poisoned lock.
@@ -2297,31 +2408,23 @@ fn stop_and_reap(
     argv: &[String],
     because: &str,
 ) -> HarnessResult<ExitStatus> {
-    if let Err(kill_error) = child.kill() {
-        if let Ok(Some(status)) = child.try_wait() {
-            return Ok(status);
-        }
-        let _ = terminate_process_group(group, kill_tool());
-        return Err(HarnessError::new(
-            format!("terminating {} because {because}", posix_command_line(argv)),
-            format!(
-                "the child could not be terminated: {kill_error}; it is still running, so the \
-                 harness refuses to report a result it cannot bound"
-            ),
-        ));
-    }
-    match child.wait() {
-        Ok(status) => Ok(status),
-        Err(error) => {
+    match reap_bounded(child) {
+        ReapOutcome::Reaped(status) => Ok(status),
+        // The child was signalled and still could not be accounted for inside the reap deadline.
+        // That is not a result about the program: it is a process this run may have left running,
+        // so the group is swept, the breach is latched so no further cell is scheduled behind it,
+        // and the cell is failed rather than reported over a child nobody can bound.
+        ReapOutcome::Unreaped(detail) => {
             let _ = terminate_process_group(group, kill_tool());
+            record_infrastructure_breach(detail.clone());
             Err(HarnessError::new(
                 format!(
                     "reaping {} after terminating it because {because}",
                     posix_command_line(argv)
                 ),
                 format!(
-                    "the terminated child could not be reaped: {error}; a child left unreaped \
-                     would accumulate across the matrix"
+                    "{detail}. The harness refuses to report a result it cannot bound, and refuses \
+                     the cells that would have followed for the same reason"
                 ),
             ))
         }
@@ -2372,4 +2475,241 @@ fn termination_of(
             status.into_raw()
         ),
     ))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Archiving a cell's captures, for the evidence that must outlive its workspace
+//
+// `RunOutcome::persist` writes the captured streams and the termination record into the cell's
+// workspace, which is exactly the right place for them while the cell is being investigated. It is
+// the *only* place they exist, and that is the gap this section closes.
+//
+// A workspace is discarded once a cell has nothing left to investigate, and the set of cells with
+// nothing to investigate is decided by the run's policy — so an outcome that is reported but does not
+// fail, an expected divergence or a permissive run's absent oracle, used to have its raw compiler
+// diagnostics and its termination record deleted the moment the cell concluded. The report row named
+// the workspace as where the captures lived, and by the time anyone read the row they were gone. In
+// continuous integration the effect is sharper still: the report directory is uploaded and the
+// workspace root is not, so the evidence for every reported-but-not-failing outcome reached nobody.
+//
+// The archive read back here is what the report publishes in their place. It reads the entries the
+// cell actually persisted rather than re-rendering them from memory, so what is archived is what was
+// written; it is bounded per entry and in total, because an artifact that can grow without limit is
+// one a run can be made to fill a disk with; and it is sanitized, because it is published.
+
+/// Longest single archived entry, in bytes.
+///
+/// Generous enough for a compiler's complete diagnostic output and a program's recorded stdout, small
+/// enough that a document holding several of them stays readable. An entry longer than this is
+/// truncated **and says so**, which is the distinction that matters: a silently shortened capture
+/// would be evidence a reader could draw a wrong conclusion from.
+const ARCHIVED_ENTRY_BYTES_MAX: usize = 64 * 1024;
+
+/// Longest whole archive for one cell, in bytes, across every entry it holds.
+///
+/// Bounds the aggregate as well as each part, so a workspace holding many entries cannot exceed the
+/// per-entry limit collectively. Entries are archived in name order until the budget is exhausted, and
+/// the ones that did not fit are named rather than dropped silently.
+const ARCHIVED_TOTAL_BYTES_MAX: usize = 256 * 1024;
+
+/// One entry of a cell workspace, read back as sanitized, bounded text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedCapture {
+    name: String,
+    text: String,
+    bytes: u64,
+    truncated: bool,
+    binary: bool,
+}
+
+impl ArchivedCapture {
+    /// The entry's name within the workspace, exactly as the cell wrote it.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The entry's content, sanitized for publication and bounded — or, for an entry that is not
+    /// text, a description of it in place of its bytes.
+    ///
+    /// The distinction is reported separately by [`ArchivedCapture::binary`] rather than left for a
+    /// reader to infer, so a description is never mistaken for content.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// How many bytes the entry held on disk, before any bound was applied.
+    ///
+    /// Reported alongside the text so a truncated entry states its real size: "the first 64 KiB of
+    /// 300 KiB" and "all 64 KiB" are different facts, and a reader deciding whether to re-run the cell
+    /// needs to know which one they are holding.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Whether the text is the whole entry or only its beginning.
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Whether the entry is not text, so that [`ArchivedCapture::text`] describes it rather than
+    /// holding its bytes.
+    ///
+    /// True for a linked executable or an object file, which is what a cell workspace holds besides
+    /// its streams. Transcribing one into a text document produces an unreadable rendering that
+    /// crowds out the evidence a reader came for, and it is the one entry in a workspace that the
+    /// archived reproduction commands regenerate exactly — so it is named and measured here instead.
+    pub fn binary(&self) -> bool {
+        self.binary
+    }
+}
+
+/// Read back every capture a cell persisted into its workspace, as sanitized, bounded evidence.
+///
+/// Every regular entry of the workspace root is archived — the captured stdout and stderr of each
+/// side, each termination record, and the reproduction commands the cell wrote for itself — in name
+/// order, so two runs over one cell archive identical bytes.
+///
+/// Deliberately name-agnostic rather than driven by [`CaptureNames`]: a list of names here would have
+/// to be kept in step with every name any caller chooses, and the one that fell out of step would be
+/// the one that mattered. Directories and links are skipped, since neither is a capture; a directory
+/// beneath a cell workspace is an audit sub-workspace with its own accounting, and a link is not
+/// something this suite ever writes there.
+///
+/// Failures are reported **as archived entries** rather than raised. This function runs while a cell
+/// is being retired, after its verdicts are decided, and a decided cell must not be re-decided by a
+/// problem with its own tidying — the same rule the retirement path already follows. An entry that
+/// could not be read therefore appears in the archive saying so, which is strictly more informative
+/// than an absence.
+pub fn archive_persisted_captures(workspace: &Workspace) -> Vec<ArchivedCapture> {
+    let root = workspace.root();
+    let mut entries: Vec<(String, PathBuf)> = match fs::read_dir(root) {
+        Ok(listing) => listing
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str().map(String::from)?;
+                Some((name, entry.path()))
+            })
+            .collect(),
+        Err(error) => {
+            return vec![ArchivedCapture {
+                name: String::from("<workspace>"),
+                text: sanitize_text_for_report(&format!(
+                    "{} could not be listed, so no capture could be archived from it: {error}",
+                    shown_path(root)
+                )),
+                bytes: 0,
+                truncated: false,
+                binary: false,
+            }];
+        }
+    };
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut archived = Vec::new();
+    let mut spent = 0usize;
+    let mut omitted = Vec::new();
+    for (name, path) in entries {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            omitted.push(name);
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let bytes = metadata.len();
+        let remaining = ARCHIVED_TOTAL_BYTES_MAX.saturating_sub(spent);
+        if remaining == 0 {
+            omitted.push(name);
+            continue;
+        }
+        let budget = ARCHIVED_ENTRY_BYTES_MAX.min(remaining);
+        let (head, truncated) = match read_bounded_prefix(&path, budget) {
+            Ok(read) => read,
+            Err(error) => (
+                format!(
+                    "this entry could not be read while the cell was being retired: {error}; the \
+                     cell's own workspace was the only other copy"
+                )
+                .into_bytes(),
+                false,
+            ),
+        };
+        // A workspace holds the linked executables beside the streams, and they are the entries a
+        // text document cannot carry: lossily decoded they are unreadable, and at several hundred
+        // kilobytes each they exhaust the budget the diagnostics needed. An interior NUL byte is the
+        // long-established discriminator for exactly this, and it is content-driven, so it stays
+        // correct whatever a caller names its artifacts. Such an entry is described with its true
+        // size rather than dropped: the description costs a line, the reproduction commands
+        // archived alongside it regenerate the artifact byte for byte, and no entry goes unmentioned.
+        let binary = head.contains(&0);
+        let text = match binary {
+            true => format!(
+                "not text ({bytes} bytes, first NUL byte within the inspected {} byte(s)), so it is \
+                 described rather than transcribed: an interior NUL means no text rendering of it \
+                 would be faithful, and this is the one entry the archived reproduction commands \
+                 regenerate exactly. Re-run the cell to obtain it.",
+                head.len()
+            ),
+            false => String::from_utf8_lossy(&head).into_owned(),
+        };
+        spent = spent.saturating_add(text.len());
+        archived.push(ArchivedCapture {
+            name: sanitize_text_for_report(&name),
+            text: sanitize_text_for_report(&redact_secrets(&text)),
+            bytes,
+            truncated: truncated && !binary,
+            binary,
+        });
+    }
+    if !omitted.is_empty() {
+        omitted.sort();
+        archived.push(ArchivedCapture {
+            name: String::from("<omitted>"),
+            text: sanitize_text_for_report(&format!(
+                "{} entr(ies) were not archived because the {ARCHIVED_TOTAL_BYTES_MAX}-byte budget \
+                 for one cell's evidence was exhausted or they could not be inspected: {}. The \
+                 cell's workspace path is named above; re-run the cell to reproduce them",
+                omitted.len(),
+                omitted.join(", ")
+            )),
+            bytes: 0,
+            truncated: false,
+            binary: false,
+        });
+    }
+    archived
+}
+
+/// Read at most `budget` bytes from the start of a file, reporting whether more remained.
+///
+/// Yields the raw bytes rather than a string, because the caller has to decide from them whether the
+/// entry is text at all, and that decision cannot be made after a decode has already destroyed the
+/// evidence for it. Where the caller does decode, it decodes lossily on purpose: a capture is
+/// arbitrary bytes a compiled program wrote, so it is not required to be valid UTF-8, and refusing to
+/// archive a program's output for that reason alone would discard exactly the evidence an unusual
+/// failure produces.
+fn read_bounded_prefix(path: &Path, budget: usize) -> io::Result<(Vec<u8>, bool)> {
+    let mut file = fs::File::open(path)?;
+    let mut buffer = vec![0u8; budget];
+    let mut filled = 0usize;
+    while filled < budget {
+        match file.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    buffer.truncate(filled);
+    // One further byte decides whether anything remained, without reading the rest of the file.
+    let mut probe = [0u8; 1];
+    let truncated = loop {
+        match file.read(&mut probe) {
+            Ok(0) => break false,
+            Ok(_) => break true,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break false,
+        }
+    };
+    Ok((buffer, truncated))
 }

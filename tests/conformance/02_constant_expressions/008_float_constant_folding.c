@@ -48,12 +48,13 @@
  *
  * No header is named: bcc ships no stdio.h, its bundled set being the nine required
  * freestanding headers plus a bonus stdatomic.h, ten files in all
- * (docs/project-guide.md line 212).  Deliberately elsewhere, so this program does
- * not duplicate it: the widest floating type's value comparison, general float <->
- * int conversion boundaries and finite ordering breadth all belong to area 13;
- * sizeof and _Alignof facts to 004_sizeof_alignof.c; the f suffix's typing effect to
- * 005_integer_constant_suffixes.c, the suffix appearing here only inside a computed
- * value.  NaN and infinity are foreclosed by the area rule, so neither is produced.
+ * (docs/project-guide.md, "9 bundled freestanding headers").  Deliberately
+ * elsewhere, so this program does not duplicate it: the widest floating type's value
+ * comparison, general float <-> int conversion boundaries and finite ordering
+ * breadth all belong to area 13; sizeof and _Alignof facts to 004_sizeof_alignof.c;
+ * the f suffix's typing effect to 005_integer_constant_suffixes.c, the suffix
+ * appearing here only inside a computed value.  NaN and infinity are foreclosed by
+ * the area rule, so neither is produced.
  */
 
 int printf(const char *, ...);

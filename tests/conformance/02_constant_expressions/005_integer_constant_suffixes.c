@@ -49,7 +49,7 @@
  * their 32- and 64-bit unsigned left operands.  Limits are spelled as literals
  * because no header is named: bcc ships no stdio.h, its bundled set being the nine
  * required freestanding headers plus a bonus stdatomic.h, ten files in all
- * (docs/project-guide.md line 212).
+ * (docs/project-guide.md, "9 bundled freestanding headers").
  */
 int printf(const char *, ...);
 

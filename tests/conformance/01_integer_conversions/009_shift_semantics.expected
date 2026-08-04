@@ -35,11 +35,28 @@ an int shift and %d is the correct specifier.  A shift count of unsigned char ty
 promoted too, and separately: the operands of a shift do not undergo the usual arithmetic
 conversions, so 1 << (unsigned char)4 is an int shift governed by the left operand's type
 alone.
-No signed overflow, no aliasing violation, no uninitialized read, no object modified twice
-between sequence points, at most one side-effecting argument per call, no dependence on
-padding bytes or on the relative addresses of unrelated objects.  No shift operand is an
-unparenthesised additive expression -- none is an additive expression at all -- so the strict
-warning gate is satisfied with no deviation at all, and the sanitizer run reports nothing.
+No signed overflow, no aliasing violation, no uninitialized read, and no object modified
+twice between sequence points: every object is initialized in its own declaration and never
+assigned to afterwards, so there is no second modification anywhere to sequence against a
+first.  No dependence on padding bytes or on the relative addresses of unrelated objects.  No
+shift operand is an unparenthesised additive expression -- none is an additive expression at
+all -- so the strict warning gate is satisfied with no deviation at all, and the sanitizer
+run reports nothing.
+NO EVALUATION ORDER IS DEPENDED UPON, and the argument for that deliberately does not rest on
+counting the volatile reads, because this program does not hold itself to at most one of them
+per call.  The run_shift_zero line passes two value arguments, i_five << sh_zero and
+i_five >> sh_zero, so that one call reads four volatile objects and reads each of i_five and
+sh_zero twice; five further runtime lines -- run_ushl_max, run_ushr_max, run_sshr_neg2,
+run_sshr_all and run_llong_shl -- read two distinct volatile objects as the two operands of a
+single shift.  The argument rests on something stronger.  No volatile object is ever WRITTEN:
+each is initialized in its own declaration and never assigned to again, so every read of one
+yields the value that declaration gave it, and therefore neither the number of accesses --
+which C11 6.7.3p7 leaves implementation-defined, so a record may not assume it -- nor the
+order they happen in can change a printed byte.  Both permitted orders of the two arguments
+produce the same stdout, which is the property the oracle needs, and pairing the two shifts
+in one call is also what stops either of them being folded away.  The folded twin of that
+line, fold_shift_zero, likewise passes two value arguments, but both are constant expressions
+with no side effect at all, so no ordering question arises there.
 Every property is computed twice, once from literal constants and once from
 volatile-qualified storage, so the constant folder's answer cannot stand in for the
 one the backend computes at run time.

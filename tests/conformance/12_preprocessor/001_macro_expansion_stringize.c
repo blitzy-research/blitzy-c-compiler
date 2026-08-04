@@ -6,13 +6,14 @@
        function-like macro expansion with stringification (#) and token pasting (##)".
      - docs/technical-specifications.md line 491 - the same module provides the
        "recursive expansion guard", which the final line observes directly.
-     - docs/project-guide.md line 79 - the preprocessor component covers object-like,
+     - docs/project-guide.md, the "C11 Frontend -- Preprocessor" row - it covers object-like,
        function-like, stringification and token-pasting expansion.
    Every construct below is therefore documented as SUPPORTED, so this program carries
    no expected-divergence marker: a divergence here is a genuine finding.
 
    Why this program exists at all. The repository already has 68 integration tests for
-   the preprocessor (docs/project-guide.md line 141), but they assert expansion
+   the preprocessor (docs/project-guide.md, the "Integration -- Preprocessing" row),
+   but they assert expansion
    STRUCTURALLY - they inspect the token stream. This program instead asserts that a
    preprocessed-then-compiled program's OBSERVABLE BEHAVIOUR agrees with an independent
    oracle end to end. A structural test cannot detect a wrong answer it was not written

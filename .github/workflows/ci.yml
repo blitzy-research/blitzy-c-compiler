@@ -1,23 +1,151 @@
 # Continuous integration for bcc.
 #
-# This workflow defines the differential conformance job: it installs the reference compilers
-# and emulators the suite's oracles compare against, pre-flights the discovered oracle
-# inventory, runs the suite in strict mode, and publishes the report and finding directories as
-# build artifacts.
+# This workflow defines the differential conformance gates: it establishes the checks that hold on
+# any checkout carrying the suite, installs the reference compilers and emulators the suite's
+# oracles compare against, proves that toolchain really is the one the corpus is judged against,
+# pre-flights the discovered oracle inventory, runs the suite in strict mode, and publishes the
+# report as a build artifact.
 #
-# The job is purely additive and stands alone: it depends on no other job, no other job depends
-# on it, and it restates none of the repository's other gates — build, unit tests, integration
+# The jobs are purely additive and stand alone: they depend on no other job, no other job depends
+# on them, and they restate none of the repository's other gates — build, unit tests, integration
 # tests, clippy and rustfmt keep their own single definition, because a second definition of a
 # gate is a second answer to the same question.
+#
+# ## Why there are two jobs rather than one
+#
+# `tests/conformance/README.md` §"The Cargo integration precondition" is explicit that every Cargo
+# command this suite is measured by presupposes the repository's own manifest, its `bcc` binary
+# target and its `src/**` tree — auto-discovery is what makes `cargo test --test conformance` work
+# without a manifest *change*, but auto-discovery still needs a manifest to be discovered from. The
+# suite must never add one: C1 makes `Cargo.toml` read-only, and creating one here would satisfy a
+# gate by violating the constraint the gate exists to protect.
+#
+# A checkout can therefore be in one of two states, and a single job cannot honestly serve both. So
+# the checks split exactly where the precondition does:
+#
+# - `conformance-static` runs the two gates that need no manifest — formatting and a full
+#   type-check of the suite — and therefore runs on every checkout, including one that carries the
+#   suite ahead of the compiler tree.
+# - `differential-conformance` runs the Cargo-dependent gates and the matrix itself. It detects the
+#   manifest first and, when there is none, says so loudly — a warning annotation and a job summary
+#   naming the precondition — rather than failing on a property of the checkout or, worse, passing
+#   silently as though the matrix had run.
 name: CI
 
+# WHY THERE IS NO `pull_request` TRIGGER, WHICH IS A DELIBERATE OMISSION RATHER THAN A GAP.
+# This workflow does not merely build the suite: it COMPILES AND EXECUTES the corpus. The suite's
+# own hermeticity is redirection of cooperating tools, not confinement — its regeneration script
+# says so in as many words, and a variable is only honoured by a program that reads it — so
+# nothing here stops a test program writing where it likes on the runner. Running the matrix over
+# a revision an unreviewed pull request controls would therefore execute contributor-authored C
+# and contributor-authored Rust directly on the runner, which is the one thing the suite's
+# documented limitations require an external sandbox for.
+#
+# So the executable work runs only from revisions that are already reviewed and merged, plus
+# manual dispatch by someone with write access. To exercise this matrix over a proposed change,
+# review it first and dispatch this workflow against the merge result, or run it inside a real
+# container or virtual machine that does provide the boundary the suite does not.
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  # Manual dispatch exists for one reason: it carries the opt-in that releases the raw generated
+  # finding directories as an artifact. See the upload steps at the end of the conformance job.
+  workflow_dispatch:
+    inputs:
+      publish_raw_findings:
+        description: >-
+          Upload the raw generated finding directories as a separate artifact. These carry
+          UNREVIEWED evidence — captured diagnostics, exact commands and absolute tool paths — and
+          their own manifests record `disclosure_review = not-performed`. Leave this false unless
+          you intend to perform that review on what you download.
+        type: boolean
+        default: false
+
+# Least privilege, declared rather than inherited. Every step below reads the checkout, compiles
+# it and uploads an artifact; none writes to the repository, opens an issue or publishes a
+# package, so read access to contents is the whole requirement. Stating it here also fixes the
+# scope against the repository or organisation default, which is what an undeclared permission
+# set silently follows.
+permissions:
+  contents: read
+
+# One run of this workflow per line of development, and never two at once.
+#
+# The job below compiles and executes 1,296 cells against four cross toolchains and three
+# emulators, and is allowed half an hour to do it. Without a concurrency group, three pushes
+# to the same branch in quick succession start three of those runs and all three finish, even
+# though the first two describe trees nobody will merge — paying full price for a verdict on
+# a commit that has already been superseded.
+#
+# The group key is the workflow paired with the pull request it belongs to, falling back to the
+# git ref when there is no pull request — resolving to `CI-123` for pull request 123 and
+# `CI-refs/heads/main` for a push to main, so different branches and different pull requests
+# never share a group and never cancel each other. Keying a pull request by its NUMBER rather
+# than by the synthesized merge ref names it by its own identity, which survives a rename or a
+# force-push of its head branch.
+#
+# Cancellation is safe here specifically because this suite is a FULL sweep rather than an
+# incremental one: every run compares the same 108 programs over the same matrix, so the run
+# that supersedes another re-establishes everything the cancelled run was in the middle of
+# establishing. A cancelled run is also reported as cancelled and never as passed, so it cannot
+# stand in for a verdict the tip of the branch has not actually earned.
+#
+# Deliberately absent: any cap on the test harness's own parallelism. The suite's fourteen area
+# tests are independent and the built-in harness sizes its worker pool to the machine it finds;
+# pinning that to a fixed number here would trade a real speed-up for no bound worth having,
+# since the resource this group exists to protect is the RUNNER COUNT, not the core count
+# inside one runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  # The gates that hold on any checkout carrying this suite, with or without the Cargo package.
+  #
+  # Both commands are the ones tests/conformance/README.md documents for a manifest-less checkout,
+  # copied exactly — including the `CARGO_MANIFEST_DIR` the direct `rustc` invocation needs,
+  # because `conformance_harness/mod.rs` resolves the package root through `env!` at compile time
+  # and the shorter form fails in a way that looks like the suite is broken when it is not.
+  #
+  # These are not a substitute for the Cargo gates and are not presented as one. They establish the
+  # properties that do not depend on packaging — that every file parses, type-checks and is
+  # correctly formatted — which is exactly the subset a manifest-less checkout can honestly claim.
+  conformance-static:
+    name: Conformance suite static gates
+    # Pinned like the matrix job below rather than left on `ubuntu-latest`, which moves to a new
+    # major image without any change to this file.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        # Pinned by digest, not by tag: a tag is mutable, so `@v4` is a promise the action's owner
+        # can rewrite under this workflow without any change to this file.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Pinned to the exact supported version rather than to a channel. `stable` moves without any
+      # change to this file, which makes a green run unreproducible and a red one hard to
+      # attribute; the repository builds against 1.93.1, so this installs that. Using rustup
+      # directly also removes a third-party action from the trust surface of a job that already
+      # has rustup available to it. `rustfmt` is requested explicitly because the minimal profile
+      # does not carry it and the formatting gate below invokes it directly.
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.93.1 --profile minimal --no-self-update --component rustfmt,clippy
+          rustup default 1.93.1
+          rustc --version
+          cargo --version
+          rustfmt --version
+
+      - name: Check the formatting of the suite
+        run: rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs
+
+      - name: Type-check the whole suite with warnings denied
+        run: |
+          mkdir -p target/conformance-typecheck
+          CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata \
+            -D warnings --out-dir target/conformance-typecheck tests/conformance.rs
+
   # Judge bcc's observable program behaviour — stdout bytes and exit status, nothing else —
   # against three independent oracles: (a) an external reference C compiler at the same target
   # and optimization level, (b) bcc's own other backends against the x86-64 baseline, and
@@ -25,7 +153,13 @@ jobs:
   # under tests/conformance/ at -O0, -O1 and -O2 on all four supported targets.
   differential-conformance:
     name: Differential conformance suite
-    runs-on: ubuntu-latest
+    # A FIXED image label, not `ubuntu-latest`. `ubuntu-latest` moves between releases on
+    # GitHub's own schedule, and the release is what decides which compiler stands behind every
+    # package name below — most consequentially the language mode a reference driver compiles by
+    # default, which no flag in this suite can correct because no `-std` flag is ever passed. A
+    # moving image would therefore silently change the dialect the corpus is judged against. The
+    # package set installed below is the one that matches THIS image.
+    runs-on: ubuntu-24.04
     # The matrix takes a few minutes. The bound is deliberately generous so that a slow runner
     # reports a slow run rather than a spurious failure.
     timeout-minutes: 30
@@ -36,70 +170,327 @@ jobs:
       # than a modest machine. It is set for the whole job so that the pre-flight step below
       # fails fast on a gap instead of merely reporting it.
       BCC_CONFORMANCE_STRICT: "1"
+      # The four reference drivers, pinned by name in the job itself rather than left to the
+      # harness's unversioned probe order. The probe order cannot know which major version a
+      # distribution has put behind `gcc`, and the suite passes no standard-selection flag — the
+      # compiler under test has none to match — so the driver's own DEFAULT language mode is the
+      # language every oracle (a) comparison is judged against. These four are the gnu17 drivers
+      # on the pinned image; the step after the install proves it rather than assuming it.
+      BCC_REF_CC: gcc-13
+      BCC_REF_CC_I686: i686-linux-gnu-gcc-13
+      BCC_REF_CC_AARCH64: aarch64-linux-gnu-gcc-13
+      BCC_REF_CC_RISCV64: riscv64-linux-gnu-gcc-13
     steps:
+      # `@v4` is a MAJOR-VERSION selector, not an immutable pin: the tag is mutable and resolves
+      # to whatever v4 release is current. It is used deliberately, because a major-version
+      # selector is what receives the action's own security fixes; the accurate description is
+      # recorded here rather than the file claiming a pin it does not have.
+      #
+      # The checkout credential is not persisted: no later step pushes, tags or otherwise talks
+      # back to the repository, so leaving a usable token in `.git/config` for the rest of the
+      # job would grant reach nothing here needs.
       - name: Check out the repository
-        uses: actions/checkout@v4
+        # Pinned by digest, not by tag: a tag is mutable, so `@v4` is a promise the action's owner
+        # can rewrite under this workflow without any change to this file.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # `@stable` is a CHANNEL BRANCH — the mutable ref this action publishes to track the
+      # current Rust stable release — and tracking stable is exactly the semantics wanted: the
+      # suite's documented minimum is 1.70+ and it must keep building on the current stable.
+      # Named accurately for the same reason as above.
+      # Pinned to the exact supported version rather than to a channel. `stable` moves without any
+      # change to this file, which makes a green run unreproducible and a red one hard to
+      # attribute; the repository builds against 1.93.1, so this installs that. Using rustup
+      # directly also removes a third-party action from the trust surface of a job that already
+      # has rustup available to it. `rustfmt` is requested explicitly because the minimal profile
+      # does not carry it and the formatting gate below invokes it directly.
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.93.1 --profile minimal --no-self-update --component rustfmt,clippy
+          rustup default 1.93.1
+          rustc --version
+          cargo --version
+          rustfmt --version
 
       # Everything installed here serves the test oracles and nothing else. bcc invokes no
       # external assembler, linker or compiler of its own: it preprocesses, analyses, generates
       # code and links inside a single process, so none of these binaries takes any part in its
       # compilation pipeline.
       #
-      # gcc is oracle (a)'s native arm and the driver of both undefined-behaviour audit gates.
-      # The three cross drivers are the only way to reach oracle (a)'s i686, AArch64 and
-      # RISC-V 64 arms, because the reference compiler has no target-selection flag. The
-      # emulator package executes the three non-native targets for oracle (b), and the cross C
-      # runtimes supply the start files and static C library every `-static` link needs.
+      # Every name is EXPLICIT and VERSIONED where a version decides behaviour:
+      #
+      #   * `gcc-13` and the three `gcc-13-*-linux-gnu` cross drivers, never the unversioned
+      #     names. The unversioned driver is whichever major version the release made default,
+      #     and a later default mode (gnu23) changes the meaning of constructs this corpus
+      #     contains — a UTF-8 literal's type, and whether `bool`, `true` and `false` are
+      #     keywords. The harness refuses such a driver rather than judging the corpus with it,
+      #     which would cost oracle (a) on every arm.
+      #   * The three cross drivers are the only way to reach oracle (a)'s i686, AArch64 and
+      #     RISC-V 64 arms, because the reference compiler has no target-selection flag and
+      #     `-m32` is unusable where the multilib start files are absent.
+      #   * `libc6-dev-i386-cross`, NOT `libc6-dev-i386`. The `-cross` package installs
+      #     /usr/i686-linux-gnu/lib/{libc.a,crt1.o,crti.o,crtn.o}, which is what
+      #     `i686-linux-gnu-gcc-13 -static` actually resolves; `libc6-dev-i386` installs the
+      #     /usr/lib32 multilib set that only `gcc -m32` uses, so it would leave every i686 cell
+      #     failing at the link step.
+      #   * The emulator package name differs by release and is resolved by ASKING apt rather
+      #     than assumed: on releases where `qemu-user-static` is merely a virtual name with no
+      #     candidate, installing it resolves to a binfmt package that ships no
+      #     `qemu-<arch>-static` binaries at all, and the emulators come from `qemu-user`
+      #     instead. The harness accepts either spelling, so either package works once the right
+      #     one is installed.
+      #   * `--no-install-recommends`, because a Recommends is not a guarantee: the i686 static C
+      #     runtime is only *recommended* by its cross driver, and every runtime this suite needs
+      #     is named here outright instead.
+      #
+      # tests/conformance/README.md, under "Reference compilers, emulators and cross C runtimes",
+      # is the authoritative per-release package matrix and records why each of the three obvious
+      # alternatives installs cleanly while failing to deliver what the suite needs.
       - name: Install the reference compilers, emulators and cross C runtimes for the oracles
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
-            gcc \
-            gcc-i686-linux-gnu \
-            gcc-aarch64-linux-gnu \
-            gcc-riscv64-linux-gnu \
-            qemu-user-static \
-            libc6-dev-i386 \
+          # Matched with the shell's own pattern test rather than through a pipe into `grep -q`:
+          # `grep -q` exits at its first match, and under `pipefail` the SIGPIPE it delivers to
+          # the writer would surface as the pipeline's status, so a match could be read as "no
+          # match". No text test in this workflow pipes into an early-exiting reader for that
+          # reason — this one uses `case`, and the two in the next step use a here-string.
+          policy=$(apt-cache policy qemu-user-static 2>/dev/null || true)
+          case $policy in
+          *'Candidate: (none)'*) emulator_package=qemu-user ;;
+          *) emulator_package=qemu-user-static ;;
+          esac
+          echo "emulator package for this release: $emulator_package"
+          sudo apt-get install -y --no-install-recommends \
+            gcc-13 \
+            gcc-13-i686-linux-gnu \
+            gcc-13-aarch64-linux-gnu \
+            gcc-13-riscv64-linux-gnu \
+            "$emulator_package" \
+            libc6-dev \
+            libc6-dev-i386-cross \
             libc6-dev-arm64-cross \
             libc6-dev-riscv64-cross
 
-      # Both cargo invocations below presuppose the repository's own manifest, its `bcc` binary
-      # target and its src/** tree; the suite adds no manifest of its own and changes none,
-      # because Cargo discovers tests/conformance.rs automatically as the integration-test
-      # target `conformance`.
+      # Verified, not assumed — the discipline requirement 3 sets for flags, applied to the
+      # oracles themselves. A package name that installs proves only that something was
+      # installed: it does not prove which language the driver behind it compiles, and that is
+      # the property every oracle (a) verdict depends on. So each pinned driver is asked, exactly
+      # as tests/conformance_harness/env.rs asks it during discovery — `-dM -E -x c -` on empty
+      # input — and is required to predefine `__STDC_VERSION__` in the C11..C17 range with
+      # `__STRICT_ANSI__` absent, because the corpus is C11 material that also exercises GNU
+      # extensions. Each emulator is required to resolve under one of its two spellings.
       #
+      # This fails the job before the matrix runs rather than after, and it fails loudly: under
+      # strict mode a refused driver would cost oracle (a) an entire arm, and a job that
+      # discovered that from a verdict table would be reporting a toolchain defect as a
+      # conformance result.
+      - name: Verify the oracle toolchain is the one the corpus is judged against
+        run: |
+          set -euo pipefail
+          status=0
+          for pin in \
+            "x86_64-linux-gnu:BCC_REF_CC:$BCC_REF_CC" \
+            "i686-linux-gnu:BCC_REF_CC_I686:$BCC_REF_CC_I686" \
+            "aarch64-linux-gnu:BCC_REF_CC_AARCH64:$BCC_REF_CC_AARCH64" \
+            "riscv64-linux-gnu:BCC_REF_CC_RISCV64:$BCC_REF_CC_RISCV64"
+          do
+            target=${pin%%:*}
+            rest=${pin#*:}
+            variable=${rest%%:*}
+            driver=${rest#*:}
+            if ! command -v "$driver" > /dev/null 2>&1; then
+              echo "::error::$variable names $driver, which is not an executable on PATH"
+              status=1
+              continue
+            fi
+            dump=$("$driver" -dM -E -x c - < /dev/null 2> /dev/null || true)
+            version=$(sed -n 's/^#define __STDC_VERSION__ \([0-9][0-9]*\)L\{0,1\}$/\1/p' <<< "$dump")
+            if [ -z "$version" ]; then
+              echo "::error::$driver ($target) stated no readable __STDC_VERSION__, so the language it compiles by default is unproven"
+              status=1
+              continue
+            fi
+            if [ "$version" -lt 201112 ] || [ "$version" -gt 201710 ]; then
+              echo "::error::$driver ($target) compiles __STDC_VERSION__ ${version}L by default; the corpus is C11/C17 material and no -std flag is ever passed, so this driver would judge a different language"
+              status=1
+              continue
+            fi
+            if grep -q '^#define __STRICT_ANSI__ ' <<< "$dump"; then
+              echo "::error::$driver ($target) predefines __STRICT_ANSI__, so its default mode rejects the GNU extensions this corpus exercises"
+              status=1
+              continue
+            fi
+            echo "$target: $driver — $("$driver" --version | head -n 1) — __STDC_VERSION__ ${version}L, GNU extensions enabled"
+          done
+          for runner in qemu-i386 qemu-aarch64 qemu-riscv64; do
+            if command -v "$runner" > /dev/null 2>&1; then
+              echo "runner: $runner ($(command -v "$runner"))"
+            elif command -v "${runner}-static" > /dev/null 2>&1; then
+              echo "runner: ${runner}-static ($(command -v "${runner}-static"))"
+            else
+              echo "::error::neither $runner nor ${runner}-static is on PATH, so that target cannot execute for oracle (b)"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      # The gate the two `cargo` steps below depend on: establish whether this checkout actually
+      # carries the Cargo package they presuppose, and record the answer where both a reader and
+      # those steps can see it. Three conditions, because each failure is a different situation
+      # and all three are fatal to `cargo test --test conformance`: a manifest must exist,
+      # `cargo metadata` must be able to read it, and it must declare the `bcc` binary target the
+      # suite resolves through `CARGO_BIN_EXE_bcc`.
+      #
+      # A checkout without the package is reported as a warning and a job-summary section rather
+      # than a silent skip or a failure: the suite genuinely cannot run there, saying so is the
+      # honest outcome, and hiding it would leave the workflow claiming a run it never made.
+      - name: Determine whether the compiler's Cargo package is present in this checkout
+        id: package
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/cargo-metadata.json"
+          errors="$RUNNER_TEMP/cargo-metadata.err"
+          reason=""
+          if [ ! -f Cargo.toml ]; then
+            reason="there is no Cargo.toml at the repository root"
+          elif ! cargo metadata --no-deps --format-version 1 > "$metadata" 2> "$errors"; then
+            reason="cargo metadata could not read the manifest: $(head -n 1 "$errors")"
+          elif ! python3 -c 'import json, sys; metadata = json.load(open(sys.argv[1])); sys.exit(0 if any(target["name"] == "bcc" and "bin" in target["kind"] for package in metadata["packages"] for target in package["targets"]) else 1)' "$metadata"; then
+            reason="the manifest declares no bcc binary target"
+          fi
+          if [ -z "$reason" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "the Cargo package is present; the conformance suite will run"
+            {
+              echo "### Differential conformance suite"
+              echo
+              echo "The compiler's Cargo package is present in this checkout, so the suite was executed:"
+              echo "the oracle pre-flight followed by the full matrix, in strict mode."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::The differential conformance suite was NOT executed: $reason. cargo test --test conformance requires the compiler's Cargo package (Cargo.toml declaring the bcc binary target, plus src/**), which this suite deliberately does not supply. See 'The Cargo integration precondition' in tests/conformance/README.md."
+            {
+              echo "### Differential conformance suite — NOT executed"
+              echo
+              echo "This checkout does not carry the compiler's Cargo package: $reason."
+              echo
+              echo "\`cargo test --test conformance\` presupposes a \`Cargo.toml\` declaring the \`bcc\`"
+              echo "binary target and the \`src/**\` tree it builds from. The suite adds no manifest and"
+              echo "must never add one, so the Cargo gates cannot run until the suite and the compiler"
+              echo "tree are on one branch. See **The Cargo integration precondition** in"
+              echo "\`tests/conformance/README.md\`."
+              echo
+              echo "What ran instead: \`rustfmt --check\` on the driver and every harness module, and a"
+              echo "\`rustc --test\` type-check of the whole suite with warnings denied — the checks that"
+              echo "do not depend on packaging. **No oracle comparison was performed.**"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       # This step is the intended pre-flight. It prints the discovered oracle inventory and
       # states exactly which arms of which oracles will run, so a misconfigured environment is
       # diagnosed in seconds rather than after the whole matrix has executed against a silently
       # reduced oracle set.
       - name: Pre-flight the oracle inventory
+        if: steps.package.outputs.present == 'true'
         run: cargo test --test conformance infra_oracle_capability_report -- --nocapture
 
       # Each area accumulates every verdict before it asserts, so --nocapture puts the complete
       # per-area verdict table and the deliverable summary in the job log without anyone having
       # to download the artifact first.
       - name: Run the differential conformance suite
+        if: steps.package.outputs.present == 'true'
         run: cargo test --test conformance -- --nocapture
+
+      # The manifest-less shape, and the only two checks it can honestly claim. Both are lifted
+      # verbatim from the table in "The Cargo integration precondition": every file parses,
+      # type-checks and is correctly formatted. `CARGO_MANIFEST_DIR` is required rather than
+      # decorative — the harness resolves the corpus relative to it — and the type-check output
+      # goes to the runner's temporary directory so nothing lands in the checkout.
+      - name: Static checks that need no Cargo package
+        if: steps.package.outputs.present != 'true'
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs
+          CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata -D warnings \
+            --out-dir "$RUNNER_TEMP/conformance-typecheck" tests/conformance.rs
 
       # `if: always()` is load-bearing rather than defensive. A failing run is precisely when
       # these artifacts matter, and the harness writes the per-area reports and the run summary
       # before an area test asserts, so a complete report exists even then; without this the
-      # evidence would be discarded exactly when it is needed. The two published paths are a
-      # contract shared with the harness and with .gitignore, and they are the whole publication:
-      # the transient per-cell workspaces beneath the build directory are deliberately left
-      # behind, being removed on success and retained only to investigate a failure on the
-      # machine that produced it.
-      - name: Upload the conformance reports and findings
-        if: always()
-        uses: actions/upload-artifact@v4
+      # evidence would be discarded exactly when it is needed.
+      #
+      # ## Why only the report is published by default
+      #
+      # The report tree is safe to publish by construction: every free-text value that reaches a
+      # report row passes through the harness's secret redaction, root elision and report-safe
+      # rendering at the single point an outcome comes into existence, so a published report cannot
+      # carry a credential or the absolute location of this workspace. A generated finding
+      # directory is deliberately the opposite — it describes the machine that produced it as
+      # freely as it likes, because that is what makes it re-runnable there — and its own manifest
+      # says so, recording `disclosure_review = not-performed`. `tests/conformance/FINDINGS.md`
+      # §5.3 requires that review before a finding is published, and publishing the raw directory
+      # by default would route evidence around the one gate that exists to hold it.
+      #
+      # So the raw directories are behind an explicit opt-in below, and the report — which names
+      # every finding, its identifier and its directory, with a sanitized account of each
+      # divergence — is what a reader gets without asking.
+      - name: Upload the conformance reports
+        if: always() && steps.package.outputs.present == 'true'
+        # Pinned by digest for the same reason as the checkout above.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: conformance-report
           # A run that fails before any report is written must warn, not turn a missing
-          # directory into a second, misleading failure on top of the real one.
+          # directory into a second, misleading failure on top of the real one. In the
+          # manifest-less shape no report exists at all, and that too is a warning rather than a
+          # failure, because the step above has already said why.
           if-no-files-found: warn
-          path: |
-            target/conformance-report/**
-            target/conformance-findings/**
+          path: target/conformance-report/**
+
+      # The disclosure gate, made visible rather than assumed. It states how many generated
+      # finding directories exist and what each one's manifest says about its own review, so an
+      # operator who opted in knows exactly what they are downloading — and so a directory that
+      # somehow claimed to have been reviewed by a run is caught here instead of being believed.
+      - name: Audit the generated findings before releasing them
+        if: always() && steps.package.outputs.present == 'true' && inputs.publish_raw_findings
+        run: |
+          set -euo pipefail
+          root=target/conformance-findings
+          if [ ! -d "$root" ]; then
+            echo "no generated finding directories in this run; nothing to release"
+            exit 0
+          fi
+          count=0
+          for manifest in "$root"/*/MANIFEST.txt; do
+            [ -e "$manifest" ] || continue
+            count=$((count + 1))
+            # Both curation attestations, because they answer different questions about what is
+            # being downloaded: disclosure_review says whether anything in it was vetted for
+            # publication, and minimization says whether the reproducer is a reduced case or a
+            # verbatim copy of the corpus program. A run writes `not-performed` for both, and the
+            # curated audit refuses both, so seeing either state anything else here means a
+            # directory beneath the generated root is claiming a judgement no run can make.
+            printf '%s:\n' "$(dirname "$manifest")"
+            printf '  %s\n' \
+              "$(grep -m1 '^disclosure_review' "$manifest" || echo 'disclosure_review = <ABSENT>')" \
+              "$(grep -m1 '^minimization' "$manifest" || echo 'minimization = <ABSENT>')"
+          done
+          echo "::warning::Releasing $count raw generated finding directory(ies) as the conformance-findings-raw artifact. Every one of them is UNREVIEWED and UNMINIMIZED evidence: each retains captured diagnostics, exact commands and absolute tool paths, and each reproducer is a verbatim copy of a corpus program rather than a reduced case. Perform the tests/conformance/FINDINGS.md §5.3 disclosure review on what you download before sharing it further, and the §5.1 minimization step before treating any of it as a filed finding."
+
+      - name: Upload the raw generated finding directories (UNREVIEWED evidence, opt-in)
+        if: always() && steps.package.outputs.present == 'true' && inputs.publish_raw_findings
+        # Pinned by digest for the same reason as the checkout above.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: conformance-findings-raw
+          if-no-files-found: warn
+          # Short-lived deliberately: this is unreviewed evidence released for a specific
+          # investigation, not a durable publication. The curated, reviewed finding set lives in
+          # the repository under tests/conformance/findings/ and needs no artifact at all.
+          retention-days: 1
+          path: target/conformance-findings/**

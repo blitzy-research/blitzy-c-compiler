@@ -22,6 +22,7 @@ expect_exit        = 0
 oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
+ub_audit_source_suppressions = -Woverride-init
 ub_notes           <<END
 This program contains no undefined and no unspecified behaviour. That is the precondition which
 makes both differential oracles sound: undefined behaviour would license either compiler to do
@@ -112,17 +113,23 @@ No header is included anywhere and printf is declared by hand as `int printf(con
 That is the corpus-wide rule stated in tests/conformance/README.md, whose two sanctioned exceptions
 are area 07's stdarg.h and area 12's bundled-header probe; area 03 takes neither.
 
-This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
-under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror
-at -O0, -O1 and -O2 with all four reference drivers, with no diagnostic of any kind, and it builds
-and runs clean under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both
-gates are reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag
-discipline is untouched. The translation unit does contain diagnostic-control directives, and they
-are declared here rather than left for a reader to find: two matched push/pop pairs suppress
--Woverride-init around the five overriding declarations and nothing else, for the reason set out
-under REASONING ON OVERLAPPING DESIGNATORS below. They are not a gate deviation -- no gate member is
-dropped, no ub_audit_flags key appears, -Werror remains in force, and -Woverride-init itself remains
-fatal everywhere outside those two regions, which was verified by measurement.
+This record declares no COMMAND-LINE warning-gate deviation, and area 03 sanctions none: no
+ub_audit_flags key appears, so the program is compiled under the full default gate -Wall -Wextra
+-pedantic -Wconversion -Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference
+drivers, and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
+-fno-sanitize-recover=all. Both gates are reference-compiler-only and are never applied to bcc, so
+requirement 3's shared-flag discipline is untouched.
+
+The translation unit does contain diagnostic-control directives, and they are REGISTERED rather than
+merely mentioned: the ub_audit_source_suppressions key above names -Woverride-init, which is the one
+diagnostic two matched push/pop pairs suppress, around the five overriding declarations and nothing
+else. That key is machine-read. The audit scans this program's source on every run and fails the
+warning gate if it finds a directive this record does not register, if this record registers a warning
+the source does not suppress, if a suppression is not bracketed by a matched push and pop, if the
+warning is not sanctioned for this exact area and program, or if the reason below does not name it --
+so the exception is enforced on the same terms as a command-line deviation rather than resting on this
+paragraph. -Werror remains in force, every other diagnostic remains fatal, and -Woverride-init itself
+remains fatal everywhere outside those two bracketed regions, which was verified by measurement.
 
 REASONING ON OVERLAPPING DESIGNATORS, AS THE AREA REQUIREMENTS DIRECT:
 
@@ -239,14 +246,36 @@ than to bcc. If bcc rejects or mis-orders any override here, that is an undocume
 must be delivered as a finding with its minimized reproducer, not classified away.
 END
 impl_defined_notes <<END
-This record narrows nothing that the harness reads: all four targets, all three optimization levels
-and all three oracles are enabled, no expected-divergence marker is carried, no gate deviation is
-claimed under the ub_audit_flags key, and no implementation-defined value reaches this program's
-output. Every initializer form the area requires is present in the source, overlapping designators
-included. The single spelling still absent is an override whose initializer carries a SIDE EFFECT,
-and because that exclusion is an undefined-and-unspecified-behaviour matter rather than an
-implementation-defined one, it is stated where the area requirements direct: in ub_notes above, under
-REASONING ON OVERLAPPING DESIGNATORS.
+This record narrows exactly one thing, and it narrows it from inside the program rather than on the
+command line: all four targets, all three optimization levels and all three oracles are enabled, no
+expected-divergence marker is carried, no gate deviation is claimed under the ub_audit_flags key, and
+no implementation-defined value reaches this program's output -- but two matched push/pop pairs in the
+source suppress -Woverride-init, and that is the narrowing this paragraph exists to justify. Every
+initializer form the area requires is present in the source, overlapping designators included. The
+single spelling still absent is an override whose initializer carries a SIDE EFFECT, and because that
+exclusion is an undefined-and-unspecified-behaviour matter rather than an implementation-defined one,
+it is stated where the area requirements direct: in ub_notes above, under REASONING ON OVERLAPPING
+DESIGNATORS.
+
+THE REASON FOR SUPPRESSING -Woverride-init, WHICH THE ub_audit_source_suppressions KEY REGISTERS.
+-Woverride-init is enabled by -Wextra and made fatal by -Werror, and it fires on an initializer that
+overrides an earlier one for the same subobject. That is not a defect here: it is the CONSTRUCT UNDER
+TEST. C11 6.7.9p19 initializes in initializer-list order and gives the later initializer precedence,
+so the five overriding objects -- g_over_flat, g_over_row_elem, g_over_elem_row, g_over_memb and the
+automatic l_over_flat -- have exactly one correct answer each, and g_over_row_elem against
+g_over_elem_row is the discriminating pair whose whole value is that the same two initializers in
+opposite order must give different results. The diagnostic reports well-defined behaviour that the
+area requirements oblige this program to exercise.
+
+Neither alternative is acceptable, which is why the suppression is the narrowest available response.
+Removing the objects would drop mandated initializer coverage because a diagnostic found a defined
+construct surprising, which the corpus forbids. Dropping -Wextra from the gate through ub_audit_flags
+would be a far wider relaxation -- it would discard every other diagnostic -Wextra carries for the
+whole file -- and area 03 sanctions no gate deviation in any case. The directives instead bracket the
+five declarations and nothing else with a matched push and pop, so -Woverride-init is fatal again on
+the next line, and every other diagnostic is fatal throughout. The exception is bounded in the source,
+registered in this record, sanctioned for this exact program in the harness's own table, and checked
+in both directions on every run.
 
 All printed values are int and are printed with %d only. The program contains no
 long, size_t, ptrdiff_t, intptr_t, float, double or long double. The single sizeof

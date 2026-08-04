@@ -103,15 +103,16 @@ use std::path::{Component, Path, PathBuf};
 
 use super::{
     canonical_corpus_root, comma_separated, corpus_root, ensure_within, findings_root,
-    fnv1a64_bytes, is_forbidden_for_side, is_ub_audit_gate_member, joined_target_names,
-    manifest_dir, must_escape_for_report, posix_command_line, read_file_bounded,
-    require_contained_corpus_file, require_regular_file, sanitize_text_for_report, shown_path,
-    stable_digest, ub_audit_gate_required, AreaSpec, CellKey, CompilerSide, DivergenceClass,
-    HarnessError, HarnessResult, OptLevel, Oracle, Target, AREAS, BCC_TARGET_FLAG,
-    BCC_TARGET_SELECTORS, CURATED_FINDINGS_DIR_NAME, DIFFERENTIAL_FLAGS_MINIMAL, DIGEST_HEX_DIGITS,
-    EXTENSION_AREA, MAX_INSPECTED_FILE_BYTES, PROGRAM_COUNT, SHARED_FLAGS_VERIFIED,
-    UB_AUDIT_GATE_DEFAULT, UB_AUDIT_GATE_MANDATORY, UB_AUDIT_GATE_REMOVABLE, UB_GATE_DEFAULT,
-    UB_GATE_WITHOUT_CONVERSION, UB_GATE_WITHOUT_PEDANTIC,
+    fnv1a64_bytes, is_forbidden_for_side, is_sanctioned_source_suppression,
+    is_ub_audit_gate_member, joined_target_names, manifest_dir, must_escape_for_report,
+    posix_command_line, read_file_bounded, require_contained_corpus_file, require_regular_file,
+    sanctioned_source_suppression_warnings, sanitize_text_for_report, shown_path, stable_digest,
+    ub_audit_gate_required, AreaSpec, CellKey, CompilerSide, DivergenceClass, HarnessError,
+    HarnessResult, MarkerClass, OptLevel, Oracle, Target, AREAS, BCC_TARGET_FLAG,
+    BCC_TARGET_SELECTORS, COMPARISON_EXCLUDED_LABEL, CURATED_FINDINGS_DIR_NAME,
+    DIFFERENTIAL_FLAGS_MINIMAL, DIGEST_HEX_DIGITS, EXTENSION_AREA, MAX_INSPECTED_FILE_BYTES,
+    PROGRAM_COUNT, SHARED_FLAGS_VERIFIED, UB_AUDIT_GATE_DEFAULT, UB_AUDIT_GATE_MANDATORY,
+    UB_AUDIT_GATE_REMOVABLE, UB_GATE_DEFAULT, UB_GATE_WITHOUT_CONVERSION, UB_GATE_WITHOUT_PEDANTIC,
 };
 
 const HEREDOC_OPENER: &str = "<<";
@@ -308,7 +309,7 @@ const RECORD_BYTES_MAX: u64 = 256 * 1024;
 /// fail the build instead of silently eroding the headroom the comment on [`RECORD_BYTES_MAX`]
 /// claims, and the correct response then is to raise the bound and the divisor together, as a
 /// decision about the format rather than an accident of one record's prose.
-const RECORD_BYTES_OBSERVED_MAX: u64 = 32_240;
+const RECORD_BYTES_OBSERVED_MAX: u64 = 32_265;
 
 /// Largest single heredoc field observed in the committed corpus, in bytes, and its line count.
 ///
@@ -531,6 +532,30 @@ impl KeySpec {
     }
 }
 
+/// The key by which a record registers an in-source diagnostic suppression.
+///
+/// # Why the presence of a `#pragma` needs a key of its own
+///
+/// `ub_audit_flags` records a relaxation of the warning gate expressed on the command line, and the
+/// audit runs that gate itself, so nothing there can escape it. A `#pragma GCC diagnostic ignored`
+/// inside the translation unit relaxes the same gate to the same effect — a diagnostic that `-Werror`
+/// would have made fatal is never raised — but it lives in the program rather than in the invocation,
+/// so a record could truthfully say "no gate deviation" while a gate member was switched off for part
+/// of the file. Requirement 1's guarantee is that undefined-behaviour freedom is *machine-enforced*,
+/// and an exception the machine cannot see is not enforced at all.
+///
+/// So the two are treated identically: an in-source suppression must be declared here, must be
+/// sanctioned by [`UB_AUDIT_SOURCE_SUPPRESSIONS_SANCTIONED`] for this exact program, and must carry
+/// its reason in `impl_defined_notes` naming the warning by its exact spelling. The audit reads the
+/// source and enforces the correspondence in **both** directions — an undeclared directive fails, and
+/// so does a declaration with no directive behind it.
+///
+/// `Presence::Conditional`, and the condition is a property of the SOURCE rather than of the record,
+/// which no parser can check: the parser therefore validates the value whenever it is present, and
+/// the audit supplies the other half by refusing a program whose source carries a directive this key
+/// does not name.
+const KEY_SOURCE_SUPPRESSIONS: &str = "ub_audit_source_suppressions";
+
 const KEY_MARKER_ID: &str = "expected_divergence.id";
 
 const KEY_MARKER_CLASS: &str = "expected_divergence.class";
@@ -649,7 +674,7 @@ const ANTICIPATORY_WORDING: &[&str] = &[
 ];
 
 /// Every recognised key, in the order the reference record writes them.
-const KEYS: [KeySpec; 24] = [
+const KEYS: [KeySpec; 25] = [
     KeySpec::new("program", FieldKind::Scalar, Presence::Required),
     KeySpec::new("area", FieldKind::Scalar, Presence::Required),
     KeySpec::new("description", FieldKind::Scalar, Presence::Required),
@@ -664,6 +689,11 @@ const KEYS: [KeySpec; 24] = [
     KeySpec::new("oracle_b", FieldKind::Scalar, Presence::Required),
     KeySpec::new("oracle_c", FieldKind::Scalar, Presence::Required),
     KeySpec::new("ub_audit_flags", FieldKind::Scalar, Presence::Optional),
+    KeySpec::new(
+        KEY_SOURCE_SUPPRESSIONS,
+        FieldKind::Scalar,
+        Presence::Conditional,
+    ),
     KeySpec::new("ub_notes", FieldKind::Heredoc, Presence::Required),
     KeySpec::new(
         "impl_defined_notes",
@@ -1816,7 +1846,7 @@ impl fmt::Display for MarkerScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpectedDivergence {
     id: String,
-    class: DivergenceClass,
+    class: MarkerClass,
     scope: MarkerScope,
     basis: String,
     basis_path: PathBuf,
@@ -1837,8 +1867,9 @@ impl ExpectedDivergence {
         &self.id
     }
 
-    /// The shape of divergence this marker excuses.
-    pub fn class(&self) -> DivergenceClass {
+    /// What this marker excuses: an observed divergence shape, or a comparison the record's own
+    /// oracle toggles deliberately decline to make.
+    pub fn class(&self) -> MarkerClass {
         self.class
     }
 
@@ -1985,6 +2016,7 @@ pub struct Manifest {
     expect_exit: i32,
     enabled_oracles: Vec<Oracle>,
     ub_audit_flags: Option<Vec<String>>,
+    source_suppressions: Vec<String>,
     ub_notes: String,
     impl_defined_notes: Option<String>,
     expected_stdout: String,
@@ -2093,6 +2125,16 @@ impl Manifest {
             Some(gate) => !is_same_flag_set(gate, UB_GATE_DEFAULT),
             None => false,
         }
+    }
+
+    /// The diagnostics this program's own source switches off with a diagnostic-control directive.
+    ///
+    /// Empty for every program that carries none, which is all but one of them. The audit reads the
+    /// source and requires this list and the directives it finds to agree exactly, in both
+    /// directions: an undeclared directive fails the gate, and so does a declaration with no
+    /// directive behind it.
+    pub fn source_suppressions(&self) -> &[String] {
+        &self.source_suppressions
     }
 
     /// The written undefined-behaviour-freedom argument: the human half of the requirement whose
@@ -3021,6 +3063,150 @@ fn parse_ub_audit_flags(origin: &Path, raw: &RawField, area: &str) -> HarnessRes
 /// deviation without a recorded reason is a defect in the **test program**, not in the compiler: the
 /// gate's whole value is its strictness, and an unexplained relaxation quietly re-admits the
 /// undefined behaviour this suite depends on excluding in order to attribute a divergence at all.
+/// Parse and validate the in-source suppression registration.
+///
+/// Four conditions, each closing a way the registration could become a licence rather than a record:
+///
+/// - it names at least one warning, because an empty declaration is indistinguishable from none while
+///   still satisfying a presence check;
+/// - every entry is a `-W` warning switch and nothing else, so the key cannot be used to record an
+///   arbitrary compiler option or a whole-file suppression;
+/// - no entry is repeated, because a duplicate is a partly edited record rather than an intention;
+/// - every entry is sanctioned for THIS record's own area and program. The grain is deliberate — see
+///   [`UB_AUDIT_SOURCE_SUPPRESSIONS_SANCTIONED`] — so a later program cannot silence a diagnostic on
+///   the strength of an exception that was justified for a different construct in a different file.
+fn parse_source_suppressions(
+    origin: &Path,
+    raw: &RawField,
+    area: &str,
+    program: &str,
+) -> HarnessResult<Vec<String>> {
+    let items = whitespace_items(&raw.value);
+    if items.is_empty() {
+        return Err(key_error(
+            origin,
+            raw.line,
+            KEY_SOURCE_SUPPRESSIONS,
+            format!(
+                "the key is present but names no warning. A program that suppresses nothing in its \
+                 source simply omits this key; an empty registration would satisfy the audit's \
+                 presence check while recording no exception at all. The warnings any program may \
+                 register are {}, and each is sanctioned for one named program only",
+                comma_separated(&sanctioned_source_suppression_warnings())
+            ),
+        ));
+    }
+
+    let mut declared: Vec<String> = Vec::with_capacity(items.len());
+    for item in &items {
+        if !item.starts_with("-W") || item.len() < 3 {
+            return Err(key_error(
+                origin,
+                raw.line,
+                KEY_SOURCE_SUPPRESSIONS,
+                format!(
+                    "{item:?} is not a warning switch. This key registers the exact diagnostics a \
+                     `#pragma GCC diagnostic ignored` in the program's source switches off, so every \
+                     entry is spelled as the warning appears in that directive — `-Woverride-init`, \
+                     leading hyphen included. Accepting anything else would turn a record of one \
+                     bracketed exception into a place to name arbitrary compiler behaviour"
+                ),
+            ));
+        }
+        if declared.iter().any(|known| known == item) {
+            return Err(key_error(
+                origin,
+                raw.line,
+                KEY_SOURCE_SUPPRESSIONS,
+                format!(
+                    "{item:?} is named twice; a repeated warning says nothing the single occurrence \
+                     does not, and a duplicate is a partly edited record rather than an intention"
+                ),
+            ));
+        }
+        if !is_sanctioned_source_suppression(area, program, item) {
+            return Err(key_error(
+                origin,
+                raw.line,
+                KEY_SOURCE_SUPPRESSIONS,
+                format!(
+                    "{item:?} is not a sanctioned in-source suppression for {area}/{program}. An \
+                     exception of this kind is admitted for one construct in one file, never \
+                     corpus-wide: the diagnostic it silences exists to catch a mistake, and \
+                     sanctioning it broadly would let a later program silence a real one. The \
+                     sanctioned set is {}. If this program genuinely needs the exception, add the \
+                     (area, program, warning) triple to UB_AUDIT_SOURCE_SUPPRESSIONS_SANCTIONED in \
+                     the harness root with the reasoning beside the existing entry, so the whole set \
+                     stays readable in one place",
+                    comma_separated(
+                        sanctioned_source_suppression_triples()
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<&str>>()
+                            .as_slice()
+                    )
+                ),
+            ));
+        }
+        declared.push(String::from(*item));
+    }
+    Ok(declared)
+}
+
+/// The sanctioned in-source suppressions rendered as `area/program: -Wwarning`, for a diagnostic.
+fn sanctioned_source_suppression_triples() -> Vec<String> {
+    super::UB_AUDIT_SOURCE_SUPPRESSIONS_SANCTIONED
+        .iter()
+        .map(|(area, program, warning)| format!("{area}/{program}: {warning}"))
+        .collect()
+}
+
+/// Require every registered in-source suppression to carry its reason, naming the warning.
+///
+/// The same obligation [`require_gate_deviation_is_explained`] places on a command-line deviation, and
+/// for the same reason: a relaxation whose justification is not written down beside it is a relaxation
+/// nobody can review. `impl_defined_notes` is the one field the reason is read from — `ub_notes`
+/// carries the undefined-behaviour-freedom argument and is a different question — and the reason must
+/// name the warning by its exact spelling, so that the explanation and the exception cannot drift.
+fn require_source_suppression_is_explained(
+    origin: &Path,
+    suppressions: &[String],
+    impl_defined_notes: Option<&str>,
+) -> HarnessResult<()> {
+    if suppressions.is_empty() {
+        return Ok(());
+    }
+    let notes = impl_defined_notes.unwrap_or_default();
+    let unexplained: Vec<&str> = suppressions
+        .iter()
+        .map(String::as_str)
+        .filter(|warning| !notes.contains(*warning))
+        .collect();
+    if unexplained.is_empty() {
+        return Ok(());
+    }
+    Err(record_error(
+        origin,
+        format!(
+            "this record registers the in-source suppression of {}, but `impl_defined_notes` does \
+             not name {} anywhere, so the exception has no recorded reason. AN EXCEPTION WITHOUT A \
+             RECORDED REASON IS ITSELF A DEFECT IN THE TEST: a `#pragma GCC diagnostic ignored` \
+             switches off a member of the warning gate for part of the translation unit, which is \
+             the same relaxation a gate deviation makes and is held to the same standard. Name each \
+             suppressed warning there by its exact spelling, state which declarations the directive \
+             brackets, and state why the diagnostic reports well-defined behaviour in this program. \
+             Add or extend {}",
+            comma_separated(suppressions
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<&str>>()
+                .as_slice()),
+            comma_separated(&unexplained),
+            required_form_of("impl_defined_notes")
+        ),
+    ))
+}
+
 fn require_gate_deviation_is_explained(
     origin: &Path,
     gate: &[String],
@@ -3497,6 +3683,97 @@ fn require_marker_for_narrowed_oracle(
     Ok(())
 }
 
+/// Refuse a marker whose class disagrees with whether its arm is compared at all.
+///
+/// [`require_marker_for_narrowed_oracle`] establishes that a narrowed oracle carries a marker. This
+/// establishes that the marker says the right **kind** of thing about it, and the two rules together
+/// are what stop a coverage restriction and an observation from being spelled the same way.
+///
+/// # The defect this closes
+///
+/// A narrowing marker was previously written with an observational class — `stdout_mismatch`, for a
+/// value comparison that had been switched off — and every automated check passed, because the class
+/// is only ever *matched* on an arm that produced a comparison and this arm produces none. What the
+/// checks could not see is that the field asserted something untrue in the one place a report row
+/// quotes it: that two completed runs disagreed on bytes, when nothing had run. A reader auditing the
+/// register was told an observation had been made.
+///
+/// # The rule, in both directions
+///
+/// - A marker scoped to **any** oracle the record disables must be classed
+///   [`MarkerClass::ComparisonExcluded`]. No observable shape can be seen on an arm that is not
+///   compared, so naming one would be a claim about an experiment that does not happen.
+/// - A marker classed [`MarkerClass::ComparisonExcluded`] must scope **only** oracles the record
+///   disables. On an arm the record does compare, a divergence has a shape and the marker must name
+///   which shape it excuses — otherwise the marker would silently excuse every divergence the arm
+///   could produce, which is precisely the widening the class check exists to prevent.
+///
+/// The two together make a mixed scope inexpressible, and that is intended: a marker either explains
+/// what a comparison saw or explains why a comparison is not made, and one marker cannot honestly do
+/// both. Splitting such a marker in two costs one register entry and buys an unambiguous account of
+/// each arm.
+fn require_class_matches_narrowing(
+    fields: &[(&'static KeySpec, RawField)],
+    origin: &Path,
+    enabled: &[Oracle],
+    marker: Option<&ExpectedDivergence>,
+) -> HarnessResult<()> {
+    let Some(divergence) = marker else {
+        return Ok(());
+    };
+    let narrowed: Vec<Oracle> = divergence
+        .scope
+        .oracles
+        .iter()
+        .copied()
+        .filter(|oracle| !enabled.contains(oracle))
+        .collect();
+    let compared: Vec<Oracle> = divergence
+        .scope
+        .oracles
+        .iter()
+        .copied()
+        .filter(|oracle| enabled.contains(oracle))
+        .collect();
+    let class_line = field(fields, KEY_MARKER_CLASS).map(|raw| raw.line);
+    let refuse = |cause: String| -> HarnessError {
+        match class_line {
+            Some(line) => key_error(origin, line, KEY_MARKER_CLASS, cause),
+            None => record_error(origin, cause),
+        }
+    };
+
+    match divergence.class {
+        MarkerClass::ComparisonExcluded if !compared.is_empty() => Err(refuse(format!(
+            "marker {} is classed `{}`, which says no comparison is attempted on the arm it scopes, \
+             but this record ENABLES {}. A comparison that is performed can produce a divergence, \
+             and a marker over it must name which of the six observable classes it excuses — {} — so \
+             that a second, undocumented defect on the same arm is still reported as the finding it \
+             is. Either name the class of the divergence this marker excuses, or switch that oracle \
+             off in the same edit if the intent was to decline the comparison",
+            divergence.id,
+            COMPARISON_EXCLUDED_LABEL,
+            comma_separated(&compared.iter().map(|oracle| oracle.label()).collect::<Vec<&str>>()),
+            comma_separated(&DivergenceClass::ALL.map(DivergenceClass::label)),
+        ))),
+        MarkerClass::Observed(class) if !narrowed.is_empty() => Err(refuse(format!(
+            "marker {} is classed `{}`, which names a divergence somebody observed, but its scope \
+             names {}, which this record DISABLES — so no comparison is made on that arm and no \
+             {} could be seen there. Class it `{}` instead: that value exists for exactly this \
+             case, it keeps the identifier, the scope and the resolved basis the register audits, \
+             and it states what is true — that the comparison is deliberately not made — rather \
+             than describing an observation. If the intent was to document a real divergence, \
+             enable that oracle in the same edit so the comparison is actually performed",
+            divergence.id,
+            class.label(),
+            comma_separated(&narrowed.iter().map(|oracle| oracle.label()).collect::<Vec<&str>>()),
+            class.label(),
+            COMPARISON_EXCLUDED_LABEL,
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Refuse a marker whose scope names a target or an optimization level this record never exercises.
 ///
 /// A marker reclassifies a divergence in a cell the record actually declares. A scope naming a target
@@ -3783,17 +4060,21 @@ fn parse_marker(
     }
 
     let class_field = required_field(fields, origin, KEY_MARKER_CLASS)?;
-    let class = DivergenceClass::parse(&class_field.value).ok_or_else(|| {
+    let class = MarkerClass::parse(&class_field.value).ok_or_else(|| {
         key_error(
             origin,
             class_field.line,
             KEY_MARKER_CLASS,
             format!(
-                "{:?} names no divergence class; the set is closed at six members so that the \
-                 classification table stays total, and a newly observed shape is mapped onto one \
-                 of them rather than appended as a seventh. The classes are: {}",
+                "{:?} names no marker class. The observable set is closed at six members so that \
+                 the classification table stays total, and a newly observed shape is mapped onto \
+                 one of them rather than appended as a seventh; `{}` is the one further value, and \
+                 it names no observation at all — it is what a marker writes when the record \
+                 disables the oracle its scope names, so nothing is compared on that arm. The \
+                 accepted values are: {}",
                 class_field.value.trim(),
-                comma_separated(&DivergenceClass::ALL.map(DivergenceClass::label))
+                COMPARISON_EXCLUDED_LABEL,
+                MarkerClass::accepted_labels(),
             ),
         )
     })?;
@@ -4818,6 +5099,13 @@ fn assemble(
         None => None,
     };
 
+    let source_suppressions = match field(&fields, KEY_SOURCE_SUPPRESSIONS) {
+        Some(raw) => {
+            parse_source_suppressions(origin, raw, &area_field.value, &program_field.value)?
+        }
+        None => Vec::new(),
+    };
+
     let ub_notes_field = required_field(&fields, origin, "ub_notes")?;
     require_non_empty(
         origin,
@@ -4889,6 +5177,23 @@ fn assemble(
             ));
         }
     }
+    // An in-source suppression is a narrowing of the same kind as a gate deviation — a member of the
+    // gate stops being fatal — so it joins the same list and takes on the same obligation to record
+    // its reason. It is listed separately from the gate because the two are relaxed in different
+    // places and a reader needs to know which: one is visible in the command line the report prints,
+    // the other only in the program.
+    if !source_suppressions.is_empty() {
+        narrowings.push(format!(
+            "the source suppresses {} with a diagnostic-control directive",
+            comma_separated(
+                source_suppressions
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<&str>>()
+                    .as_slice()
+            )
+        ));
+    }
     if !narrowings.is_empty() && impl_defined_notes.is_none() {
         return Err(record_error(
             origin,
@@ -4906,6 +5211,11 @@ fn assemble(
     if let Some(gate) = &ub_audit_flags {
         require_gate_deviation_is_explained(origin, gate, impl_defined_notes.as_deref())?;
     }
+    require_source_suppression_is_explained(
+        origin,
+        &source_suppressions,
+        impl_defined_notes.as_deref(),
+    )?;
 
     let source = origin.with_extension(SOURCE_EXTENSION);
     let marker = parse_marker(&fields, origin, &source)?;
@@ -4919,6 +5229,7 @@ fn assemble(
         )?;
     }
     require_marker_for_narrowed_oracle(&fields, origin, &enabled_oracles, marker.as_ref())?;
+    require_class_matches_narrowing(&fields, origin, &enabled_oracles, marker.as_ref())?;
 
     Ok(Manifest {
         path: origin.to_path_buf(),
@@ -4933,6 +5244,7 @@ fn assemble(
         expect_exit,
         enabled_oracles,
         ub_audit_flags,
+        source_suppressions,
         ub_notes: ub_notes_field.value.clone(),
         impl_defined_notes,
         expected_stdout: expected_stdout_field.value.clone(),

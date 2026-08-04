@@ -216,8 +216,8 @@ use conformance_harness::ubaudit;
 use conformance_harness::{
     corpus_root, findings_root, manifest_dir, redact_secrets, report_root, shown_path,
     target_dir_rejection, work_root, AreaSpec, Cell, CellKey, DivergenceClass, HarnessError,
-    OptLevel, Oracle, Outcome, Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT,
-    MIN_PROGRAMS_PER_MANDATED_AREA, OPT_LEVEL_COUNT, ORACLE_A_COMPARISON_COUNT,
+    MarkerClass, OptLevel, Oracle, Outcome, Provenance, Target, Verdict, AREAS, AREA_COUNT,
+    BCC_CELL_COUNT, MIN_PROGRAMS_PER_MANDATED_AREA, OPT_LEVEL_COUNT, ORACLE_A_COMPARISON_COUNT,
     ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT, TARGET_COUNT,
     TOTAL_ASSERTION_COUNT,
 };
@@ -1002,6 +1002,37 @@ fn infra_oracle_capability_report() {
     );
 
     assert_shared_helper_integration();
+    assert_reproduction_script_is_protected();
+}
+
+/// Report that a finding's reproduction script cannot be subverted by an inherited shell function,
+/// and fail if that is no longer true.
+///
+/// `commands.sh` is the artifact a maintainer is explicitly invited to **execute**, and its own
+/// preamble tells them that an exported shell function named after one of its helpers cannot stand in
+/// for the real utility. The harness enforces that whenever it assembles such a script — but a
+/// healthy run produces no finding, so on exactly the runs where the suite is green the check would
+/// never fire and a regression in the renderers could survive indefinitely. Asserting it here puts it
+/// on every run.
+///
+/// Folded into the pre-flight test rather than given a `#[test]` of its own for the same reason as
+/// [`assert_shared_helper_integration`]: the suite's test count is one of the mechanical guarantees
+/// that no pre-existing test was skipped or weakened, and a nineteenth test would falsify the count
+/// that makes the guarantee checkable.
+fn assert_reproduction_script_is_protected() {
+    match findings::verify_reproduction_scaffolding("pre-flight: reproduction script protection") {
+        Ok(lines) => println!(
+            "reproduction script protection: HELD — every helper the {lines} scaffolding line(s) of \
+             a finding's `commands.sh` invoke is reached through `command` and covered by the \
+             script's own `unset -f`, so an inherited exported shell function cannot stand in for \
+             one. Re-checked over the whole script whenever a finding is written.",
+        ),
+        Err(error) => panic!(
+            "a finding's reproduction script would no longer hold the protection its own preamble \
+             states, so `commands.sh` could execute an inherited shell function in place of a \
+             helper: {error}"
+        ),
+    }
 }
 
 /// Path of the repository's shared integration-test helper module, relative to the package root.
@@ -1216,6 +1247,17 @@ enum ReferenceArm {
         /// whole — collapses into "not the environment" under any boolean encoding, which is
         /// exactly the reading that turns an unattributable refusal into an accusation.
         attribution: Attribution,
+        /// The build layer's own structured account of the invocation that refused.
+        ///
+        /// Carried here rather than re-derived because the [`CompileOutcome`] does not outlive the
+        /// match that produced this variant, and the command, the termination and the capture
+        /// reference are exactly what a maintainer needs in order to reproduce the refusal. Reducing
+        /// this arm to `class` and `summary` alone is what previously made a reference-arm refusal
+        /// unactionable in the report.
+        ///
+        /// Boxed because this variant would otherwise be several times the size of every other, and
+        /// every `ReferenceArm` value in the run would carry that size whether it held a refusal or not.
+        provenance: Box<Provenance>,
     },
     /// An observation to compare bcc against. Boxed for the same reason as [`Baseline::Observed`].
     Ran(Box<Authority>),
@@ -1495,6 +1537,7 @@ impl<'a> CellPlan<'a> {
                         class,
                         summary,
                         attribution: build_attribution(&build),
+                        provenance: Box::new(build.provenance()),
                     }
                 }
             }
@@ -1544,19 +1587,27 @@ impl<'a> CellPlan<'a> {
                 class,
                 summary,
                 attribution: attribution @ (Attribution::Environment | Attribution::Indeterminate),
+                provenance,
             } => classify::build_failure(
                 self.record,
                 self.key,
                 oracle,
-                *class,
-                *attribution,
-                summary,
-                // No dependency root: this refusal is the REFERENCE compiler's, and a marker in
-                // this record documents a limitation of the compiler under test. Borrowing it here
-                // would excuse a defect in the test material with documentation about something
-                // else entirely. Both attributions reaching this arm are unavailable scopes in any
-                // case, which never reach the marker logic at all.
-                None,
+                classify::BuildRefusal {
+                    class: *class,
+                    attribution: *attribution,
+                    summary,
+                    // No dependency root: this refusal is the REFERENCE compiler's, and a marker in
+                    // this record documents a limitation of the compiler under test. Borrowing it
+                    // here would excuse a defect in the test material with documentation about
+                    // something else entirely. Both attributions reaching this arm are unavailable
+                    // scopes in any case, which never reach the marker logic at all.
+                    root: None,
+                    // The provenance IS carried, unlike the root: it is a record of what this arm
+                    // ran, not an authority borrowed from elsewhere, so it says nothing about the
+                    // compiler under test and everything about the invocation a maintainer has to
+                    // repeat.
+                    provenance: Some(provenance.clone()),
+                },
             ),
             ReferenceArm::Refused {
                 summary,
@@ -1798,10 +1849,13 @@ impl<'a> CellPlan<'a> {
             self.record,
             self.key,
             oracle,
-            class,
-            build_attribution(build),
-            &summary,
-            classify::refusal_root(self.record, self.key, class),
+            classify::BuildRefusal {
+                class,
+                attribution: build_attribution(build),
+                summary: &summary,
+                root: classify::refusal_root(self.record, self.key, class),
+                provenance: Some(Box::new(build.provenance())),
+            },
         );
         let comparison =
             compare::build_refusal(oracle, self.key, class, side, &summary, reference_arm);
@@ -2032,19 +2086,27 @@ impl<'a> CellPlan<'a> {
                 class,
                 summary,
                 attribution: attribution @ (Attribution::Environment | Attribution::Indeterminate),
+                provenance,
             } => classify::build_failure(
                 self.record,
                 self.key,
                 oracle,
-                *class,
-                *attribution,
-                summary,
-                // No dependency root: this refusal is the REFERENCE compiler's, and a marker in
-                // this record documents a limitation of the compiler under test. Borrowing it here
-                // would excuse a defect in the test material with documentation about something
-                // else entirely. Both attributions reaching this arm are unavailable scopes in any
-                // case, which never reach the marker logic at all.
-                None,
+                classify::BuildRefusal {
+                    class: *class,
+                    attribution: *attribution,
+                    summary,
+                    // No dependency root: this refusal is the REFERENCE compiler's, and a marker in
+                    // this record documents a limitation of the compiler under test. Borrowing it
+                    // here would excuse a defect in the test material with documentation about
+                    // something else entirely. Both attributions reaching this arm are unavailable
+                    // scopes in any case, which never reach the marker logic at all.
+                    root: None,
+                    // The provenance IS carried, unlike the root: it is a record of what this arm
+                    // ran, not an authority borrowed from elsewhere, so it says nothing about the
+                    // compiler under test and everything about the invocation a maintainer has to
+                    // repeat.
+                    provenance: Some(provenance.clone()),
+                },
             ),
             ReferenceArm::Refused {
                 summary,
@@ -2261,19 +2323,78 @@ impl<'a> CellPlan<'a> {
     /// summary is assembled: the place where a reduced set of retained evidence is a fact about the
     /// run rather than about any single cell.
     fn retire(self, outcomes: &[Outcome]) {
-        let CellPlan { workspace, .. } = self;
-        let investigate = outcomes.iter().any(|outcome| {
-            matches!(
-                outcome.verdict(),
-                Verdict::Fail | Verdict::XPass | Verdict::Finding
-            )
-        });
-        if investigate || workspace.keeps_on_success() {
+        let CellPlan {
+            caps, workspace, ..
+        } = self;
+        let config = caps.config();
+        let investigate = outcomes
+            .iter()
+            .any(|outcome| workspace_is_evidence(outcome, config));
+        let keep_everything = workspace.keeps_on_success();
+
+        if !investigate && !keep_everything {
+            // Last chance to archive what this cell recorded: the workspace is about to be removed,
+            // and for a reported-but-not-failing outcome its capture files are the only copy there is.
+            // Done before the discard rather than after, for the obvious reason, and done per outcome
+            // rather than per cell because the verdicts differ by oracle.
+            let archived = conformance_harness::execute::archive_persisted_captures(&workspace);
+            for outcome in outcomes
+                .iter()
+                .filter(|outcome| needs_durable_evidence(outcome))
+            {
+                println!(
+                    "  {}",
+                    report::publish_cell_evidence(
+                        outcome,
+                        &archived,
+                        &format!(
+                            "this cell's workspace was discarded because nothing in it fails the \
+                             run under the active policy; the {} verdict on this arm is reported, \
+                             so its evidence is published here instead",
+                            outcome.verdict().label()
+                        ),
+                    )
+                );
+            }
+        }
+
+        if investigate || keep_everything {
             println!("  workspace retained: {}", workspace.retain().describe());
         } else if let Some(note) = workspace.discard_advisory() {
             println!("  note: {note}");
         }
     }
+}
+
+/// Whether this outcome makes its cell's workspace evidence that must be kept.
+///
+/// Two clauses, and the first is the one that changed. Retention used to test a **fixed** verdict set,
+/// `FAIL | XPASS | FINDING`, which disagreed with the policy the run actually asserts on: under
+/// `BCC_CONFORMANCE_STRICT` an `UNAVAILABLE` *fails the run*, and its workspace — holding the
+/// diagnosis, the compiler's own stderr and the termination record — was deleted anyway. A run that
+/// fails on an outcome and then destroys that outcome's evidence is the worst combination available:
+/// the failure is reported and cannot be investigated. Asking [`classify::fails_run`] means the two
+/// answers cannot drift, because they are now one answer.
+///
+/// The second clause keeps a `FINDING` regardless. A finding does **not** fail the run — it is a
+/// deliverable, and requirement 6 asks for the reproducer, both sides' output and the exact commands —
+/// so its evidence is needed *precisely* in the runs that pass. `XPASS` needs no clause of its own: it
+/// fails the run by default, and where `BCC_CONFORMANCE_ALLOW_XPASS` downgrades it, the marker it
+/// invalidates is still listed loudly and its cell still publishes durable evidence below.
+fn workspace_is_evidence(outcome: &Outcome, config: &RunConfig) -> bool {
+    classify::fails_run(outcome, config) || outcome.verdict() == Verdict::Finding
+}
+
+/// Whether this outcome needs a durable evidence document once its workspace is gone.
+///
+/// Everything except a plain `PASS`. A pass is fully described by its report row — both command lines,
+/// both terminations, both capture locations and the byte counts, all carried in the row's provenance
+/// columns — and re-running the cell reproduces it, so archiving 3,500 of them per run would bury the
+/// documents that matter. Every other verdict reaching this path is *reported* while its workspace is
+/// discarded, which is exactly the class that had no durable evidence at all: an expected divergence, a
+/// permissive run's absent oracle, and an unexpected success the escape hatch downgraded.
+fn needs_durable_evidence(outcome: &Outcome) -> bool {
+    outcome.verdict() != Verdict::Pass
 }
 
 /// Who the build layer found answerable for a refusal.
@@ -3123,10 +3244,17 @@ fn marker_gates() -> Vec<report::PreflightGate> {
 /// Structural discovery is not admission. The driver finds every source in the corpus, loads every
 /// record beside it and sweeps every declared cell — which is right, and is what keeps requirement 5's
 /// prohibition on silent exclusion honest. But a record that parses is not the same thing as a record
-/// whose contents have been reviewed, and this repository's own documentation says so: the enumerable
-/// matrix in `tests/conformance/README.md` and the honest-measurement section of
-/// `tests/conformance/EXPECTED_DIVERGENCES.md` both publish a **substantiated** column that is
-/// narrower than the structural one, and both name the record it excludes.
+/// whose contents have been reviewed, and this repository's own documentation keeps the two apart: the
+/// enumerable matrix in `tests/conformance/README.md` and the honest-measurement section of
+/// `tests/conformance/EXPECTED_DIVERGENCES.md` both publish a **substantiated** column beside the
+/// structural one for exactly that reason.
+///
+/// The two columns carry the same figure at this checkpoint — all 108 records are substantiated, and
+/// [`PENDING_RECORDS`] is correspondingly empty — so the gate below currently reports `HELD` rather
+/// than withholding anything. That is the instance, not the mechanism, and the distinction is the
+/// reason the column and this gate are both kept: the substantiated figure falls behind the structural
+/// one again the moment a program lands with a record whose review has not completed, and the gate is
+/// what makes that fall visible instead of letting the run publish verdicts over it.
 ///
 /// Without a gate, that distinction lived only in prose. Given a real compiler under test, an
 /// unsubstantiated record's `expected_stdout`, `expect_exit`, command templates and marker would all
@@ -3288,16 +3416,30 @@ struct PendingRecord {
 ///
 /// The set is **empty**, and it is kept rather than deleted because it is the mechanism, not the
 /// instance: the one record it held,
-/// `13_floating_point/004_long_double_target_restricted.expected`, has completed its review. Its
-/// written undefined-behaviour argument now carries the excess-intermediate-precision, conversion,
-/// literal, printing, characteristic-macro and magnitude obligations it had left to the program's
-/// comments; its measured reason for disabling oracle (b) was re-measured, dropping the
-/// unsupportable exponent-range claim in favour of the significand widths — 64 bits against 113 —
-/// that the exclusion actually rests on; and the loose "three different formats" wording was
-/// corrected to "three storage-and-format pairings over two distinct formats" in the record's
-/// `expected_divergence.observed` field and in the register's matching `Observed` row in the one
-/// edit the character-for-character forward check requires. Every record the corpus holds is
-/// therefore substantiated, and the gate below now reports that rather than withholding an area.
+/// `13_floating_point/004_long_double_target_restricted.expected`, has completed its review, and the
+/// defects that review found have been corrected in the record itself rather than merely noted.
+/// Four corrections, in the order they were made:
+///
+/// - its written undefined-behaviour argument now carries the excess-intermediate-precision,
+///   conversion, literal, printing, characteristic-macro and magnitude obligations it had left to
+///   the program's own comments;
+/// - its measured reason for disabling oracle (b) was re-measured, dropping the unsupportable
+///   exponent-range claim in favour of the significand widths — 64 bits against 113 — that the
+///   exclusion actually rests on, with the loose "three different formats" wording corrected to
+///   "three storage-and-format pairings over two distinct formats";
+/// - the argument's claim that character-type access to the type's object representation would be
+///   **undefined behaviour** was withdrawn as false. Such access is permitted; what makes a byte
+///   image unusable here is that the padding bytes are unspecified and that both the padding and
+///   the encoding are target-dependent, and the record now says that instead — the program inspects
+///   no representation either way;
+/// - the marker's class was changed from `stdout_mismatch` to `comparison_excluded`. The old value
+///   described the arm the record **switches off** as though two completed runs had disagreed on
+///   bytes, which no machine check could contradict precisely because nothing runs on that arm. The
+///   parser now requires the narrowing class there and refuses it on an arm that is compared, so
+///   the class and the oracle toggle cannot drift apart again.
+///
+/// Every record the corpus holds is therefore substantiated, and the gate below now reports that
+/// rather than withholding an area.
 const PENDING_RECORDS: [PendingRecord; 0] = [];
 
 /// What the record-substantiation audit found.
@@ -3791,7 +3933,7 @@ fn publish(spec: &'static AreaSpec, outcomes: &[Outcome], caps: &Capabilities, n
         // them.
         Ok(false) => println!(
             "  run summary not written — {}",
-            report::finalization_pending(caps)
+            report::finalization_pending()
         ),
         Err(error) => panic!(
             "the run summary could not be finalized.\n\n{error}\n\nThe summary is the artifact the \
@@ -5137,11 +5279,20 @@ fn marker_classification_audit(
         }
     }
 
+    // Narrowing markers are counted and named separately, because they are the one kind that can
+    // document NO combination at all: their class names no observation, so every combination they
+    // are probed against is correctly admitted as a finding. Without this line a reader comparing
+    // the two counts would have no way to tell a narrowing marker from a marker whose scope had
+    // silently stopped matching anything.
+    let narrowing = markers
+        .iter()
+        .filter(|marker| marker.class().observed().is_none())
+        .count();
     let tally = format!(
         "marker classification — {} marker(s) exercised over {} target(s) × {} level(s) × {} \
          oracle(s) × {} class(es): {} documented combination(s) refused by the finding writer as \
          expected divergences, {} undocumented combination(s) admitted as findings. A class the \
-         marker does not claim is NOT excused by it, even on an arm its scope names\n",
+         marker does not claim is NOT excused by it, even on an arm its scope names{}\n",
         markers.len(),
         Target::ALL.len(),
         OptLevel::ALL.len(),
@@ -5149,6 +5300,14 @@ fn marker_classification_audit(
         DivergenceClass::ALL.len(),
         documented_refusals,
         undocumented_admissions,
+        match narrowing {
+            0 => String::new(),
+            count => format!(
+                " — and {count} of the {} document a comparison their record declines to make, so \
+                 they claim no observable class and correctly document none of these combinations",
+                markers.len()
+            ),
+        },
     );
 
     (violations, tally)
@@ -5190,8 +5349,12 @@ impl ClassificationProbe<'_> {
     }
 
     /// Whether the marker **documents** this divergence: the scope half **and** the class.
+    ///
+    /// A marker classed `comparison_excluded` documents no observation at all, so it can never
+    /// answer yes here however wide its scope is — which is the property that keeps a narrowing
+    /// marker from excusing a divergence a real comparison found.
     fn documented(&self) -> bool {
-        self.scope_covers() && self.marker.class() == self.class
+        self.scope_covers() && self.marker.class() == MarkerClass::Observed(self.class)
     }
 
     /// The combination, named once for every diagnostic this probe can produce.
@@ -5228,7 +5391,7 @@ impl ClassificationProbe<'_> {
                 describe_documentation(authority.is_some()),
                 describe_documentation(documented),
                 self.scope_covers(),
-                self.marker.class() == self.class,
+                self.marker.class() == MarkerClass::Observed(self.class),
             ));
         }
 
@@ -5322,7 +5485,7 @@ fn marker_note_defects(
             marker.id(),
         ));
     }
-    if marker.class() != class && !note.contains(class.label()) {
+    if marker.class() != MarkerClass::Observed(class) && !note.contains(class.label()) {
         defects.push(format!(
             "{context} does not name the {class} actually observed, only the {} the marker claims, \
              so it describes the documentation rather than the divergence: {note}",
@@ -5376,6 +5539,11 @@ fn synthetic_divergence(oracle: Oracle, class: DivergenceClass) -> Comparison {
         ),
         oracle,
         excluded: None,
+        // No provenance, and that is the accurate value rather than a gap. A provenance records the
+        // executions an outcome was reached from, and this construct was reached from none: nothing
+        // was compiled, run or compared to produce it. Filling the fields with plausible-looking
+        // blanks would make an audit construct indistinguishable from a measurement.
+        provenance: None,
     }
 }
 

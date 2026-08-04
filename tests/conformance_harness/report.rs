@@ -24,10 +24,11 @@
 //! | `target/conformance-report/summary.tsv` | The same data, machine-readable for aggregation | this module |
 //! | `target/conformance-report/areas/<area>.md` | Per-area human-readable report | this module |
 //! | `target/conformance-report/areas/<area>.tsv` | Per-area machine-readable report | this module |
+//! | `target/conformance-report/evidence/<cell>+oracle_<x>.txt` | Durable, sanitized evidence for an outcome that was reported without failing, whose cell workspace was therefore discarded | this module |
 //! | `target/conformance-report/.run-owner` | Which run owns this directory, so a second one is refused | this module |
 //! | `target/conformance-report/run.txt` | The run manifest: which run produced the reports beside it, under what configuration, and the retention ceilings | `sandbox.rs`, named by [`super::sandbox::RUN_MANIFEST_NAME`] |
 //!
-//! Those six paths are a contract shared with the suite driver, with the build directory's
+//! Those seven paths are a contract shared with the suite driver, with the build directory's
 //! ignore rules and with the continuous-integration job that uploads them, so they are named by
 //! the constants and helpers below rather than spelled at a call site. The run manifest is listed
 //! because it lands in the same directory and is uploaded with the rest, even though the module
@@ -80,6 +81,14 @@
 //! Whichever area finishes last therefore produces the summary, no ordering between tests is
 //! required, and no fifteenth test has to exist to do it — which matters because the suite's test
 //! count is itself a mechanical check that no existing test was skipped or removed.
+//!
+//! **Reading the area files is the finalizer's privilege alone.** Every other caller is answered from
+//! the run registry: the completeness question is decided inside one critical section, so a caller
+//! that is merely explaining the absence of a summary already has its answer in memory, and going
+//! back to the filesystem for it would re-parse the whole set once per non-final area — thirteen times
+//! over in a fourteen-area run, on files that grow with the matrix. The one thing memory cannot know
+//! is what the files say, so when the finalizer declines on the strength of what it read it records
+//! that reason for the others to quote.
 //!
 //! Only **one** caller ever writes it, and that is enforced rather than hoped for. The check and the
 //! claim happen together inside one critical section: [`claim_finalization`] takes the run registry's
@@ -228,29 +237,42 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use super::classify::{verdict_fails_run, EXPECTED_DIVERGENCE_REGISTER, FINDINGS_REGISTER};
 use super::env::{
-    Capabilities, VAR_ALLOW_MISSING_ORACLES, VAR_ALLOW_XPASS, VAR_KEEP_WORK, VAR_ONLY, VAR_QUICK,
-    VAR_STRICT, VAR_TIMEOUT_SECS,
+    Capabilities, RunConfig, VAR_ALLOW_MISSING_ORACLES, VAR_ALLOW_XPASS, VAR_KEEP_WORK, VAR_ONLY,
+    VAR_QUICK, VAR_STRICT, VAR_TIMEOUT_SECS,
 };
 use super::findings::{self, FindingId, COMMANDS_NAME};
 use super::manifest::{self, ExpectedDivergence};
-use super::sandbox::{claim_ownership, live_foreign_owner_identity, RUN_OWNER_ENTRY};
+use super::sandbox::{
+    claim_ownership, live_foreign_owner_identity, workspace_path, RUN_OWNER_ENTRY,
+};
 use super::{
     create_directory_chain_below, escape_markdown_inline, posix_quote, read_file_bounded,
     redact_secrets, remove_entry, report_root, require_directory_chain_below, require_replaceable,
     resolve_shown_path, run_generation, sanitize_text_for_report, shown_path, stable_digest,
-    stage_bytes_no_follow, AreaSpec, CellKey, DivergenceClass, HarnessError, HarnessResult,
-    OptLevel, Oracle, Outcome, Replaceable, Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT,
-    MAX_INSPECTED_FILE_BYTES, MIN_PROGRAMS_PER_MANDATED_AREA, ORACLE_A_COMPARISON_COUNT,
-    ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT,
-    REFERENCE_CROSS_CELL_COUNT_MAX, REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
+    AreaSpec, CellKey, DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Outcome,
+    Replaceable, Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT, MAX_INSPECTED_FILE_BYTES,
+    MIN_PROGRAMS_PER_MANDATED_AREA, ORACLE_A_COMPARISON_COUNT, ORACLE_B_COMPARISON_COUNT,
+    ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT, REFERENCE_CROSS_CELL_COUNT_MAX,
+    REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
 };
 
 /// Directory beneath [`report_root`] that holds the per-area reports.
 pub const AREAS_DIR_NAME: &str = "areas";
+
+/// Directory beneath [`report_root`] that holds durable evidence for discarded workspaces.
+///
+/// Inside the report root rather than beside it, for one reason: the report root is what a maintainer
+/// attaches to an issue and what continuous integration uploads. Evidence published anywhere else
+/// would be evidence that, once again, reached nobody — which is the whole defect being closed.
+pub const EVIDENCE_DIR_NAME: &str = "evidence";
+
+/// Extension of an evidence document.
+pub const EVIDENCE_EXTENSION: &str = "txt";
 
 /// File stem of the two run-summary artifacts.
 pub const SUMMARY_STEM: &str = "summary";
@@ -288,6 +310,42 @@ const COL_REFERENCE: &str = "reference";
 const COL_DETAIL: &str = "detail";
 const COL_RUN: &str = "run";
 const COL_IDENTITY: &str = "identity";
+// Provenance columns. Every one of them is populated on EVERY verdict that had an execution behind
+// it, agreement included, which is the property the free-text `detail` column could never offer: its
+// content varies by verdict, so a consumer selecting on a command line had nothing to select on for
+// most of a run.
+const COL_SOURCE: &str = "source";
+const COL_RECORD_PATH: &str = "record_path";
+const COL_SUBJECT: &str = "subject";
+const COL_SUBJECT_COMMAND: &str = "subject_command";
+const COL_SUBJECT_TERMINATION: &str = "subject_termination";
+const COL_SUBJECT_CAPTURES: &str = "subject_captures";
+const COL_AUTHORITY: &str = "authority";
+const COL_AUTHORITY_COMMAND: &str = "authority_command";
+const COL_AUTHORITY_TERMINATION: &str = "authority_termination";
+const COL_AUTHORITY_CAPTURES: &str = "authority_captures";
+const COL_FIRST_DIFFERENCE: &str = "first_difference";
+const COL_SEVERITY: &str = "severity";
+const COL_CELL_FINGERPRINT: &str = "cell_fingerprint";
+
+/// The repository-relative root of the corpus, for the `source` and `record_path` columns.
+///
+/// Spelled relative rather than absolute for the reason every published path is: a report travels off
+/// the machine that produced it, and an absolute path names a continuous-integration workspace or an
+/// agent clone.
+const CORPUS_RELATIVE_ROOT: &str = "tests/conformance";
+
+/// Extension of a corpus program, matching `manifest.rs`'s own spelling.
+const SOURCE_EXTENSION: &str = "c";
+
+/// Extension of an expectation record, matching `manifest.rs`'s own spelling.
+const RECORD_EXTENSION: &str = "expected";
+
+/// `severity` value for a row that fails the run under this run's configured policy.
+const SEVERITY_FAILS_RUN: &str = "fails-run";
+
+/// `severity` value for a row that is reported and counted but does not fail the run.
+const SEVERITY_REPORTED: &str = "reported";
 
 /// Column order of a per-area machine-readable report, one row per recorded outcome.
 ///
@@ -296,10 +354,29 @@ const COL_IDENTITY: &str = "identity";
 /// written in the spelling its own `parse` function accepts. `detail` is last because it is the
 /// only column of unbounded length.
 ///
-/// `run` and `identity` carry the provenance of the row: which run wrote it, and the digest of the
-/// matrix, tool set and corpus it was written under. [`try_finalize`] refuses a row whose provenance
-/// is not this run's, which is what stops an earlier run's outcomes from being aggregated into this
-/// run's totals. They sit before `detail` so that the unbounded column stays last.
+/// `run` and `identity` carry the provenance of the RUN: which run wrote the row, and the digest of
+/// the matrix, tool set and corpus it was written under. [`try_finalize`] refuses a row whose
+/// provenance is not this run's, which is what stops an earlier run's outcomes from being aggregated
+/// into this run's totals.
+///
+/// The thirteen columns after them carry the provenance of the OUTCOME, and they exist because the row
+/// schema previously carried none. A row named the cell, the verdict and the class, and then handed
+/// everything else to `detail` — one unbounded free-text field whose content varies by verdict. An
+/// aggregator could therefore not answer "what command produced this", "how did the process end",
+/// "where are the captured streams", "which source and which record is this about", "does this row
+/// fail the run" or "is this the same cell configuration as that one" for any row at all, and for a
+/// PASS row the facts were not merely unstructured but absent. The columns are:
+///
+/// | Column | What it carries |
+/// |---|---|
+/// | `source`, `record_path` | The program and its expectation record, repository-relative, so a row identifies its own inputs |
+/// | `subject`, `subject_command`, `subject_termination`, `subject_captures` | The side under judgement: who produced it, the exact command, the structured ending with its raw wait status, and where the raw streams were persisted |
+/// | `authority`, `authority_command`, `authority_termination`, `authority_captures` | The same four for what it was judged against. `authority_command` is empty for the golden oracle, whose authority is a committed record rather than a process |
+/// | `first_difference` | Where the two sides first differ; empty for an agreement, which is a value rather than a silence |
+/// | `severity` | Whether this row fails the run **under the policy this run was configured with**, so an aggregator does not have to re-implement the strict and allow-xpass rules to know what a verdict meant here |
+/// | `cell_fingerprint` | A digest of the cell's identity and both commands, so the same configuration is recognisable across runs and two rows that differ only in output are distinguishable from two rows that were not the same experiment |
+///
+/// They all sit before `detail` so that the unbounded column stays last.
 pub const AREA_TSV_COLUMNS: &[&str] = &[
     COL_AREA,
     COL_PROGRAM,
@@ -313,6 +390,19 @@ pub const AREA_TSV_COLUMNS: &[&str] = &[
     COL_FINDING_DIR,
     COL_RUN,
     COL_IDENTITY,
+    COL_SOURCE,
+    COL_RECORD_PATH,
+    COL_SUBJECT,
+    COL_SUBJECT_COMMAND,
+    COL_SUBJECT_TERMINATION,
+    COL_SUBJECT_CAPTURES,
+    COL_AUTHORITY,
+    COL_AUTHORITY_COMMAND,
+    COL_AUTHORITY_TERMINATION,
+    COL_AUTHORITY_CAPTURES,
+    COL_FIRST_DIFFERENCE,
+    COL_SEVERITY,
+    COL_CELL_FINGERPRINT,
     COL_DETAIL,
 ];
 
@@ -330,13 +420,20 @@ pub const AREA_TSV_COLUMNS: &[&str] = &[
 /// | `matrix` | `label`, `count` (actual), `reference` (planned), `detail` |
 /// | `area` | `area`, `label` (classification), `count` (outcomes), `reference` (programs), `detail` |
 /// | `tally` | `area` (empty for the run total), `verdict`, `count` |
-/// | `outcome` | `area`, `program`, `target`, `opt`, `oracle`, `verdict`, `class`, `marker_id`, `label`, `reference`, `detail` |
+/// | `outcome` | `area`, `program`, `target`, `opt`, `oracle`, `verdict`, `class`, `marker_id`, `label`, `reference`, every provenance column, `detail` |
 /// | `expected_divergence` | `area`, `program`, `class`, `marker_id`, `count`, `label` (scope), `reference` (basis path), `detail` |
 /// | `finding` | `area`, `program`, `target`, `opt`, `oracle`, `class`, `label` (identifier), `reference` (directory), `detail` |
 /// | `unavailable` | `area`, `program`, `target`, `opt`, `oracle`, `detail` |
 /// | `exclusion` | `area`, `program`, `oracle`, `label` (kind), `reference` (what was narrowed), `detail` |
 /// | `diagnostic` | `detail` |
 /// | `fingerprint` | `label`, `detail` |
+///
+/// The provenance block an `outcome` record fills is the same block, in the same order, that an area
+/// report's [`AREA_TSV_COLUMNS`] carries. Deliberately the same: the summary's outcome rows are the
+/// area rows re-read, so a consumer that learned to read the evidence of a cell from one file reads it
+/// unchanged from the other, and a value cannot be transcribed into a differently named column on the
+/// way through. No other record kind fills them — a tally, a marker or a fingerprint is not an
+/// observation of a cell and has no command, termination or capture to name.
 pub const SUMMARY_TSV_COLUMNS: &[&str] = &[
     COL_RECORD,
     COL_AREA,
@@ -350,6 +447,19 @@ pub const SUMMARY_TSV_COLUMNS: &[&str] = &[
     COL_COUNT,
     COL_LABEL,
     COL_REFERENCE,
+    COL_SOURCE,
+    COL_RECORD_PATH,
+    COL_SUBJECT,
+    COL_SUBJECT_COMMAND,
+    COL_SUBJECT_TERMINATION,
+    COL_SUBJECT_CAPTURES,
+    COL_AUTHORITY,
+    COL_AUTHORITY_COMMAND,
+    COL_AUTHORITY_TERMINATION,
+    COL_AUTHORITY_CAPTURES,
+    COL_FIRST_DIFFERENCE,
+    COL_SEVERITY,
+    COL_CELL_FINGERPRINT,
     COL_DETAIL,
 ];
 
@@ -450,6 +560,21 @@ const GENERATION_KEY_CONFIG: &str = "config";
 /// Preamble key naming the process that wrote the file.
 const GENERATION_KEY_TOKEN: &str = "token";
 
+/// Preamble field naming whether the matrix that ran was smaller than the full one.
+///
+/// Published as a field of the FIRST line, rather than left to be inferred from the `config` field or
+/// read out of the Markdown sibling, because that is where a machine consumer looks. A reduced report
+/// that a machine reads as a full one is the one misreading these artifacts must not permit: it turns
+/// "these 96 cells agreed" into "this area agreed", and the difference is the whole claim.
+const GENERATION_KEY_REDUCED: &str = "reduced";
+
+/// Preamble field naming whether this report may not describe one complete, coherent run.
+///
+/// Distinct from `reduced`: a reduced matrix is always partial, but a full matrix can also be partial
+/// — an unmet precondition, an unreadable record, a diagnostic raised while assembling. Both are
+/// published so neither has to be inferred from the other.
+const GENERATION_KEY_PARTIAL: &str = "partial";
+
 /// Which run wrote an artifact, under what configuration it ran, and which process it was.
 ///
 /// The three fields answer three different questions and all three are needed.
@@ -486,18 +611,33 @@ impl Generation {
         }
     }
 
-    /// The line that opens a machine-readable area report.
+    /// The line that opens a machine-readable report — an area's and the summary's alike.
     ///
     /// Assembled here rather than through [`tsv_field`] because it is a comment line rather than a
-    /// row; both values are built from a restricted character set by [`safe_token`], so neither can
-    /// contain the separator, a line break or anything else that would let the preamble be read as
-    /// two lines or as a data row.
-    fn preamble(&self) -> String {
+    /// row; every identity value is built from a restricted character set by [`safe_token`] and the
+    /// two coverage fields render as one of two fixed words, so none of the five can contain the
+    /// separator, a line break or anything else that would let the preamble be read as two lines or
+    /// as a data row.
+    ///
+    /// Carries the coverage of the run as well as its identity. The three identity fields answer
+    /// "which run wrote this"; `reduced` and `partial` answer "what does it describe", which is the
+    /// question a machine consumer has to answer before it may aggregate a single row. They are
+    /// deliberately **not** read back by [`Generation::parse`] and take no part in staleness: a
+    /// report is foreign because of *whose* it is, never because of how much it covered, and folding
+    /// coverage into identity would make this run reject its own reports the moment a filter changed
+    /// what they described.
+    fn preamble(&self, coverage: &Coverage) -> String {
         format!(
             "{GENERATION_PREAMBLE_PREFIX}{TSV_SEPARATOR}{GENERATION_KEY_RUN}={}\
              {TSV_SEPARATOR}{GENERATION_KEY_CONFIG}={}\
-             {TSV_SEPARATOR}{GENERATION_KEY_TOKEN}={}",
-            self.run, self.config, self.token
+             {TSV_SEPARATOR}{GENERATION_KEY_TOKEN}={}\
+             {TSV_SEPARATOR}{GENERATION_KEY_REDUCED}={}\
+             {TSV_SEPARATOR}{GENERATION_KEY_PARTIAL}={}",
+            self.run,
+            self.config,
+            self.token,
+            true_false(coverage.reduced),
+            true_false(coverage.is_partial())
         )
     }
 
@@ -703,6 +843,26 @@ pub fn summary_markdown_path() -> PathBuf {
 /// Absolute path of the machine-readable run summary.
 pub fn summary_tsv_path() -> PathBuf {
     report_root().join(format!("{SUMMARY_STEM}.{TSV_EXTENSION}"))
+}
+
+/// Absolute path of the directory holding durable evidence for outcomes whose workspace was discarded.
+pub fn evidence_dir() -> PathBuf {
+    report_root().join(EVIDENCE_DIR_NAME)
+}
+
+/// Absolute path of the evidence document for one cell and one oracle.
+///
+/// Deterministic, and built from the **same** slug the cell's workspace is named with, so the two are
+/// recognisably one cell's artifacts and a reader holding a report row can compute either without
+/// being handed a path. The oracle is part of the name because the verdict is per oracle: one cell can
+/// have an expected divergence on one arm and a plain pass on the others, and only the first needs a
+/// document.
+pub fn evidence_document_path(key: &CellKey, oracle: Oracle) -> PathBuf {
+    evidence_dir().join(format!(
+        "{}+oracle_{}.{EVIDENCE_EXTENSION}",
+        key.slug(),
+        oracle.letter()
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1165,24 +1325,276 @@ fn write_report_pair(
         require_replaceable(context, path, Replaceable::RegularFile)?;
     }
 
-    // Stage both, so that every fallible step happens before either destination is claimed.
-    let staged_markdown = stage_bytes_no_follow(context, markdown_path, markdown.as_bytes())?;
-    let staged_tsv = stage_bytes_no_follow(context, tsv_path, tsv.as_bytes())?;
+    // One call, because the guarantee is about the pair rather than about either half. It stages both
+    // documents before claiming either, commits them back to back, and — the part two adjacent renames
+    // cannot give on their own — puts the Markdown half back if the machine-readable half cannot be
+    // published, so a half-failed publication never leaves a new document standing beside a stale
+    // sibling for a later reader or an unconditional artifact upload to collect.
+    super::publish_pair_no_follow(
+        context,
+        markdown_path,
+        markdown.as_bytes(),
+        tsv_path,
+        tsv.as_bytes(),
+    )
+}
 
-    // Claim both, back to back.
-    staged_markdown.commit()?;
-    staged_tsv.commit().map_err(|error| {
-        HarnessError::new(
-            String::from(context),
-            format!(
-                "{error}. {} was published but its machine-readable sibling {} was not, so the two \
-                 now describe different runs; re-run the affected area to replace the pair, and do \
-                 not aggregate totals from the stale sibling in the meantime",
-                shown_path(markdown_path),
-                shown_path(tsv_path)
-            ),
-        )
-    })
+// ---------------------------------------------------------------------------------------------
+// Durable evidence for outcomes whose workspace is not retained
+//
+// A cell workspace is retained when the cell has something to investigate and discarded otherwise, and
+// "something to investigate" is decided by the run's policy. That leaves a class of outcomes that are
+// *reported* but do not fail: an expected divergence, and a permissive run's absent oracle. Their raw
+// compiler diagnostics and termination records lived only in the workspace, so they were deleted the
+// moment the cell concluded — and the report row that named the workspace as their location was
+// published pointing at a directory that no longer existed. Continuous integration made it starker:
+// the report root is uploaded, the workspace root is not.
+//
+// So each such outcome now gets a small document inside the report root, holding what the row holds
+// plus the archived content of the captures the cell persisted. The document is sanitized, bounded,
+// deterministically named from the same slug the workspace uses, and counted so the summary can state
+// how much evidence a run published and whether any of it was refused.
+
+/// Longest evidence document one cell may publish, in bytes.
+///
+/// The archive it is rendered from is already bounded per entry and in total by `execute.rs`; this is
+/// the bound on the rendered document, which adds a header and one section per entry. A document that
+/// would exceed it is truncated with a final line saying so, so the file is never silently short.
+const EVIDENCE_DOCUMENT_BYTES_MAX: usize = 384 * 1024;
+
+/// Longest total evidence one run may publish, in bytes, across every document.
+///
+/// The matrix is 1,296 cells and three oracles, so a run in which a marker fires on every arm would
+/// otherwise publish 3,888 documents with no aggregate ceiling. 64 MiB is far more than any real run
+/// needs and still bounds the pathological one; documents beyond it are refused, and the refusal is
+/// reported in the summary rather than passed over.
+const EVIDENCE_RUN_BYTES_MAX: u64 = 64 * 1024 * 1024;
+
+/// Bytes of evidence this run has published so far.
+static EVIDENCE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Documents of evidence this run has published so far.
+static EVIDENCE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Everything this run could not publish as evidence, and why.
+fn evidence_refusals() -> &'static Mutex<Vec<String>> {
+    static REFUSALS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    REFUSALS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Documents and bytes of evidence this run has published.
+pub fn evidence_totals() -> (u64, u64) {
+    (
+        EVIDENCE_COUNT.load(Ordering::Relaxed),
+        EVIDENCE_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+/// Everything this run declined to publish as evidence.
+///
+/// Consulted once, when the summary is assembled, for the same reason the retention prunings are: a
+/// piece of evidence that was refused must be stated in the deliverable rather than discovered by a
+/// maintainer who went looking for a document that is not there.
+pub fn evidence_refusal_notes() -> Vec<String> {
+    match evidence_refusals().lock() {
+        Ok(held) => held.clone(),
+        // A poisoned lock means a thread panicked while recording a refusal. The refusals already
+        // recorded are still true, so they are recovered rather than discarded.
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+/// Record one refusal so that it reaches the run summary.
+fn note_evidence_refusal(note: String) -> String {
+    match evidence_refusals().lock() {
+        Ok(mut held) => held.push(note.clone()),
+        Err(poisoned) => poisoned.into_inner().push(note.clone()),
+    }
+    note
+}
+
+/// Publish one outcome's evidence to a durable document beneath the report root.
+///
+/// Returns the sentence to print beside the cell: the path on success, the reason on refusal. Nothing
+/// is raised, and that is deliberate rather than lax — this runs while a cell is being retired, after
+/// its verdicts are decided, and a decided cell must not be re-decided by a problem with its own
+/// archiving. The refusal is instead recorded for the summary, so it is reported at run scope where it
+/// is a fact about the run rather than about the cell.
+///
+/// `reason` states why the workspace this evidence came from is not being kept, so the document
+/// explains its own existence to whoever opens it.
+pub fn publish_cell_evidence(
+    outcome: &Outcome,
+    archived: &[super::execute::ArchivedCapture],
+    reason: &str,
+) -> String {
+    let key = outcome.key();
+    let path = evidence_document_path(key, outcome.oracle());
+    let context = format!(
+        "publishing durable evidence for {}/{} @ {} {} oracle_{}",
+        key.area(),
+        key.program(),
+        key.target().triple(),
+        key.opt().flag(),
+        outcome.oracle().letter()
+    );
+
+    let document = render_evidence_document(outcome, archived, reason);
+    let bytes = document.len() as u64;
+    let charged = EVIDENCE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    if charged > EVIDENCE_RUN_BYTES_MAX {
+        // Give the charge back, so one refused document does not close the sink for every later one.
+        EVIDENCE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        return note_evidence_refusal(format!(
+            "evidence for {} was not published: it would have taken this run past the \
+             {EVIDENCE_RUN_BYTES_MAX}-byte evidence ceiling ({charged} bytes charged). Re-run this \
+             cell on its own, or set {VAR_KEEP_WORK}, to obtain it",
+            sanitize_text_for_report(&context)
+        ));
+    }
+
+    if let Err(error) = ensure_report_namespace(&context) {
+        EVIDENCE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        return note_evidence_refusal(format!(
+            "evidence for {} was not published: {}",
+            sanitize_text_for_report(&context),
+            error.cause()
+        ));
+    }
+    if let Err(error) = create_directory_chain_below(&context, &report_root(), &evidence_dir())
+        .and_then(|()| require_replaceable(&context, &path, Replaceable::RegularFile))
+        .and_then(|()| super::publish_bytes_no_follow(&context, &path, document.as_bytes()))
+    {
+        EVIDENCE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        return note_evidence_refusal(format!(
+            "evidence for {} was not published: {}",
+            sanitize_text_for_report(&context),
+            error.cause()
+        ));
+    }
+    EVIDENCE_COUNT.fetch_add(1, Ordering::Relaxed);
+    format!("evidence retained: {} ({bytes} byte(s))", shown_path(&path))
+}
+
+/// Render one outcome's evidence document.
+///
+/// Every field is already sanitized where it came from — the provenance by [`super::SideRecord`], the
+/// archive by `execute.rs` — and the assembled document is passed through sanitization once more, for
+/// the reason the whole module applies it at sinks rather than at sources: a rule applied at some sinks
+/// is a rule the next sink will be written without.
+fn render_evidence_document(
+    outcome: &Outcome,
+    archived: &[super::execute::ArchivedCapture],
+    reason: &str,
+) -> String {
+    let key = outcome.key();
+    let mut text = String::new();
+    text.push_str("# Durable evidence for one comparison\n\n");
+    text.push_str(&format!("area = {}\n", key.area()));
+    text.push_str(&format!("program = {}\n", key.program()));
+    text.push_str(&format!(
+        "source = {CORPUS_RELATIVE_ROOT}/{}/{}.{SOURCE_EXTENSION}\n",
+        key.area(),
+        key.program()
+    ));
+    text.push_str(&format!(
+        "record = {CORPUS_RELATIVE_ROOT}/{}/{}.{RECORD_EXTENSION}\n",
+        key.area(),
+        key.program()
+    ));
+    text.push_str(&format!("target = {}\n", key.target().triple()));
+    text.push_str(&format!("opt_level = {}\n", key.opt().flag()));
+    text.push_str(&format!("oracle = oracle_{}\n", outcome.oracle().letter()));
+    text.push_str(&format!("verdict = {}\n", outcome.verdict().label()));
+    if let Some(class) = outcome.class() {
+        text.push_str(&format!("divergence_class = {}\n", class.label()));
+    }
+    if let Some(marker) = outcome.marker_id() {
+        text.push_str(&format!("marker = {marker}\n"));
+    }
+    text.push_str(&format!(
+        "workspace = {}\n",
+        shown_path(&workspace_path(key))
+    ));
+    text.push_str(&format!("why_this_document_exists = {reason}\n"));
+
+    if let Some(provenance) = outcome.provenance() {
+        for (role, side) in [
+            ("subject", provenance.subject()),
+            ("authority", provenance.authority()),
+        ] {
+            if let Some(side) = side {
+                text.push_str(&format!("\n[{role}]\n"));
+                text.push_str(&format!("who = {}\n", side.role()));
+                text.push_str(&format!("command = {}\n", side.command()));
+                text.push_str(&format!("termination = {}\n", side.termination()));
+                text.push_str(&format!("captures = {}\n", side.captures()));
+            }
+        }
+        if !provenance.first_difference().is_empty() {
+            text.push_str(&format!(
+                "\nfirst_difference = {}\n",
+                provenance.first_difference()
+            ));
+        }
+    }
+
+    text.push_str("\n[detail]\n");
+    text.push_str(outcome.detail());
+    text.push('\n');
+
+    for capture in archived {
+        text.push_str(&format!(
+            "\n[capture {}] {} byte(s) on disk{}\n",
+            capture.name(),
+            capture.bytes(),
+            // Three distinct states, said in three distinct ways, because a reader acts differently
+            // on each: this is the whole entry, this is its beginning, or this is a description of an
+            // entry no text document could carry faithfully.
+            match (capture.binary(), capture.truncated()) {
+                (true, _) => ", described rather than transcribed",
+                (false, true) => ", archived prefix only",
+                (false, false) => "",
+            }
+        ));
+        text.push_str(capture.text());
+        if !capture.text().ends_with('\n') {
+            text.push('\n');
+        }
+    }
+
+    let mut document = sanitize_document_for_evidence(&text);
+    if document.len() > EVIDENCE_DOCUMENT_BYTES_MAX {
+        // Truncate on a character boundary, then say so. A silently shortened document is evidence a
+        // reader can draw a wrong conclusion from; a document that states its own truncation is not.
+        let mut cut = EVIDENCE_DOCUMENT_BYTES_MAX;
+        while cut > 0 && !document.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        document.truncate(cut);
+        document.push_str(&format!(
+            "\n[truncated] this document reached the {EVIDENCE_DOCUMENT_BYTES_MAX}-byte limit for \
+             one cell's evidence; re-run this cell with {VAR_KEEP_WORK} set to obtain the whole of \
+             it\n"
+        ));
+    }
+    document
+}
+
+/// Make an assembled evidence document safe to publish, line by line.
+///
+/// Applied to the whole document rather than to each field, and it keeps line feeds while escaping
+/// everything else sanitization escapes — because unlike a report row, this artifact *is*
+/// multi-line: a compiler's diagnostic output is only readable with its line structure intact, and
+/// collapsing it would defeat the purpose of archiving it. Every other forgeable character, and every
+/// credential-bearing value, is still removed, by the same two functions the report rows use.
+fn sanitize_document_for_evidence(text: &str) -> String {
+    let redacted = redact_secrets(text);
+    redacted
+        .lines()
+        .map(sanitize_text_for_report)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1470,7 +1882,125 @@ struct Row {
     marker_id: Option<String>,
     finding_id: Option<String>,
     finding_dir: Option<PathBuf>,
+    /// The outcome's structured provenance, rendered into the thirteen columns documented on
+    /// [`AREA_TSV_COLUMNS`]. Every field is already report-safe.
+    provenance: RowProvenance,
     detail: String,
+}
+
+/// The provenance half of a row, in the fields the machine-readable report publishes.
+///
+/// A flat record of already-sanitized strings rather than a reference to the [`Provenance`] it was
+/// built from, for two reasons that both matter here. A row must survive being written to a file and
+/// read back — [`try_finalize`] aggregates the summary by parsing the area files rather than by
+/// walking the matrix a second time — so every field has to have exactly one textual form, and that
+/// form has to be the one the parser reconstructs. And the two derived fields, `severity` and
+/// `cell_fingerprint`, are not properties of the observation at all: severity depends on the run's
+/// configured policy and the fingerprint on the cell's identity, so they belong to the row rather
+/// than to the provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct RowProvenance {
+    source: String,
+    record_path: String,
+    subject: String,
+    subject_command: String,
+    subject_termination: String,
+    subject_captures: String,
+    authority: String,
+    authority_command: String,
+    authority_termination: String,
+    authority_captures: String,
+    first_difference: String,
+    severity: String,
+    cell_fingerprint: String,
+}
+
+impl RowProvenance {
+    /// Render one outcome's provenance into the row's fields.
+    ///
+    /// The two path fields are DERIVED from the cell identity rather than plumbed through from the
+    /// loader, and that is sound rather than convenient: `Cell::require_identity` refuses to build a
+    /// cell whose source file does not live in the area directory the key names and does not carry the
+    /// program's own stem, so the identity and the paths cannot disagree by the time an outcome exists.
+    /// Deriving them here means a row identifies its own inputs even for an outcome reached without a
+    /// record — an absent tool, an unreadable corpus entry — where nothing was loaded to plumb.
+    ///
+    /// `severity` is answered with this run's own policy, through the same
+    /// [`verdict_fails_run`] the driver asserts on, so a published row cannot disagree with the run
+    /// that produced it about whether it was a failure.
+    fn of(outcome: &Outcome, config: &RunConfig) -> RowProvenance {
+        let key = outcome.key();
+        let stem = format!("{}/{}", key.area(), key.program());
+        let source = format!("{CORPUS_RELATIVE_ROOT}/{stem}.{SOURCE_EXTENSION}");
+        let record_path = format!("{CORPUS_RELATIVE_ROOT}/{stem}.{RECORD_EXTENSION}");
+        let provenance = outcome.provenance();
+        let subject = provenance.and_then(super::Provenance::subject);
+        let authority = provenance.and_then(super::Provenance::authority);
+        let field = |side: Option<&super::SideRecord>, read: fn(&super::SideRecord) -> &str| {
+            side.map(read).unwrap_or_default().to_string()
+        };
+        let subject_command = field(subject, super::SideRecord::command);
+        let authority_command = field(authority, super::SideRecord::command);
+        let cell_fingerprint = stable_digest(&[
+            key.area(),
+            key.program(),
+            key.target().triple(),
+            key.opt().flag(),
+            &format!("oracle_{}", outcome.oracle().letter()),
+            &subject_command,
+            &authority_command,
+        ]);
+        RowProvenance {
+            source,
+            record_path,
+            subject: field(subject, super::SideRecord::role),
+            subject_command,
+            subject_termination: field(subject, super::SideRecord::termination),
+            subject_captures: field(subject, super::SideRecord::captures),
+            authority: field(authority, super::SideRecord::role),
+            authority_command,
+            authority_termination: field(authority, super::SideRecord::termination),
+            authority_captures: field(authority, super::SideRecord::captures),
+            first_difference: provenance
+                .map(super::Provenance::first_difference)
+                .unwrap_or_default()
+                .to_string(),
+            severity: match verdict_fails_run(outcome.verdict(), config) {
+                true => String::from(SEVERITY_FAILS_RUN),
+                false => String::from(SEVERITY_REPORTED),
+            },
+            cell_fingerprint,
+        }
+    }
+
+    /// Copy this block onto a row of the machine-readable summary.
+    ///
+    /// A copy rather than a second derivation. The summary's outcome rows *are* the area rows, read
+    /// back from the files the areas published, so recomputing the evidence here would introduce a
+    /// second answer to a question that already has one — and the disagreement would appear between
+    /// two artifacts of a single run, which is the one place a reader has no way to adjudicate.
+    ///
+    /// Empty fields are dropped by [`SummaryRow::set`], so an outcome that carries no provenance —
+    /// one reached from no execution, such as the register audit's synthetic divergence — renders
+    /// the same empty columns it does in its area report rather than an invented value.
+    fn apply_to(&self, row: SummaryRow) -> SummaryRow {
+        row.set(COL_SOURCE, self.source.clone())
+            .set(COL_RECORD_PATH, self.record_path.clone())
+            .set(COL_SUBJECT, self.subject.clone())
+            .set(COL_SUBJECT_COMMAND, self.subject_command.clone())
+            .set(COL_SUBJECT_TERMINATION, self.subject_termination.clone())
+            .set(COL_SUBJECT_CAPTURES, self.subject_captures.clone())
+            .set(COL_AUTHORITY, self.authority.clone())
+            .set(COL_AUTHORITY_COMMAND, self.authority_command.clone())
+            .set(
+                COL_AUTHORITY_TERMINATION,
+                self.authority_termination.clone(),
+            )
+            .set(COL_AUTHORITY_CAPTURES, self.authority_captures.clone())
+            .set(COL_FIRST_DIFFERENCE, self.first_difference.clone())
+            .set(COL_SEVERITY, self.severity.clone())
+            .set(COL_CELL_FINGERPRINT, self.cell_fingerprint.clone())
+    }
 }
 
 impl Row {
@@ -1489,12 +2019,13 @@ impl Row {
     /// class observed through different oracles name the **same** directory. That is not a
     /// duplicate: one root cause is filed once, its manifest lists every oracle that observed it,
     /// and each row points at the whole of the evidence rather than at one oracle's slice of it.
-    fn from_outcome(outcome: &Outcome) -> Row {
+    fn from_outcome(outcome: &Outcome, config: &RunConfig) -> Row {
         let key = outcome.key();
         let identifier = match (outcome.verdict(), outcome.class()) {
             (Verdict::Finding, Some(class)) => Some(FindingId::derive(key, class)),
             _ => None,
         };
+        let provenance = RowProvenance::of(outcome, config);
         Row {
             area: String::from(key.area()),
             program: String::from(key.program()),
@@ -1508,6 +2039,7 @@ impl Row {
                 .as_ref()
                 .map(|value| String::from(value.as_str())),
             finding_dir: identifier.as_ref().map(FindingId::directory),
+            provenance,
             detail: String::from(outcome.detail()),
         }
     }
@@ -1584,6 +2116,19 @@ impl Row {
                 .unwrap_or_default(),
             identity.run.clone(),
             identity.identity.clone(),
+            self.provenance.source.clone(),
+            self.provenance.record_path.clone(),
+            self.provenance.subject.clone(),
+            self.provenance.subject_command.clone(),
+            self.provenance.subject_termination.clone(),
+            self.provenance.subject_captures.clone(),
+            self.provenance.authority.clone(),
+            self.provenance.authority_command.clone(),
+            self.provenance.authority_termination.clone(),
+            self.provenance.authority_captures.clone(),
+            self.provenance.first_difference.clone(),
+            self.provenance.severity.clone(),
+            self.provenance.cell_fingerprint.clone(),
             self.detail.clone(),
         ])
     }
@@ -1656,7 +2201,22 @@ impl Row {
                 marker_id: optional_field(fields[7]),
                 finding_id: optional_field(fields[8]),
                 finding_dir,
-                detail: String::from(fields[12]),
+                provenance: RowProvenance {
+                    source: String::from(fields[12]),
+                    record_path: String::from(fields[13]),
+                    subject: String::from(fields[14]),
+                    subject_command: String::from(fields[15]),
+                    subject_termination: String::from(fields[16]),
+                    subject_captures: String::from(fields[17]),
+                    authority: String::from(fields[18]),
+                    authority_command: String::from(fields[19]),
+                    authority_termination: String::from(fields[20]),
+                    authority_captures: String::from(fields[21]),
+                    first_difference: String::from(fields[22]),
+                    severity: String::from(fields[23]),
+                    cell_fingerprint: String::from(fields[24]),
+                },
+                detail: String::from(fields[25]),
             },
             RunIdentity {
                 run: String::from(value(10)),
@@ -1706,7 +2266,6 @@ impl Row {
 ///
 /// A row with an empty field is the ordinary case for every verdict but `FINDING`, and yields no path
 /// and no diagnostic.
-#[allow(clippy::too_many_arguments)]
 fn parse_finding_dir(
     number: usize,
     recorded: Option<&str>,
@@ -1867,7 +2426,11 @@ impl AreaReport {
     /// that: an outcome filed under a different area than the one being written, the same cell and
     /// oracle recorded twice — which would double-count the tally — and a finding carrying no
     /// divergence class, which leaves its artifacts unnameable.
-    fn from_outcomes(spec: &'static AreaSpec, outcomes: &[Outcome]) -> AreaReport {
+    fn from_outcomes(
+        spec: &'static AreaSpec,
+        outcomes: &[Outcome],
+        config: &RunConfig,
+    ) -> AreaReport {
         let mut report = AreaReport {
             spec,
             rows: Vec::with_capacity(outcomes.len()),
@@ -1899,7 +2462,7 @@ impl AreaReport {
                     outcome.oracle()
                 ));
             }
-            let row = Row::from_outcome(outcome);
+            let row = Row::from_outcome(outcome, config);
             // A finding is a deliverable, and the deliverable is the artifact directory. A row that
             // says `FINDING` while that directory holds nothing is the one shape of report that is
             // actively misleading: it reads as a recorded observation and is an empty promise. So the
@@ -2430,10 +2993,33 @@ struct MatrixDimension {
     planned: usize,
     actual: usize,
     note: &'static str,
+    plan: PlanKind,
+}
+
+/// How a dimension's planned number is to be read against its recorded one.
+///
+/// Most of the matrix is an **exact** target: a cell count, a comparison count, a target count. For
+/// those, recording more than was planned is a defect — a duplicate, a synthetic row counted as a
+/// cell, or a corpus that outgrew its declared count — and the excess is reported as one.
+///
+/// One dimension is a **floor**, and it has to be read the other way round. The coverage requirement
+/// states a *minimum* number of programs for each mandated area, and this corpus deliberately exceeds
+/// it in nine of the nine: the plan's own words are "no fewer than six programs each", and the areas
+/// hold seven, eight, ten and eleven. Comparing a floor for equality turned that surplus into a
+/// warning and stamped eight of the fourteen area reports `partial` on a completely clean run, which
+/// is the exact misreading the machine-readable coverage field exists to prevent — inverted, and
+/// therefore worse, because a consumer now acts on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanKind {
+    /// The recorded number is expected to equal the planned one; either direction is a defect.
+    Exact,
+    /// The recorded number is expected to be **at least** the planned one; a surplus is coverage above
+    /// plan and is reported as met, with the margin named rather than hidden behind a bare tick.
+    Floor,
 }
 
 impl MatrixDimension {
-    /// Assemble one dimension.
+    /// Assemble one dimension whose planned number is an exact target.
     fn new(
         label: &'static str,
         heading: &'static str,
@@ -2447,6 +3033,21 @@ impl MatrixDimension {
             planned,
             actual,
             note,
+            plan: PlanKind::Exact,
+        }
+    }
+
+    /// Assemble one dimension whose planned number is a floor rather than a target.
+    fn floor(
+        label: &'static str,
+        heading: &'static str,
+        planned: usize,
+        actual: usize,
+        note: &'static str,
+    ) -> MatrixDimension {
+        MatrixDimension {
+            plan: PlanKind::Floor,
+            ..MatrixDimension::new(label, heading, planned, actual, note)
         }
     }
 
@@ -2467,25 +3068,45 @@ impl MatrixDimension {
     /// count the tables still declare. Every one of those makes the recorded number untrustworthy,
     /// and a tick beside it told a reader the opposite. The count states are therefore three rather
     /// than two, and the excess is named with the same prominence as a shortfall.
+    ///
+    /// A [`PlanKind::Floor`] dimension has no excess at all, by definition: its planned number is a
+    /// minimum, so exceeding it is the plan being met with room to spare rather than a count that
+    /// cannot be trusted. The margin is still reported — see [`MatrixDimension::surplus`] — because
+    /// "ten programs where six were required" is coverage information, but it is never a warning and
+    /// never makes a report partial.
     fn excess(&self) -> Option<usize> {
-        self.actual.checked_sub(self.planned).filter(|gap| *gap > 0)
+        match self.plan {
+            PlanKind::Exact => self.actual.checked_sub(self.planned).filter(|gap| *gap > 0),
+            PlanKind::Floor => None,
+        }
     }
 
-    /// The status cell: exactly met, short by how much, or over by how much.
+    /// By how much a floor dimension exceeds its minimum, or `None` when it is exactly at it or is not
+    /// a floor at all.
+    fn surplus(&self) -> Option<usize> {
+        match self.plan {
+            PlanKind::Floor => self.actual.checked_sub(self.planned).filter(|gap| *gap > 0),
+            PlanKind::Exact => None,
+        }
+    }
+
+    /// The status cell: met, met with a margin, short by how much, or over by how much.
     fn status(&self) -> String {
-        match (self.shortfall(), self.excess()) {
-            (Some(gap), _) => format!("⚠️ short by {gap}"),
-            (_, Some(gap)) => format!("⚠️ over by {gap}"),
-            (None, None) => String::from("✅ complete"),
+        match (self.shortfall(), self.excess(), self.surplus()) {
+            (Some(gap), _, _) => format!("⚠️ short by {gap}"),
+            (_, Some(gap), _) => format!("⚠️ over by {gap}"),
+            (_, _, Some(margin)) => format!("✅ met, {margin} above the floor"),
+            (None, None, None) => String::from("✅ complete"),
         }
     }
 
     /// The status as it appears in the machine-readable summary, where no glyph is used.
     fn machine_status(&self) -> String {
-        match (self.shortfall(), self.excess()) {
-            (Some(gap), _) => format!("short by {gap}; {}", self.note),
-            (_, Some(gap)) => format!("over by {gap}; {}", self.note),
-            (None, None) => format!("complete; {}", self.note),
+        match (self.shortfall(), self.excess(), self.surplus()) {
+            (Some(gap), _, _) => format!("short by {gap}; {}", self.note),
+            (_, Some(gap), _) => format!("over by {gap}; {}", self.note),
+            (_, _, Some(margin)) => format!("met, {margin} above the floor; {}", self.note),
+            (None, None, None) => format!("complete; {}", self.note),
         }
     }
 
@@ -2699,7 +3320,10 @@ fn area_matrix(
         ),
     ];
     if spec.mandated() {
-        dimensions.push(MatrixDimension::new(
+        // A floor, not a target: the coverage requirement states a minimum per mandated area and this
+        // corpus deliberately exceeds it in every one of the nine. Read as an equality it reported a
+        // surplus as a defect and made a clean area report call itself partial.
+        dimensions.push(MatrixDimension::floor(
             "mandated_floor",
             "Mandated-area program floor",
             MIN_PROGRAMS_PER_MANDATED_AREA,
@@ -4353,9 +4977,14 @@ fn render_area_markdown(
 /// recognised on its first line. The per-row provenance answers the same question again at row
 /// granularity, which is what lets a row that outlived the clearing contribute nothing rather than
 /// contribute silently.
-fn render_area_tsv(report: &AreaReport, generation: &Generation, identity: &RunIdentity) -> String {
+fn render_area_tsv(
+    report: &AreaReport,
+    generation: &Generation,
+    identity: &RunIdentity,
+    coverage: &Coverage,
+) -> String {
     let mut lines = Vec::with_capacity(report.rows.len() + 2);
-    lines.push(generation.preamble());
+    lines.push(generation.preamble(coverage));
     lines.push(tsv_header(AREA_TSV_COLUMNS));
     for row in &report.rows {
         lines.push(row.to_tsv(identity));
@@ -5106,6 +5735,53 @@ fn render_summary_markdown(
         }
     }
     lines.push(String::new());
+    // Evidence published for the cells whose workspaces were NOT kept. Stated in the same section as
+    // the retention accounting because the two together are the whole answer to "what of this run
+    // survives it": a retained workspace holds a failing cell's evidence, and a document beneath
+    // `evidence/` holds the evidence of a cell that was reported without failing — an expected
+    // divergence, or a permissive run's absent oracle — whose workspace was removed. Without the
+    // second, the report row for such an outcome named a directory that no longer existed, and in
+    // continuous integration, where the report root is uploaded and the workspace root is not, its
+    // evidence reached nobody at all.
+    let (evidence_documents, evidence_bytes) = evidence_totals();
+    lines.extend(property_table(&[
+        (
+            String::from("Evidence documents published"),
+            evidence_documents.to_string(),
+        ),
+        (
+            String::from("Evidence bytes"),
+            format!("{evidence_bytes} of {EVIDENCE_RUN_BYTES_MAX} permitted for the run"),
+        ),
+        (
+            String::from("Per-document ceiling"),
+            EVIDENCE_DOCUMENT_BYTES_MAX.to_string(),
+        ),
+        (
+            String::from("Where they are"),
+            format!("`{EVIDENCE_DIR_NAME}/` beneath this report"),
+        ),
+    ]));
+    lines.push(String::new());
+    let refusals = evidence_refusal_notes();
+    if refusals.is_empty() {
+        lines.push(String::from(
+            "Every outcome that needed a durable evidence document received one: no archive was \
+             refused, so nothing this run reported is missing the record of how it was reached.",
+        ));
+    } else {
+        lines.push(format!(
+            "{} evidence document(s) could NOT be published, so the outcomes they belong to are \
+             reported without the captures behind them. Each refusal names the cell, which is \
+             enough to re-run exactly it.",
+            refusals.len()
+        ));
+        lines.push(String::new());
+        for note in &refusals {
+            lines.push(format!("- {}", md(note)));
+        }
+    }
+    lines.push(String::new());
 
     lines.push(String::from("## Why this report is reduced or partial"));
     lines.push(String::new());
@@ -5427,6 +6103,30 @@ fn render_summary_tsv(
         );
     }
 
+    // The other half of "what survives this run": documents published for the cells whose workspaces
+    // were not kept. Emitted beside the retention totals so an aggregator reading only this file can
+    // account for every reported outcome's evidence, not only the failing ones'.
+    let (evidence_documents, evidence_bytes) = evidence_totals();
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "evidence_documents")
+            .set(COL_COUNT, evidence_documents.to_string())
+            .set(COL_REFERENCE, EVIDENCE_DIR_NAME),
+    );
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "evidence_bytes")
+            .set(COL_COUNT, evidence_bytes.to_string())
+            .set(COL_REFERENCE, EVIDENCE_RUN_BYTES_MAX.to_string()),
+    );
+    for note in evidence_refusal_notes() {
+        rows.push(
+            SummaryRow::new(RECORD_META)
+                .set(COL_LABEL, "evidence_refused")
+                .set(COL_DETAIL, note),
+        );
+    }
+
     for reason in &coverage.reasons {
         rows.push(SummaryRow::new(RECORD_COVERAGE_REASON).set(COL_DETAIL, reason.clone()));
     }
@@ -5563,20 +6263,26 @@ fn render_summary_tsv(
         );
     }
 
+    // Outcomes, carrying the provenance block through unchanged from the area row it was read from.
+    // Copied rather than recomputed on purpose: the summary is an aggregation, and a second
+    // derivation here could disagree with the area report it claims to summarize.
     for area in &run.areas {
         for row in &area.rows {
             rows.push(
-                SummaryRow::new(RECORD_OUTCOME)
-                    .set(COL_AREA, row.area.clone())
-                    .set(COL_PROGRAM, row.program.clone())
-                    .set(COL_TARGET, row.target.triple())
-                    .set(COL_OPT, row.opt.flag())
-                    .set(COL_ORACLE, format!("oracle_{}", row.oracle.letter()))
-                    .set(COL_VERDICT, row.verdict.label())
-                    .set_opt(COL_CLASS, row.class.map(|class| class.label()))
-                    .set_opt(COL_MARKER_ID, row.marker_id.clone())
-                    .set_opt(COL_LABEL, row.finding_id.clone())
-                    .set_opt(COL_REFERENCE, row.finding_dir.as_deref().map(shown_path))
+                row.provenance
+                    .apply_to(
+                        SummaryRow::new(RECORD_OUTCOME)
+                            .set(COL_AREA, row.area.clone())
+                            .set(COL_PROGRAM, row.program.clone())
+                            .set(COL_TARGET, row.target.triple())
+                            .set(COL_OPT, row.opt.flag())
+                            .set(COL_ORACLE, format!("oracle_{}", row.oracle.letter()))
+                            .set(COL_VERDICT, row.verdict.label())
+                            .set_opt(COL_CLASS, row.class.map(|class| class.label()))
+                            .set_opt(COL_MARKER_ID, row.marker_id.clone())
+                            .set_opt(COL_LABEL, row.finding_id.clone())
+                            .set_opt(COL_REFERENCE, row.finding_dir.as_deref().map(shown_path)),
+                    )
                     .set(COL_DETAIL, row.detail.clone()),
             );
         }
@@ -5713,7 +6419,13 @@ fn render_summary_tsv(
         );
     }
 
-    let mut lines = Vec::with_capacity(rows.len() + 1);
+    let mut lines = Vec::with_capacity(rows.len() + 2);
+    // The same generation preamble the per-area files carry, and for the same reason it is FIRST
+    // there. The `reduced` and `partial` facts are also published below as `meta` records, and that
+    // was previously the only place they appeared — which meant a machine consumer had to parse and
+    // scan an unbounded number of records before it could learn whether the totals it was about to
+    // aggregate described a full run. A reader that stops after one line now knows.
+    lines.push(generation.preamble(coverage));
     lines.push(tsv_header(SUMMARY_TSV_COLUMNS));
     lines.extend(rows.iter().map(SummaryRow::render));
     join_document(&lines)
@@ -5774,6 +6486,15 @@ struct RunRegistry {
     /// calls. Recording the answer where both can read it is what lets the report be published
     /// first and the run be failed afterwards, which is this module's standing discipline.
     shortfalls: BTreeMap<String, Vec<String>>,
+    /// Why the last finalization attempt that reached the artifacts declined to write the summary.
+    ///
+    /// Only [`finalize`] can fill this in, and only from what it actually read, because it is the one
+    /// caller that reads the area files at all. It exists so that [`finalization_pending`] can explain
+    /// a disk-derived refusal — a published area's file that has since been removed, or one that
+    /// belongs to another run — **without** re-reading fourteen files to rediscover a conclusion that
+    /// has already been reached. Empty in the ordinary case, where the reason is simply that an area
+    /// this invocation selected has not published yet, which the registry already knows.
+    deferral: Option<String>,
 }
 
 /// This process's registry, created on first use.
@@ -5866,6 +6587,35 @@ fn release_finalization_claim() {
     registry().finalized = false;
 }
 
+/// Record why the finalizer declined, from what it read, or clear a reason that no longer applies.
+///
+/// Called only by [`finalize`], which is the only function in this module that reads the area files.
+/// Overwrites rather than accumulates: the current state of the report directory is what a caller
+/// asking "why is there no summary?" needs, not the history of every attempt.
+fn record_finalization_deferral(reason: Option<String>) {
+    registry().deferral = reason;
+}
+
+/// The areas this invocation selected that have not yet published, and any recorded refusal.
+///
+/// Answered entirely from memory. This is what makes the pending explanation free: the completeness
+/// question was already settled inside [`claim_finalization`]'s critical section, so re-deriving it
+/// from the filesystem would re-read every area file to learn something the registry already knows —
+/// thirteen times in a fourteen-area run, once for each caller that is not the finalizer.
+fn finalization_state() -> (Vec<&'static str>, Option<String>) {
+    // Read before the lock is taken, exactly as [`claim_finalization`] does and for the same reason:
+    // scanning the command line has nothing to do with the registry, and holding the guard across it
+    // would widen the critical section for no reason.
+    let expected = libtest_filter_selection().expected_areas();
+    let held = registry();
+    let awaited = expected
+        .iter()
+        .map(|spec| spec.directory())
+        .filter(|directory| !held.published.contains(directory))
+        .collect();
+    (awaited, held.deferral.clone())
+}
+
 // ---------------------------------------------------------------------------------------------
 // The public surface
 //
@@ -5947,7 +6697,7 @@ pub fn write_area(
     // to do it through a redirected directory.
     ensure_report_namespace(&format!("writing the report of feature area `{area}`"))?;
 
-    let mut report = AreaReport::from_outcomes(spec, outcomes);
+    let mut report = AreaReport::from_outcomes(spec, outcomes, caps.config());
     let facts = CorpusFacts::for_area(spec);
     // The caller's statements first, because they explain the shape of everything below them: a
     // withheld area's empty tally reads as an absence until the note says what withheld it.
@@ -5985,7 +6735,7 @@ pub fn write_area(
         &area_markdown_path(spec),
         &render_area_markdown(&report, &facts, caps, &coverage, &dimensions, &generation),
         &area_tsv_path(spec),
-        &render_area_tsv(&report, &generation, RunIdentity::of(caps)),
+        &render_area_tsv(&report, &generation, RunIdentity::of(caps), &coverage),
     )?;
 
     // Registration follows publication, never precedes it, so a registered area is always an area
@@ -6417,6 +7167,12 @@ fn finalize(caps: &Capabilities, specs: &[&'static AreaSpec]) -> HarnessResult<b
         .iter()
         .any(|spec| !accounted.contains(&spec.directory()))
     {
+        // The registry said the set was complete or this function would not have been reached, so an
+        // area unaccounted for here is one whose file is no longer usable: removed since it was
+        // published, or belonging to a different run. That conclusion was reached by reading, and
+        // reading is this function's privilege alone, so it is recorded for the callers that only
+        // want to explain the absence of a summary.
+        record_finalization_deferral(Some(deferral_reason(&run, &current, &expected, &accounted)));
         return Ok(false);
     }
     if run.areas.is_empty() && !expected.is_empty() {
@@ -6425,8 +7181,12 @@ fn finalize(caps: &Capabilities, specs: &[&'static AreaSpec]) -> HarnessResult<b
         // than leaving the previous one in place and saying nothing. A filter that selects no area
         // at all is the one exception, and it is handled below: there the emptiness is the fact
         // being recorded.
+        record_finalization_deferral(Some(deferral_reason(&run, &current, &expected, &accounted)));
         return Ok(false);
     }
+    // Everything this invocation selected is present and belongs to this run, so any reason recorded
+    // by an earlier attempt describes a state that no longer holds and must not outlive it.
+    record_finalization_deferral(None);
     if expected.is_empty() {
         run.diagnostics.push(String::from(
             "⚠️ no feature area could be selected by this process's test-name filters, so this \
@@ -6522,57 +7282,108 @@ fn finalize(caps: &Capabilities, specs: &[&'static AreaSpec]) -> HarnessResult<b
     Ok(true)
 }
 
+/// The finalizer's own account of why it declined, built from the files it read.
+///
+/// Composed here rather than at the two `return Ok(false)` sites so that both record the same shape of
+/// answer, and so that the sentence names every selected area it could not account for — an area whose
+/// file was removed after this run published it, and one whose file belongs to another run, fail the
+/// same way round but for opposite reasons, and a reader needs to be told which.
+///
+/// The result is stored in the registry and printed verbatim by [`finalization_pending`], which is what
+/// lets that function explain a disk-derived refusal without reading anything itself.
+fn deferral_reason(
+    run: &RunReport,
+    current: &Generation,
+    expected: &[&'static AreaSpec],
+    accounted: &BTreeSet<&'static str>,
+) -> String {
+    let missing: Vec<&'static str> = expected
+        .iter()
+        .map(|spec| spec.directory())
+        .filter(|directory| !accounted.contains(directory))
+        .collect();
+    let mut clauses: Vec<String> = Vec::new();
+    if !missing.is_empty() {
+        clauses.push(format!(
+            "{} selected area report(s) could not be accounted for when the set was aggregated \
+             ({})",
+            missing.len(),
+            missing.join(", ")
+        ));
+    }
+    if !run.stale.is_empty() {
+        clauses.push(format!(
+            "{} report(s) were REFUSED as belonging to a different run — {}",
+            run.stale.len(),
+            run.stale
+                .iter()
+                .map(|stale| format!("`{}` — {}", stale.spec.directory(), stale.note))
+                .collect::<Vec<String>>()
+                .join("; ")
+        ));
+    }
+    if !run.unusable.is_empty() {
+        clauses.push(format!(
+            "{} report(s) were present but unusable — {}",
+            run.unusable.len(),
+            run.unusable
+                .iter()
+                .map(|spec| format!("`{}`", spec.directory()))
+                .collect::<Vec<String>>()
+                .join(", ")
+        ));
+    }
+    if clauses.is_empty() {
+        // Reached when every selected area was accounted for and yet nothing of this run's own could
+        // be aggregated, which is the empty-selection case the caller handles separately. Named rather
+        // than left blank, because an unexplained refusal is the one answer this module never gives.
+        clauses.push(String::from(
+            "no area report belonging to this run could be aggregated at all",
+        ));
+    }
+    format!(
+        "{}. This run is {}.",
+        clauses.join("; "),
+        current.describe()
+    )
+}
+
 /// Why the run summary has not been written, in a sentence a caller can print.
 ///
 /// [`try_finalize`] answers whether the summary was written; this answers why not, which is the
 /// question the answer `false` actually raises. It distinguishes the two reasons, because they call
 /// for opposite responses from a reader: areas still awaited are the ordinary state of every call but
-/// the last one of the run and need no action at all, whereas a refused artifact means a file of
-/// another run's configuration is sitting in the report root and the summary will not appear until
-/// the current configuration has replaced it.
+/// the last one of the run and need no action at all, whereas a refused artifact means a file this
+/// run published is no longer there, or belongs to another run's configuration, and the summary will
+/// not appear until that is put right.
 ///
-/// The scan covers the **whole** area table rather than only the areas this invocation selected, so
-/// under a name filter the areas that were never going to run appear here among the awaited. That is
-/// deliberate — the sentence is an explanation of a report directory's state, and an area with no file
-/// is worth naming either way — but it is not the completeness test: [`claim_finalization`] and
-/// [`finalize`] measure completeness against `expected_areas`, so a filtered run's summary is written
-/// as soon as its **selected** areas have filed, and is stamped partial with the rest listed as
-/// absent. The sentences below say which of the two a reader is looking at.
+/// # Answered from the registry, not from the report directory
 ///
-/// Reads the same files [`try_finalize`] read, so a set completed by another thread in between is
-/// reported as exactly that rather than as a contradiction. Never fails: an unreadable file is
-/// described, not raised, because this is the explanation of a non-failure.
-pub fn finalization_pending(caps: &Capabilities) -> String {
-    let current = Generation::current(caps);
-    let identity = RunIdentity::of(caps);
-    let mut awaited: Vec<&'static str> = Vec::new();
-    let mut refused: Vec<String> = Vec::new();
+/// This used to re-derive its answer by reading every area report on disk, which was work performed
+/// to rediscover a conclusion that had already been reached moments earlier: the completeness test
+/// lives inside [`claim_finalization`]'s critical section, so by the time a caller is asking *why*
+/// nothing was written, the registry already knows which selected areas have published. In a
+/// fourteen-area run the thirteen non-final callers each re-parsed the whole set — quadratic in the
+/// number of areas, against files that grow with the matrix — to learn something memory could answer
+/// for nothing.
+///
+/// So the answer now comes from memory, and **artifact reads belong to the single finalizer**. The one
+/// thing memory cannot know is a disk-derived refusal, because only the finalizer looks at the files;
+/// that is why [`finalize`] records its reason through [`record_finalization_deferral`] when it
+/// declines, and why this reports that recorded reason verbatim. Nothing is lost and nothing is
+/// guessed: every sentence below is either a fact the registry holds or a fact the finalizer
+/// established by reading.
+///
+/// Never fails, and never reads a file: this is the explanation of a non-failure.
+pub fn finalization_pending() -> String {
+    let (awaited, deferral) = finalization_state();
 
-    for spec in AREAS.iter() {
-        match read_area(spec, &current, identity) {
-            AreaState::Current(_) => {}
-            AreaState::Absent => awaited.push(spec.directory()),
-            AreaState::Stale(stale) => {
-                refused.push(format!("`{}` — {}", spec.directory(), stale.note));
-            }
-            // A damaged file is refused for a different reason than a foreign one, but it is
-            // refused just the same, and a caller asking why the summary has not appeared needs
-            // both named rather than one silently omitted.
-            AreaState::Unusable(report) => {
-                let why = if report.diagnostics.is_empty() {
-                    String::from("its contents could not be used")
-                } else {
-                    report.diagnostics.join(" ")
-                };
-                refused.push(format!("`{}` — {why}", spec.directory()));
-            }
-        }
-    }
-
-    if awaited.is_empty() && refused.is_empty() {
+    if awaited.is_empty() && deferral.is_none() {
         return format!(
-            "every one of the {AREA_COUNT} area reports is now present and belongs to this run, so \
-             the summary was written by whichever area completed the set. Nothing is outstanding."
+            "every area this invocation selected has published a report belonging to this run, so \
+             the summary was written by whichever area completed the set. Nothing is outstanding. \
+             (The table holds {AREA_COUNT} areas in all; a filtered invocation selects fewer, and \
+             its summary is stamped partial.)"
         );
     }
 
@@ -6580,26 +7391,22 @@ pub fn finalization_pending(caps: &Capabilities) -> String {
     if !awaited.is_empty() {
         sentences.push(format!(
             "it is written once every area this invocation selected has filed a report belonging \
-             to this run; of the {AREA_COUNT} areas in the table, {} have no such report yet ({}). \
-             Under a name filter or a single-area invocation the areas that were never going to run \
-             stay listed here permanently, which is expected and is not a failure: such a run's \
+             to this run; {} of the selected areas have not published yet ({}), out of the \
+             {AREA_COUNT} in the table. Under a name filter or a single-area invocation only the \
+             selected areas are waited for, so such a run does not sit pending for ever: its \
              summary is published over the areas it did select and stamped partial, and each area's \
              own report was written regardless.",
             awaited.len(),
             awaited.join(", ")
         ));
     }
-    if !refused.is_empty() {
+    if let Some(reason) = deferral {
         sentences.push(format!(
-            "⚠️ {} area report(s) were REFUSED because they did not come from this run, and are \
-             therefore not aggregated — a summary that mixed two configurations would present \
-             another run's verdicts as this one's. A row means something different under a \
-             different matrix, filter, verdict policy or per-cell budget, so the two cannot be \
-             added together. This run is {}, and the refused reports are:\n\
-             \x20 - {}",
-            refused.len(),
-            current.describe(),
-            refused.join("\n  - ")
+            "⚠️ the finalizer read the report directory and declined: {reason} A summary that mixed \
+             two configurations would present another run's verdicts as this one's — a row means \
+             something different under a different matrix, filter, verdict policy or per-cell budget, \
+             so the two cannot be added together — and one assembled over a file that has since \
+             vanished would report an area as not run when it did run."
         ));
     }
     sentences.join(" ")

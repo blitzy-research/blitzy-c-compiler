@@ -68,9 +68,10 @@
  *
  * No header is named: bcc ships no stdio.h, its bundled set being the nine required
  * freestanding headers plus a bonus stdatomic.h, ten files in all
- * (docs/project-guide.md line 212).  string.h is absent from that set, so strlen is
- * unavailable and lengths are computed here by a bounded walk.  Only ordinary narrow
- * literals appear; the wide and Unicode forms belong to area 11.
+ * (docs/project-guide.md, "9 bundled freestanding headers").  string.h is absent
+ * from that set, so strlen is unavailable and lengths are computed here by a bounded
+ * walk.  Only ordinary narrow literals appear; the wide and Unicode forms belong to
+ * area 11.
  */
 
 int printf(const char *, ...);

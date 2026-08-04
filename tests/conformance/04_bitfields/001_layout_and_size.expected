@@ -57,13 +57,26 @@ counter bounded by the sizeof of a four- or eight-byte array, and bitwise AND ma
 unsigned constants, so there is no signed overflow and no operand can wrap.  No shift
 operator appears in executable code at all, so no shift count can be out of range.
 
-No object is modified twice between sequence points, no call takes an argument with a side
-effect, and nothing depends on padding bytes or on the relative addresses of unrelated
-objects.  Output is deterministic by construction: no address, pointer value, timestamp or
-random value is printed, no locale-dependent conversion is used, the only conversion
-specifiers are %u and %02x and each is given an operand cast to unsigned, and every loop
-bound is the sizeof of a fixed-size array, so both iteration order and iteration count are
-fixed.
+No object is modified twice between sequence points, and nothing depends on padding bytes or
+on the relative addresses of unrelated objects.  Every store into a volatile destination is a
+full expression of its own, terminated by its own semicolon, so no store ever shares a full
+expression with a read.
+CALLS DO TAKE ARGUMENTS WITH SIDE EFFECTS here, because C11 5.1.2.3p2 counts accessing a
+volatile object as one, and the three readback calls each pass several: the packed3 readback
+passes three volatile bitfield reads, the oneword readback two, and the covered32 readback
+four.  The relative order of the reads within a call is unspecified, and nothing printed can
+turn on it.  Each call reads DISTINCT members, no read modifies anything, and every store that
+produced the values being read is an earlier statement whose end-of-full-expression sequence
+point separates it from the call -- so each read yields the value its own store put there
+whichever order the reads happen in, and every permitted order produces the same stdout, which
+is the property the oracle needs.  Reading the fields back inside one call is deliberate: it is
+what forces the backend to emit a genuine extract per field instead of reusing a value it has
+just inserted.  The two byte-image loops pass exactly one volatile read per call, so no
+ordering question arises in them at all.
+Output is deterministic by construction: no address, pointer value, timestamp or random value
+is printed, no locale-dependent conversion is used, the only conversion specifiers are %u and
+%02x and each is given an operand cast to unsigned, and every loop bound is the sizeof of a
+fixed-size array, so both iteration order and iteration count are fixed.
 
 Every read-back and every byte image is produced twice, once from constant initializers and
 literals that a constant folder can evaluate whole and once through volatile-qualified

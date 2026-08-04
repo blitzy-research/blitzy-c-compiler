@@ -97,7 +97,8 @@ is not in bcc's bundled set at all, and stddef.h is bundled but not sanctioned h
 The builtin selection deliberately favours the most universally-implemented, deterministic
 builtins over exotic coverage, because the documentation supports __builtin_* only
 generically at docs/technical-specifications.md lines 13, 107 and 761 and
-docs/project-guide.md lines 81 and 206, with no enumerated list of individual builtins
+docs/project-guide.md's "C11 Frontend -- Parser" and "C11 frontend with GCC extensions"
+rows, with no enumerated list of individual builtins
 anywhere. Breadth of safety was preferred so that one unimplemented builtin cannot block
 the program. Because no documentation enumerates individual builtins, there is no
 documented basis to cite and this program carries NO expected-divergence marker: an

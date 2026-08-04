@@ -104,8 +104,8 @@
  * boundary, not the false == or the true !=, not the ordering across sign, and
  * not the double surface.  A folded result with no twin is asserted by the
  * constant folder alone, so a wrong condition code or an inverted predicate in
- * exactly that comparison would leave every printed value unchanged; the three
- * folded_matches_runtime lines therefore carry one column per pair, and
+ * exactly that comparison would leave every printed value unchanged; the five
+ * pair_ agreement lines therefore carry one column per pair, and
  * all_folded_matches_runtime conjoins all thirty-five.
  *
  * The rule is applied WITHOUT EXCEPTION, and the count is stated so that it can
@@ -113,9 +113,12 @@
  * variant and all 35 carry an rt_-prefixed runtime twin - 18 on float, 10 on
  * double, 2 mixed-width, and 5 across the select, branch, both short-circuit
  * forms and the boolean negation.  Every one of those 35 pairs is compared field
- * by field across the folded_matches_runtime, folded_matches_runtime_more and
- * all_folded_matches_runtime lines, so no property is twinned in the code and
- * then left out of the comparison.  A property present in only one variant is
+ * by field across five agreement lines grouped the same way the results are --
+ * pair_f_relational carrying ten columns, pair_f_equality four, pair_f_sign
+ * four, pair_d ten and pair_mixed_and_flow seven, which is 10 + 4 + 4 + 10 + 7
+ * = 35 columns in total -- and then conjoined by all_folded_matches_runtime, so
+ * no property is twinned in the code and then left out of the comparison.  A
+ * property present in only one variant is
  * strictly weaker than one present in both: a false direction, an equal-operand
  * boundary or a sign ordering that only the folder ever evaluates says nothing
  * about the backend's condition codes, which is the very thing this program
@@ -164,12 +167,12 @@
  * No header is named: bcc ships no hosted input/output header, its bundled set
  * being the nine required freestanding headers plus a bonus atomics header, ten
  * files in all (docs/technical-specifications.md line 19 and lines 202-214;
- * docs/project-guide.md line 212).  Naming the hosted one would fail against bcc
- * while succeeding against the reference compiler - a spurious divergence caused
- * by the test rather than the compiler.  float.h is bundled but is deliberately
- * not named either: no FLT_ or DBL_ characteristic is needed here, and the
- * bundled-header probe is 12_preprocessor/003_bundled_header_inclusion.c's
- * subject.
+ * docs/project-guide.md, "9 bundled freestanding headers").  Naming the hosted
+ * one would fail against bcc while succeeding against the reference compiler - a
+ * spurious divergence caused by the test rather than the compiler.  float.h is
+ * bundled but is deliberately not named either: no FLT_ or DBL_ characteristic
+ * is needed here, and the bundled-header probe is
+ * 12_preprocessor/003_bundled_header_inclusion.c's subject.
  */
 
 int printf(const char *, ...);

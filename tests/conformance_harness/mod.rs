@@ -87,7 +87,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::thread;
@@ -583,6 +583,67 @@ pub fn is_ub_audit_gate_removable(flag: &str) -> bool {
     UB_AUDIT_GATE_REMOVABLE.contains(&candidate)
 }
 
+/// The only in-source diagnostic suppressions the corpus sanctions, by exact program and warning.
+///
+/// # Why a second table exists at all
+///
+/// [`UB_AUDIT_GATE_REMOVABLE`] governs a relaxation expressed on the COMMAND LINE, which the audit
+/// runs and can therefore see. A `#pragma GCC diagnostic ignored` inside a translation unit is a
+/// relaxation of exactly the same kind and exactly the same consequence — a gate diagnostic that
+/// would have been fatal is not raised — but it is invisible to anything that only reads
+/// `ub_audit_flags`. A program could then be reported as having satisfied the full default gate
+/// while a member of that gate had been switched off for part of the file, which makes the audit's
+/// central claim untrue in the one direction nobody would check.
+///
+/// So an in-source suppression is admitted on the same terms as a command-line deviation: it must be
+/// registered in the program's own record, it must be sanctioned here, and it must carry a recorded
+/// reason that names the warning.
+///
+/// # Why the grain is (area, program, warning) rather than just a warning
+///
+/// A removable gate FLAG is a property of a kind of test — any extensions program may drop
+/// `-pedantic`. An in-source suppression is not: it is one construct, in one file, whose standard
+/// behaviour a particular diagnostic reports as suspicious. Sanctioning `-Woverride-init` corpus-wide
+/// would let any later program silence overlapping initializers, including one where the overlap was
+/// an authoring mistake rather than the subject. Naming the program keeps the exception exactly as
+/// wide as the case that justifies it, and makes the whole set of them readable in one table.
+///
+/// # The single entry, and why the feature is not simply dropped instead
+///
+/// `03_initializers/004_designated_array` exercises overlapping designators, whose later-initializer
+/// precedence C11 6.7.9p19 fixes. `-Woverride-init` — which `-Wextra` enables and `-Werror` makes
+/// fatal — reports precisely that well-defined overriding. Removing the construct would drop
+/// mandated initializer coverage because a diagnostic found it surprising, which the corpus rules
+/// forbid; dropping `-Wextra` for the program would discard every other diagnostic it carries. The
+/// suppression is bracketed by a matched `push`/`pop` around the affected declarations alone, so
+/// `-Woverride-init` stays fatal everywhere else in the same translation unit.
+pub const UB_AUDIT_SOURCE_SUPPRESSIONS_SANCTIONED: &[(&str, &str, &str)] =
+    &[("03_initializers", "004_designated_array", "-Woverride-init")];
+
+/// True when `warning` may be suppressed in the source of `area`/`program`.
+pub fn is_sanctioned_source_suppression(area: &str, program: &str, warning: &str) -> bool {
+    let warning = warning.trim();
+    UB_AUDIT_SOURCE_SUPPRESSIONS_SANCTIONED.iter().any(
+        |(sanctioned_area, sanctioned_program, sanctioned_warning)| {
+            *sanctioned_area == area
+                && *sanctioned_program == program
+                && *sanctioned_warning == warning
+        },
+    )
+}
+
+/// Every warning any program in the corpus may suppress in source, for a diagnostic that has to name
+/// the whole set rather than one program's entitlement.
+pub fn sanctioned_source_suppression_warnings() -> Vec<&'static str> {
+    let mut warnings: Vec<&'static str> = Vec::new();
+    for (_, _, warning) in UB_AUDIT_SOURCE_SUPPRESSIONS_SANCTIONED {
+        if !warnings.contains(warning) {
+            warnings.push(warning);
+        }
+    }
+    warnings
+}
+
 /// One of the four target architectures bcc supports.
 ///
 /// The triple spellings, widths and ELF classes below come from the repository's own
@@ -1030,6 +1091,90 @@ impl std::str::FromStr for DivergenceClass {
                 ),
             )
         })
+    }
+}
+
+/// The token a narrowing marker writes in place of a divergence class.
+pub const COMPARISON_EXCLUDED_LABEL: &str = "comparison_excluded";
+
+/// What an expected-divergence marker says it excuses — the `class` field of a marker block.
+///
+/// Two shapes, and the difference between them is whether a comparison was ever **attempted**:
+///
+/// - [`MarkerClass::Observed`] names one of the six [`DivergenceClass`] shapes. The record leaves
+///   the scoped oracle **enabled**, the comparison is performed, and the marker reclassifies a
+///   divergence of that shape as expected. Such a marker can reach `XFAIL` when the divergence
+///   occurs and `XPASS` when it has disappeared.
+/// - [`MarkerClass::ComparisonExcluded`] names no shape at all. The record **disables** the scoped
+///   oracle for a recorded reason, so nothing is compared on that arm and no shape could be seen.
+///
+/// # Why the second shape has to exist rather than borrowing one of the first six
+///
+/// A narrowing marker used to be written with an observational class — `stdout_mismatch` was the
+/// natural choice for a value comparison switched off — and that spelling asserted something untrue
+/// in the one field a report row quotes: that two completed runs disagreed on bytes. Nothing ran.
+/// The register's own §3.3 already describes such a marker as *dormant by construction*, explaining
+/// **why a comparison is not made** rather than what a comparison saw; this type gives that reading
+/// a name in the grammar, so a coverage restriction can no longer be spelled as an observation.
+///
+/// The **six divergence classes stay six**. This is deliberately not a seventh member of
+/// [`DivergenceClass`]: `classify.rs` maps observed shapes to verdicts and must never be able to
+/// produce this value, so it cannot be one of the shapes that module enumerates. Because
+/// [`MarkerClass::ComparisonExcluded`] is not `Observed(_)`, no equality test against an observed
+/// class can ever match it — the type system, rather than a convention, is what stops a narrowing
+/// marker from excusing a divergence that a real comparison found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MarkerClass {
+    /// The marker documents an observable divergence of this class on an arm the record compares.
+    Observed(DivergenceClass),
+    /// The marker documents a comparison the record deliberately does not make.
+    ComparisonExcluded,
+}
+
+impl MarkerClass {
+    /// The token an expectation record and the register both write for this class.
+    pub fn label(self) -> &'static str {
+        match self {
+            MarkerClass::Observed(class) => class.label(),
+            MarkerClass::ComparisonExcluded => COMPARISON_EXCLUDED_LABEL,
+        }
+    }
+
+    /// Parse a marker class from its token, ignoring surrounding whitespace and ASCII case.
+    ///
+    /// Case is ignored for the same reason [`DivergenceClass::parse`] ignores it: a marker written
+    /// in a different case should be understood rather than turned into an unexplained failure.
+    pub fn parse(text: &str) -> Option<MarkerClass> {
+        let wanted = text.trim();
+        if wanted.eq_ignore_ascii_case(COMPARISON_EXCLUDED_LABEL) {
+            return Some(MarkerClass::ComparisonExcluded);
+        }
+        DivergenceClass::parse(wanted).map(MarkerClass::Observed)
+    }
+
+    /// The observable class this marker claims, or `None` for a coverage restriction.
+    ///
+    /// The `None` case is what makes a narrowing marker unfalsifiable **by construction** rather
+    /// than by accident: there is no divergence class it equals, so no observed divergence can be
+    /// excused by it, and no absent divergence can retire it through `XPASS`.
+    pub fn observed(self) -> Option<DivergenceClass> {
+        match self {
+            MarkerClass::Observed(class) => Some(class),
+            MarkerClass::ComparisonExcluded => None,
+        }
+    }
+
+    /// Every legal `class` token, for a diagnostic that has to list the accepted values.
+    pub fn accepted_labels() -> String {
+        let mut labels: Vec<&str> = DivergenceClass::ALL.map(DivergenceClass::label).to_vec();
+        labels.push(COMPARISON_EXCLUDED_LABEL);
+        comma_separated(&labels)
+    }
+}
+
+impl fmt::Display for MarkerClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
     }
 }
 
@@ -1844,6 +1989,144 @@ impl fmt::Display for Cell {
     }
 }
 
+/// One side of an observation, in fields rather than in prose.
+///
+/// # Why a typed record rather than a sentence
+///
+/// Everything a reader needs in order to act on a row without re-running it — who produced the
+/// artifact, the exact command that produced or ran it, how the process ended, and where the
+/// captured streams were written — used to reach a report only inside [`Outcome::detail`], a single
+/// free-text string. That worked for a divergence, because a diverging comparison builds a full
+/// account, and failed silently for an agreement, because an agreement built a shorter one. A
+/// consumer therefore could not rely on any particular fact being present: it had to parse prose,
+/// and the prose differed by verdict.
+///
+/// Fields fix that at the source. Every comparison, agreeing or not, fills the same shape, so the
+/// machine-readable report can carry a `subject_command` column that is populated on a PASS row for
+/// the same reason it is populated on a FAIL row, and a documentation claim about what a row
+/// contains becomes a property of the type rather than a hope about the sentence.
+///
+/// Every field is already report-safe: values are passed through [`sanitize_text_for_report`],
+/// [`redact_secrets`] and [`symbolize_roots`] on construction, at the one place a record comes into
+/// existence, for the same reasons [`Outcome::new`] does it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct SideRecord {
+    role: String,
+    command: String,
+    termination: String,
+    captures: String,
+}
+
+impl SideRecord {
+    /// Record one side of an observation.
+    ///
+    /// `role` names the producer — `bcc`, the reference compiler, a target's backend, the recorded
+    /// golden record. `command` is the exact command line, and is empty only for a side that ran no
+    /// process at all, which is true of exactly one thing in this suite: the golden record, whose
+    /// bytes are committed rather than produced. `termination` is the structured ending, rendered by
+    /// the caller that owns the type it came from. `captures` names where the raw streams were
+    /// persisted, so a row can point at evidence instead of quoting it.
+    pub fn new(
+        role: impl Into<String>,
+        command: impl Into<String>,
+        termination: impl Into<String>,
+        captures: impl Into<String>,
+    ) -> SideRecord {
+        let clean =
+            |value: String| sanitize_text_for_report(&symbolize_roots(&redact_secrets(&value)));
+        SideRecord {
+            role: clean(role.into()),
+            command: clean(command.into()),
+            termination: clean(termination.into()),
+            captures: clean(captures.into()),
+        }
+    }
+
+    /// Who produced the artifact this side is about.
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+
+    /// The exact command line, or the empty string for a side that ran no process.
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    /// How the process ended, including its raw wait status where there was one.
+    pub fn termination(&self) -> &str {
+        &self.termination
+    }
+
+    /// Where the raw captured streams were persisted, or the empty string when none were.
+    pub fn captures(&self) -> &str {
+        &self.captures
+    }
+}
+
+/// The structured provenance of one outcome: which executions it was reached from.
+///
+/// Carried by [`Outcome`] beside its free-text detail rather than instead of it. The two answer
+/// different questions and neither replaces the other: the detail is what a human reads, laid out
+/// and explained, while this is what a machine reads, in fixed fields that are present on every
+/// verdict. `report.rs` renders these into named columns of the per-area machine-readable report, so
+/// an aggregator can select on a command line or a termination without pattern-matching English.
+///
+/// `subject` is the side under judgement and `authority` is what it was judged against; for the
+/// golden oracle the authority is the committed record, and for the cross-backend oracle it is the
+/// baseline backend. Both are optional because two situations legitimately have only one side: a
+/// build that produced nothing has a subject and no authority, and an oracle that could not be
+/// attempted has neither.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct Provenance {
+    subject: Option<SideRecord>,
+    authority: Option<SideRecord>,
+    first_difference: String,
+}
+
+impl Provenance {
+    /// A provenance carrying only the side under judgement — a build that produced no artifact, so
+    /// there was nothing to compare it against.
+    pub fn of_subject(subject: SideRecord) -> Provenance {
+        Provenance {
+            subject: Some(subject),
+            authority: None,
+            first_difference: String::new(),
+        }
+    }
+
+    /// A provenance carrying both sides of a comparison.
+    pub fn of_pair(subject: SideRecord, authority: SideRecord) -> Provenance {
+        Provenance {
+            subject: Some(subject),
+            authority: Some(authority),
+            first_difference: String::new(),
+        }
+    }
+
+    /// Attach where the two sides first differ. Empty for an agreement, which is the whole point of
+    /// recording it in a field: "no first difference" is then a value rather than a missing sentence.
+    pub fn with_first_difference(mut self, located: impl Into<String>) -> Provenance {
+        self.first_difference =
+            sanitize_text_for_report(&symbolize_roots(&redact_secrets(&located.into())));
+        self
+    }
+
+    /// The side under judgement.
+    pub fn subject(&self) -> Option<&SideRecord> {
+        self.subject.as_ref()
+    }
+
+    /// What the subject was judged against.
+    pub fn authority(&self) -> Option<&SideRecord> {
+        self.authority.as_ref()
+    }
+
+    /// Where the two sides first differ, or the empty string when they agree.
+    pub fn first_difference(&self) -> &str {
+        &self.first_difference
+    }
+}
+
 /// One accumulated verdict: what a single oracle concluded about a single cell.
 ///
 /// Outcomes are accumulated rather than asserted one at a time, because each area test
@@ -1858,6 +2141,7 @@ pub struct Outcome {
     class: Option<DivergenceClass>,
     marker_id: Option<String>,
     detail: String,
+    provenance: Option<Provenance>,
 }
 
 impl Outcome {
@@ -1936,7 +2220,23 @@ impl Outcome {
             class,
             marker_id: marker_id.map(|marker| sanitize_text_for_report(&marker)),
             detail: sanitize_text_for_report(&symbolize_roots(&redact_secrets(&chosen))),
+            provenance: None,
         }
+    }
+
+    /// Attach the structured provenance of the observation this outcome was reached from.
+    ///
+    /// Separate from [`Outcome::new`] so that every existing construction site keeps compiling and
+    /// keeps meaning what it meant: an outcome with no provenance is one whose observation had no
+    /// execution behind it — an absent tool, an unreadable corpus entry — and that is a fact worth
+    /// being able to state rather than an omission to be filled in with blanks.
+    ///
+    /// Consuming and returning `self` rather than taking `&mut self` keeps the attachment part of the
+    /// expression that builds the outcome, so a caller cannot construct one, forget to attach, and
+    /// still have something that looks finished.
+    pub fn with_provenance(mut self, provenance: Provenance) -> Outcome {
+        self.provenance = Some(provenance);
+        self
     }
 
     /// The cell this outcome is about.
@@ -1968,13 +2268,35 @@ impl Outcome {
         self.marker_id.as_deref()
     }
 
-    /// Everything a reader needs to understand the outcome without re-running it: the first
-    /// divergent line and byte offset, both exit statuses, and the command lines involved.
+    /// The prose account of this outcome: what was observed and what it means, laid out for a
+    /// human to read.
+    ///
+    /// **What this string contains varies by verdict, deliberately, and a consumer must not depend
+    /// on any particular fact being in it.** A divergence carries the located first difference, both
+    /// terminations and both command lines, because that is what a reader acting on a failure needs.
+    /// An agreement carries a shorter confirmation, because the interesting thing about a PASS is
+    /// that there is nothing to act on. That asymmetry was previously documented here as a guarantee
+    /// — "the first divergent line and byte offset, both exit statuses, and the command lines" — and
+    /// it was not one: the PASS paths never satisfied it, so a consumer written against the promise
+    /// would have found the fields missing on exactly the rows that make up most of a run.
+    ///
+    /// The facts a consumer may rely on are in [`Outcome::provenance`] instead, in fields, present on
+    /// every verdict that had an execution behind it. This remains the human half and is what the
+    /// verdict table and the failure message print.
     ///
     /// Already sanitized for single-line rendering by [`Outcome::new`], so this is safe to
     /// write into a report row, a summary column or a diagnostic without further treatment.
     pub fn detail(&self) -> &str {
         &self.detail
+    }
+
+    /// The structured provenance of the observation, when there was an execution behind it.
+    ///
+    /// `None` for an outcome reached without running anything — an absent tool, an unreadable corpus
+    /// entry, an internal inconsistency — which is a distinction a report should show rather than
+    /// paper over with empty columns that look like measurements.
+    pub fn provenance(&self) -> Option<&Provenance> {
+        self.provenance.as_ref()
     }
 }
 
@@ -3030,6 +3352,174 @@ pub fn publish_bytes_no_follow(context: &str, path: &Path, bytes: &[u8]) -> Harn
     stage_bytes_no_follow(context, path, bytes)?.commit()
 }
 
+/// Publish two artifacts rendered from one snapshot so that a reader never keeps a mismatched pair.
+///
+/// # What two adjacent renames do and do not give
+///
+/// Staging both halves first — see [`StagedPublication`] — moves every fallible *write* ahead of
+/// either destination being claimed, so the exposure shrinks to the gap between two renames. What it
+/// does **not** do on its own is bound the damage when the *second* rename fails: the first is already
+/// committed by then, so the directory keeps a new document beside its stale sibling, indefinitely and
+/// with nothing in either file saying they do not belong together. A run that reported that failure
+/// and stopped would leave exactly the artifact `if: always()` uploads from continuous integration.
+///
+/// This function closes that. The first destination's current bytes are snapshotted before anything is
+/// claimed, and if the second commit fails the first is **put back** — restored to those bytes, or
+/// removed outright when the destination held nothing. Either way the directory ends in one of the two
+/// coherent states it was allowed to be in: both halves from this run, or both halves from whatever
+/// stood there before. The transient window between the two renames remains, and is documented on
+/// [`StagedPublication`] rather than claimed away; what is removed is the *permanent* mismatch.
+///
+/// The rollback is itself fallible, so its outcome is reported inside the failure rather than
+/// swallowed: a maintainer needs to know whether the directory was restored or is now mismatched, and
+/// the two call for different actions.
+///
+/// # Which mechanism actually catches which failure, measured rather than assumed
+///
+/// The three classes are worth separating, because the rollback is not what handles the common one:
+///
+/// - **A destination that cannot be replaced** — a directory, a link, a multiply linked file — is
+///   refused by [`stage_bytes_no_follow`] *before either half is claimed*, so no mismatch is even
+///   reachable. This was verified by planting a non-empty directory at the second destination: the
+///   call failed at staging, and the pair already on disk was left untouched. This is the class an
+///   operator is most likely to create, and the rollback never sees it.
+/// - **A rename that fails** — a genuine mid-operation I/O failure, or the parent directory being
+///   swapped between staging and committing — is the residual class, and it is what the snapshot and
+///   the put-back exist for.
+/// - **A rename that succeeds and is then refused** by its own post-rename verification leaves the
+///   intended bytes in place. Restoring the first half here would *create* the mismatch, so the first
+///   half is deliberately left alone and the failure says so. That distinction is drawn from what the
+///   destination holds rather than from the error, because the error cannot tell the two apart.
+///
+/// # Errors
+///
+/// Returns an explanatory failure, attributed to `context`, when either half cannot be staged or
+/// committed. When the second commit is what failed, the message additionally states whether the first
+/// half was successfully put back.
+pub fn publish_pair_no_follow(
+    context: &str,
+    first_path: &Path,
+    first_bytes: &[u8],
+    second_path: &Path,
+    second_bytes: &[u8],
+) -> HarnessResult<()> {
+    // Taken before either half is staged, so the bytes recorded are the ones a reader could have been
+    // holding. A destination that is absent, or that is anything other than a lone regular file,
+    // snapshots as nothing: the first is the ordinary case, since the report root is emptied at the
+    // start of every run, and the second is refused a moment later by staging itself, which will not
+    // publish over a link or a multiply linked file.
+    let previous = snapshot_regular_file(first_path);
+
+    // Both staged before either is claimed: if the second staging fails, the first is discarded by its
+    // own destructor and neither destination has been touched.
+    let staged_first = stage_bytes_no_follow(context, first_path, first_bytes)?;
+    let staged_second = stage_bytes_no_follow(context, second_path, second_bytes)?;
+
+    staged_first.commit()?;
+    match staged_second.commit() {
+        Ok(()) => Ok(()),
+        // A failed commit covers two states that call for opposite actions, and conflating them
+        // would manufacture the very mismatch this function exists to prevent: the rename may never
+        // have happened, or it may have happened and then been refused by its own post-rename
+        // verification. In the second state the pair on disk is already coherent — both halves from
+        // this run — and putting the first half back to an older generation would *break* it. The
+        // difference is observable rather than inferable, so the destination is asked what it holds.
+        Err(error) if second_holds_exactly(second_path, second_bytes) => Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{}. Both halves of the pair were nonetheless written, so {} and {} do describe this \
+                 run and the first half has deliberately NOT been put back — doing so would have \
+                 replaced a coherent pair with a mismatched one. The publication is still refused: \
+                 verify both halves and re-run the affected area",
+                error.cause(),
+                shown_path(first_path),
+                shown_path(second_path)
+            ),
+        )),
+        Err(error) => Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{}. {} was published but its sibling {} was not, so the pair would describe two \
+                 different runs; {}",
+                error.cause(),
+                shown_path(first_path),
+                shown_path(second_path),
+                restore_first_half(context, first_path, previous.as_deref())
+            ),
+        )),
+    }
+}
+
+/// Whether the second destination already holds exactly the bytes this publication meant to put there.
+///
+/// The question a failed second commit cannot answer on its own, asked of the filesystem instead of
+/// guessed: a rename that was refused *after* it succeeded leaves the intended bytes in place, and one
+/// that never happened does not. Reusing [`snapshot_regular_file`] keeps the same
+/// lone-regular-file discipline the snapshot above applies, so a destination that became a link or
+/// acquired a second link answers "no" and is treated as unpublished — the conservative direction,
+/// because it leads to the branch that reports the state rather than the one that assumes coherence.
+fn second_holds_exactly(path: &Path, bytes: &[u8]) -> bool {
+    snapshot_regular_file(path).is_some_and(|held| held == bytes)
+}
+
+/// Put the first half of a pair back after the second half could not be published.
+///
+/// Returns the sentence that states what happened, because the caller reports it as part of the
+/// failure: "restored" and "could not be restored" call for completely different actions, and a
+/// rollback whose own outcome went unstated would be a second silent failure inside the first.
+fn restore_first_half(context: &str, path: &Path, previous: Option<&[u8]>) -> String {
+    match previous {
+        // Something stood here before this run claimed it. Put those exact bytes back, through the
+        // same no-follow publisher, so the directory holds the coherent older pair rather than one
+        // new half beside one old one.
+        Some(bytes) => match publish_bytes_no_follow(context, path, bytes) {
+            Ok(()) => format!(
+                "{} has been restored to the bytes it held before this publication, so the pair on \
+                 disk is coherent again. Re-run the affected area to replace it",
+                shown_path(path)
+            ),
+            Err(restore) => format!(
+                "and {} could NOT be restored to its previous bytes ({}), so the pair on disk is \
+                 now mismatched: do not aggregate totals from it, and re-run the affected area to \
+                 replace both halves",
+                shown_path(path),
+                restore.cause()
+            ),
+        },
+        // Nothing stood here — the ordinary case, since the report root is emptied at the start of
+        // every run. Removing the half just published leaves no pair at all, which is honest: an
+        // absent report is recognised as absent, where a lone half is not.
+        None => match fs::remove_file(path) {
+            Ok(()) => format!(
+                "{} held nothing before this publication and the half just published has been \
+                 removed, so no mismatched pair remains. Re-run the affected area to replace it",
+                shown_path(path)
+            ),
+            Err(restore) => format!(
+                "and the half just published at {} could NOT be removed again ({}), so a lone \
+                 document remains with no sibling: do not aggregate totals from it, and re-run the \
+                 affected area to replace both halves",
+                shown_path(path),
+                restore
+            ),
+        },
+    }
+}
+
+/// The bytes a destination currently holds, or `None` when it holds nothing this run may put back.
+///
+/// `None` covers three cases and deliberately conflates them, because the caller does the same thing
+/// in all three: the entry does not exist, it is not a lone regular file, or it could not be read.
+/// Nothing is put back in any of them, and the two that are not simply "absent" are refused
+/// independently by [`stage_bytes_no_follow`] before either destination is claimed.
+fn snapshot_regular_file(path: &Path) -> Option<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || hard_link_count(&metadata).is_some_and(|links| links != 1) {
+        return None;
+    }
+    fs::read(path).ok()
+}
+
 /// A publication whose bytes are on disk but whose destination has not been claimed yet.
 ///
 /// # Why staging is separable from committing
@@ -3046,8 +3536,19 @@ pub fn publish_bytes_no_follow(context: &str, path: &Path, bytes: &[u8]) -> Harn
 /// with no I/O between them. Two adjacent renames are not one atomic operation and this type does not
 /// pretend otherwise — a directory-level swap would be needed for that, and it is not available
 /// portably from `std` — but it reduces the exposure from "however long it takes to render and write a
-/// second document" to the gap between two syscalls, and it removes every failure mode that could
-/// leave the pair *permanently* mismatched.
+/// second document" to the gap between two syscalls.
+///
+/// # What staging alone does not give, and where the rest lives
+///
+/// It used to be claimed here that staging "removes every failure mode that could leave the pair
+/// permanently mismatched." That was wrong, and wrong in the direction that matters: staging bounds the
+/// *transient* window, but if the **second** commit fails the first is already claimed, and the
+/// directory then keeps a new document beside a stale sibling indefinitely — precisely the artifact a
+/// continuous-integration upload that runs regardless of outcome would publish. Committing is
+/// deliberately left as the fallible step it is; the guarantee about the *pair* is made by
+/// [`publish_pair_no_follow`], which snapshots the first destination before claiming it and puts it
+/// back if the second half cannot be published. Use that for any pair; use this type directly only
+/// when the caller owns the recovery itself.
 ///
 /// # Cleanup is automatic
 ///
@@ -5782,6 +6283,350 @@ pub fn own_process_group(command: &mut Command) {
 #[cfg(not(unix))]
 pub fn own_process_group(_command: &mut Command) {}
 
+/// How long a child this suite has killed is given to be reaped before the wait is abandoned.
+///
+/// Every cleanup path in the suite reaps through [`reap_bounded`], and this is the bound it applies.
+/// Generous against any honest duration — an uncatchable signal has already been delivered, so the
+/// kernel's only remaining work is to tear the process down and post its status — and short against
+/// the run it must not stall.
+///
+/// The figure matters because cleanup is the mechanism a per-cell budget *depends on*: the watchdog
+/// fires, terminates the child, and reaps it. A cleanup that can block for ever therefore turns the
+/// one bound that limits a hung compiler into a hang of its own, with nothing outside it left to
+/// catch it. It is the same five seconds [`GROUP_SIGNAL_DEADLINE`] allows a `kill` invocation:
+/// the two bound different phases of one cleanup, and sharing the figure keeps that cleanup's whole
+/// worst case a small multiple of a single number a maintainer can hold in mind.
+pub const REAP_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How often a killed child is polled while it is being reaped.
+///
+/// A poll rather than a blocking wait because the standard library offers no timed wait on a child,
+/// and short enough that the ordinary case — a child that is already gone by the first poll — adds
+/// no measurable delay to a cleanup performed after thousands of invocations.
+pub const REAP_POLL: Duration = Duration::from_millis(20);
+
+/// What a bounded reap established about one child.
+///
+/// Returned rather than discarded because the two answers lead to opposite responses. A reaped child
+/// is the ordinary ending and needs no mention. A child that could not be reaped is a process — or a
+/// zombie — this run left behind, and at the scale of the full matrix one per cell accumulates into
+/// thousands, so it is recorded as a breach rather than absorbed into a discarded result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReapOutcome {
+    /// The child's status was observed, so nothing of it is left running or unreaped.
+    ///
+    /// Carries the status, because a caller that terminated a child deliberately still has to
+    /// record how it ended: the raw wait status is what lets a comparison tell a signal death from
+    /// a numerically equal ordinary exit.
+    Reaped(ExitStatus),
+    /// The child could not be reaped within [`REAP_DEADLINE`], or its status became unobservable.
+    ///
+    /// Carries a sentence for the caller's notes, already phrased for a report.
+    Unreaped(String),
+}
+
+impl ReapOutcome {
+    /// The sentence to record, or [`None`] when the reap succeeded and there is nothing to say.
+    pub fn note(&self) -> Option<&str> {
+        match self {
+            ReapOutcome::Reaped(_) => None,
+            ReapOutcome::Unreaped(detail) => Some(detail.as_str()),
+        }
+    }
+}
+
+/// Kill one child and reap it within [`REAP_DEADLINE`], never blocking without end.
+///
+/// The single cleanup routine every path in this suite that abandons a child goes through — the
+/// compile watchdog, the execution watchdog, the pre-flight probes and this module's own `kill`
+/// helper. One routine rather than five copies, because the property being established is subtle
+/// enough to get wrong once: *the child is gone and its status has been collected*, proved rather
+/// than assumed, and proved inside a bound.
+///
+/// # Why the plain `Child::wait` it replaces was not good enough
+///
+/// [`std::process::Child::wait`] blocks until the child terminates, with no deadline. After an
+/// uncatchable kill that is *almost* always immediate — but "almost always" is the wrong standard
+/// for the outermost bound in a run of thousands of cells. A child stopped by a job-control signal,
+/// one wedged in an uninterruptible kernel wait, or one whose status is being contended for on a
+/// loaded machine can all delay it, and a delay here is unbounded by construction: this cleanup *is*
+/// what bounds the cell, so nothing outside it would ever fire.
+///
+/// A kill that fails is ordinarily not a failure at all — it is what a child that has already exited
+/// reports — so the kill's own result is not the postcondition. The reap is. That is why the failure
+/// of the kill is deliberately not returned and the outcome of the wait is.
+///
+/// # Errors
+///
+/// None: this returns a verdict rather than failing. A child that could not be reaped is reported
+/// through [`ReapOutcome::Unreaped`], and callers additionally record a run-level breach through
+/// [`record_infrastructure_breach`] so that later cells are refused rather than allowed to add to
+/// the leak.
+pub fn reap_bounded(child: &mut Child) -> ReapOutcome {
+    let _ = child.kill();
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return ReapOutcome::Reaped(status),
+            // Still running. The deadline is tested before sleeping, so a child that has already
+            // gone by the second poll is not made to wait for one.
+            Ok(None) => {}
+            Err(error) => {
+                let reason: String = error.to_string();
+                return ReapOutcome::Unreaped(format!(
+                    "a child this run had terminated could not be waited for at all: {}; its status \
+                     was never collected, so it may remain as a zombie",
+                    sanitize_text_for_report(&reason)
+                ));
+            }
+        }
+        if started.elapsed() >= REAP_DEADLINE {
+            return ReapOutcome::Unreaped(format!(
+                "a child this run had terminated with an uncatchable signal was still not reapable \
+                 {} ms later, so the wait was abandoned rather than allowed to block the run \
+                 without end; the process may still be present, and it is reported here instead of \
+                 being absorbed into a discarded result",
+                REAP_DEADLINE.as_millis()
+            ));
+        }
+        thread::sleep(REAP_POLL);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The run-level infrastructure breach
+//
+// Two of this suite's guarantees are about *resources*, not about verdicts: every process it
+// launches has ended, and every byte it retains is inside a stated ceiling. Both are enforced per
+// cell, and both can fail per cell — a descendant that outlives an uncatchable kill, a child that
+// cannot be reaped, a capture reader that cannot be proved finished, an entry that had to be pruned
+// and could not be deleted.
+//
+// A per-cell failure of either kind must not stay per-cell, and that is the whole reason this latch
+// exists. The matrix is 1,296 cells across fourteen concurrent workers. A leak that recurs once per
+// cell is a leak multiplied by 1,296, and a retention ceiling that has silently stopped holding is a
+// build volume filling behind a report that claims otherwise. Continuing to schedule cells after
+// either has happened converts one recorded fault into thousands of unrecorded ones.
+//
+// So the first such failure latches, once, for the life of the process, and every subsequent attempt
+// to spawn a child refuses with the recorded reason. The latch is deliberately:
+//
+// - **Write-once.** A `OnceLock` keeps the FIRST breach, which is the one that explains the rest;
+//   later ones would only bury it. It also cannot be poisoned by a panicking test, which a mutex
+//   could — and losing this record because an unrelated area failed is exactly the silence it
+//   exists to remove.
+// - **Fail-closed, and narrow about what counts.** A group that still holds a member after an
+//   uncatchable kill, a child that could not be reaped, a reader that could not be proved finished
+//   and an unenforceable retention ceiling all latch it, because each is a resource this run cannot
+//   account for. The *absence of a group-signalling utility* deliberately does not: that is a
+//   disclosed condition of a reduced machine, already stated on every outcome it affects and in the
+//   run summary, and failing every run on such a machine would refuse a whole matrix over a
+//   capability gap rather than over a leak.
+// ---------------------------------------------------------------------------------------------
+
+/// The first resource breach this run could not account for, if any.
+fn infrastructure_breach_latch() -> &'static OnceLock<String> {
+    static BREACH: OnceLock<String> = OnceLock::new();
+    &BREACH
+}
+
+/// Record that this run can no longer account for a process it launched or a byte it retained.
+///
+/// Idempotent, and keeps the first answer: a breach is latched once and never overwritten, so the
+/// reason a run stopped scheduling cells is the reason it first stopped being able to bound itself.
+/// Callers pass a sentence already safe to render in a report.
+pub fn record_infrastructure_breach(detail: String) {
+    let _ = infrastructure_breach_latch().set(detail);
+}
+
+/// The recorded breach, or [`None`] while this run can still account for everything it started.
+///
+/// Consulted immediately before every child is spawned. A caller that finds it set refuses to
+/// launch and reports the recorded reason, which is what keeps one unaccounted process or one
+/// unenforceable ceiling from being multiplied by the cells that would otherwise follow it.
+pub fn infrastructure_breach() -> Option<&'static str> {
+    infrastructure_breach_latch().get().map(String::as_str)
+}
+
+/// The sentence a module reports when it declines to launch because of a latched breach.
+///
+/// Rendered here rather than at each call site so that the compile path, the execution path and the
+/// pre-flight probes all give the same account of the same condition — and so that the account names
+/// the original fault rather than the cell that happened to be next.
+pub fn infrastructure_breach_refusal(breach: &str) -> String {
+    format!(
+        "this run can no longer account for the resources it has already used, so nothing further \
+         was launched: {breach}. Cells are refused from this point rather than continued, because \
+         the fault recurs per cell — the matrix is thousands of cells across concurrent workers, so \
+         continuing would multiply one recorded fault into many unrecorded ones and would leave \
+         every later verdict resting on a process tree and a build volume this run cannot bound. \
+         Investigate the recorded fault on the machine that produced it; the run is deliberately \
+         reported as failing rather than completing over cells it could not bound"
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
+// Bounded measurement of a directory tree
+//
+// Two places in this suite need to know how large something on disk is: the retention accounting,
+// which charges a kept workspace against the run's ceiling, and the compile watchdog, which stops a
+// driver that is filling the build volume while it still has budget left. Both were asking the
+// question of a *tree*, and a tree is a hostile shape to measure naively.
+//
+// Recursion is the first hazard: depth is bounded by nothing but the filesystem, so a deep tree
+// exhausts the stack rather than returning an answer. Breadth is the second: a directory holding a
+// million entries takes an unbounded amount of time to walk, and the walk runs while a cell is being
+// concluded. An unreadable entry is the third, and the subtlest — treating "I could not measure it"
+// as "it is zero bytes" makes every ceiling above it unenforceable while the accounting continues to
+// claim it holds.
+//
+// This measurement therefore iterates over an explicit stack, stops at stated ceilings on depth,
+// entry count and elapsed time, and reports what it could not measure instead of scoring it zero.
+// The caller decides what an incomplete measurement means, and both callers decide the same thing:
+// fail closed.
+// ---------------------------------------------------------------------------------------------
+
+/// The ceilings one bounded tree measurement observes.
+///
+/// A record rather than three arguments, because the three are one policy and a caller that could
+/// pass them separately could pass two of them and forget the third.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeLimits {
+    /// How many directory levels below the root are entered. Zero measures the root itself only.
+    pub depth_max: usize,
+    /// How many entries are visited in total before the walk stops.
+    pub entries_max: u64,
+    /// How long the walk may take before it stops.
+    pub elapsed_max: Duration,
+}
+
+/// What one bounded tree measurement established.
+///
+/// The three facts travel together deliberately. `bytes` alone cannot be acted on: a caller has to
+/// know whether the walk finished, because a figure from a walk that stopped at a ceiling is a lower
+/// bound rather than a size, and one taken over entries that could not be measured is a lower bound
+/// too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeMeasurement {
+    /// Bytes occupied by every regular file visited. A symbolic link contributes nothing.
+    pub bytes: u64,
+    /// Entries visited, the root included.
+    pub entries: u64,
+    /// Why the walk stopped early, or [`None`] when it visited everything.
+    pub truncated: Option<String>,
+    /// Entries whose size could not be determined at all.
+    pub unmeasured: u64,
+}
+
+impl TreeMeasurement {
+    /// Whether every entry was visited and every visited entry was measured.
+    ///
+    /// The one question a caller enforcing a ceiling must ask before trusting [`Self::bytes`]. Both
+    /// callers in this suite fail closed on a `false`, for the reason the section note above gives:
+    /// a ceiling enforced against a lower bound is not enforced.
+    pub fn complete(&self) -> bool {
+        self.truncated.is_none() && self.unmeasured == 0
+    }
+
+    /// Why this measurement cannot be relied upon, in a sentence, or [`None`] when it can.
+    pub fn shortfall(&self) -> Option<String> {
+        if self.complete() {
+            return None;
+        }
+        let mut reasons: Vec<String> = Vec::new();
+        if let Some(truncated) = self.truncated.as_deref() {
+            reasons.push(String::from(truncated));
+        }
+        if self.unmeasured > 0 {
+            reasons.push(format!(
+                "{} entr(y/ies) could not be measured at all, so the {} byte(s) counted are a lower \
+                 bound rather than a size",
+                self.unmeasured, self.bytes
+            ));
+        }
+        Some(reasons.join("; "))
+    }
+}
+
+/// Measure the tree at `root` without recursion and without exceeding `limits`.
+///
+/// A symbolic link is counted as nothing and is never followed, at the root or anywhere below it: its
+/// target is not this tree's to account for, and following it is the traversal every other guard in
+/// this suite refuses. A regular file contributes its length; a directory contributes its children.
+///
+/// Never fails. An unreadable directory, an entry whose metadata cannot be read and a walk that hit
+/// a ceiling are all *reported* on the measurement rather than raised, because this runs while a cell
+/// is being concluded or while a child is being watched, and a measurement problem must not become
+/// the verdict.
+pub fn measure_tree(root: &Path, limits: TreeLimits) -> TreeMeasurement {
+    let started = Instant::now();
+    let mut bytes = 0_u64;
+    let mut entries = 0_u64;
+    let mut unmeasured = 0_u64;
+    let mut truncated: Option<String> = None;
+    // Depth travels with each path, so the bound is on the tree rather than on the order the walk
+    // happens to take.
+    let mut pending: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    while let Some((path, depth)) = pending.pop() {
+        if entries >= limits.entries_max {
+            truncated = Some(format!(
+                "the walk stopped after visiting the {} entr(y/ies) one measurement may visit, so \
+                 the {bytes} byte(s) counted are a lower bound rather than a size",
+                limits.entries_max
+            ));
+            break;
+        }
+        if started.elapsed() >= limits.elapsed_max {
+            truncated = Some(format!(
+                "the walk stopped after {} ms, which is as long as one measurement may take, so the \
+                 {bytes} byte(s) counted are a lower bound rather than a size",
+                limits.elapsed_max.as_millis()
+            ));
+            break;
+        }
+        entries = entries.saturating_add(1);
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            unmeasured = unmeasured.saturating_add(1);
+            continue;
+        };
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            continue;
+        }
+        if !file_type.is_dir() {
+            bytes = bytes.saturating_add(metadata.len());
+            continue;
+        }
+        if depth >= limits.depth_max {
+            // The directory itself was visited and counted; what is inside it was not, and saying so
+            // is what stops a deep tree from being scored as an empty one.
+            truncated = Some(format!(
+                "the walk stopped at {} level(s) below the root, which is as deep as one \
+                 measurement may go, so the {bytes} byte(s) counted are a lower bound rather than a \
+                 size",
+                limits.depth_max
+            ));
+            continue;
+        }
+        let Ok(listing) = fs::read_dir(&path) else {
+            unmeasured = unmeasured.saturating_add(1);
+            continue;
+        };
+        for entry in listing {
+            match entry {
+                Ok(entry) => pending.push((entry.path(), depth + 1)),
+                Err(_) => unmeasured = unmeasured.saturating_add(1),
+            }
+        }
+    }
+    TreeMeasurement {
+        bytes,
+        entries,
+        truncated,
+        unmeasured,
+    }
+}
+
 /// What terminating a process group established.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupTermination {
@@ -5885,10 +6730,19 @@ pub fn terminate_process_group(pgid: u32, kill_tool: Option<&Path>) -> GroupTerm
     }
     match signal_group(tool, "-0", &group) {
         // Exit status zero from a bare existence check means at least one member is still there.
-        Some(true) => GroupTermination::Survivors(format!(
-            "process group {pgid} still had a member after an uncatchable kill, so a descendant of \
-             this child outlived it; it may still hold the capture pipes open"
-        )),
+        Some(true) => {
+            let detail = format!(
+                "process group {pgid} still had a member after an uncatchable kill, so a descendant \
+                 of this child outlived it; it may still hold the capture pipes open"
+            );
+            // Latched as well as reported. A descendant that survives an uncatchable signal is a
+            // process this run cannot account for, and the condition that produced it — a driver
+            // stage or an emulator guest that ignores its own termination — recurs on the next cell
+            // and the thousand after it. Reporting it on this outcome alone would leave the run to
+            // accumulate the rest silently, so the latch refuses the cells that would follow.
+            record_infrastructure_breach(detail.clone());
+            GroupTermination::Survivors(detail)
+        }
         _ => GroupTermination::Cleared,
     }
 }
@@ -5963,8 +6817,16 @@ fn unswept_reason(tool: &Path) -> String {
 /// On expiry the utility is itself killed and reaped, and the outcome is reported as "could not be
 /// run". That is accurate: an invocation that did not complete has established nothing about the
 /// group, and [`terminate_process_group`] turns it into an `Unsupervised` verdict, which states that
-/// a descendant may have survived rather than claiming a sweep that did not happen. The reap is
-/// bounded too, so a child that cannot be reaped leaves one zombie rather than a stalled run.
+/// a descendant may have survived rather than claiming a sweep that did not happen.
+///
+/// # Every exit routes through one bounded cleanup
+///
+/// There are two ways this stops without an answer — the wait failed, or the deadline arrived — and
+/// both leave a helper process of this run's own still running. Neither may simply return. Both go
+/// through [`abandon_signal_helper`], which kills and reaps inside [`REAP_DEADLINE`] and, when even
+/// that cannot prove the helper ended, records a run-level breach so the cells that would follow are
+/// refused rather than allowed to leave one more. That is the difference between a leak this run
+/// reports once and a leak it repeats several thousand times.
 fn signal_group(tool: &Path, signal: &str, target: &str) -> Option<bool> {
     let mut command = Command::new(tool);
     command.arg(signal).arg("--").arg(target);
@@ -5990,25 +6852,45 @@ fn signal_group(tool: &Path, signal: &str, target: &str) -> Option<bool> {
             // utility that has already exited by the time of the second poll is not made to wait.
             Ok(None) => {}
             // The child can no longer be waited for at all, so no answer about the group is
-            // obtainable from it.
-            Err(_) => return None,
+            // obtainable from it — and it is still this run's process, so it is cleaned up rather
+            // than returned from.
+            Err(error) => {
+                return abandon_signal_helper(
+                    &mut child,
+                    &format!(
+                        "could not be waited for at all ({})",
+                        sanitize_text_for_report(&error.to_string())
+                    ),
+                )
+            }
         }
         if started.elapsed() >= GROUP_SIGNAL_DEADLINE {
-            let _ = child.kill();
-            // Reaped rather than abandoned, so a cleanup that had to terminate its own helper does
-            // not accumulate a zombie for every cell it ran on. Bounded for the same reason the wait
-            // above is: this is the outermost bound in the suite, and nothing would catch it.
-            let killed_at = Instant::now();
-            while killed_at.elapsed() < GROUP_SIGNAL_DEADLINE {
-                match child.try_wait() {
-                    Ok(Some(_)) | Err(_) => break,
-                    Ok(None) => thread::sleep(GROUP_SIGNAL_POLL),
-                }
-            }
-            return None;
+            return abandon_signal_helper(
+                &mut child,
+                &format!(
+                    "had still not finished {} ms after it was launched",
+                    GROUP_SIGNAL_DEADLINE.as_millis()
+                ),
+            );
         }
         thread::sleep(GROUP_SIGNAL_POLL);
     }
+}
+
+/// Terminate and reap a `kill` helper whose answer can no longer be obtained, and report the loss.
+///
+/// The single exit for both of [`signal_group`]'s failure paths, which is what guarantees that a
+/// helper is never simply left behind: it is killed and reaped inside [`REAP_DEADLINE`], and a reap
+/// that could not be proved records a run-level breach rather than disappearing into a discarded
+/// result. The return is always [`None`], because an invocation that did not complete established
+/// nothing about the group — which is precisely what the caller must report.
+fn abandon_signal_helper(child: &mut Child, because: &str) -> Option<bool> {
+    if let ReapOutcome::Unreaped(detail) = reap_bounded(child) {
+        record_infrastructure_breach(format!(
+            "the `kill` helper this run launched to sweep a process group {because}, and then {detail}"
+        ));
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -10,14 +10,15 @@
  * The header therefore includes nothing and declares no libc function; in
  * particular it does not include <stdio.h>, which bcc does not ship - its bundled
  * set is the nine required freestanding headers plus a bonus stdatomic.h, ten files
- * in all (docs/project-guide.md line 212), and no standard I/O header is among them
- * - and which would fail under bcc while succeeding under the reference compiler.
- * This directory is not that bundled set: it is the fixture directory the probe
- * puts on the include search path, and it holds this file alone.  The payloads
- * are object-like macros rather than typed constants because a macro cannot provoke
- * an unused-constant diagnostic, and the guard is spelled with #ifndef rather than
- * #pragma once because a pragma that was accepted and ignored would leave the
- * header unguarded - either would be fatal under the -Werror audit gate.
+ * in all (docs/project-guide.md, "9 bundled freestanding headers"), and no standard
+ * I/O header is among them - and which would fail under bcc while succeeding under
+ * the reference compiler. This directory is not that bundled set: it is the fixture
+ * directory the probe puts on the include search path, and it holds this file
+ * alone.  The payloads are object-like macros rather than typed constants because a
+ * macro cannot provoke an unused-constant diagnostic, and the guard is spelled with
+ * #ifndef rather than #pragma once because a pragma that was accepted and ignored
+ * would leave the header unguarded - either would be fatal under the -Werror audit
+ * gate.
  */
 
 #ifndef BCC_CONFORMANCE_PROBE_HEADER_H

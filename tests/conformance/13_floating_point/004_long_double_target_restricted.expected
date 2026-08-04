@@ -70,13 +70,22 @@ gradual underflow anywhere. No division has a zero divisor. The conversions to a
 truncate 6.25, -6.25 and 12.5, so each integral part sits far inside its destination range on every
 target, which is what keeps a floating-to-integer conversion defined under C11 6.3.1.4p1.
 
-NO OBJECT REPRESENTATION IS INSPECTED. A 12-byte or 16-byte object of this type carries padding beyond
-its significant bytes, and reading it byte-wise would be both undefined behaviour and target-dependent,
-so no long double object is examined byte by byte, copied into an object of another type, or
-reinterpreted through overlapping storage or a pointer cast. No `LDBL_` characteristic macro is named
-anywhere in the program either -- not the significand width, the epsilon, the maximum or the exponent
-range -- and no header is included from which one could come, so nothing target-dependent about the
-type's own description can reach a comparison.
+NO OBJECT REPRESENTATION IS INSPECTED, AND THE REASON IS NOT THAT INSPECTING ONE WOULD BE UNDEFINED.
+Character-type access to an object representation is PERMITTED: C11 6.2.6.1p4 defines the object
+representation as an array of unsigned char, and 6.5p7 lets an lvalue of character type alias any
+object, so reading a long double byte by byte is well defined and this record does not claim
+otherwise. What such a read would not be is a portable oracle. A 12-byte or 16-byte object of this
+type carries padding beyond its significant bytes; those padding bytes take unspecified values that
+nothing in this program sets or controls, C11 6.2.6.1p6 makes the value of the padding in a structure
+unspecified for the same reason, and both the extent of the padding and the encoding of the
+significant bytes were measured to differ across the four targets. A byte image would therefore
+differ between two backends for reasons that say nothing about either compiler, which is exactly the
+kind of comparison this suite must not make. So the program inspects none of it: no long double
+object is examined byte by byte, copied into an object of another type, or reinterpreted through
+overlapping storage or a pointer cast, and no assertion anywhere depends on a padding byte. No
+`LDBL_` characteristic macro is named anywhere in the program either -- not the significand width,
+the epsilon, the maximum or the exponent range -- and no header is included from which one could
+come, so nothing target-dependent about the type's own description can reach a comparison.
 
 EVERY CONVERSION IS EXPLICIT, EVERY LITERAL CARRIES THE TYPE IT MEANS, AND EVERY ARGUMENT MATCHES THE
 CONVERSION SPECIFICATION THAT PRINTS IT. The three are one discipline, because a lapse in each is
@@ -187,15 +196,28 @@ authority of a documented exclusion that no identifier and no resolved basis sto
 format now refuses that state: a record that disables an oracle without a marker scoping it is
 rejected at parse time.
 
+THE MARKER'S CLASS IS `comparison_excluded`, AND THAT IS THE HALF OF THIS RECORD MOST RECENTLY
+CORRECTED. It used to read `stdout_mismatch`, which is one of the six classes a real comparison can
+produce, and writing it here asserted in the one field a report row quotes that two completed runs had
+disagreed on bytes. Nothing ran: the comparison this marker scopes is the one the record above
+switches off. Every automated check passed anyway, because a class is only ever matched against an
+observation and this arm produces none -- so the false statement sat in a machine-checked field that
+no machine could contradict. `comparison_excluded` is the class that says what is true, it is accepted
+only on an arm the record disables, and an observational class is now refused on such an arm and this
+one refused on an arm that is compared: the parser holds both directions, so the class and the oracle
+toggle can no longer drift apart. Keeping the identifier, the scope and the resolved basis unchanged
+is deliberate -- what needed fixing was the kind of thing the marker claimed, not its authority.
+
 WHAT THE MARKER CLAIMS, PRECISELY. Not that the four backends disagree today -- they do not; all
 twelve cells print these bytes, because every printed value was chosen to be exact in all three
-representations. What it claims is that a cross-backend VALUE comparison over this type could not be
-read as evidence about bcc even if they did disagree, because the four backends do not share one
-encoding: two of them hold x87 80-bit extended, in 16 bytes and in 12, and the other two hold IEEE
-binary128 in 16 -- three storage-and-format pairings over two distinct formats, each of which rounds
-at a different place. That is a statement about what the comparison would MEAN, which is why it stays
-correct if a later maintainer adds a value that does diverge -- and it is why the marker can never
-reach XPASS: nothing is compared on the arm it scopes, so no divergence can disappear from it.
+representations. Nor does it claim that any comparison saw anything: its class names no observation.
+What it claims is that a cross-backend VALUE comparison over this type could not be read as evidence
+about bcc even if they did disagree, because the four backends do not share one encoding: two of them
+hold x87 80-bit extended, in 16 bytes and in 12, and the other two hold IEEE binary128 in 16 -- three
+storage-and-format pairings over two distinct formats, each of which rounds at a different place. That
+is a statement about what the comparison would MEAN, which is why it stays correct if a later
+maintainer adds a value that does diverge -- and it is why the marker can never reach XPASS: nothing
+is compared on the arm it scopes, so no divergence can disappear from it.
 
 RETIREMENT. Re-enabling oracle (b) here means deleting the marker block, the register entry and the
 impl_defined_notes reason in one edit; narrowing any oracle without all three fails the run, which is
@@ -226,19 +248,23 @@ double_significand=1 1
 ld_at_least_double=1
 END
 expected_divergence.id       = XD-TYPE-LONGDOUBLE-001
-expected_divergence.class    = stdout_mismatch
+expected_divergence.class    = comparison_excluded
 expected_divergence.scope    = oracle_b; all targets; all opt levels
 expected_divergence.basis    = docs/technical-specifications.md, line 511, the type representation is specified with target-parametric sizes covering the floating types including long double
 expected_divergence.documented <<END
 Type representation with target-parametric sizes
 END
 expected_divergence.observed <<END
-The cross-backend value comparison is not attempted for this program: the record disables oracle (b).
-What the measurement shows, and what the exclusion rests on, is that sizeof(long double) is 16 on
-x86_64, 12 on i686, 16 on aarch64 and 16 on riscv64, with the two x86 targets carrying the x87 80-bit
-extended format inside that storage and the other two carrying IEEE binary128 -- three
-storage-and-format pairings over two distinct formats, whose significands are 64 bits against 113 and
-which therefore round at different places. A value difference between two backends over this type is
-therefore an implementation-defined difference of the kind the brief's carve-out names, not a defect
-in either.
+NO CROSS-BACKEND VALUE COMPARISON IS ATTEMPTED FOR THIS PROGRAM: the record above disables oracle (b),
+and this marker's class is comparison_excluded precisely so that this field describes no comparison
+result. What was observed is a measurement of the TYPE, made with the four pinned reference drivers:
+sizeof(long double) is 16 on x86_64, 12 on i686, 16 on aarch64 and 16 on riscv64, with the two x86
+targets carrying the x87 80-bit extended format inside that storage and the other two carrying IEEE
+binary128 -- three storage-and-format pairings over two distinct formats, whose significands are 64
+bits against 113 and which therefore round at different places. Measured beside it: the twelve cells
+this program does run print byte-identical stdout, because every value printed was chosen to be exact
+in all three representations, so the exclusion is about what a cross-backend value comparison over
+this type would MEAN rather than about any difference this program exhibits. A value difference
+between two backends over this type is an implementation-defined difference of the kind the brief's
+carve-out names, not a defect in either.
 END

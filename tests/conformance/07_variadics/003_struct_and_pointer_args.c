@@ -19,7 +19,8 @@
  * and it belongs to both compilers' freestanding header sets.  printf is
  * hand-declared, because bcc ships no stdio.h: its bundled set is the nine
  * required freestanding headers plus a bonus stdatomic.h, ten files in all
- * (docs/project-guide.md line 212), and no standard I/O header is among them.
+ * (docs/project-guide.md, "9 bundled freestanding headers"), and no standard I/O
+ * header is among them.
  */
 
 #include <stdarg.h>

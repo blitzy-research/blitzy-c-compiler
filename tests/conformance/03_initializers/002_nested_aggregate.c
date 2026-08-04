@@ -70,8 +70,8 @@
  * compared or converted; and nothing is shifted, cast, aliased or modified after its
  * initializer.  No header is named and printf is declared by hand,
  * because bcc ships no stdio.h -- its bundled set is the nine required freestanding
- * headers plus a bonus stdatomic.h, ten files in all (docs/project-guide.md line
- * 212). */
+ * headers plus a bonus stdatomic.h, ten files in all (docs/project-guide.md, "9 bundled
+ * freestanding headers"). */
 
 int printf(const char *, ...);
 

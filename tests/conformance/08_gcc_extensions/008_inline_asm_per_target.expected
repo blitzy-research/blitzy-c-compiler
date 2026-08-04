@@ -159,7 +159,8 @@ assembly, which is the only place asm volatile permits it to be.
 
 Inline assembly with operand constraints is documented as supported at
 docs/technical-specifications.md lines 13, 107 and 761, with the spellings asm and
-__asm__, and at docs/project-guide.md lines 81 and 206. This program therefore tests
+__asm__, and at docs/project-guide.md's "C11 Frontend -- Parser" and "C11 frontend with
+GCC extensions" rows. This program therefore tests
 documented functionality and carries NO expected-divergence marker.
 
 Output is identical on all four targets at all three optimization levels.

@@ -91,21 +91,21 @@ those, or a snapshot taken into a plain local beforehand, so nothing depends on 
 in which a call's arguments are evaluated.
 NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, printf, is declared by
 hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
-bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so a directive
-naming that header would fail on the bcc side of oracle (a) while succeeding on the reference side --
-a spurious divergence caused by the test rather than by the compiler under test. stdalign.h IS
-DELIBERATELY NOT INCLUDED EITHER, and that omission is a positive design choice rather than an
-oversight: _Alignof is one of the 44 C11 KEYWORDS the compiler recognises in the lexer
-(docs/technical-specifications.md line 497), so it needs no declaration at all, whereas stdalign.h
-supplies only the lowercase alignas and alignof MACROS that spell those keywords differently
-(docs/technical-specifications.md line 212). Naming the header would therefore test a macro
-definition in a bundled header instead of the keyword in the compiler, which is this area's actual
-subject, and it would put a bundled header on the bcc side of oracle (a) that the reference compiler
-resolves from its own system headers -- two different files, silently compared. Every use in this
-program is the keyword form _Alignof. stddef.h and stdint.h are deliberately not named for the same
-reason. Nothing in the file is a GCC extension, so no include exception and no gate deviation is
-available to area 02 and none is needed; the corpus has exactly two header exceptions, area 07's
-stdarg.h and the dedicated bundled-header probe in area 12.
+bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md, "9 bundled freestanding
+headers"), so a directive naming that header would fail on the bcc side of oracle (a) while
+succeeding on the reference side -- a spurious divergence caused by the test rather than by the
+compiler under test. stdalign.h IS DELIBERATELY NOT INCLUDED EITHER, and that omission is a positive
+design choice rather than an oversight: _Alignof is one of the 44 C11 KEYWORDS the compiler
+recognises in the lexer (docs/technical-specifications.md line 497), so it needs no declaration at
+all, whereas stdalign.h supplies only the lowercase alignas and alignof MACROS that spell those
+keywords differently (docs/technical-specifications.md line 212). Naming the header would therefore
+test a macro definition in a bundled header instead of the keyword in the compiler, which is this
+area's actual subject, and it would put a bundled header on the bcc side of oracle (a) that the
+reference compiler resolves from its own system headers -- two different files, silently compared.
+Every use in this program is the keyword form _Alignof. stddef.h and stdint.h are deliberately not
+named for the same reason. Nothing in the file is a GCC extension, so no include exception and no
+gate deviation is available to area 02 and none is needed; the corpus has exactly two header
+exceptions, area 07's stdarg.h and the dedicated bundled-header probe in area 12.
 size_t, ptrdiff_t and intptr_t therefore cannot be NAMED in this program at all, and their widths are
 probed without naming them: sizeof yields a size_t, so sizeof(sizeof(int)) is size_t's own width, and
 a pointer difference yields a ptrdiff_t, so sizeof of one is ptrdiff_t's width. That is an advantage

@@ -4,17 +4,38 @@ One prompt attempt at building a Rust C-Compiler
 ## Differential conformance suite
 
 An oracle-based differential conformance suite validates the compiler's observable program
-behaviour against two independent authorities and against its own recorded golden output:
+behaviour against three complementary comparison oracles — one external authority, one internal
+cross-check, and its own recorded golden output:
 
 - **Reference-compiler oracle** — each program is compiled with `bcc` and with a reference C
-  compiler, both binaries are executed, and stdout bytes plus exit status are compared.
+  compiler for the same target at the same optimization level, both binaries are executed, and
+  stdout bytes plus exit status are compared. This is the one oracle whose authority is independent
+  of `bcc`.
 - **Cross-backend oracle** — the same program is compiled for x86-64, i686, AArch64 and
-  RISC-V 64 and executed natively or under QEMU user-mode emulation, with every target
-  compared against the x86-64 baseline at the same optimization level.
+  RISC-V 64 and executed natively or under QEMU user-mode emulation, with each of the **three
+  non-baseline targets** compared against the x86-64 baseline at the same optimization level. The
+  baseline is the authority, so it is not compared with itself.
 - **Golden-record oracle** — every cell is checked against the `expected_stdout` bytes and the
   `expect_exit` status recorded in the program's own co-located expectation record.
 
-Run it with:
+**Prerequisite:** every command below needs the compiler's own Cargo package in the checkout — a
+root `Cargo.toml` declaring the `bcc` binary target and the `src/**` tree it builds from. Cargo
+discovers `tests/conformance.rs` automatically, so the suite needs no manifest *change*; it still
+needs a manifest to be discovered *from*, and it must never add one. On a checkout that carries the
+suite ahead of the compiler tree the Cargo gates therefore do not run and there is no `bcc` to test —
+a property of the checkout rather than a defect in the suite. That shape can still verify everything
+which does not depend on packaging:
+
+```bash
+rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs
+CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata \
+  --out-dir target/conformance-typecheck tests/conformance.rs
+```
+
+Full details, and what each checkout shape can and cannot establish:
+[the Cargo integration precondition](tests/conformance/README.md#the-cargo-integration-precondition).
+
+With the package present, run the suite with:
 
 ```bash
 cargo test --test conformance
@@ -31,8 +52,12 @@ BCC_CONFORMANCE_QUICK=1 cargo test --test conformance           # reduced matrix
 
 Every outcome is one of PASS, XFAIL (an expected divergence with a documented basis), XPASS
 (a marker whose divergence has disappeared — a failure), FINDING (an undocumented divergence,
-delivered as a minimized reproducer), FAIL, or UNAVAILABLE (an oracle's tooling is genuinely
-absent). A run summary is written to `target/conformance-report/summary.md`.
+delivered with a **verbatim** reproducer, its recorded minimization status, the captured outputs of
+each compiler and each backend, an environment fingerprint and exact reproduction commands — a run
+files a verbatim copy of the corpus program, because reduction is a supervised curation step
+performed before a finding is promoted to the curated set rather than something a run performs),
+FAIL, or UNAVAILABLE (an oracle's tooling is genuinely absent). A run summary is written to
+`conformance-report/summary.md` beneath the build directory (`target/` unless `CARGO_TARGET_DIR` redirects it).
 
 - Suite contract, verdict taxonomy, environment variables and how to reproduce any cell by
   hand: [`tests/conformance/README.md`](tests/conformance/README.md)

@@ -166,12 +166,19 @@
 //!
 //! Retention is the one thing here that would otherwise grow without limit: 1,296 cells, each
 //! keeping its directory when it does not pass, and the run in which the compiler under test
-//! builds nothing at all is the run in which all of them do. Three ceilings therefore apply at
-//! the moment of retention — one entry, one workspace, and the run as a whole — and pruning
-//! removes the largest entries first, so the executables go and the captured streams, recorded
-//! statuses and command lines stay. Every pruning is recorded in the returned [`Retention`] and in
-//! [`retention_pruning_notes`], because a pruned workspace and a workspace that never existed look
-//! identical on disk and mean opposite things.
+//! builds nothing at all is the run in which all of them do. Ceilings therefore apply at the moment
+//! of retention — an entry whose size could not be established at all, then one entry, then one
+//! workspace, then the run as a whole — and pruning removes the largest entries first, so the
+//! executables go and the captured streams, recorded statuses and command lines stay. Every pruning
+//! is recorded in the returned [`Retention`] and in [`retention_pruning_notes`], because a pruned
+//! workspace and a workspace that never existed look identical on disk and mean opposite things.
+//!
+//! Each ceiling is compared against a figure that was **proved**: measurement is bounded rather than
+//! recursive, bytes are discharged only by a deletion that was confirmed, and the charge finally made
+//! against the run's budget is a fresh measurement of the directory rather than arithmetic over what
+//! was listed a moment earlier. Where a ceiling still cannot be enforced, the run says so and stops
+//! scheduling cells, because a budget that has silently stopped holding is worse than no budget: the
+//! report stays confident while the build volume fills.
 //!
 //! Edition 2021, minimum supported Rust 1.70. Only the standard library is used, as the
 //! project permits no third-party crate; this module is what stands in for a scratch-directory
@@ -182,14 +189,16 @@ use std::io;
 use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use super::env::RunConfig;
 use super::{
     build_root, create_directory_chain_below, encode_slug_component, ensure_within, findings_root,
-    must_escape_for_report, publish_bytes_no_follow, read_file_bounded, remove_entry, report_root,
-    require_directory_chain_below, require_real_directory_within, require_regular_file,
-    run_generation, run_id, sanitize_text_for_report, shown_path, work_root, write_new_file, Cell,
-    CellKey, HarnessError, HarnessResult,
+    measure_tree, must_escape_for_report, publish_bytes_no_follow, read_file_bounded,
+    record_infrastructure_breach, remove_entry, report_root, require_directory_chain_below,
+    require_real_directory_within, require_regular_file, run_generation, run_id,
+    sanitize_text_for_report, shown_path, work_root, write_new_file, Cell, CellKey, HarnessError,
+    HarnessResult, TreeLimits,
 };
 
 // The well-known entries of a cell workspace. Named here so that the module which compiles a
@@ -1339,11 +1348,11 @@ impl Workspace {
     /// them keep one. Unbounded, that fills the build directory of the machine, and the run that
     /// discovers the most is the run that is least able to report it.
     ///
-    /// Three ceilings therefore apply, in order — [`RETAINED_ENTRY_BYTES_MAX`] to one entry,
-    /// [`RETAINED_WORKSPACE_BYTES_MAX`] to this directory, and
-    /// [`RETAINED_RUN_BYTES_MAX`]/[`RETAINED_WORKSPACE_COUNT_MAX`] to the run as a whole — and each
-    /// is enforced at the moment of retention rather than by a sweep afterwards, so the bound holds
-    /// continuously instead of eventually.
+    /// Ceilings therefore apply, in order — an entry whose size could not be established at all,
+    /// [`RETAINED_ENTRY_BYTES_MAX`] to one entry, [`RETAINED_WORKSPACE_BYTES_MAX`] to this directory,
+    /// and [`RETAINED_RUN_BYTES_MAX`]/[`RETAINED_WORKSPACE_COUNT_MAX`] to the run as a whole — and
+    /// each is enforced at the moment of retention rather than by a sweep afterwards, so the bound
+    /// holds continuously instead of eventually.
     ///
     /// Pruning removes the **largest** entries first. That is not an arbitrary order: when a byte
     /// ceiling is what bites, the large entries are the linked executables while the small ones are
@@ -1363,46 +1372,101 @@ impl Workspace {
     ///
     /// A failure encountered while pruning is itself recorded as a note and never raised: this is
     /// the concluding step of a cell that has already been decided, and a tidying problem must not
-    /// re-decide it.
+    /// re-decide it. It does, however, keep the entry's bytes charged and — where it leaves a ceiling
+    /// unenforceable — record a run-level breach, because *this* cell's verdict staying untouched is
+    /// not a reason for the run to go on filling a volume it can no longer bound.
+    /// # What a ceiling means here, and why every figure is proved rather than assumed
+    ///
+    /// A ceiling is only a ceiling if the number it is compared against is true. Three ways of not
+    /// being true were available to this accounting, and all three are closed:
+    ///
+    /// - **An entry nobody could measure is refused, not scored as nothing.** Treating an unreadable
+    ///   entry as zero bytes makes every ceiling above it unenforceable while the accounting keeps
+    ///   reporting that it holds — the worst of both, because the report is confident and wrong. Such
+    ///   an entry is pruned, with the reason named, before any ceiling is applied.
+    /// - **Bytes are discharged only by a deletion that was confirmed.** An entry the accounting
+    ///   believes is gone but which is still on disk is exactly how a total drifts below the truth.
+    ///   A pruning that fails therefore keeps its bytes charged and says so.
+    /// - **The final figure is re-measured from disk.** Arithmetic over the entries this function
+    ///   started with cannot see what a compiler wrote into the directory while the cell was
+    ///   concluding, nor what a failed removal left behind, so the charge made against the run's
+    ///   budget is a fresh measurement of what is actually there.
+    ///
+    /// If, after all of that, a hard ceiling still cannot be enforced — the workspace is over its
+    /// ceiling with nothing left that can be removed, or the reconciliation itself could not be
+    /// completed — the run records an infrastructure breach and stops scheduling cells. That is the
+    /// only honest ending available: a retention budget that has silently stopped holding is a build
+    /// volume filling behind a report that claims otherwise.
     pub fn retain(self) -> Retention {
         let root = self.root;
         let mut notes = Vec::new();
         let mut entries = collect_entries(&root, &mut notes);
+        // Bytes of entries that are still on disk and can never be candidates again, because their
+        // removal was attempted and failed. Kept apart from `entries` so that a failed pruning is
+        // charged exactly once and never retried without end.
+        let mut stuck: u64 = 0;
+
+        // Ceiling zero: an entry whose size could not be established. Applied before every other
+        // ceiling, because an unmeasured entry would otherwise be compared against all of them as a
+        // lower bound and pass each one.
+        let mut index = 0;
+        while index < entries.len() {
+            match entries[index].shortfall.clone() {
+                Some(shortfall) => {
+                    let entry = entries.remove(index);
+                    if !prune_entry(
+                        &entry,
+                        &format!(
+                            "its size could not be established — {shortfall} — and an entry that \
+                             cannot be measured cannot be charged against a ceiling"
+                        ),
+                        &mut notes,
+                    ) {
+                        stuck = stuck.saturating_add(entry.bytes);
+                    }
+                }
+                None => index += 1,
+            }
+        }
 
         // Ceiling one: no single entry may be larger than the per-entry bound. Applied before the
-        // others so that one pathological artifact cannot consume a whole workspace's allowance and
-        // push out every small capture beside it.
+        // whole-workspace ceiling so that one pathological artifact cannot consume a whole
+        // workspace's allowance and push out every small capture beside it.
         let mut index = 0;
         while index < entries.len() {
             if entries[index].bytes > RETAINED_ENTRY_BYTES_MAX {
                 let entry = entries.remove(index);
-                prune_entry(
+                if !prune_entry(
                     &entry,
                     &format!(
                         "it is larger than the {RETAINED_ENTRY_BYTES_MAX}-byte ceiling on one \
                          retained entry"
                     ),
                     &mut notes,
-                );
+                ) {
+                    stuck = stuck.saturating_add(entry.bytes);
+                }
             } else {
                 index += 1;
             }
         }
 
-        // Ceiling two: the workspace as a whole. Largest first, until it fits.
-        let mut total: u64 = entries.iter().map(|entry| entry.bytes).sum();
-        while total > RETAINED_WORKSPACE_BYTES_MAX {
+        // Ceiling two: the workspace as a whole. Largest first, until it fits — and a removal that
+        // could not be performed keeps its bytes in the total, so the loop ends when there is nothing
+        // left that can be given up rather than when the arithmetic has been made to look tidy.
+        while charged(&entries, stuck) > RETAINED_WORKSPACE_BYTES_MAX {
             match take_largest(&mut entries) {
                 Some(entry) => {
-                    total = total.saturating_sub(entry.bytes);
-                    prune_entry(
+                    if !prune_entry(
                         &entry,
                         &format!(
                             "the workspace exceeded the {RETAINED_WORKSPACE_BYTES_MAX}-byte ceiling \
                              on one retained workspace"
                         ),
                         &mut notes,
-                    );
+                    ) {
+                        stuck = stuck.saturating_add(entry.bytes);
+                    }
                 }
                 None => break,
             }
@@ -1415,18 +1479,24 @@ impl Workspace {
         let already = RETAINED_COUNT.fetch_add(1, Ordering::Relaxed);
         if already >= RETAINED_WORKSPACE_COUNT_MAX as u64 {
             while let Some(entry) = take_largest(&mut entries) {
-                total = total.saturating_sub(entry.bytes);
-                prune_entry(
+                if !prune_entry(
                     &entry,
                     &format!(
                         "this run had already retained {RETAINED_WORKSPACE_COUNT_MAX} workspaces, \
                          which is the ceiling on the number one run may keep"
                     ),
                     &mut notes,
-                );
+                ) {
+                    stuck = stuck.saturating_add(entry.bytes);
+                }
             }
-            total = 0;
         }
+
+        // Reconciliation. Everything above is arithmetic over the entries this function listed; this
+        // is a fresh measurement of the directory as it now stands, and it is the figure charged
+        // against the run's budget. The two can legitimately differ — a compiler's sub-process may
+        // still have been writing while the cell concluded — and where they do, the disk is right.
+        let mut total = reconcile(&root, charged(&entries, stuck), &mut notes);
 
         // The byte reservation is a claim-then-verify loop rather than a read followed by an add,
         // because fourteen feature areas conclude cells concurrently and two of them reading the
@@ -1445,8 +1515,7 @@ impl Workspace {
             }
             match take_largest(&mut entries) {
                 Some(entry) => {
-                    total = total.saturating_sub(entry.bytes);
-                    prune_entry(
+                    let removed = prune_entry(
                         &entry,
                         &format!(
                             "this run had already retained {current} of the \
@@ -1454,10 +1523,30 @@ impl Workspace {
                         ),
                         &mut notes,
                     );
+                    if !removed {
+                        stuck = stuck.saturating_add(entry.bytes);
+                    }
+                    total = reconcile(&root, charged(&entries, stuck), &mut notes);
                 }
-                // Nothing left to give up, so the reservation is zero and the next pass through
-                // the loop necessarily fits.
-                None => total = 0,
+                // Nothing is left that can be given up, and the bytes that remain are on disk
+                // whether or not they fit. They are charged as they are — the previous arrangement
+                // charged zero here, which is precisely how a ceiling comes to be exceeded while the
+                // accounting reports that it holds — and the run is told that its budget can no
+                // longer be enforced.
+                None => {
+                    let detail = format!(
+                        "the retained workspace {} still holds {total} byte(s) that could not be \
+                         removed, and this run has already charged {current} of the \
+                         {RETAINED_RUN_BYTES_MAX}-byte retention budget, so the budget cannot be \
+                         enforced; the bytes are charged as they are rather than written off, and no \
+                         further cell is scheduled behind a ceiling this run cannot hold",
+                        shown_path(&root)
+                    );
+                    notes.push(note_pruning(sanitize_text_for_report(&detail)));
+                    record_infrastructure_breach(detail);
+                    RETAINED_BYTES.fetch_add(total, Ordering::AcqRel);
+                    break;
+                }
             }
         }
 
@@ -1469,6 +1558,76 @@ impl Workspace {
     }
 }
 
+/// Bytes currently on disk for a workspace being retained: its candidates plus what could not go.
+///
+/// A function rather than a running variable, because a running variable is what let a failed removal
+/// discharge bytes that were never removed. Recomputing is cheap — a workspace holds about a dozen
+/// entries — and it cannot drift from the two collections it sums.
+fn charged(entries: &[RetainedEntry], stuck: u64) -> u64 {
+    entries
+        .iter()
+        .fold(stuck, |total, entry| total.saturating_add(entry.bytes))
+}
+
+/// Measure the retained workspace as it now stands, and charge the larger of disk and arithmetic.
+///
+/// Returns the figure to charge against the run's budget, and appends a note whenever the disk and
+/// the arithmetic disagree or the measurement could not be completed.
+///
+/// # Why the larger of the two, and why an incomplete measurement is a breach
+///
+/// The arithmetic is what this function's caller believes it has kept; the measurement is what is
+/// there. Charging the smaller of the two is how a budget stops holding, so the larger is charged in
+/// every case — including the case where the measurement is a lower bound, since a lower bound above
+/// the arithmetic proves the arithmetic wrong.
+///
+/// An incomplete measurement of a workspace that is *over* its ceiling cannot be reconciled at all: it
+/// is not known how far over. That is the one condition under which this records an infrastructure
+/// breach, because it is the condition in which the ceiling has stopped being a ceiling.
+fn reconcile(root: &Path, arithmetic: u64, notes: &mut Vec<String>) -> u64 {
+    let measured = measure_tree(root, RETENTION_TREE_LIMITS);
+    let charge = measured.bytes.max(arithmetic);
+    if let Some(shortfall) = measured.shortfall() {
+        let detail = format!(
+            "the retained workspace {} could not be measured in full — {shortfall} — so the \
+             {charge} byte(s) charged against this run's retention budget is the larger of what was \
+             measured and what the accounting expected, and it may still understate what is there",
+            shown_path(root)
+        );
+        notes.push(note_pruning(sanitize_text_for_report(&detail)));
+        if charge > RETAINED_WORKSPACE_BYTES_MAX {
+            record_infrastructure_breach(format!(
+                "{detail}. The workspace is also past the \
+                 {RETAINED_WORKSPACE_BYTES_MAX}-byte ceiling on one retained workspace, so that \
+                 ceiling cannot be shown to hold and no further cell is scheduled behind it"
+            ));
+        }
+        return charge;
+    }
+    if measured.bytes != arithmetic {
+        notes.push(note_pruning(sanitize_text_for_report(&format!(
+            "the retained workspace {} holds {} byte(s) on disk where the retention accounting \
+             expected {arithmetic}; the measured figure is what was charged, because a directory a \
+             compiler was still writing into is described by what is in it rather than by what was \
+             listed a moment earlier",
+            shown_path(root),
+            measured.bytes
+        ))));
+    }
+    if charge > RETAINED_WORKSPACE_BYTES_MAX {
+        let detail = format!(
+            "the retained workspace {} still holds {charge} byte(s) after pruning, which is past \
+             the {RETAINED_WORKSPACE_BYTES_MAX}-byte ceiling on one retained workspace, and nothing \
+             remained that could be removed; the ceiling cannot be enforced and no further cell is \
+             scheduled behind it",
+            shown_path(root)
+        );
+        notes.push(note_pruning(sanitize_text_for_report(&detail)));
+        record_infrastructure_breach(detail);
+    }
+    charge
+}
+
 /// One entry of a workspace that is about to be retained, and the bytes it occupies.
 ///
 /// A directory counts as one entry carrying its recursive size, because the only nested structure
@@ -1478,15 +1637,26 @@ impl Workspace {
 struct RetainedEntry {
     path: PathBuf,
     bytes: u64,
+    /// Why `bytes` is a lower bound rather than a size, when it is.
+    ///
+    /// [`Workspace::retain`] refuses such an entry before it applies any ceiling. An entry carrying
+    /// this cannot honestly be compared against a bound, and the alternative — comparing it anyway —
+    /// means every ceiling above it passes on a number nobody established.
+    shortfall: Option<String>,
 }
 
 /// List the direct entries of `root`, measuring each, without following a symbolic link.
 ///
-/// A directory that cannot be listed, or an entry that cannot be measured, contributes a note
-/// rather than an error: this runs while a cell is being concluded, and a measurement problem must
-/// not become a verdict. An entry whose size is unknown is treated as zero bytes and left in place,
-/// because pruning something on the strength of a failed measurement would destroy evidence to
-/// enforce a bound nobody could show was exceeded.
+/// A directory that cannot be listed contributes a note rather than an error: this runs while a cell
+/// is being concluded, and a measurement problem must not become a verdict.
+///
+/// An entry whose size could not be established carries its own [`RetainedEntry::shortfall`] rather
+/// than being scored as zero bytes. That is a reversal of an earlier rule, and the reason is worth
+/// stating: leaving such an entry in place *and* counting it as nothing preserved evidence at the
+/// cost of making every ceiling above it unenforceable, while the accounting went on reporting that
+/// each one held. Between two failure directions — losing one entry of one failing cell's evidence,
+/// or filling the machine's build volume behind a report that says it is bounded — the first is a
+/// recoverable inconvenience and the second is not.
 fn collect_entries(root: &Path, notes: &mut Vec<String>) -> Vec<RetainedEntry> {
     let listing = match fs::read_dir(root) {
         Ok(listing) => listing,
@@ -1511,8 +1681,10 @@ fn collect_entries(root: &Path, notes: &mut Vec<String>) -> Vec<RetainedEntry> {
             }
         };
         let path = entry.path();
+        let measured = measure_tree(&path, RETENTION_TREE_LIMITS);
         entries.push(RetainedEntry {
-            bytes: entry_bytes(&path),
+            bytes: measured.bytes,
+            shortfall: measured.shortfall(),
             path,
         });
     }
@@ -1522,31 +1694,25 @@ fn collect_entries(root: &Path, notes: &mut Vec<String>) -> Vec<RetainedEntry> {
     entries
 }
 
-/// Bytes occupied by one entry, recursing into a directory and counting a symbolic link as nothing.
+/// Ceilings on one measurement of a retained entry or of a retained workspace.
 ///
-/// A link counts as nothing because its target is not this workspace's to account for, and because
-/// following it to measure the target is exactly the traversal every other guard in this module
-/// refuses.
-fn entry_bytes(path: &Path) -> u64 {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return 0;
-    };
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return 0;
-    }
-    if !file_type.is_dir() {
-        return metadata.len();
-    }
-    let Ok(listing) = fs::read_dir(path) else {
-        return 0;
-    };
-    let mut total = 0u64;
-    for entry in listing.flatten() {
-        total = total.saturating_add(entry_bytes(&entry.path()));
-    }
-    total
-}
+/// The measurement itself needs bounds, and the reason is not hypothetical. The shape being measured
+/// is whatever a compiler under test left in a directory, so its depth and breadth are not this
+/// module's to assume: a recursive walk exhausts the stack on a deep tree, and an unbounded one takes
+/// unbounded time on a wide one — both while a cell is being concluded, which is the worst moment
+/// available for either.
+///
+/// Each figure is generous against the honest case and refuses the pathological one. A cell workspace
+/// holds about a dozen entries, flat; eight levels covers a compiler's temporary sub-directory and any
+/// nesting inside it, four thousand entries covers a driver that leaves a great many temporary files,
+/// and a quarter of a second is far longer than a walk of either needs. A measurement that reaches one
+/// of these reports itself as incomplete, and [`Workspace::retain`] fails closed on that rather than
+/// treating a lower bound as a size.
+const RETENTION_TREE_LIMITS: TreeLimits = TreeLimits {
+    depth_max: 8,
+    entries_max: 4096,
+    elapsed_max: Duration::from_millis(250),
+};
 
 /// Remove and return the largest remaining entry, breaking a tie by path so the choice is stable.
 fn take_largest(entries: &mut Vec<RetainedEntry>) -> Option<RetainedEntry> {
@@ -1564,12 +1730,13 @@ fn take_largest(entries: &mut Vec<RetainedEntry>) -> Option<RetainedEntry> {
     }
 }
 
-/// Remove one entry to stay inside the budget, and record why.
+/// Remove one entry to stay inside the budget, record why, and report whether it is actually gone.
 ///
-/// A removal that fails is recorded too, and with the same prominence: an entry the accounting
-/// believes is gone but which is still on disk would make the run's retained total wrong, and a
-/// wrong total is how a ceiling stops holding.
-fn prune_entry(entry: &RetainedEntry, reason: &str, notes: &mut Vec<String>) {
+/// The return value is the whole point of the signature. A removal that fails leaves the entry on
+/// disk, so its bytes must stay charged; a caller that could not tell the two apart would discharge
+/// bytes that were never freed, and a total below the truth is exactly how a ceiling stops holding.
+/// A failure is recorded with the same prominence as a success for the same reason.
+fn prune_entry(entry: &RetainedEntry, reason: &str, notes: &mut Vec<String>) -> bool {
     let context = format!("pruning the retained entry {}", entry.path.display());
     match purge(&context, &entry.path) {
         // What the note promises is bounded by what is actually still there, so it promises only what
@@ -1580,18 +1747,26 @@ fn prune_entry(entry: &RetainedEntry, reason: &str, notes: &mut Vec<String>) {
         // lines included, and the program source and its record were copies rather than build
         // products in the first place. Naming the cell also happens to be the more useful
         // instruction, because it works whatever else was pruned.
-        Ok(()) => notes.push(note_pruning(format!(
-            "{} ({} byte(s)) was pruned from the retained evidence because {reason}; the directory \
-             it stood in names the cell, so re-running that one cell reproduces it",
-            entry.path.display(),
-            entry.bytes
-        ))),
-        Err(error) => notes.push(note_pruning(format!(
-            "{} ({} byte(s)) should have been pruned because {reason}, and could not be: {}",
-            entry.path.display(),
-            entry.bytes,
-            error.cause()
-        ))),
+        Ok(()) => {
+            notes.push(note_pruning(format!(
+                "{} ({} byte(s)) was pruned from the retained evidence because {reason}; the \
+                 directory it stood in names the cell, so re-running that one cell reproduces it",
+                entry.path.display(),
+                entry.bytes
+            )));
+            true
+        }
+        Err(error) => {
+            notes.push(note_pruning(format!(
+                "{} ({} byte(s)) should have been pruned because {reason}, and could not be: {}; \
+                 its bytes therefore stay charged against this run's retention budget, because they \
+                 are still on disk",
+                entry.path.display(),
+                entry.bytes,
+                error.cause()
+            )));
+            false
+        }
     }
 }
 

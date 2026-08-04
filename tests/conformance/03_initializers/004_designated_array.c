@@ -134,6 +134,15 @@ static struct pair g_st_brace[3] = { [2] = { 5, 6 }, [0] = { 1, 2 } };
  * previous state is restored on the next line, so every other diagnostic -- and -Woverride-init
  * itself everywhere else in this translation unit -- remains in force.
  *
+ * THE SUPPRESSION IS REGISTERED, NOT MERELY EXPLAINED HERE.  This file's expectation record
+ * declares `ub_audit_source_suppressions = -Woverride-init`, and the undefined-behaviour audit
+ * reads THIS SOURCE on every run to hold the two together: it fails the warning gate for a
+ * diagnostic-control directive the record does not register, for a registration the source no
+ * longer needs, for a suppression left outside a matched push/pop bracket, and for any warning not
+ * sanctioned for this exact area and program in the harness's own table.  So the exception below is
+ * enforced on the same terms as a command-line gate deviation rather than resting on a comment.
+ * The reason it is admitted at all is in that record's impl_defined_notes.
+ *
  * g_over_row_elem and g_over_elem_row are the discriminating pair: identical initializers,
  * opposite order, so element [0][1] must read 20 in the first and 2 in the second.  Any
  * implementation that answered 20 for both would be preserving explicitly named subobjects

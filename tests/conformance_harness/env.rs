@@ -180,9 +180,10 @@ use std::time::{Duration, Instant};
 use super::execute::TIMEOUT_UTILITY_OUTER_MARGIN;
 use super::manifest::Execution;
 use super::{
-    build_root, digest_hex, isolate_child_environment, own_process_group, redact_secrets, run_id,
-    sanitize_text_for_report, shown_path, stable_digest, terminate_process_group, AreaSpec,
-    HarnessError, HarnessResult, OptLevel, Oracle, RunGeneration, Target, BCC_TARGET_FLAG,
+    build_root, digest_hex, isolate_child_environment, own_process_group, reap_bounded,
+    record_infrastructure_breach, redact_secrets, run_id, sanitize_text_for_report, shown_path,
+    stable_digest, terminate_process_group, AreaSpec, HarnessError, HarnessResult, OptLevel,
+    Oracle, ReapOutcome, RunGeneration, Target, BCC_TARGET_FLAG,
 };
 
 // Every variable the harness reads is a named constant so that a diagnostic can quote the exact
@@ -451,7 +452,8 @@ const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 ///
 /// The scale is what makes this worth measuring at all. A full matrix spawns at least 5,508 bounded
 /// invocations, so 103 milliseconds each is roughly 569 seconds of wall time added to a suite whose
-/// own measured budget is about 188 seconds — an outer net that never fires costing three times the
+/// own measured run is a 345–476 second band on the four-core machine recorded in
+/// `tests/conformance/README.md` — an outer net that never fires costing more wall time than the
 /// work it supervises.
 const OUTER_NET_OVERHEAD_MAX: Duration = Duration::from_millis(25);
 
@@ -2346,14 +2348,31 @@ fn await_child_within_deadline(
     }
 }
 
-/// Kill a child and wait for it, ignoring both results.
+/// Kill a child, reap it inside a deadline, and sweep its group.
 ///
-/// Both results are ignored on purpose. A kill fails when the child has already exited, and a wait
-/// fails when it has already been reaped; either way the postcondition this function exists to
-/// establish — that no process of ours is still running and none is left unreaped — already holds.
+/// A failed kill is still ignored on purpose: it is what a child that has already exited reports,
+/// and the reap that follows is the postcondition rather than the kill.
+///
+/// # Why the reap is bounded rather than a plain wait
+///
+/// This function is the whole of what makes [`PROBE_DEADLINE`] a bound on the *probe* rather than
+/// merely on the polling loop above it. A plain [`std::process::Child::wait`] here has no deadline of
+/// its own, so a child that could not be torn down promptly would hold the pre-flight for as long as
+/// it liked — and the pre-flight is what a run performs before it does anything else, with nothing
+/// outside it to notice. [`reap_bounded`] kills and then polls to a stated deadline, so the probe's
+/// five seconds is an end-to-end figure.
+///
+/// A child that could not be reaped even then is recorded as a run-level breach. That is deliberately
+/// louder than the group sweep below, which stays unreported for the reason
+/// [`terminate_group_of`] documents: a leaked descendant of a `--version` invocation is untidy,
+/// whereas an unreaped child of this run's own is a process nothing can account for, and the
+/// condition that produced it will produce it again on the thousands of cells that follow.
 fn terminate_and_reap(child: &mut Child, group: u32) {
-    let _ = child.kill();
-    let _ = child.wait();
+    if let ReapOutcome::Unreaped(detail) = reap_bounded(child) {
+        record_infrastructure_breach(format!(
+            "a pre-flight probe's child could not be accounted for: {detail}"
+        ));
+    }
     terminate_group_of(group);
 }
 

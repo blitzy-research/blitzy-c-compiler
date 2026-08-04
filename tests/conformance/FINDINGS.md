@@ -269,7 +269,7 @@ correction is never a compiler source change.
 
 | Artifact | Content | Why it exists |
 |---|---|---|
-| `reproducer.c` | The program, **minimized as far as practical** while still provoking the divergence | The divergence has to be *in* something. A reproducer no larger than the difference needs is what makes the observation readable in one sitting |
+| `reproducer.c` | The program, **minimized as far as practical** while still provoking the divergence, with the outcome recorded in `MANIFEST.txt`'s `minimization` state (§5.1) | The divergence has to be *in* something. A reproducer no larger than the difference needs is what makes the observation readable in one sitting. "As far as practical" is a judgement about one program, so it is recorded rather than assumed: the audit refuses a directory still carrying the state a run wrote |
 | `reproducer.expected` | Its expectation record, in the standard `.expected` format, keeping the **corpus** program's identity rather than the copy's path (§5.2) | Keeps the finding **runnable by the harness**, so it can be re-checked over time instead of becoming a static curiosity that nobody can tell is still true |
 | `MANIFEST.txt` | The finding identifier, the affected area and program, the divergence class, **which oracles and which cells diverged**, and a one-paragraph description of the observed difference | The one file to read first. Everything else in the directory is evidence; this is the account of what the evidence shows |
 | `commands.sh` | **Exact, copy-pasteable compile and run lines for every cell involved**, runnable as `sh commands.sh` from inside the finding directory, with **relative paths only** (§5.3) | This is the artifact that satisfies requirement 6's *"the exact reproduction commands"* — and it does so **without the harness, without Cargo and without a Rust toolchain** |
@@ -360,8 +360,8 @@ So the fingerprint records every tool the observation depended on: `bcc`, the na
 compiler, each cross driver, each emulator, the per-cell timeout budget, each target's C runtime,
 the host and kernel identification, and this run's own token and configuration. This directly
 mitigates a risk the repository already documents in its own register — *"QEMU version
-incompatibility for cross-arch testing"*, `docs/project-guide.md` line 256, recorded as *Partially
-mitigated* with *"version pinning recommended for stability"*. A finding that turns out to have been
+incompatibility for cross-arch testing"*, `docs/project-guide.md` §6, recorded as *Partially
+mitigated* with *"emulator version pinning is still recommended for stability"*. A finding that turns out to have been
 an emulator upgrade is a finding correctly *closed*, and it can only be closed that way if somebody
 wrote down which emulator it was.
 
@@ -486,10 +486,11 @@ trusted.
 
    **There is exactly one exception to that asymmetry, it is narrow, and it is written down rather
    than inferred.** [`08_gcc_extensions/004_case_ranges.c`](08_gcc_extensions/004_case_ranges.c)
-   carries `XD-GCCEXT-CASE-RANGES-001`, a `compile_failure` scoped `oracle_a`, whose basis **is** an
-   omission from the documented extension inventory. It is there because the suite's frozen brief
-   mandates that marker by identifier, class, scope and basis — not because this register concluded
-   that an omission authorises one. So a case-range **build refusal** triages as an expected
+   carries `XD-GCCEXT-CASE-RANGES-001`, a `compile_failure` scoped `oracle_a`, whose basis is the
+   compliance rule that states which GCC extensions are explicitly required — case ranges are not among
+   them, so a refusal falls outside the documented obligation. It is there because the suite's frozen
+   brief mandates that marker by identifier, class, scope and basis, and what the basis establishes is
+   the boundary of that obligation rather than a statement that the construct is rejected. So a case-range **build refusal** triages as an expected
    divergence rather than a finding, while a case-range **wrong answer** is a `stdout_mismatch` the
    marker's class does not cover and is still a finding. For every other construct the asymmetry holds
    with no exception at all.
@@ -599,7 +600,16 @@ directory, the artifact and what to do about it — a proofreader rather than a 
 - the manifest does not state **which machine produced the evidence** (`source_machine`), or does not
   record that the mandatory disclosure review of step 7 was **performed** (`disclosure_review`). A
   generated directory carries `not-performed` in that field, truthfully, so promoting one cannot skip
-  the review by omission.
+  the review by omission;
+- the manifest does not record the **minimization outcome** (`minimization`). This is the second of the
+  two curation judgements, audited in the same shape and for the same reason: a run writes
+  `not-performed` because its `reproducer.c` is a verbatim copy of the corpus program, and the curated
+  audit **rejects that value**, so a promotion cannot leave the judgement unmade. Replace it with
+  `reduced: <method and what was removed>` or with `verbatim-by-judgement: <reason>`. Both are
+  legitimate outcomes of §5.1 — the second is the ordinary one, because each corpus program already
+  exercises one semantic concern — and both must carry a reason, so a bare prefix is refused. Where a
+  reduction was performed, the artifact-inventory check above independently catches a directory whose
+  captures were copied forward from the unreduced run.
 
 **The finding still reproduces from `commands.sh` alone**, in a clean shell, with no harness, no
 Cargo and no Rust toolchain on the path. If it does not, the curated directory is not a reproducer —
@@ -685,13 +695,19 @@ property of the text. So the judgement is recorded rather than re-derived: the m
 ```text
 source_machine    = <digest of the producing machine's roots>
 disclosure_review = clean            # or: redacted: commands.sh, outputs/a-aarch64-O2.compile.stderr
+minimization      = verbatim-by-judgement: one construct, one line per property; nothing left to remove
 ```
 
 The first is written by the run and says which machine-and-checkout the evidence came from, so a later
 reader on a different machine can tell that only the portable half of the scan was in force. The second
 is written by the run as `not-performed` — truthfully, because nothing under the build directory is
 committed — and the curated audit **rejects that value**, so a promotion cannot happen without a human
-replacing it with what they found. A declared redaction is checked further: it must name at least one
+replacing it with what they found. The third is the same mechanism applied to §5.1's judgement: a run
+writes `not-performed`, the audit rejects it, and a curator states either `reduced: <method>` or
+`verbatim-by-judgement: <reason>`. Recording both judgements in the same shape is deliberate — they are
+the two things about a curated finding that no validator can determine, and gating one while assuming
+the other is how an outward-facing document comes to describe a deliverable the artifact does not
+match. A declared redaction is checked further: it must name at least one
 artifact that exists in the directory, and it must not name a compared stream, because redacting one of
 those destroys the finding rather than protecting the machine.
 
@@ -865,8 +881,8 @@ finding landing in either one is evidence for a question the project has already
 
 | Open item | Where |
 |---|---|
-| Remaining-work item *"C11 Standard Corner Case Compliance Testing"*, 5 hours, Medium priority | `docs/project-guide.md` line 111 |
-| Open risk *"C11 corner case non-compliance"* — *"edge cases in complex declarators and type conversions may remain"*, status *Open — Requires targeted testing* | `docs/project-guide.md` line 248 |
+| Remaining-work item *"C11 Standard Corner Case Compliance Testing"*, 5 hours, Medium priority | `docs/project-guide.md` §2.2 |
+| Open risk *"C11 corner case non-compliance"* — *"edge cases in complex declarators and type conversions may remain"*, status *Open — Requires targeted testing* | `docs/project-guide.md` §6 |
 
 Worth knowing while triaging, and easy to get wrong from memory: **exactly two expected-divergence
 markers are active anywhere in the corpus** — the two the frozen specification fixes in advance — and
@@ -875,19 +891,24 @@ identifiers in both directions.
 
 | Marker | Program | Class / scope | What it excuses, and what it does not |
 | --- | --- | --- | --- |
-| `XD-GCCEXT-CASE-RANGES-001` | `08_gcc_extensions/004_case_ranges` | `compile_failure` / `oracle_a` | A **refusal** to translate the construct, on oracle (a) alone, cited to an extension inventory that omits case ranges. A wrong answer from a compiler that accepts it is a `stdout_mismatch` the class does not cover — a **FINDING** — and so is any divergence on oracle (b) or (c) that is not a dependent blocked arm of the same refusal |
-| `XD-TYPE-LONGDOUBLE-001` | `13_floating_point/004_long_double_target_restricted` | `stdout_mismatch` / `oracle_b` | The one comparison its record declines to make. Its nine cross-backend comparisons report `XFAIL` as not attempted; oracles (a) and (c) judge all twelve cells and a divergence on either is a **FINDING** |
+| `XD-GCCEXT-CASE-RANGES-001` | `08_gcc_extensions/004_case_ranges` | `compile_failure` / `oracle_a` | A **refusal** to translate the construct, on oracle (a) alone, cited to the compliance rule that fixes the GCC extensions the implementation is explicitly required to support — a set that does not include case ranges. A wrong answer from a compiler that accepts it is a `stdout_mismatch` the class does not cover — a **FINDING** — and so is any divergence on oracle (b) or (c) that is not a dependent blocked arm of the same refusal |
+| `XD-TYPE-LONGDOUBLE-001` | `13_floating_point/004_long_double_target_restricted` | `comparison_excluded` / `oracle_b` | The one comparison its record declines to make. Its class names **no observation** — it is the value reserved for an arm nothing is compared on — so it can never excuse a divergence a comparison found. Its nine cross-backend comparisons report `XFAIL` as not attempted; oracles (a) and (c) judge all twelve cells and a divergence on either is a **FINDING** |
 
 Two qualifications belong with that table rather than in a reader's memory, because both change what a
 triage decision may rest on. The case-range marker's divergence has **no independent capture** — this
 checkout carries no `bcc` and the compiler under test forwards to the reference toolchain, so an
 agreement from it measures the environment rather than the compiler; the marker discloses that in its own
 `observed` field, `evidence` is unwritten, and `XPASS` fails the run while the construct works. And the
-long-double `oracle_b` narrowing is **recorded and machine-checked, not adjudicated**: whether its cited
-basis semantically supports switching that oracle off is a reviewer's judgement
-([`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §2.4.1) and the governing program and record have
-not been reviewed at the checkpoint that published this section, so treat the exclusion and its nine
-`XFAIL` arms as pending that review rather than as settled.
+long-double `oracle_b` narrowing is **recorded and machine-checked, not adjudicated**. Its governing
+program and record have **completed their review**, which re-measured the exclusion's reason onto the
+significand widths, 64 bits against 113, after the claim that the exponent ranges differ was withdrawn,
+and the driver's pending declaration is empty — so for triage purposes the nine `XFAIL` arms are
+settled: a divergence on oracle (a) or (c) over that program is a **FINDING**, exactly as the table says.
+What the review did not and could not close is whether the cited basis *semantically supports* switching
+that oracle off — a reviewer's judgement that [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §2.4.1
+leaves to the reader for every marker, permanently. If you disagree with the citation, §3.2 there is the
+retirement procedure; what you must not do is refile one of those nine arms as a finding, because a
+not-attempted comparison observed nothing.
 
 One construct a reader might expect to be excused is not: the wide and Unicode literal prefixes carry no
 marker. So apart from a case-range refusal on oracle (a) and that one program's nine cross-backend arms,
@@ -1055,15 +1076,15 @@ another and nothing more; judging `bcc` requires the real binary and the merge d
 | [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) | The companion register: **documented** divergences, the marker mechanism — five required keys and two optional ones, the followable-citation rule and the not-anticipatory rule the parser enforces — the two markers the frozen brief names, and the bidirectional audit that keeps markers and records from drifting apart |
 | [`../conformance.rs`](../conformance.rs) | The suite driver: 14 feature-area tests and 4 infrastructure tests |
 | [`../conformance_harness/`](../conformance_harness/) | The harness modules — oracle discovery, workspace isolation, record parsing, compilation, execution, comparison, classification, **finding-artifact writing** and reporting |
-| `docs/testing/differential-conformance.md` (**planned**, not present on this branch — named as plain text for that reason) | The documentation-site page: methodology, oracle definitions, the build matrix, the verdict taxonomy and the deliverable summary format |
+| [`../../docs/testing/differential-conformance.md`](../../docs/testing/differential-conformance.md) | The documentation-site page, committed and published in the MkDocs navigation: methodology, oracle definitions, the build matrix, the verdict taxonomy and the deliverable summary format |
 
-Those links are relative — the first two are siblings of this file, the next two sit one level up —
-so they resolve when this document is read in place. The same five, spelled from the repository root
-for anyone reading an excerpt of this table out of context: this register is
+Those links are relative — the first two are siblings of this file, the next two sit one level up and
+the last two levels up — so they resolve when this document is read in place. The same five, spelled
+from the repository root for anyone reading an excerpt of this table out of context: this register is
 `tests/conformance/FINDINGS.md`, the path the harness holds as a constant and names in every finding
 verdict; its two companions are `tests/conformance/README.md` and
 `tests/conformance/EXPECTED_DIVERGENCES.md`; the driver is `tests/conformance.rs` and the harness
-modules are under `tests/conformance_harness/`; and the planned documentation page is
+modules are under `tests/conformance_harness/`; and the documentation page is
 `docs/testing/differential-conformance.md`.
 
 ### 7.4 Register changelog
@@ -1079,7 +1100,7 @@ divergence, [`findings/`](findings/) holds only its placeholder, and §2's table
 
 | Date | Change |
 |---|---|
-| 2026-08-04 | Triage guidance reconciled with the corpus's marker set after a security review of the marker authorities, still **empty**: no register row was added or removed and no curated directory exists. §6.2 had recorded **one** active marker and described case ranges as unmarked; the case-range marker has been **reinstated**, so §6.2 now records **two** — `XD-GCCEXT-CASE-RANGES-001` (`compile_failure`, `oracle_a`) beside `XD-TYPE-LONGDOUBLE-001` (`stdout_mismatch`, `oracle_b`) — as a table, with the triage consequence stated exactly: a case-range **refusal on oracle (a)** is that marker's `XFAIL`, and every other divergence on that program is still a **FINDING**. The retirement it replaces had rested on a compiler under test that forwards to the reference toolchain, so its twelve agreements compared one toolchain with itself and could not establish that a real `bcc` supports the construct; the frozen specification fixes that marker for that program, and reference-versus-itself agreement is not the evidence that retires it. Two qualifications are now stated rather than left to memory: the case-range divergence has **no independent capture** (disclosed in the marker's own `observed` field, with `evidence` unwritten and `XPASS` failing the run while the construct works), and the long-double `oracle_b` narrowing is **recorded and machine-checked rather than adjudicated**, pending a review of the governing program and record. §5 step 3 keeps the omission rule exactly as the contract enforces it — an omission is admitted by the parser, anticipation is refused at parse time, and triage still treats an inventory's silence as leaving *your* observation a finding — and now separates that from the case the rule does not decide: a marker the specification fixes is not an author's to mint or withdraw. |
+| 2026-08-04 | Triage guidance reconciled with the corpus's marker set after a security review of the marker authorities, still **empty**: no register row was added or removed and no curated directory exists. §6.2 had recorded **one** active marker and described case ranges as unmarked; the case-range marker has been **reinstated**, so §6.2 now records **two** — `XD-GCCEXT-CASE-RANGES-001` (`compile_failure`, `oracle_a`) beside `XD-TYPE-LONGDOUBLE-001` (`stdout_mismatch`, `oracle_b`) — as a table, with the triage consequence stated exactly: a case-range **refusal on oracle (a)** is that marker's `XFAIL`, and every other divergence on that program is still a **FINDING**. The retirement it replaces had rested on a compiler under test that forwards to the reference toolchain, so its twelve agreements compared one toolchain with itself and could not establish that a real `bcc` supports the construct; the frozen specification fixes that marker for that program, and reference-versus-itself agreement is not the evidence that retires it. Two qualifications are now stated rather than left to memory: the case-range divergence has **no independent capture** (disclosed in the marker's own `observed` field, with `evidence` unwritten and `XPASS` failing the run while the construct works), and the long-double `oracle_b` narrowing is **recorded and machine-checked rather than adjudicated**, pending a review of the governing program and record. *(That last clause is superseded: the governing program and record have since completed their review, which re-measured the exclusion's reason and corrected it. §6.2 above carries the current state; the clause is left standing here because a dated row records what was true when it was written.)* §5 step 3 keeps the omission rule exactly as the contract enforces it — an omission is admitted by the parser, anticipation is refused at parse time, and triage still treats an inventory's silence as leaving *your* observation a finding — and now separates that from the case the rule does not decide: a marker the specification fixes is not an author's to mint or withdraw. |
 | 2026-08-04 | Triage guidance reconciled with the corpus's marker set, still **empty**: no register row was added or removed and no curated directory exists. §6.2 had claimed **zero** active markers and described `long double` as carrying none, both of which had stopped being true; it now records **exactly one** active marker — `XD-TYPE-LONGDOUBLE-001` on `13_floating_point/004_long_double_target_restricted`, class `stdout_mismatch`, scope `oracle_b` — whose nine cross-backend arms report `XFAIL` while oracles (a) and (c) judge all twelve cells, so a divergence on either of those is still a **FINDING**. The case-range marker described in the 2026-08-02 entry below was reinstated after that entry and was **retired again** here, on the run rather than on an argument — **a retirement the entry above reversed**, because the run that produced it had no independent compiler under test: the compiler under test accepted the program, the marked arm agreed on all twelve cells, and the resulting twelve `XPASS` outcomes failed the run until the marker was withdrawn from the record and the register together. A case-range divergence of **any** class is therefore a FINDING. And §5 step 3 now states the omission rule as the contract actually enforces it: an **omission** is admitted by the record parser, which deliberately does not adjudicate a citation's strength, while **anticipation** is refused at parse time — so triage still treats an inventory's silence as leaving an observation a finding, and it is the missing observation rather than the weak citation that disqualified the case-range marker |
 | 2026-08-03 | Triage guidance and the curation rule reconciled with the corpus as it now stands, still **empty**: no register row was added or removed. The corpus is complete — fourteen areas, 108 programs, 108 expectation records, no unpaired source and no orphan record — so §6, §6.3 and §7.2 no longer describe sixteen records as outstanding and the runnable count is 108, not 92. And **no expected-divergence marker is active anywhere**: the case-range marker described in the entry below was retired, because its basis was an omission and its observation was an anticipation, and the marker contract now refuses both shapes at parse time. §5 step 3 therefore states the omission rule with **no exception**, and §6.2 records zero active markers, so a case-range divergence of any class is triaged as a **FINDING**. `long double` is unchanged: a recorded oracle-(b) exclusion in its own record, never a marker. |
 | 2026-08-02 | Contract corrections, still **empty**: the artifact table in §3 now spells the captured-output dimension `<side>` — matching §3.1 and the writer — and names the `.compile.*` compiler-capture group alongside the runtime one; the curated-reproducer rule in §3 now defers to the canonical README rule and restates **both** sanctioned header exceptions rather than only the variadic one; and the branch-state statements in §6 and §7.2 are aligned with the corpus as committed — all fourteen areas and all 108 programs present, sixteen records still to land, runnable count 92, and no expected-divergence marker active anywhere |

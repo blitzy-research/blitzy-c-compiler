@@ -80,23 +80,37 @@ block below is the machine-readable half of it. What follows is why the marker e
 does and does not excuse, and what it would take to retire it.
 
 WHY CASE RANGES ARE THE ONE CONSTRUCT IN THE MANDATED EXTENSION LIST THAT NEEDS A MARKER. The
-mandated list of GCC extensions is statement expressions, typeof, computed gotos and case ranges.
-The first three appear in the repository's documented extension inventory; case ranges appear in
-none of them. docs/project-guide.md line 206 is that inventory: its Compliance and Quality Review
-row for the C11 frontend records a passing verdict and enumerates exactly what is parsed --
-__attribute__, statement expressions, typeof, computed goto, inline assembly -- and case ranges are
-not among them. docs/technical-specifications.md lines 13, 107 and 506 enumerate the same set in
-three further places, with the same absence.
+mandated list of GCC extensions is statement expressions, typeof, computed gotos and case ranges. The
+first three are extensions this repository's own specification REQUIRES; case ranges are not. The
+governing statement is docs/technical-specifications.md line 761, inside the section headed "C11 +
+GCC Extensions Compliance Rule" at line 758, and it is affirmative rather than silent: it states
+which GCC extensions are explicitly required -- __attribute__, __builtin_* intrinsics, inline
+assembly with operand constraints, statement expressions, typeof/__typeof__, computed goto and
+__extension__ -- and the line after it adds that "These extensions are not optional; they are
+required for compiling real-world codebases like SQLite, Lua, and Redis". Case ranges are not in that
+required set. Four further places in the repository enumerate the same seven-item set and reach the
+same boundary: docs/technical-specifications.md lines 13, 107 and 506, and the Compliance and Quality
+Review row for the C11 frontend in docs/project-guide.md, which records a passing verdict and lists
+exactly what is parsed -- __attribute__, statement expressions, typeof, computed goto, inline
+assembly.
 
 WHAT THAT BASIS DOES AND DOES NOT ESTABLISH, STATED PLAINLY SO THE MARKER IS NOT READ AS MORE THAN
-IT IS. The basis is an OMISSION, and an omission is weaker than a statement: an inventory that does
-not name a feature is consistent with the feature working and the inventory being incomplete, with
-the feature not working, and with nobody having considered the question. The marker is therefore not
-a claim that bcc must reject case ranges. It is a claim that IF bcc rejects them, the rejection is
-traceable to a documented gap rather than being an unexplained divergence -- which is exactly the
-distinction requirement 5 draws, and exactly the ambiguity the plan flagged for a maintainer to
-resolve. The register records the same qualification, and the citation is machine-resolved against
-line 206 of the cited document on every run, so a reader can turn to the inventory and judge it.
+IT IS. What it establishes affirmatively is the BOUNDARY OF THE DOCUMENTED OBLIGATION: the
+specification fixes the GCC extension set the implementation must provide, says in the next line that
+those extensions are not optional, and does not place case ranges inside it. An implementation that
+declines the construct is therefore within its documented scope, and that is a statement the cited
+line makes rather than a silence a reader has to interpret. What it does NOT establish is that bcc
+refuses them -- a construct outside the required set may still be implemented, and nothing in the
+repository says whether this one is. So the marker is not a claim that bcc must reject case ranges. It
+is a claim that IF bcc rejects them, the rejection falls outside the documented obligation and is
+traceable to it rather than being an unexplained divergence -- exactly the distinction requirement 5
+draws, and exactly the ambiguity the plan flagged for a maintainer to resolve. This is a strictly
+stronger footing than the marker's earlier one, which cited the project guide's inventory and rested
+on the inventory's SILENCE about the construct; a reviewer had to weigh an omission, which is
+compatible with the feature working, with it not working, and with nobody having considered the
+question. The register records the same qualification, and the citation is machine-resolved against
+line 761 of the cited document on every run -- with the quoted requirement sentence resolved inside
+that line -- so a reader can turn to the compliance rule and judge it.
 
 WHAT STANDS BEHIND EACH HALF OF THE OBSERVATION, BECAUSE THE TWO HALVES ARE NOT EQUALLY EVIDENCED.
 The reference half is measured: gcc 13.4.0 accepts this program and prints the eighteen-line golden
@@ -112,9 +126,11 @@ environment evidence, which settles nothing in either direction.
 WHY THE MARKER IS PRESENT ANYWAY, WHICH IS THE PART THAT KEEPS BEING GOT WRONG. The project
 specification is frozen, and it fixes this marker for this program by identifier, class, scope and
 basis. Carrying it is therefore a requirement of the specification rather than an inference this
-record may withdraw -- and the same reasoning already governs the basis, because the record format
-admits an omission-based citation precisely on the ground that refusing it would refuse a marker the
-specification mandates, which makes the format wrong rather than the record. What the specification
+record may withdraw. The record format additionally admits an omission-based citation, on the ground
+that refusing one would refuse a marker the specification mandates -- which makes the format wrong
+rather than the record -- but this marker no longer relies on that latitude: its basis is now the
+affirmative compliance rule that fixes the required extension set, and the quotation resolved inside
+the cited line is that rule's own sentence. What the specification
 does not do is suspend the safeguard, and the safeguard is what keeps carrying this marker honest:
 where the compiler under test accepts the construct, the arm this marker scopes agrees, the verdict is
 XPASS and the run FAILS, naming the marker and both places it lives. Nothing is quietly excused. An
@@ -148,9 +164,11 @@ actual compiler under test, not a stand-in forwarding to the reference toolchain
 compared with itself cannot answer the question the marker asks. With that observation in hand,
 retirement is one edit in each of two places: delete the marker block from this record, and delete the
 summary row and the structured entry from tests/conformance/EXPECTED_DIVERGENCES.md. Should the
-repository instead come to STATE the limitation in prose, cite that sentence and quote it in the
-optional expected_divergence.documented key: the audit resolves the quotation inside the cited range,
-and the basis becomes an assertion rather than a silence.
+repository come to name the construct directly -- an entry in the out-of-scope table, or a sentence
+saying it is not implemented -- cite that sentence and quote it in the optional
+expected_divergence.documented key in its place: the audit resolves the quotation inside the cited
+range, and the basis would then assert the limitation itself rather than the boundary of the
+obligation, which is the one step stronger than the compliance rule cited today.
 END
 expected_stdout    <<END
 cr_bucket_neg=10
@@ -175,20 +193,32 @@ END
 expected_divergence.id       = XD-GCCEXT-CASE-RANGES-001
 expected_divergence.class    = compile_failure
 expected_divergence.scope    = oracle_a; all targets; all opt levels
-expected_divergence.basis    = docs/project-guide.md, line 206, the documented GCC extension inventory enumerates the parsed extensions and omits case ranges
+expected_divergence.basis    = docs/technical-specifications.md, line 761, the C11 + GCC Extensions Compliance Rule states which GCC extensions are explicitly required and case ranges are not among them
 expected_divergence.documented <<END
-__attribute__, statement expressions, typeof, computed goto, inline assembly all parsed
+GCC extensions explicitly required: `__attribute__`, `__builtin_*` intrinsics, inline assembly (`asm`/`__asm__` with operand constraints), statement expressions, `typeof`/`__typeof__`, computed goto, `__extension__`
 END
 expected_divergence.observed <<END
-The divergence this marker covers is a refusal by the compiler under test to translate the case-range
-label form: no artifact is produced, so oracle (a) has nothing to compare, while the reference compiler
-accepts the same source and prints the eighteen-line golden record this file carries for it, beginning cr_bucket_neg=10
-and ending cr_runtime_hex=12. The reference half of that pair is measured on this branch, with
-gcc 13.4.0 on all four targets at all three optimization levels. The compiler-under-test half carries
-no independent capture, which is why expected_divergence.evidence is left unwritten: the only compiler
-under test this checkout can offer forwards every invocation to the pinned reference driver, so its
-agreement measures the environment -- one toolchain compared with itself -- and speaks to neither bcc
-nor case ranges. The marker is present because the frozen project specification fixes it for this
-program by identifier, class, scope and basis; the register's section 3.1 XPASS safeguard is what keeps that honest,
-and only a real independent bcc observation retires it.
+WHAT THIS MARKER COVERS, AND WHAT STANDS BEHIND EACH HALF OF IT. It covers exactly one divergence: a
+refusal by the compiler under test to translate the case-range label form, on oracle (a) alone. A
+refusal produces no artifact, so oracle (a) has nothing to compare, while the reference compiler
+accepts the same source and prints the eighteen-line golden record this file carries for it, beginning
+cr_bucket_neg=10 and ending cr_runtime_hex=12.
+
+The reference half is measured on this branch: gcc 13.4.0 accepts this program and prints those bytes
+on all four targets at all three optimization levels. The compiler-under-test half carries no
+independent capture, and expected_divergence.evidence is left unwritten rather than filled in from
+something weaker -- this checkout holds the corpus and no bcc, and the only compiler under test it can
+offer forwards every invocation to the pinned reference driver for the requested target, so that
+compiler's agreement is a measurement of the environment, one toolchain compared with itself, and it
+speaks to neither bcc nor case ranges. A run of that shape has been performed here and is recorded for
+exactly what it is: non-independent environment evidence, which settles nothing in either direction.
+So no such refusal has been captured on this branch, and this field describes the divergence the marker
+is scoped to explain rather than one a capture attests.
+
+The marker is present because the frozen project specification fixes it for this program by
+identifier, class, scope and basis, and its basis is the affirmative compliance rule cited above,
+which fixes the required GCC extension set and does not place case ranges inside it. The register's
+section 3.1 XPASS safeguard is what keeps carrying it honest: where the compiler under test accepts the
+construct, the arm this marker scopes agrees, the verdict is XPASS and the run FAILS, naming the marker
+and both places it lives. Only a real, independent bcc observation retires it.
 END

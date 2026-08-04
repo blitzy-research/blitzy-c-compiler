@@ -245,7 +245,10 @@ use super::env::{
     VAR_REF_CC_RISCV64, VAR_STRICT,
 };
 use super::manifest::{ExpectedDivergence, Manifest};
-use super::{shown_path, CellKey, DivergenceClass, HarnessError, Oracle, Outcome, Target, Verdict};
+use super::{
+    shown_path, CellKey, DivergenceClass, HarnessError, MarkerClass, Oracle, Outcome, Provenance,
+    Target, Verdict,
+};
 
 /// Repository-relative path of the expected-divergence register.
 ///
@@ -499,6 +502,20 @@ pub enum Observation<'a> {
         attribution: Attribution,
         /// One line naming what happened, from the build layer that read the diagnostics.
         summary: &'a str,
+        /// The structured account of the build that refused, from the build layer that ran it.
+        ///
+        /// A refused build has a subject and no authority: there is no artifact to compare, so
+        /// nothing was judged against anything. What it does have is the exact command line, the
+        /// compiler's own termination and the workspace its captured diagnostics were written to,
+        /// and those are precisely the facts a maintainer needs in order to reproduce a refusal —
+        /// which is why they now reach the report instead of stopping at `summary`.
+        ///
+        /// `None` for a build failure reported without one, which is honest rather than tidy.
+        ///
+        /// Boxed because it is by far the largest thing any variant of this enum carries, and an
+        /// unboxed copy would make every `Observation` — including the three that carry no provenance
+        /// at all — as large as this one.
+        provenance: Option<Box<Provenance>>,
         /// The marked arm of this same refusal, when another arm of the cell carries a marker
         /// covering it.
         ///
@@ -538,6 +555,46 @@ pub enum Observation<'a> {
 /// [`Verdict::Fail`] rather than being quietly treated as "no marker", which would silently
 /// convert every expected divergence in that program into a finding.
 pub fn judge(
+    observation: &Observation<'_>,
+    manifest: Option<&Manifest>,
+    key: &CellKey,
+    oracle: Oracle,
+) -> Outcome {
+    // One wrapper around the whole policy, for one purpose: whatever verdict the policy reaches, the
+    // structured account of the executions it was reached from travels with it.
+    //
+    // Classification used to flatten an observation to a single line -- `comparison.summary` -- before
+    // handing it on, so the exact commands, both terminations, both raw wait statuses and the located
+    // first difference were discarded HERE, one step before the report that needed them. Rendering a
+    // summary is a job for an output sink, which can choose how much to show; a classifier deciding
+    // how much of the evidence survives is a decision made in the wrong place, and it was made
+    // irreversibly.
+    //
+    // The summary keeps its job -- it is still what the verdict table prints -- and the fields travel
+    // alongside it instead of being replaced by it.
+    let outcome = judge_verdict(observation, manifest, key, oracle);
+    match observation_provenance(observation) {
+        Some(provenance) => outcome.with_provenance(provenance),
+        None => outcome,
+    }
+}
+
+/// The structured provenance an observation carries, when it had executions behind it.
+///
+/// `None` is a real answer for two of the four observation shapes: an absent tool ran nothing, and an
+/// unexplained harness failure has nothing to attribute. Returning empty fields for those would make a
+/// row that measured nothing look like a row that measured and found nothing.
+fn observation_provenance(observation: &Observation<'_>) -> Option<Provenance> {
+    match observation {
+        Observation::Compared(comparison) => comparison.provenance.clone(),
+        Observation::Build { provenance, .. } => {
+            provenance.as_ref().map(|boxed| boxed.as_ref().clone())
+        }
+        Observation::ToolingAbsent { .. } | Observation::Unexplained { .. } => None,
+    }
+}
+
+fn judge_verdict(
     observation: &Observation<'_>,
     manifest: Option<&Manifest>,
     key: &CellKey,
@@ -587,6 +644,7 @@ pub fn judge(
             attribution: Attribution::Compiler,
             summary,
             root,
+            ..
         } => (*class, *summary, DivergenceShape::Refused, *root),
 
         Observation::Compared(comparison) => {
@@ -808,6 +866,24 @@ pub fn unavailable_oracle(caps: &Capabilities, key: &CellKey, oracle: Oracle) ->
     )
 }
 
+/// Everything the build layer concluded about a refusal, as one value.
+///
+/// Grouped rather than passed as five separate parameters so that the call is readable at the site and
+/// so that a caller cannot transpose two of them: `class` and `attribution` are both small
+/// enumerations, and a swapped pair would compile while reporting a refusal at the wrong scope.
+pub struct BuildRefusal<'a> {
+    /// The shape of the failure, from the closed set.
+    pub class: DivergenceClass,
+    /// Whether the compiler or this machine is answerable.
+    pub attribution: Attribution,
+    /// One line naming what happened, from the build layer that read the diagnostics.
+    pub summary: &'a str,
+    /// The marked arm of this same refusal, when another arm of the cell carries a covering marker.
+    pub root: Option<RefusalRoot<'a>>,
+    /// The build layer's own structured account of the invocation that refused.
+    pub provenance: Option<Box<Provenance>>,
+}
+
 /// Decide the verdict for a build that produced no usable artifact.
 ///
 /// `class`, `attribution` and `summary` are the three halves of the build layer's own judgement
@@ -825,6 +901,12 @@ pub fn unavailable_oracle(caps: &Capabilities, key: &CellKey, oracle: Oracle) ->
 /// repository **documents** be an expected divergence instead of a finding — and, where no such
 /// documentation exists, keeps it a finding on every arm.
 ///
+/// `provenance` is the build layer's own structured account of the invocation that refused —
+/// [`CompileOutcome::provenance`] — and it is a parameter for the same reason `root` is: only the
+/// caller knows whether it holds the build outcome or merely a description of one. Pass it whenever
+/// the outcome is in hand, so that a refusal reaches the report with its command, its termination and
+/// its capture reference rather than with one summary line.
+///
 /// `root` is the dependency context, and it is a parameter rather than something this function
 /// derives so that every caller has to say explicitly whether one exists. Pass
 /// [`refusal_root`]'s answer for a refusal by the compiler under test, where one root event
@@ -836,17 +918,22 @@ pub fn build_failure(
     manifest: &Manifest,
     key: &CellKey,
     oracle: Oracle,
-    class: DivergenceClass,
-    attribution: Attribution,
-    summary: &str,
-    root: Option<RefusalRoot<'_>>,
+    refusal: BuildRefusal<'_>,
 ) -> Outcome {
+    let BuildRefusal {
+        class,
+        attribution,
+        summary,
+        root,
+        provenance,
+    } = refusal;
     judge(
         &Observation::Build {
             class,
             attribution,
             summary,
             root,
+            provenance,
         },
         Some(manifest),
         key,
@@ -918,13 +1005,18 @@ pub fn oracle_applies(oracle: Oracle, target: Target) -> bool {
 /// not match the cell being judged is reported as an inconsistency, because consulting another
 /// program's marker is precisely how a divergence could be excused by documentation that was
 /// never about it.
+///
+/// A marker classed [`MarkerClass::ComparisonExcluded`] never matches here, and that is the whole
+/// point of that class: it documents an arm the record does not compare, so there is no observed
+/// class for it to equal. The equality below is against `MarkerClass::Observed(class)`, so the
+/// exclusion is enforced by the type rather than by a convention a later edit could forget.
 pub fn covers(
     marker: &ExpectedDivergence,
     key: &CellKey,
     oracle: Oracle,
     class: DivergenceClass,
 ) -> bool {
-    marker.class() == class && marker.covers(key, oracle)
+    marker.class() == MarkerClass::Observed(class) && marker.covers(key, oracle)
 }
 
 /// The marker that excuses a divergence of this class for this cell and oracle, if any.
@@ -1175,11 +1267,15 @@ fn marker_non_coverage(
         return None;
     }
     let mut mismatches: Vec<String> = Vec::new();
-    if marker.class() != class {
-        mismatches.push(format!(
-            "it documents class {} while a {class} was observed",
-            marker.class()
-        ));
+    if marker.class() != MarkerClass::Observed(class) {
+        mismatches.push(match marker.class() {
+            MarkerClass::ComparisonExcluded => format!(
+                "it documents a comparison this record declines to make, not an observation, while                  a {class} was observed"
+            ),
+            MarkerClass::Observed(documented) => format!(
+                "it documents class {documented} while a {class} was observed"
+            ),
+        });
     }
     if !marker.scope().oracles().contains(&oracle) {
         mismatches.push(match shape {

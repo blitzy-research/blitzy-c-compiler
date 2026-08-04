@@ -107,7 +107,8 @@ four-way cross-backend comparison sound rather than merely permitted.
 Every construct the program exercises is documented as supported: object-like and
 function-like macro expansion with stringification and token pasting at
 docs/technical-specifications.md line 92, the same two operators plus the recursive expansion
-guard at line 491, and the same list at docs/project-guide.md line 79. This record therefore
+guard at line 491, and the same list in docs/project-guide.md's "C11 Frontend -- Preprocessor"
+row. This record therefore
 carries no expected-divergence marker, and a divergence under any of its three oracles is a
 genuine finding rather than an expected one.
 END

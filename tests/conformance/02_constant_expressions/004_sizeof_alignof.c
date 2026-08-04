@@ -70,16 +70,17 @@
  *
  * No header is named and printf is hand-declared.  bcc ships no stdio.h: its
  * bundled set is the nine required freestanding headers plus a bonus stdatomic.h,
- * ten files in all (docs/project-guide.md line 212).  _Alignof is a C11 keyword and
- * needs none; stdalign.h would only supply the lowercase alignof macro.  stddef.h
- * and stdint.h are absent too, so size_t, ptrdiff_t and intptr_t cannot be named
- * here at all.  The first two are still probed WITHOUT being named, because the
- * language hands them over anonymously: sizeof yields a size_t, making
- * sizeof(sizeof(int)) size_t's own width, and a pointer difference yields a
- * ptrdiff_t.  intptr_t has no such anonymous route -- there is no operator that
- * produces one -- so it is NOT probed and NOT covered, here or anywhere in the
- * corpus.  That exclusion, and why the pointer-width lines below do not stand in
- * for it, is stated in this program's expectation record.
+ * ten files in all (docs/project-guide.md, "9 bundled freestanding headers").
+ * _Alignof is a C11 keyword and needs none; stdalign.h would only supply the
+ * lowercase alignof macro.  stddef.h and stdint.h are absent too, so size_t,
+ * ptrdiff_t and intptr_t cannot be named here at all.  The first two are still
+ * probed WITHOUT being named, because the language hands them over anonymously:
+ * sizeof yields a size_t, making sizeof(sizeof(int)) size_t's own width, and a
+ * pointer difference yields a ptrdiff_t.  intptr_t has no such anonymous route --
+ * there is no operator that produces one -- so it is NOT probed and NOT covered,
+ * here or anywhere in the corpus.  That exclusion, and why the pointer-width
+ * lines below do not stand in for it, is stated in this program's expectation
+ * record.
  *
  * Nothing implementation-defined reaches stdout: no address, no pointer value, no
  * plain long and no plain-char signedness-dependent value is printed, every
