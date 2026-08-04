@@ -6,7 +6,7 @@
 
 program            = 003_finite_comparisons
 area               = 13_floating_point
-description        = Comparison and ordering on finite values only: every relational and equality operator on float, on double and across the two, the conditional operator, if selection, short-circuit chains and logical negation, each in a folded and a volatile-runtime variant
+description        = Comparison and ordering on finite values only: every relational and equality operator on float, on double and across the two, the conditional operator, if selection, both short-circuit forms and logical negation, each in a folded and a volatile-runtime variant
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -19,74 +19,156 @@ oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
 Free of undefined and unspecified behaviour by construction:
-- FINITE VALUES ONLY, and no not-a-number or infinity identity assumption. Neither appears
-  in any spelling, and neither is reachable: there is no division at all, so no division by
-  zero, and no magnitude exceeds 3.75, so nothing can overflow.
-- No identity assumption is made about a not-a-number: this program does not test the
-  self-inequality identity, and every inequality has two separately named operands.
-- No identity assumption is made about signed zero, and negative zero is unreachable: no
-  zero appears as an operand, and no value is subtracted from itself, so no printed value
-  can render as a negative zero on one target and a positive zero on another.
-- No subnormal arises: the smallest magnitude used is 0.75, many orders of magnitude above
-  the normal minimum of either format.
-- Equality and inequality are legitimate here rather than the sloppiness they usually
-  signal: every value is a dyadic rational, exactly representable in binary32 and binary64
-  alike, and no operation is performed on any of them beyond comparison and unary minus, so
-  no rounding occurs at any step and equality is an exact, hard property. This is also why
-  -Wfloat-equal is deliberately not a member of the default audit gate.
-- No signed integer overflow: every printed integer is the 0 or 1 a comparison yields.
-- No shift, no pointer arithmetic, no array indexing and no aggregate access, so there is
-  no aliasing violation and no dependence on padding.
-- No read of uninitialised storage; every object is initialised at its declaration and the
-  volatile objects have static initialisers.
-- No object is modified twice between sequence points. Each volatile object is read exactly
-  once, in a statement of its own, before its value reaches an argument list, so nothing
-  depends on unspecified evaluation order.
-- The two-variant rule is applied to every comparison: once folded, and once over volatile
-  operands, which forces the backend's comparison instruction selection and condition-code
-  handling to answer.
-- Nothing is allocated, nothing outside the translation unit is read, and main returns 0.
-
-Verified empirically on this branch with gcc 13.4.0 and qemu-user 10.1.0: the default
-strict warning gate (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror) produces zero diagnostics at -O0, -O1 and -O2; the sanitizer gate
-(-fsanitize=undefined,address -fno-sanitize-recover=all) runs to completion with no
-output and exit status 0; and all twelve cells of the declared matrix produce
-byte-identical stdout with exit status 0 and an empty standard error.
+- FINITE VALUES ONLY, and no non-finite value is even reachable. No not-a-number and no
+  infinity appears in any spelling -- there is no NAN, INFINITY, nan(), HUGE_VAL or
+  __builtin_ form anywhere in the program -- and neither can be produced: there is no
+  division at all, so no division by zero, and no magnitude exceeds 3.75, so nothing can
+  overflow. Every operand is one of 0.75, 1.25, 1.5, 2.5, 3.75 or a negation of one.
+- NO IDENTITY ASSUMPTION IS MADE ABOUT A NOT-A-NUMBER. This program does NOT test the
+  self-inequality identity x != x. Every != below has two separately named operands.
+- NO IDENTITY ASSUMPTION IS MADE ABOUT SIGNED ZERO. This program does NOT test
+  -0.0 == 0.0, and negative zero is not merely untested but unreachable: no zero appears
+  as an operand, no zero is negated, no zero is multiplied by a negative value, and no
+  value is subtracted from itself -- indeed nothing is subtracted at all. The only
+  floating values printed are 2.500000 and 1.250000, so no printed value can render as
+  -0.000000 on one target and 0.000000 on another.
+- NO SUBNORMAL ARISES. The smallest magnitude used is 0.75, many orders of magnitude above
+  the normal minimum of either format, and no operation reduces a magnitude at all.
+- EQUALITY AND INEQUALITY ARE EXACT HERE, which is why they are used deliberately rather
+  than carelessly. Every operand is a dyadic rational whose significand needs at most four
+  bits -- 0.75 = 3/4, 1.25 = 5/4, 1.5 = 3/2, 2.5 = 5/2, 3.75 = 15/4 -- so each is exactly
+  representable in binary32 and in binary64 alike, and no operation is performed on any of
+  them beyond comparison, unary minus and one widening. No rounding decision is taken at
+  any step. Two consequences follow, and both are load-bearing:
+  (1) == and != are hard properties rather than approximations, so the customary advice
+      against floating equality does not apply, and -Wfloat-equal is correspondingly not a
+      member of the default audit gate; and
+  (2) i686 evaluates floating expressions in x87 extended precision (FLT_EVAL_METHOD 2)
+      while the other three targets do not, and excess intermediate precision cannot
+      perturb a value that is already exact in every format involved, so it cannot change
+      any comparison outcome on any target.
+- EVERY CONVERSION IS WRITTEN WITH AN EXPLICIT CAST. The only conversion in the program is
+  the float-to-double widening of the two mixed-width comparisons, and it is spelled
+  (double)(...) through the FC_WIDEN macro rather than left to the implicit usual
+  arithmetic conversions. The widening is exact, both values being dyadic. That is what
+  keeps the program clean under the -Wconversion and -Wsign-conversion members of the
+  gate, and both are active here: this record declares no ub_audit_flags, because area 13
+  sanctions no deviation and the default gate at full strength is what it wants, so there
+  is nothing to override and no deviation to justify.
+- No signed integer overflow, and no integer arithmetic at all. Every integer in the
+  program is a comparison result, so every integer value is 0 or 1.
+- No shift operator appears, so no shift count can be out of range.
+- No pointer is formed, no array is indexed and no aggregate is accessed, so there is no
+  aliasing violation, no one-past-end question, and no dependence on padding bytes or on
+  the relative addresses of unrelated objects. No floating object is inspected byte-wise or
+  reinterpreted through overlapping storage or a pointer cast.
+- No read of uninitialized storage. Every object is initialized at its declaration, every
+  volatile object carries an initializer, and the two objects an if statement assigns are
+  assigned in both arms.
+- No object is modified twice between sequence points.
+- AT MOST ONE SIDE-EFFECTING ARGUMENT PER CALL, and in fact none: every result is computed
+  into its own named variable before it is printed, so no argument list contains a volatile
+  access or any other side effect.
+- NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER. Each of the fifteen volatile objects is
+  read exactly once, in a declaration of its own, into a plain local, and every comparison
+  and every argument then reads only those plain locals. A macro body may name a parameter
+  more than once -- the ordering chains do -- but no volatile object is ever read twice
+  inside one expression, so no ordering question can arise at all. A value that reached a
+  local through a volatile load is still unknown to the optimizer, so the runtime
+  comparisons remain genuine run-time compares.
+- The && and || chains are deliberately side-effect-free, so nothing here depends on
+  short-circuit suppression of a side effect; that property is area 06's subject rather
+  than this program's. They are still genuine short circuits: in the || the left comparison
+  is false and the right one true, so evaluation really does fall through to the second.
+- THE TWO-VARIANT RULE IS APPLIED TO EVERY PREDICATE. All 35 properties are asserted once
+  over literal constants, which the folder evaluates at translation time, and once over
+  volatile operands, which must be re-read at run time and so force the backend's
+  comparison instruction selection and condition-code handling to answer. The false
+  directions and the equal-operand boundaries are twinned too, because those are exactly
+  where an inverted predicate survives while the true directions go on working.
+- NO HEADER IS INCLUDED. The program hand-declares int printf(const char *, ...); and names
+  nothing else. bcc ships no stdio.h, so an #include <stdio.h> would fail against it while
+  succeeding against the reference compiler -- a spurious divergence caused by the test
+  rather than the compiler. float.h is bundled but is deliberately not named either, no
+  FLT_ or DBL_ characteristic being needed here; math.h is neither bundled nor wanted, and
+  no isnan, isinf, isfinite or fabs appears, because finiteness here is a property of the
+  literals rather than something to be tested for at run time.
+- HERMETIC, as constraint C4 requires. main is int main(void) and returns 0, inside the
+  0-125 range the suite requires. Every input is a literal in the source: no file is
+  opened, no socket is created, no environment variable and no program argument is read,
+  and no storage is obtained from the heap.
+- Verified empirically on this branch with gcc-13 (GCC 13.4.0) and its matching i686,
+  aarch64 and riscv64 cross drivers: the default strict warning gate
+  (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
+  diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
+  -fno-sanitize-recover=all runs to completion with empty stderr and exit status 0.
 END
 impl_defined_notes <<END
-Every floating value in this program is a DYADIC RATIONAL - a finite sum of powers of two -
-and so is every intermediate and every result, so no operation makes a rounding decision at
-all. That is what makes the twelve cells comparable byte for byte rather than only in
-principle: i686 evaluates floating expressions in x87 extended precision (FLT_EVAL_METHOD 2)
-while x86_64 uses SSE, aarch64 its FP/SIMD unit and riscv64 the F and D extensions, and
-excess precision changes a result only where a rounding decision was taken. An exact value is
-exact in binary32, binary64 and x87 extended alike, so the printed digits cannot differ.
-Every value is printed at fixed precision with margin, and no default precision is relied on.
+This record narrows nothing -- all four targets, all three optimization levels, all three
+oracles, and no expected-divergence marker -- so these notes record the normalizations that
+let one golden record hold on every target, which is what earns the absence of a
+restriction rather than merely asserting it.
+
+FLOATING-POINT DETERMINISM RESTS ON EXACTNESS, NOT ON TOLERANCE. Every value in the program
+is a dyadic rational, and so is every intermediate and every result, so no operation makes a
+rounding decision at all. That is what makes the twelve cells comparable byte for byte
+rather than only in principle: i686 evaluates floating expressions in x87 extended precision
+(FLT_EVAL_METHOD 2) while x86_64 uses SSE, aarch64 its FP/SIMD unit and riscv64 the F and D
+extensions, and excess precision can change a result only where a rounding decision was
+taken. An exact value is exact in binary32, binary64 and x87 extended alike, so the printed
+digits cannot differ. Every printed floating value carries an explicit %.6f, so no default
+precision is relied on and no digit is at the mercy of a rounding mode.
 
 The measured target differences are handled by construction:
 
-1. sizeof(long) and sizeof(void *) are 4 on i686 and 8 on x86_64, aarch64 and riscv64
-   (docs/technical-specifications.md lines 457-462). No long, no size_t and no pointer value
-   is printed, and the only integer types printed are int and long long, which are 32 and 64
-   bits on all four targets.
-2. Plain char signedness is implementation-defined and was measured signed on x86_64 and
-   i686 and unsigned on aarch64 and riscv64. Where a character type is used it is spelled
-   explicitly signed or unsigned.
-3. All four targets are little-endian, and no floating object is inspected byte-wise, copied
-   into an object of another type, or reinterpreted through overlapping storage or a pointer
-   cast, so no representation detail can reach the output.
-4. No non-finite value, no negative zero and no subnormal appears anywhere, so nothing
-   depends on the exponent-range or NaN behaviour that legitimately differs between formats.
+1. WIDTHS. sizeof(long) and sizeof(void *) were measured as 4 on i686 and 8 on x86_64,
+   aarch64 and riscv64 (docs/technical-specifications.md lines 457-462). The program
+   declares no object of type long, unsigned long, size_t, ptrdiff_t or intptr_t, and forms
+   no pointer, so no value of a target-dependent width is computed, let alone printed. THE
+   ONLY INTEGER TYPE IN THE PROGRAM IS int, which is 32 bits on all four targets: every
+   integer printed is a comparison result, printed with %d, and is 0 or 1. The only other
+   printed values are the four selected floating results, printed with %.6f.
+2. CHARACTER SIGNEDNESS. Plain char signedness is implementation-defined and was measured as
+   signed on x86_64 and i686 and unsigned on aarch64 and riscv64. NO CHARACTER TYPE IS USED
+   IN THIS PROGRAM AT ALL, beyond the const char * format parameter of the hand-declared
+   printf prototype, which is a parameter type rather than a value: no char, signed char or
+   unsigned char object is declared, converted, compared or printed, so the measured
+   difference cannot reach the output. The corpus rule to spell a character type explicitly
+   signed or unsigned therefore has nothing here to apply to.
+3. REPRESENTATION. No address, no pointer value and no alignment residue is printed, and no
+   object's representation is inspected. All four targets are little-endian, and no floating
+   object is copied into an object of another type or reinterpreted through overlapping
+   storage or a pointer cast, so no representation detail can reach the output.
+4. EXPONENT RANGE AND NaN. No non-finite value, no negative zero and no subnormal appears
+   anywhere, so nothing depends on the exponent-range, signed-zero or not-a-number behaviour
+   that legitimately differs between formats and between the four backends' comparison
+   instructions.
+5. THE WIDEST FLOATING TYPE IS ABSENT, and deliberately so. sizeof(long double) was measured
+   at 16, 12, 16 and 16 bytes across the four targets (x87 80-bit extended versus IEEE
+   binary128), so naming it here would forfeit exactly the cross-backend comparability this
+   program depends on. That type is 004_long_double_target_restricted's subject, the one
+   program in this area permitted to narrow a comparison on its account; it is written and
+   executed rather than dropped, which is what constraint C3 requires.
 
-Restricting the program to finite values is what gives it evidentiary value rather than being
-caution for its own sake. Not-a-number and infinity behaviour, signed-zero identity and the
-quiet-versus-signalling distinction are precisely where the four backends' comparison
-instructions, flag semantics and library behaviour could legitimately differ, and where the
-implementation-defined carve-out would leave a divergence uninterpretable. Restricted to
-finite values, every comparison here is a hard property of C semantics that any correct
-compiler must reproduce byte for byte, so all three oracles stay enabled and a divergence is
-a genuine finding.
+Restricting the program to finite values is what gives it evidentiary value rather than
+being caution for its own sake. Not-a-number and infinity behaviour, signed-zero identity
+and the quiet-versus-signalling distinction are precisely where the four backends'
+comparison instructions, flag semantics and library behaviour could legitimately differ, and
+where the implementation-defined carve-out would leave a divergence uninterpretable.
+Restricted to finite values, every comparison here is a hard property of C semantics that
+any correct compiler must reproduce byte for byte -- so all three oracles stay enabled, no
+target is dropped, this record carries no marker, and a divergence is a genuine finding.
+
+PROVENANCE OF THE GOLDEN RECORD. Every field below was derived by hand from C semantics --
+each comparison is over exact values, so each result is unambiguously 0 or 1 and each
+selected value is exactly 2.5 or 1.25 -- and then confirmed against the REFERENCE compiler,
+never seeded from the compiler under test. Measured on this branch with gcc-13 (GCC 13.4.0)
+and the matching i686, aarch64 and riscv64 cross drivers, executed natively and under QEMU
+user-mode 10.1.0: stdout is byte-identical, standard error is empty and the exit status is 0
+in all twelve target-and-optimization-level cells. The -O0-against-O2 comparison is the
+informative one here: at -O2 the folded predicates collapse to immediates while the volatile
+twins remain real compare instructions, and the two must still agree, which is what the
+pair_ lines and all_folded_matches_runtime assert.
 END
 expected_stdout    <<END
 f_lt=1 f_lt_false=0 f_le_equal=1 f_lt_equal=0 f_gt=1 f_ge_equal=1

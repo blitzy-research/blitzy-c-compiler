@@ -6,7 +6,7 @@
 
 program            = 001_float_double_arithmetic
 area               = 13_floating_point
-description        = Single- and double-precision arithmetic in a folded and a volatile-runtime variant of every operation: add, subtract, multiply, divide, negate, a mixed chain, compound assignment, a call boundary, widening, narrowing, and an excess-precision probe
+description        = Single- and double-precision arithmetic at fixed print precision, folded and volatile runtime variants of every operator: add, subtract, multiply, divide, negate, a parenthesized chain, compound assignment, a call boundary, widening, narrowing and an excess-precision probe
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,81 +18,173 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-Free of undefined and unspecified behaviour by construction:
-- No signed integer overflow. Every integer value is small and every integer result is
-  far from INT_MIN and INT_MAX.
-- No shift operator appears, so no shift count can be out of range.
-- No division by zero, integer or floating.
-- Every floating-to-integer conversion in the program has an integral part comfortably
-  inside the destination's range, which is what C11 6.3.1.4p1 requires; and every
-  integer-to-floating conversion is of a value exactly representable in the destination
-  format, so no implementation-defined rounding decision is taken.
-- No array indexing beyond bounds, no pointer arithmetic and no aliasing violation. No
-  floating object is inspected byte-wise or reinterpreted through overlapping storage.
-- No read of uninitialized storage: every object is initialized at its declaration and
-  every volatile object has an initializer.
-- No object is modified twice between sequence points.
-- NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and this is argued for exactly what
-  the program does rather than for a stricter shape it does not have. No argument list in
-  this program contains more than one volatile access: every printf argument is a plain
-  local holding an already-computed result, so no call is exposed to unspecified argument
-  order. The runtime variant does pair two volatile operands inside a single arithmetic
-  expression -- the two operands of a binary operator, not the arguments of a call -- and
-  the relative order of those two reads is indeed unspecified. The program's observable
-  output cannot depend on it: the two objects are distinct, neither read modifies anything,
-  no other side effect is interleaved between them, and the operator's result is the same
-  whichever operand is fetched first. So both permitted orders produce the same stdout,
-  which is the property the oracle needs. Pairing the operands is also what forces the
-  backend to emit a genuine two-operand instruction, which is the point of the runtime
-  variant.
-- Hermetic, as constraint C4 requires: every input is a literal in the source. Nothing is
-  opened, no socket is created, no environment variable and no program argument is read,
-  and no storage is obtained from the heap.
-- main returns 0, inside the 0-125 range the suite requires.
-- Verified empirically on this branch: the default strict warning gate
-  (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
-  diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
-  -fno-sanitize-recover=all runs to completion with empty stderr and exit status 0.
+Free of undefined and unspecified behaviour by construction. The argument below is made for
+what this program ACTUALLY does rather than for a stricter shape it does not have, because
+undefined behaviour would permit either compiler to do anything and would leave a divergence
+proving nothing; freedom from it is the precondition under which a divergence is evidence
+about a compiler at all.
+
+EXACTNESS IS THE LOAD-BEARING PROPERTY, so it is argued first. Every floating operand here is
+a DYADIC RATIONAL -- m / 2^k with a small m and a small k, drawn only from 0.125, 0.25, 0.5,
+0.75, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 8.0 and 10.0 -- and every intermediate and every final
+result is one too. The widest result is 48.75, which is 110000.11 in binary and so needs eight
+significand bits; the largest magnitude reached anywhere is 50.0, an intermediate of the double
+chain. Eight bits fits binary32's twenty-four and binary64's fifty-three with room to spare, so
+every value in this program is EXACTLY REPRESENTABLE IN BOTH float AND double and NO OPERATION
+EVER MAKES A ROUNDING DECISION. Every float -> double widening and double -> float narrowing is
+therefore lossless in both directions, which is also what lets the two agreement lines compare
+a widened float against a double at all.
+BECAUSE NOTHING ROUNDS, i686's EXCESS INTERMEDIATE PRECISION CANNOT CHANGE ANY RESULT -- the
+specific hazard this program is written to defend against. i686 evaluates floating expressions
+in x87 extended precision, FLT_EVAL_METHOD 2, while x86-64 uses SSE, AArch64 its FP/SIMD unit
+and RISC-V 64 the F and D extensions. Excess precision perturbs a result only where a rounding
+decision was taken, and here none ever is: an exact value computed in sixty-four significand
+bits and stored back to twenty-four or fifty-three is the same value. A single operand that
+needed rounding -- 0.1, or a quotient by anything other than a power of two -- would let i686
+double-round and would manufacture a divergence that says nothing about any compiler.
+NO NON-FINITE VALUE AND NO SIGNED ZERO is produced or relied upon: no not-a-number, no
+infinity, no negative zero and no subnormal appears, and none is reachable. Every divisor is a
+named non-zero power of two -- 2.0 and 4.0 in both precisions -- so there is no division by
+zero; the smallest magnitude used anywhere is 0.125 and the largest is 50.0, so nothing
+overflows and nothing decays toward the subnormal range; and no value is ever subtracted from
+itself, so no zero of either sign arises. No value is compared against itself either, so no
+self-inequality identity is assumed.
+
+The remaining rulebook items, each argued for this program:
+- NO SIGNED INTEGER OVERFLOW. Exactly three integer objects exist and each holds 0 or 1: the
+  two cross-precision agreement results, and their conjunction with the twenty-one remaining
+  folded-against-runtime equalities. No integer arithmetic other than that conjunction occurs.
+- NO SHIFT OPERATOR appears anywhere, so no shift count can be out of range.
+- NO CONVERSION TO OR FROM AN INTEGER TYPE OCCURS AT ALL, so the one undefined case of a
+  floating-to-integer conversion -- an integral part not representable in the destination,
+  C11 6.3.1.4p1 -- cannot arise here, and neither can an inexact integer-to-floating
+  conversion. The three integer values are the RESULT TYPES of == and &&, which are int by
+  definition rather than by conversion. General conversion boundaries in both directions are
+  the subject of 002_float_int_conversions.c in this area.
+- NO ALIASING VIOLATION AND NO DEPENDENCE ON REPRESENTATION. No floating object is read
+  through a pointer of another type, punned through a union, or inspected byte-wise; no
+  pointer is formed, no pointer arithmetic is performed and no array is indexed, so no
+  padding byte and no relative address of unrelated objects can be observed.
+- NO READ OF UNINITIALIZED STORAGE. Every volatile operand is initialized in its own
+  declaration, and every result object is either initialized in its declaration or assigned
+  before its only read.
+- NO OBJECT IS MODIFIED TWICE BETWEEN SEQUENCE POINTS. The four compound assignments of each
+  FP_COMPOUND instantiation are four full expressions in statements of their own, and the
+  macro is a do/while(0) so that one instantiation plus its semicolon is exactly one
+  statement.
+- AT MOST ONE SIDE-EFFECTING ARGUMENT PER CALL, and in fact none. No call in this program --
+  neither printf nor either fp_scale helper -- receives an argument with a side effect: each
+  helper argument is read into a plain local in a statement of its own first, and every printf
+  argument is a plain local already holding a computed result.
+- NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER. Every macro parameter appears exactly once
+  in every macro body, so no operand is evaluated twice; where a computation needs one value in
+  two places, two DISTINCT volatile objects supply it -- vf_b / vf_b_alt and vd_b / vd_b_alt --
+  rather than one object read twice. The runtime spelling does pair two volatile reads inside a
+  single arithmetic expression: the two operands of a binary operator, not the arguments of a
+  call, and the relative order of those two reads is indeed unspecified. No printed value can
+  turn on it. The two objects are distinct, neither read modifies anything, no other side effect
+  is interleaved between them, and the operator's value is the same whichever operand is fetched
+  first, so both permitted orders produce the same stdout -- which is the property the oracle
+  needs. Pairing them is also what forces the backend to emit a genuine two-operand instruction,
+  which is the point of the runtime variant.
+
+Print discipline, because the golden record below is compared byte for byte:
+- EVERY FLOATING VALUE IS PRINTED WITH AN EXPLICIT .6 PRECISION. Each needs at most three
+  fractional digits -- .750, .375, .125 and .625 are the widest -- so every decimal expansion
+  terminates well inside the six digits printed, with three digits to spare. That margin is why
+  no printed line can turn on a last-digit rounding decision, and it is why no default precision
+  and no rounding mode is relied upon anywhere. The only other conversion specification used is
+  %d, for the three integer flags, and no length modifier appears in either.
+- EVERY CONVERSION IS WRITTEN WITH AN EXPLICIT CAST -- twenty-five (double) casts and two
+  (float) casts, including the default argument promotion of every float handed to the variadic
+  printf -- so the -Wconversion and -Wsign-conversion members of the gate are satisfied by
+  construction rather than by luck. Area 13 sanctions no deviation from the default gate, so
+  this record omits ub_audit_flags entirely and thereby accepts
+  -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror in full.
+- NO HEADER IS INCLUDED. bcc ships no stdio.h -- its bundled set is the nine required
+  freestanding headers plus a bonus stdatomic.h -- so naming one would fail against bcc while
+  succeeding against the reference compiler, a divergence caused by the test rather than by the
+  compiler. printf is hand-declared as `int printf(const char *, ...);` and is the only library
+  function used, so the artifact links against libc alone under -static. float.h is bundled but
+  is deliberately not named either: no limit and no epsilon is consulted here, and the bundled
+  set is the subject of 12_preprocessor/003_bundled_header_inclusion.c.
+- main is `int main(void)` and returns 0, inside the 0..125 range this suite permits, so the
+  recorded expect_exit names a status the operating system delivers rather than one it truncates.
+
+HERMETIC, as constraint C4 requires: every input is a literal in the source. Nothing is opened,
+no socket is created, no file is read or written, no environment variable and no program argument
+is consulted, no heap storage is obtained, no clock is read and no randomness is drawn -- so a
+cell's stdout is a function of the program and the compiler alone.
+
+Verified rather than asserted, on this branch: the default seven-flag warning gate named above
+produces ZERO diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
+-fno-sanitize-recover=all builds, RUNS TO COMPLETION with empty stderr and exit status 0, and
+prints stdout byte-identical to the golden record below. Both gates drive the REFERENCE COMPILER
+alone and are never applied to the compiler under test, so the shared-flag discipline the
+differential oracle rests on is untouched by them.
 END
 impl_defined_notes <<END
-FLOATING-POINT DETERMINISM rests on three deliberate choices, each verified by
-measurement rather than assumed:
-1. Every floating value in the program is a DYADIC RATIONAL -- an integer, or an integer
-   plus a sum of negative powers of two -- so it is exactly representable in binary32 and
-   binary64 alike and no rounding decision is ever taken.
-2. Every printed floating value carries an explicit precision with room to spare, so no
-   default precision is relied on and no digit is at the mercy of a rounding mode.
-3. Excess intermediate precision cannot perturb an exact value. This matters because i686
-   evaluates floating expressions in x87 extended precision (FLT_EVAL_METHOD 2) while the
-   other three targets do not; the exactness of every operand and every result is what
-   makes the difference unobservable.
-No not-a-number, no infinity, no negative zero, no subnormal and no division by zero is
-produced or assumed anywhere.
+THIS RECORD NARROWS NOTHING: four targets, three optimization levels, all three oracles, and no
+expected-divergence marker. The field is written all the same, for two reasons. It records the
+normalizations that keep ONE golden record valid on EVERY target, and the set of hazards
+deliberately kept out of the program is as worth reading as the properties the program asserts.
+And a divergence here is a GENUINE FINDING rather than an implementation-defined difference,
+which is a claim that ought to be inspectable rather than implicit.
 
-THE TWO-VARIANT RULE. Every computation is performed twice: once over constants, which
-the folder evaluates at translation time, and once over volatile-qualified operands, which
-must be re-read from memory at run time and so cannot be folded. Without the runtime half
-the backend would never be asked to compute anything and a code-generation defect would
-escape entirely; the two halves together also localise a divergence to the folder or to
-the backend rather than to "one of the two".
+IMPLEMENTATION-DEFINED PROPERTIES KEPT OUT OF THE OBSERVABLE OUTPUT, each measured across the
+four targets rather than assumed:
+- PLAIN CHAR SIGNEDNESS was measured as signed on x86_64 and i686 and UNSIGNED on aarch64 and
+  riscv64. No plain char value is printed, and no char object appears in the program at all, so
+  the difference cannot reach a printed line.
+- LONG AND POINTER WIDTH were measured as 4 bytes on i686 and 8 bytes on the other three
+  (docs/technical-specifications.md lines 457-462). No long, no size_t, no ptrdiff_t, no
+  intptr_t and no pointer value is printed, and no length modifier appears in any conversion
+  specification: the only integer destination anywhere is int, the same width on all four
+  targets, and the only specifications used are %.6f and %d.
+- NO ADDRESS OR POINTER VALUE IS PRINTED, and none could be: the program forms no pointer at
+  all, so no address, no pointer difference and no alignment residue exists to print.
+- LONG DOUBLE IS ABSENT ENTIRELY. Its representation was measured at 16, 12, 16 and 16 bytes
+  across x86_64, i686, aarch64 and riscv64 -- x87 80-bit on i686 against IEEE binary128
+  elsewhere -- and that is the one property in this area which genuinely cannot be compared for
+  value across backends. The type is NOT dropped on that account, which constraint C3 would
+  forbid: it is the subject of 004_long_double_target_restricted.c in this area, the only record
+  in the corpus permitted to narrow a comparison because of it. None of it leaks in here, so
+  this program keeps the full four-way comparison.
+- FLOATING EVALUATION METHOD differs -- i686 evaluates in x87 extended precision,
+  FLT_EVAL_METHOD 2, while the other three do not -- and is neutralized by exactness rather
+  than avoided. The argument sits in ub_notes above, because it is what makes the program free
+  of a dependence on unspecified intermediate precision rather than merely tidy.
+- INTEGER WIDTHS AND SIGNS ARE NOT AT ISSUE. The three printed integers are int flags holding 0
+  or 1, so no width, no signedness and no representation choice can alter their rendering.
 
-Plain char signedness is implementation-defined and was measured as signed on x86_64 and
-i686 and unsigned on aarch64 and riscv64; no plain-char value is printed. sizeof(long)
-and sizeof(void *) were measured as 4 on i686 and 8 on the other three targets
-(docs/technical-specifications.md lines 457-462); no long, size_t, ptrdiff_t, intptr_t or
-pointer value is printed and no long or pointer conversion specification is used. Only
-int, long long and their unsigned counterparts appear as integer destinations, each the
-same width on all four targets. No address or pointer value is printed.
+THE TWO-VARIANT RULE, which is why this program prints twice as many lines as it has properties.
+Every computation is written once as a macro and instantiated twice: over literal constants,
+which the folder evaluates at translation time, and over volatile-qualified operands, which must
+be re-read from memory at run time and therefore cannot be folded. Each pair is printed on
+adjacent fold_X / rt_X lines, and a final all_pairs_agree line asserts that the two spellings
+agreed on every property at once -- which catches a pair agreeing with each other but with
+neither expectation, something two separately wrong lines could otherwise be misread as. Without
+the runtime half, -O1 and -O2 would answer every line with the folder's value, the
+floating-point backend would never be asked to compute anything, and a code-generation defect
+would escape while the suite reported PASS. With both halves present, a divergence localizes to
+the folder or to the backend rather than to one of the two.
 
-long double is absent entirely, its representation having been measured at 16, 12, 16 and
-16 bytes across the four targets (x87 80-bit versus IEEE binary128). That type is covered
-by 004_long_double_target_restricted in this area, which is the only program in the corpus
-permitted to narrow a comparison on its account.
+WHY ORACLE (b) IS ENABLED HERE, the claim most worth checking. Because every printed digit is
+exact on every target, cross-backend value equality is meaningful for this program rather than a
+comparison of legitimately different numbers. That was measured, not assumed: gcc 13.4.0 with
+the matching i686, aarch64 and riscv64 cross drivers, executed natively and under QEMU user-mode
+10.1.0, produced stdout that is byte-identical -- all 946 bytes of it -- with exit status 0, in
+all twelve target-and-optimization-level cells.
 
-No target is dropped, no oracle is disabled and this record carries no expected-divergence
-marker: a divergence here is a genuine finding. Measured on this branch with gcc 13.4.0 and the matching i686, aarch64 and riscv64 cross
-drivers, executed natively and under QEMU user-mode 10.1.0: stdout is byte-identical and
-the exit status is 0 in all twelve target-and-optimization-level cells.
+PROVENANCE OF THE GOLDEN RECORD, which is what keeps oracle (c) independent. Every value below
+was derived BY HAND from the C semantics of the program -- exact dyadic arithmetic, so the
+derivation is unambiguous -- and then confirmed against the REFERENCE COMPILER in each of those
+twelve cells. No compiler under test contributed to it. Seeding it from bcc would make oracle (c)
+certify bcc against itself and would launder a miscompilation into the expectation, destroying
+the one oracle that can detect both compilers changing behaviour in the same direction at the
+same time, which oracle (a) reports as agreement. Regeneration is a maintenance action performed
+only through tests/conformance/tools/regenerate_expected.sh and never automatically during a test
+run, so a wrong answer cannot quietly become the new expectation.
 END
 expected_stdout    <<END
 fold_flt_add=3.750000

@@ -31,7 +31,8 @@ Free of undefined and unspecified behaviour by construction:
   integers of its own row, and every row sums to -3 (for example 3101 - 3102 + 3103 - 3104 +
   3105 - 3106), so the chain returns 216 - 8 * 3 = 192 and every intermediate value lies
   between 192 and 216. The largest magnitude anywhere in the program is the table entry
-  3906 -- six orders of magnitude from INT_MAX.
+  3806 -- more than five orders of magnitude short of INT_MAX, which is 2147483647 even on
+  i686's 32-bit int.
 - The printed values are NOT derived from the seed. Each pressure frame's ten values are read
   from static volatile tables: six ints from vlive_i (3101 through 3806, alternating sign),
   three doubles from vlive_d (1.25 through 24.75), and one pointer from vlive_p designating
@@ -55,14 +56,19 @@ Free of undefined and unspecified behaviour by construction:
   plive_target elements held in vlive_p; a pointer is dereferenced only to print the int it
   designates, and none is printed, converted to an integer, or modified. No pointer
   arithmetic is performed anywhere.
-- No read of uninitialized storage: every local is initialized at its declaration, and every
-  volatile object has a static initializer.
+- No read of uninitialized storage. Every local of all nine chain functions is initialized at
+  its declaration, and every volatile object has a static initializer. main's five locals are
+  the one deliberate exception to the declaration form: they are declared and then assigned,
+  each before its first read, because the runtime entry has to stage its three volatile
+  operands one read per full statement, which an initializer list of declarations could not
+  express. Assignment-before-read is the property that matters, and it holds for all five.
 - No object is modified twice between sequence points.
 - Recursion is absent: every level calls a DIFFERENT function and the depth is a fixed nine
-  frames plus main, so termination is structural. The two loops in the program are the two
-  bounded loops in leaf_mix's caller chain -- neither exists; there is no loop anywhere, and
-  the runtime entry point stages its three volatile operands with three straight-line
-  statements.
+  frames plus main, so termination is structural. There is no iteration statement anywhere
+  in the program either -- no for, no while, no do -- and no goto and no switch, so control
+  flow is straight-line through a fixed chain of calls and cannot fail to terminate. The
+  runtime entry point likewise stages its three volatile operands with three straight-line
+  statements rather than a loop.
 - NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and this is enforced structurally
   rather than argued. An access to a volatile object IS an observable side effect and the
   order in which a call's arguments are evaluated is unspecified, so every volatile datum
@@ -111,6 +117,19 @@ frame. Eighty values are held across a call in total, ten in each of eight frame
 chain's returned total of 192 is printed as well, so a value lost in any frame shows up twice
 -- once in that frame's own line and once in the total.
 
+THE TWO LIVE POINTERS, AND WHY THEIR WIDTH IS THE ONE THING ABOUT THEM THAT DIFFERS. Each
+pressure frame holds two pointers across its nested call: the const char *tag it was handed,
+which it needs again for the %s of the line it prints afterwards, and the const int *p it read
+from vlive_p, which is one of its ten independent values. These are the only live values whose
+storage size is not the same on all four targets -- sizeof(void *) was measured as 4 on i686
+and 8 on x86_64, aarch64 and riscv64 -- so whichever preserved register or spill slot each
+pointer occupies is half as wide on i686 as elsewhere, which is exactly why a pointer is worth
+carrying live here rather than only integers and doubles. Neither pointer's VALUE reaches the
+output. The tag is printed with %s, which emits the string it designates; p is dereferenced and
+printed with %d, which emits the int it designates. So the printed text cannot depend on where
+anything was placed, while the callee-saved obligation is still exercised at whatever pointer
+width the target defines.
+
 THE CALL BARRIER. Every call this program makes to the function whose ABI boundary is
 under test goes through a FILE-SCOPE volatile FUNCTION POINTER, and that is load-bearing
 rather than stylistic. A C11 volatile lvalue must be re-read on every access, so no
@@ -131,8 +150,12 @@ MEASURED STACK USE, not estimated. From the reference compiler's -O0 prologues o
 target: x86_64 eight 96-byte frames plus one 48 and one 32, with ten 8-byte return-address
 and frame-pointer saves, about 1.0 KiB; i686 eight 84-byte frames plus one 36 and one 32,
 with ten 4-byte saves, about 0.8 KiB; aarch64 eight 128-byte frames plus one 64 and one 48,
-about 1.1 KiB; riscv64 eight 144-byte frames plus one 64 and one 48, about 1.2 KiB. The C
-library's own printf frame sits on top of that and is not counted. So the honest figure is
+about 1.1 KiB; riscv64 eight 160-byte frames plus one 64 and one 48, about 1.4 KiB -- the
+deepest of the four, and the one whose figure is easiest to guess wrong from the scalar count.
+On aarch64 and riscv64 the return-address and frame-pointer saves sit inside the figure
+quoted, because the prologue stores them within the frame it has just allocated; on x86_64 and
+i686 they sit outside it, which is why those two carry the saves as a separate term. The C
+library's own printf frame sits on top of all four and is not counted. So the honest figure is
 one to two kibibytes rather than a few hundred bytes, which the ten-scalar count alone would
 have suggested and which the measurement contradicts. It stays roughly three orders of
 magnitude below the 8 MiB default stack these binaries run under, both natively (ulimit -s

@@ -27,13 +27,25 @@ Free of undefined and unspecified behaviour by construction:
 - No signed integer overflow; every integer member is within +/-9210 and none is
   arithmetically combined.
 - No shift operator appears, so no shift count can be out of range.
-- PADDING DISCIPLINE, which is the central hazard for this program. sizeof is never printed
-  and no aggregate is ever memcmp'd or inspected byte-wise. Only NAMED MEMBERS are read
-  back, so the fact that the mixed int-and-double aggregate is 12 bytes on i686 (where
-  double has four-byte alignment) and 16 bytes on the other three targets cannot affect the
-  output, and no padding byte is ever read.
-- Array members are indexed only with constant indices strictly inside their bounds, so no
-  one-past-end pointer is formed and none is dereferenced.
+- NO PADDING BYTE IS EVER READ, which is the central hazard for this program. The padding an
+  aggregate copy carries has unspecified content, so reading it would make the output depend
+  on unspecified behaviour rather than on the copy being correct. sizeof is never printed,
+  no aggregate is ever memcmp'd or otherwise inspected byte-wise, no aggregate's address is
+  taken, and ONLY NAMED MEMBERS are read back -- so every byte this program observes is a
+  byte it initialised. The layout consequence of the same discipline, namely that the mixed
+  int-and-double aggregate has a different SIZE on i686 than on the other three targets and
+  that the difference still cannot reach stdout, is recorded in impl_defined_notes below,
+  which is where this suite keeps its implementation-defined reasons.
+- Every array subscript lies inside its array's bounds, and there are exactly two forms of
+  subscript in the file. Counted mechanically on this branch, excluding declarator brackets:
+  92 subscripts are COMPILE-TIME CONSTANTS -- 36 in the folded call statements and 36 in the
+  runtime ones (ten elements of the eight-byte shape, five of each of the four sixteen-byte
+  shapes, four of the twenty-four-byte shape, two of the forty-byte shape), plus 20 in the
+  forty-byte read-backs, which name indices 0 through 9 of each value's ten-element member.
+  The remaining 14 are the single loop counter of the seven staging loops, two per loop,
+  whose bounds are 10, 5, 5, 5, 5, 4 and 2 -- exactly the declared extent of the arrays each
+  loop indexes, so no counter ever reaches an extent. No one-past-end pointer is formed and
+  none is dereferenced.
 - No aliasing violation: every aggregate is copied whole by assignment between objects of
   the same type, never through a converted pointer.
 - No read of uninitialized storage: every static aggregate has an initializer and every
@@ -59,6 +71,23 @@ Free of undefined and unspecified behaviour by construction:
   -fno-sanitize-recover=all runs to completion with empty stderr and exit status 0.
 END
 impl_defined_notes <<END
+PADDING AND AGGREGATE LAYOUT ARE UNOBSERVABLE BY CONSTRUCTION, and this is the paragraph
+that lets this record keep all four targets. Aggregate size and internal padding are
+implementation-defined, and one aggregate here genuinely differs: struct s16m, an int
+followed by a double, is 12 BYTES ON i686 -- where double carries four-byte alignment, so no
+padding is inserted after the int -- and 16 BYTES on x86_64, aarch64 and riscv64, where
+double is eight-byte aligned and four padding bytes separate the two members. Measured on
+this branch with gcc 13.4.0 and the three matching cross drivers: 16, 12, 16, 16. That
+difference never reaches stdout, because the program is written so that it cannot. sizeof is
+never printed, no aggregate is ever memcmp'd or otherwise inspected byte-wise, no
+aggregate's address is taken or printed, and ONLY NAMED MEMBERS are read back -- so no
+padding byte is ever read and no layout fact is ever converted into output. The consequence
+is the one Area 14 requires: the targets list is NOT restricted and this record carries no
+expected-divergence marker, because the implementation-defined property was engineered out
+of the observable behaviour rather than excused. That is how constraint C3 is discharged
+here -- the hardest case in the corpus is tested on all four targets rather than narrowed to
+the three where the layout agrees.
+
 WHICH REGISTER FILE EACH SHAPE ACTUALLY EXHAUSTS, stated per function rather than as one
 blanket claim, because the shapes do not behave alike and a single sentence about
 "exhausting the register files" would be false for two of them. Every reading below was
@@ -99,6 +128,16 @@ is not repeated per row.
                by-memory path itself is the subject.
   take_sbigx2   2 x 40-byte aggregate. Unambiguously memory everywhere, for the same reason.
 
+THE CONTRACT THE SEVEN ROWS ABOVE ADD UP TO, which is the whole point of this area. Four
+different mechanisms decide those rows: System V AMD64 classifies each eight-byte chunk of
+an aggregate as INTEGER or SSE, AAPCS64 recognises homogeneous floating aggregates and
+passes them in the vector file, LP64D pairs at most two floating fields and otherwise falls
+back to the integer file, and System V i386 places every aggregate on the stack. THOSE
+MECHANISMS DIFFER BY DESIGN; THE OBSERVABLE OUTPUT MUST NOT. Every line of expected_stdout
+is a member value the callee read out of an aggregate it received, so it is decided by
+whether the marshalling was CORRECT and not by which register file carried it -- which is
+precisely why a cross-backend difference here is a defect rather than a permitted variation.
+
 COVERAGE OF THE BY-MEMORY SHAPES. For the 40-byte aggregate every one of the ten members is
 read back rather than a sample of three, because a copy that corrupted only an interior
 member would otherwise leave no trace in stdout and the by-memory path would be exercised
@@ -113,23 +152,45 @@ prescribes because it cannot know what will receive them. This is plain standard
 than a compiler attribute, so both sides of oracle (a) honour it for the same reason and
 neither needs to support an extension for the barrier to hold. It also makes the
 function-pointer load the ONLY volatile access in each call expression, which is what
-keeps the one-side-effecting-argument rule satisfied. Measured before-state on this branch: with direct calls, gcc 13.4.0 at
--O2 left only take_s8x10 standing -- the other six were inlined away, so six of the seven
-documented boundaries were not crossed at that level. Measured after: all seven callees are
-emitted unmodified at -O1 and -O2 on all four targets, with no .constprop and no .isra
-clone anywhere.
+keeps the one-side-effecting-argument rule satisfied.
+
+Measured BEFORE-STATE on this branch, reproduced by removing the pointer block and calling
+the seven helpers by name, then counting their labels in each driver's assembly. At -O0 all
+seven stood on all four targets. At -O1: five of seven on x86_64 and aarch64, ONE of seven
+on riscv64, and NONE AT ALL on i686. At -O2: one of seven on x86_64, aarch64 and riscv64 --
+only take_s8x10, which survived by exceeding the inliner's size budget -- and again NONE on
+i686. Six of the seven documented boundaries were therefore uncrossed at -O2 on three
+targets and all seven were uncrossed on i686 from -O1 upward, so an inlined call marshals
+nothing and the classification the row describes was never exercised. That is the
+measurement the indirection exists to answer, and it is recorded per target because the
+per-target reading is what makes the case: on i686 the loss was total, which a single
+blanket sentence would have hidden. Measured AFTER: all seven callees are emitted unmodified
+at -O0, -O1 and -O2 on all four targets, with no .constprop, no .isra and no .part clone
+anywhere -- twelve of twelve cells.
+
+WIDTH NORMALISATION, so that no type whose width differs by target can reach the output. The
+only member types in the file are int, an array of int, float and double -- each of which
+has the same width on all four targets -- and the only values printed are int and double;
+every float member is widened to double with an explicit cast at the point of print. Counted
+on this branch, the conversion specifications used are exactly three: %d 89 times for int,
+%.4f 35 times for double, and %s 36 times for the variant tag's const char *. %ld, %lu, %zu,
+%p and %Lf never appear, so no printed field's width or representation can vary by target.
+Every floating value is a dyadic rational with denominator at most 16, exactly representable
+in binary32 and binary64 alike, so i686's x87 80-bit intermediate precision cannot change
+the four printed decimals.
 
 Plain char signedness is implementation-defined and was measured as signed on x86_64 and
-i686 and unsigned on aarch64 and riscv64; no plain-char value is printed. sizeof(long) and
-sizeof(void *) were measured as 4 on i686 and 8 on x86_64, aarch64 and riscv64
-(docs/technical-specifications.md lines 457-462); no long, size_t, ptrdiff_t, intptr_t or
-pointer value is printed and no long or pointer conversion specification is used. long
-double has three different representations across the four targets (measured 16, 12, 16 and
-16 bytes; x87 80-bit versus IEEE binary128) and is absent from this program entirely --
-using it would import a difference that has nothing to do with parameter passing. That
-type is covered by 13_floating_point/004_long_double_target_restricted, whose record
-disables oracle (b) alone, with the measured reason recorded and the expected-divergence
-marker XD-TYPE-LONGDOUBLE-001 scoping that oracle.
+i686 and unsigned on aarch64 and riscv64; no plain-char value is printed, and char appears
+in the file only as const char *. sizeof(long) and sizeof(void *) were measured as 4 on i686
+and 8 on x86_64, aarch64 and riscv64 (docs/technical-specifications.md lines 457-462); no
+long, size_t, ptrdiff_t, intptr_t or pointer value is printed and no long or pointer
+conversion specification is used. long double has three different representations across the
+four targets (measured 16, 12, 16 and 16 bytes; x87 80-bit versus IEEE binary128) and is
+absent from this program entirely -- using it would import a difference that has nothing to
+do with parameter passing. That type is covered by
+13_floating_point/004_long_double_target_restricted, whose record disables oracle (b) alone,
+with the measured reason recorded and the expected-divergence marker XD-TYPE-LONGDOUBLE-001
+scoping that oracle.
 
 No target is dropped, no oracle is disabled and this record carries no expected-divergence
 marker: a cross-backend divergence here is a GENUINE FINDING rather than an

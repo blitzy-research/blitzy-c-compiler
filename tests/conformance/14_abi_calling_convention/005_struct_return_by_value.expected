@@ -117,11 +117,12 @@ leaves unspecified. Reading it at the call site would buy nothing -- the barrier
 property of where the value CAME FROM, not of how often it is fetched -- and would cost the
 program its own defined behaviour, which is the precondition every oracle here rests on.
 Measured before-state on this branch: with direct calls, gcc 13.4.0 at
--O2 left only make_sbig standing -- every small, mixed and homogeneous-float return and both
-forwarding consumers were inlined away, so six of the seven documented return mechanisms and
-both forwarding paths were not exercised at that level. Measured after: all seven producers
-and both consumers are emitted unmodified at -O1 and -O2 on all four targets, with no
-.constprop and no .isra clone anywhere.
+-O2 left just one of the fourteen helpers standing, make_sbig -- every small, mixed and
+homogeneous-float return and all seven forwarding consumers were inlined away, so six of the
+seven documented return mechanisms and every one of the seven forwarding paths were not
+exercised at that level. Measured after: all seven producers and all seven consumers are
+emitted unmodified at -O1 and -O2 on all four targets, with no .constprop and no .isra clone
+anywhere.
 
 Plain char signedness is implementation-defined and was measured as signed on x86_64 and
 i686 and unsigned on aarch64 and riscv64; no plain-char value is printed. sizeof(long) and
