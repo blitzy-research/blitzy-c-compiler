@@ -1,0 +1,105 @@
+# Continuous integration for bcc.
+#
+# This workflow defines the differential conformance job: it installs the reference compilers
+# and emulators the suite's oracles compare against, pre-flights the discovered oracle
+# inventory, runs the suite in strict mode, and publishes the report and finding directories as
+# build artifacts.
+#
+# The job is purely additive and stands alone: it depends on no other job, no other job depends
+# on it, and it restates none of the repository's other gates — build, unit tests, integration
+# tests, clippy and rustfmt keep their own single definition, because a second definition of a
+# gate is a second answer to the same question.
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # Judge bcc's observable program behaviour — stdout bytes and exit status, nothing else —
+  # against three independent oracles: (a) an external reference C compiler at the same target
+  # and optimization level, (b) bcc's own other backends against the x86-64 baseline, and
+  # (c) the stdout committed in each program's own `.expected` record. The matrix is the corpus
+  # under tests/conformance/ at -O0, -O1 and -O2 on all four supported targets.
+  differential-conformance:
+    name: Differential conformance suite
+    runs-on: ubuntu-latest
+    # The matrix takes a few minutes. The bound is deliberately generous so that a slow runner
+    # reports a slow run rather than a spurious failure.
+    timeout-minutes: 30
+    env:
+      # Strict mode is what makes "everything other than a recorded divergence must pass" true
+      # here: every UNAVAILABLE oracle arm becomes a failure, because in continuous integration
+      # the toolchain is installed deliberately and a missing arm means a broken workflow rather
+      # than a modest machine. It is set for the whole job so that the pre-flight step below
+      # fails fast on a gap instead of merely reporting it.
+      BCC_CONFORMANCE_STRICT: "1"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Everything installed here serves the test oracles and nothing else. bcc invokes no
+      # external assembler, linker or compiler of its own: it preprocesses, analyses, generates
+      # code and links inside a single process, so none of these binaries takes any part in its
+      # compilation pipeline.
+      #
+      # gcc is oracle (a)'s native arm and the driver of both undefined-behaviour audit gates.
+      # The three cross drivers are the only way to reach oracle (a)'s i686, AArch64 and
+      # RISC-V 64 arms, because the reference compiler has no target-selection flag. The
+      # emulator package executes the three non-native targets for oracle (b), and the cross C
+      # runtimes supply the start files and static C library every `-static` link needs.
+      - name: Install the reference compilers, emulators and cross C runtimes for the oracles
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc \
+            gcc-i686-linux-gnu \
+            gcc-aarch64-linux-gnu \
+            gcc-riscv64-linux-gnu \
+            qemu-user-static \
+            libc6-dev-i386 \
+            libc6-dev-arm64-cross \
+            libc6-dev-riscv64-cross
+
+      # Both cargo invocations below presuppose the repository's own manifest, its `bcc` binary
+      # target and its src/** tree; the suite adds no manifest of its own and changes none,
+      # because Cargo discovers tests/conformance.rs automatically as the integration-test
+      # target `conformance`.
+      #
+      # This step is the intended pre-flight. It prints the discovered oracle inventory and
+      # states exactly which arms of which oracles will run, so a misconfigured environment is
+      # diagnosed in seconds rather than after the whole matrix has executed against a silently
+      # reduced oracle set.
+      - name: Pre-flight the oracle inventory
+        run: cargo test --test conformance infra_oracle_capability_report -- --nocapture
+
+      # Each area accumulates every verdict before it asserts, so --nocapture puts the complete
+      # per-area verdict table and the deliverable summary in the job log without anyone having
+      # to download the artifact first.
+      - name: Run the differential conformance suite
+        run: cargo test --test conformance -- --nocapture
+
+      # `if: always()` is load-bearing rather than defensive. A failing run is precisely when
+      # these artifacts matter, and the harness writes the per-area reports and the run summary
+      # before an area test asserts, so a complete report exists even then; without this the
+      # evidence would be discarded exactly when it is needed. The two published paths are a
+      # contract shared with the harness and with .gitignore, and they are the whole publication:
+      # the transient per-cell workspaces beneath the build directory are deliberately left
+      # behind, being removed on success and retained only to investigate a failure on the
+      # machine that produced it.
+      - name: Upload the conformance reports and findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report
+          # A run that fails before any report is written must warn, not turn a missing
+          # directory into a second, misleading failure on top of the real one.
+          if-no-files-found: warn
+          path: |
+            target/conformance-report/**
+            target/conformance-findings/**

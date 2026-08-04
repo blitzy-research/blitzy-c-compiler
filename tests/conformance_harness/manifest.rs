@@ -93,9 +93,9 @@
 //!
 //! There is deliberately no writer, fixer or update-in-place helper here, and that is what keeps a
 //! wrong answer from quietly becoming the new expectation: nothing on a test run's path can rewrite a
-//! golden record. Regeneration is a maintenance action performed outside a run, by a script planned
-//! for `tests/conformance/tools/` — a directory that does not exist on this branch yet, so today the
-//! only way a record changes is a deliberate hand edit.
+//! golden record. Regeneration is a maintenance action performed outside a run, by
+//! `tests/conformance/tools/regenerate_expected.sh`, which is never invoked by `cargo test`, so a
+//! record changes only by a deliberate hand edit or a deliberate run of that script.
 
 use std::fmt;
 use std::fs;
@@ -161,8 +161,8 @@ const RECORD_EXTENSION: &str = "expected";
 ///
 /// The corpus's genuine companions are siblings of the area directories rather than children, so
 /// nothing legitimate is displaced by this rule: the fixture support tree, the findings tree and the
-/// two registers, all committed, plus the maintenance tooling tree, which is planned for
-/// `tests/conformance/tools/` and absent on this branch.
+/// two registers, all committed, plus the maintenance tooling tree at
+/// `tests/conformance/tools/`, which holds only shell script(s) and no `.rs` file.
 ///
 /// Any other extension is a hard error, which also catches a `.rs` file dropped into the top level
 /// of an area directory: the corpus has to stay invisible to the build system for the suite to

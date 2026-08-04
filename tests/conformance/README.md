@@ -941,10 +941,9 @@ update-in-place helper anywhere in the harness.
 never quietly become the new expectation. Because `manifest.rs` has no writer at all, that guarantee
 is structural rather than procedural.
 
-The plan's maintenance script `tests/conformance/tools/regenerate_expected.sh` is intended to be the
-one sanctioned way to refresh a golden record, deliberately outside the test run. It is **not present
-on this branch**, which is why it is named here as plain text and not linked. Until it lands, a
-golden record is refreshed by hand, and the refreshed bytes must be justified in the change that
+The maintenance script [`tools/regenerate_expected.sh`](tools/regenerate_expected.sh) is the one
+sanctioned way to refresh a golden record, deliberately outside the test run. Whether a record is
+refreshed by that script or by hand, the refreshed bytes must be justified in the change that
 touches them — the reviewer, not a script, is the gate.
 
 
@@ -2496,7 +2495,7 @@ tests/conformance/
 ├── support/
 │   └── include/
 │       └── probe_header.h           the suite's ONLY fixture
-├── tools/                           PLANNED
+├── tools/
 │   └── regenerate_expected.sh       maintenance-only; never invoked by cargo test
 └── findings/                        committed; on this branch it holds only .gitkeep
     └── F-NNNN-<slug>/               PLANNED — one curated, committed finding, named by the
@@ -2599,14 +2598,13 @@ is a literal in a program's own source.
 
 ### Maintenance tooling
 
-`tools/regenerate_expected.sh` is the plan's golden-record regeneration script. It is
-**maintenance-only** and must **never be invoked by `cargo test`**: that separation is what stops a
-wrong answer from quietly becoming the new expectation.
+[`tools/regenerate_expected.sh`](tools/regenerate_expected.sh) is the golden-record regeneration
+script. It is **maintenance-only** and must **never be invoked by `cargo test`**: that separation is
+what stops a wrong answer from quietly becoming the new expectation.
 
-It is **not present on this branch**, so it is named rather than linked. The guarantee it supports
-does not depend on it, though — `manifest.rs` has no writer, so no test run can rewrite a record
-whether the script exists or not. What is missing on this branch is only the *convenience* of regenerating a
-record mechanically; the *protection* is already in place.
+The guarantee it supports does not depend on it — `manifest.rs` has no writer, so no test run can
+rewrite a record whether the script is invoked or not. The script supplies the *convenience* of
+regenerating a record mechanically; the *protection* is structural and independent of it.
 
 ### The transient-versus-curated split
 
@@ -2634,11 +2632,14 @@ record mechanically; the *protection* is already in place.
 - three Markdown files: this contract, [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) and
   [`FINDINGS.md`](FINDINGS.md).
 
+Also committed:
+
+- `tools/`, and therefore [`tools/regenerate_expected.sh`](tools/regenerate_expected.sh), the
+  maintenance-only golden-record regeneration script.
+
 Planned, and not present on this branch — named as plain text for the reason given under the layout
 tree:
 
-- `tools/`, and therefore `tools/regenerate_expected.sh`, the maintenance-only golden-record
-  regeneration script;
 - every curated finding directory beneath `findings/`, none having been curated yet.
 
 **Transient and git-ignored — elsewhere entirely, beneath the build directory:**
@@ -3102,8 +3103,8 @@ edit is still required, at step 5 below. Then:
       [Recorded reasons](#every-validation-the-parser-enforces). If your program narrows nothing —
       no restricted target list, no disabled oracle, no gate deviation — `impl_defined_notes` may
       be dropped, but state any implementation-defined property you relied on if you relied on one.
-3. Establish the golden record. Once `tools/regenerate_expected.sh` lands, that script is the only
-   sanctioned way to do it; until then, run the cell by hand using the recipe under
+3. Establish the golden record. [`tools/regenerate_expected.sh`](tools/regenerate_expected.sh) is the
+   sanctioned way to do it; alternatively run the cell by hand using the recipe under
    [Reproducing a cell by hand](#reproducing-a-cell-by-hand), read the captured stdout back, and
    paste it into `expected_stdout` — having first confirmed against the reference compiler that the
    bytes are *right*, not merely what `bcc` currently emits. A golden record copied from an

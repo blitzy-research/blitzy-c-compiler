@@ -1056,7 +1056,7 @@ to the gates that govern that area.
 | [`tests/conformance/FINDINGS.md`](../../tests/conformance/FINDINGS.md) | The findings register |
 | [`tests/conformance/support/include/probe_header.h`](../../tests/conformance/support/include/probe_header.h) | The suite's only fixture, used solely by the `-I` flag probe |
 | `tests/conformance/findings/` | The committed home of curated findings; holds only `.gitkeep` until the first is curated |
-| `tests/conformance/tools/regenerate_expected.sh` | Planned, and **not present yet** — maintenance-only golden-record regeneration, never invoked by `cargo test`. It is named rather than linked, because a link that resolves to nothing reads as a promise the repository does not keep |
+| [`tests/conformance/tools/regenerate_expected.sh`](../../tests/conformance/tools/regenerate_expected.sh) | Maintenance-only golden-record regeneration, never invoked by `cargo test` |
 
 The protection that script supports does not depend on it: the record parser has no writer, so **no
 test run can rewrite a record** whether the script exists or not. A wrong answer therefore cannot

@@ -2099,8 +2099,8 @@ pub fn manifest_dir() -> PathBuf {
 }
 
 /// Absolute path to the corpus root, which holds the feature-area directories, the registers, the
-/// fixture header and the curated findings — and which is also where the maintenance tooling tree
-/// belongs, planned for `tests/conformance/tools/` and not present on this branch.
+/// fixture header, the curated findings and the maintenance tooling tree at
+/// `tests/conformance/tools/`.
 ///
 /// The corpus is discovered by scanning this directory, so a program needs **no code
 /// registration**: nothing here, and no list anywhere in the harness, enumerates the programs.
