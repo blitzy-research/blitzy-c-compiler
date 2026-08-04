@@ -116,7 +116,7 @@
  *   i686        eight 84-byte frames, one 36 and one 32, plus ten at 4 bytes
  *               each                                          ~= 0.8 KiB
  *   AArch64     eight 128-byte frames, one 64 and one 48      ~= 1.1 KiB
- *   RISC-V 64   eight 144-byte frames, one 64 and one 48      ~= 1.2 KiB
+ *   RISC-V 64   eight 160-byte frames, one 64 and one 48      ~= 1.4 KiB
  * The C library's own printf frame is on top of that and is not counted here.  So
  * the honest figure is on the order of one to two kibibytes, rather than the few
  * hundred bytes the ten-scalar count alone would suggest.  It remains roughly three
@@ -205,21 +205,26 @@ static const int *volatile vlive_p[8] = {
  * describes would collapse to one and the property under test would not exist at
  * that optimization level.  Each level therefore reaches the next
  * through a FILE-SCOPE volatile FUNCTION POINTER.  A volatile lvalue must be
- * re-read on every access, so no conforming compiler may assume which function
- * the pointer designates: it can neither inline nor clone the callee, and every
- * frame in the chain survives at every optimization level.  This is plain
- * standard C rather than a compiler attribute, so both sides of oracle (a) honour
- * it for the same reason.  Verified in the generated assembly of all four targets
- * at -O2: all nine functions are emitted unmodified, with no .constprop and no
- * .isra clone.
+ * re-read on every access, so no conforming compiler may establish at translation
+ * time which function the pointer designates, and every transfer in the chain is
+ * a genuine indirect call.  That is an OBSTACLE and not a prohibition; what the
+ * indirection does and does not guarantee, the standard citations for it, the
+ * measured -O2 evidence on all four reference drivers and the residual risk it
+ * leaves for a compiler under test are stated once, in the banner section "THE
+ * CALL BOUNDARY IS ENFORCED, NOT HOPED FOR" at the head of this file.  This is
+ * plain standard C rather than a compiler attribute, so both sides of oracle (a)
+ * honour it for the same reason.
  *
  * The pointer is also the ONLY volatile access in each call expression, which is
  * what keeps the corpus rule of at most one side-effecting argument per call. */
 
 /* The enforced call boundary, one volatile-qualified pointer per level.  Each is
    re-read at its call site, so every one of the nine calls in the chain is
-   indirect at every optimization level and no frame can be inlined away.  Both
-   variants traverse the same nine pointers. */
+   indirect at every optimization level.  Whether a frame is additionally left
+   un-inlined and un-cloned is an optimizer OUTCOME rather than a language
+   guarantee - measured on all four reference drivers at -O2 all nine frames stand
+   with no .constprop, .isra or .part. clone, and the sibling record carries that
+   evidence.  Both variants traverse the same nine pointers. */
 static int (*volatile leaf_mix_p)(int, double, const char *) = leaf_mix;
 static int (*volatile level8_p)(int, double, const char *) = level8;
 static int (*volatile level7_p)(int, double, const char *) = level7;

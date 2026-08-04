@@ -539,12 +539,17 @@ diagnostics fire on the feature itself rather than on a defect. Every other memb
 default gate is retained -- -Wall, -Wextra, -pedantic, -Wshadow and -Werror -- so the
 diagnostics those flags enable stay in force even though they are not gate members
 themselves: -Wsign-compare is enabled by the retained -Wextra, and the out-of-range
-constant-conversion overflow diagnostic by the retained -pedantic (both measured with gcc
-13.4.0 on this program's exact shape), while -Werror still makes either one fatal.
+constant-conversion overflow diagnostic by the retained -pedantic (both measured on this
+program's exact shape), while -Werror still makes either one fatal.
 
-Plain char is not used -- every narrow type here is explicitly signed or unsigned -- so the
-measured plain-char signedness difference between the targets cannot reach this program. All
-widths are fixed-width types or int. No pointer values are printed.
+Plain char is not used as an arithmetic type -- every narrow type here is explicitly signed or
+unsigned -- so the measured plain-char signedness difference between the targets cannot reach
+this program; the format strings are character data whose bytes printf copies through
+unchanged, and no plain-char value is read as a number. Every type that carries a value here is
+target-invariant ACROSS THIS MATRIX rather than fixed-width in the C sense: char is one byte by
+definition, and short, int, unsigned short and unsigned int were measured at 2, 4, 2 and 4 bytes
+on all four targets. long and unsigned long are excluded precisely because they are not, being 4
+bytes on i686 and 8 on the other three. No pointer values are printed.
 Target assumption for the two implementation-defined conversions of 200 to signed char: each
 of the four reference toolchains documents this conversion as reduction of the value modulo
 two to the power of the destination width, with NO signal raised, which yields -56. That
@@ -1340,10 +1345,17 @@ is the single easiest way to overstate this suite, so each is defined before it 
   **107 of the 108 expectation records** have been authored or re-substantiated in the checkpoint
   sequence that produced this state; the remaining one,
   [`13_floating_point/004_long_double_target_restricted.expected`](13_floating_point/004_long_double_target_restricted.expected),
-  is a **legacy record still pending re-substantiation**. It is committed, it parses, it is paired with
-  its source and it runs — it is not missing, and it does not reduce the structural column — but its
-  prose has not been through this checkpoint's review, so it is counted separately rather than folded
-  in. Its outstanding items are the loose "three different formats" wording in its `observed` field
+  is a **legacy record still pending re-substantiation**. It is committed, it parses and it is paired
+  with its source — it is not missing, and it does not reduce the structural column — but its prose
+  has not been through this checkpoint's review, so it is counted separately rather than folded in,
+  and while that is true it is **withheld before its first compile** by the record-substantiation
+  preflight gate: no cell of it runs, and its feature area therefore **fails, loudly and with an
+  explicit non-evidence report**, rather than publishing verdicts drawn from a record whose own
+  authority is still under review (see
+  [What every report says about the gates](#what-every-report-says-about-the-gates)). That failure is
+  the mechanism working, not a regression, and retiring the record's row from the driver's pending
+  declaration is the whole of the work once its review completes.
+  Its outstanding items are the loose "three different formats" wording in its `observed` field
   and the register's matching `Observed` row, which the audit compares character for character and
   which must therefore be corrected in one edit together.
 - **Admitted as evidence about `bcc`** — the cells whose result the suite accepts as evidence about
@@ -1452,16 +1464,21 @@ is worth recording, because each is what a future regression would be caught by:
 
 **Measured, not assumed.** The suite has been run on this branch against a **surrogate** compiler
 under test rather than `bcc` — a stand-in that forwards to the reference toolchain — because this
-checkout has none. Under the surrogate every one of the fourteen area tests completes, every dimension
-of the structural column reports its figure as recorded, and the tally is **3,564 verdict outcome rows:
-3,543 PASS, 9 XFAIL and 12 XPASS**. The nine XFAIL are the long-double record's not-attempted oracle (b)
-rows; the twelve XPASS are the arms `XD-GCCEXT-CASE-RANGES-001` scopes, which a stand-in that accepts
-case ranges necessarily agrees on, so that run is taken with `BCC_CONFORMANCE_ALLOW_XPASS` set — see
+checkout has none. Under the surrogate **thirteen of the fourteen area tests complete and pass, and
+`13_floating_point` fails**, which is the record-substantiation gate doing its job rather than a
+defect: the pending record's area is withheld before its first compile, so the run records
+**3,432 verdict outcome rows — 3,420 PASS, 0 XFAIL, 12 XPASS, 0 FAIL — over 104 of the 108
+programs**. That is the full structural figure less this area's own 132 rows (4 programs × 33 rows),
+and the nine XFAIL the long-double record would otherwise contribute are absent for the same reason:
+withheld cells are not compared, so they are not excused either. The twelve XPASS are the arms
+`XD-GCCEXT-CASE-RANGES-001` scopes, which a stand-in that accepts case ranges necessarily agrees on,
+so that run is taken with `BCC_CONFORMANCE_ALLOW_XPASS` set — see
 [the unexpected-success policy](#the-unexpected-success-policy) for why a surrogate XPASS establishes
-nothing. In this checkout itself, with no compiler at all, mechanism 1 blocks every area. One caveat
-travels with every figure measured that way: the compiler under test was a surrogate, so none of it is
-evidence about `bcc`. It is quoted only to show that the structural column is arithmetic anyone can
-reproduce, never as a result.
+nothing. **Retiring one row from the driver's pending declaration is the whole of what returns that
+area to the run**, at which point the tally is the structural one again. In this checkout itself, with
+no compiler at all, mechanism 1 blocks every area. One caveat travels with every figure measured that
+way: the compiler under test was a surrogate, so none of it is evidence about `bcc`. It is quoted only
+to show that the structural column is arithmetic anyone can reproduce, never as a result.
 
 
 **Never publish a coverage percentage in this file or in either register.** Coverage instrumentation
@@ -1733,6 +1750,60 @@ The two infrastructure tests keep their own, fuller assertions. They render the 
 every command line and the compiler's own words — which is what an author actually fixes a program
 from, and what an area's one-line gate description deliberately does not try to be.
 
+### The four preflight gates, and what each establishes
+
+A preflight gate is a **precondition**, never a comparison and never a verdict about the compiler. All
+four are performed **once per process, before any area compiles its first cell**, and recorded before
+any artifact is written, so no report can exist that does not carry the preconditions it rests on.
+
+| Gate | Requirement | What it establishes | Granularity |
+| --- | --- | --- | --- |
+| `flag-capability probe` | 3 — verified flag handling | that every flag a differential invocation passes means the same thing to both compilers | the whole run: flag parity is a property of the configuration, not of any program |
+| `undefined-behaviour audit` | 1 — undefined-behaviour freedom | that every program in the corpus is free of undefined and unspecified behaviour, so a divergence over it is attributable at all | narrowed to the areas whose programs failed or could not be gated |
+| `expected-divergence marker integrity` | 5 — marked, never silently excluded | that every marker is registered, described field for field, reconciled in reverse, cites a basis that exists and says what it is cited for, and excuses **only** the divergence class it documents | narrowed to the area carrying the marker; a register, curated-finding or enumeration defect governs every area |
+| `record substantiation` | 4 and 6 — the record is the reproduction authority, and a finding is a deliverable the suite has standing to make | that every record about to judge a compiler has completed its own review | narrowed to the areas holding a record whose review has not completed |
+
+The last two exist because structural discovery is **not** admission. The suite deliberately discovers
+every source, loads every record and sweeps every declared cell — that is what keeps requirement 5's
+prohibition on silent exclusion honest — but two things then have to be true before a verdict may be
+read as evidence:
+
+- **A marker must have earned the right to excuse anything.** A marker's whole function is to turn a
+  divergence that would be a `FINDING` into an `XFAIL`. Requirement 5's audit is what establishes it is
+  entitled to; until the audit has passed, a marker applying itself is an unaudited excuse. Because the
+  built-in harness runs all eighteen tests concurrently with no ordering between them, an area could
+  otherwise reach that classification, publish it and finish long before an independent infrastructure
+  test failed. The audit is therefore a **blocking dependency of classification**, not a peer of it.
+  `infra_expected_divergence_register` keeps its own fuller assertion, because the whole audit — every
+  violation, the inventory, the curated-finding reconciliation and the classification tally — is what a
+  maintainer fixes a register from, and a gate line in fourteen reports is not.
+- **A record must have earned the right to judge.** A record that parses is not a record whose contents
+  have been reviewed, and [the enumerable matrix](#the-enumerable-matrix) publishes a *substantiated*
+  column that is narrower than the structural one for exactly that reason. Given a real compiler under
+  test, an unsubstantiated record's golden, exit status, command templates and marker would all be used
+  to judge it, and the resulting rows would sit in the report indistinguishable from the substantiated
+  ones — and a divergence over it could be filed as a FINDING, which is a deliverable asserting *the
+  compiler did this*. A suite has no standing to assert that from material whose own authority is under
+  review, so the gate fails closed rather than warning.
+
+**How the withholding is spelled, and why it is deliberately a little wide.** A gate's finest
+granularity is the feature area, because that is the unit an area test asserts on and the unit a report
+is written for. So the area holding a pending record is withheld whole: `run_area` publishes the
+report first — naming the record, what is outstanding on it, the committed documents that record its
+pending state, and that the substantiated programs sharing the area are held back only because the gate
+is area-granular — and then fails. Withholding slightly more than strictly necessary is the safe
+direction; publishing one cell the suite cannot stand behind is not. **Retiring the record's row from
+the driver's `PENDING_RECORDS` declaration is the whole of the work** once its review completes, and
+the area returns unchanged on the next run.
+
+**The pending set is declared, never inferred.** Substantiation is a review state and no property of a
+file expresses it. `oracle_b = disabled` happens to single out the same record today, and using it as a
+proxy would silently withhold the next legitimately narrowed record while ceasing to withhold this one
+the moment its narrowing changed. So the set is declared in the driver, each entry citing the committed
+documents that record the pending state, and it is checked against the corpus **in both directions**: a
+declared record that is not in the corpus is itself a `FAILED` gate governing every area, because a
+withholding that names nothing suppresses no evidence and hides that it is suppressing none.
+
 ### What every report says about the gates
 
 Every per-area report and the run summary open with a **`## Preflight gates`** section listing each
@@ -1828,8 +1899,10 @@ Run `infra_oracle_capability_report` first in any new environment. It prints the
 inventory and states exactly which arms of which oracles will run, so a misconfigured environment
 is diagnosed **before** the matrix executes — **1,296** `bcc` cells, which is what all fourteen
 areas and all 108 records amount to and what this branch actually holds. A run traverses those
-1,296; the number of cells it can present as evidence about `bcc` is **zero** while no `bcc` binary
-exists here, as [the enumerable matrix](#the-enumerable-matrix) records. The capability report is
+1,296 **less whatever a preflight gate withholds**, which at this checkpoint is the 48 cells of
+`13_floating_point`, whose record-substantiation gate holds that area back and fails it; and the
+number of cells it can present as evidence about `bcc` is **zero** while no `bcc` binary exists here,
+as [the enumerable matrix](#the-enumerable-matrix) records. The capability report is
 worth running first regardless, because it reads the environment rather than the corpus and so
 tells you which oracle arms will be available before the matrix spends time discovering it.
 
@@ -2538,10 +2611,19 @@ record mechanically; the *protection* is already in place.
 
 **Committed and tracked — this folder.** Present on this branch:
 
-- 108 programs across all fourteen area directories, and **108 expectation records — a complete 1:1
-  pairing, with no program awaiting a record and no record without a program** — every area carrying
-  its full planned program count. Every one of the 108 records parses under `manifest.rs`, and every
-  `expected_stdout` was derived from measurement rather than written by hand;
+- 108 programs across all fourteen area directories, and **108 expectation records — a
+  STRUCTURALLY complete 1:1 pairing, with no program awaiting a record and no record without a
+  program** — every area carrying its full planned program count. Every one of the 108 records
+  parses under `manifest.rs`, and every `expected_stdout` was derived from measurement rather than
+  written by hand. Read both of those claims with the column they belong to: they are
+  **structural** claims, and **107 of the 108 records are substantiated at this checkpoint** —
+  [`13_floating_point/004_long_double_target_restricted.expected`](13_floating_point/004_long_double_target_restricted.expected)
+  is a legacy record still pending re-substantiation, so its prose has not been through this
+  checkpoint's review and it is **withheld from producing evidence about the compiler** until it
+  has (see [the enumerable matrix](#the-enumerable-matrix) for the full four-column reading and
+  [What every report says about the gates](#what-every-report-says-about-the-gates) for the
+  substantiation gate that withholds it). Its golden was measured like the others; what is
+  outstanding is the review of the record, not the derivation of the bytes;
 - `support/`, holding the suite's only fixture;
 - `findings/`, which on this branch holds only `.gitkeep` — the directory is committed so that the
   first curated finding has a tracked home, and its emptiness is the accurate statement that none has

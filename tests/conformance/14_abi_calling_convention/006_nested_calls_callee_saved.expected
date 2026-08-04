@@ -140,16 +140,35 @@ printed with %d, which emits the int it designates. So the printed text cannot d
 anything was placed, while the callee-saved obligation is still exercised at whatever pointer
 width the target defines.
 
-THE CALL BARRIER. Every call this program makes to the function whose ABI boundary is
-under test goes through a FILE-SCOPE volatile FUNCTION POINTER, and that is load-bearing
-rather than stylistic. A C11 volatile lvalue must be re-read on every access, so no
-conforming compiler may assume which function the pointer designates: it can neither
-inline the callee nor clone it, and it must marshal the arguments exactly as the ABI
-prescribes because it cannot know what will receive them. This is plain standard C rather
-than a compiler attribute, so both sides of oracle (a) honour it for the same reason and
-neither needs to support an extension for the barrier to hold. It also makes the
-function-pointer load the ONLY volatile access in each call expression, which is what
-keeps the one-side-effecting-argument rule satisfied. MEASURED IN BOTH DIRECTIONS. WITHOUT the
+THE CALL BARRIER, AND WHAT IT IS AND IS NOT. Every call this program makes to the function
+whose ABI boundary is under test goes through a FILE-SCOPE volatile FUNCTION POINTER, and
+that is load-bearing rather than stylistic. WHAT ISO C REQUIRES: an access to a volatile
+object is a side effect belonging to the observable behaviour an implementation must
+reproduce (C11 5.1.2.3p2 and p6), and C11 6.7.3p7 requires an expression referring to a
+volatile-qualified object to be evaluated strictly according to the abstract machine's rules
+-- so the pointer must be RE-READ at each point of call, no conforming compiler may establish
+at translation time which function it designates, and control must be transferred to whatever
+function that particular load produced. WHAT ISO C DOES NOT REQUIRE: that the transfer reaches
+the callee's original entry point, nor that a frame survives as a frame. A conforming
+implementation may introduce a specialised clone or perform guarded devirtualization that
+elides a frame on the matching path, and still honour the loaded value, because the observable
+behaviour is unchanged. An earlier form of this paragraph said the callee "can neither be
+inlined nor cloned", which is stronger than anything the standard says and is withdrawn. The
+barrier is therefore an optimization OBSTACLE whose effect is measured on named artifacts,
+never a language guarantee, and the residual risk that leaves is real: a compiler under test
+that devirtualized through a specialised entry could collapse a frame while still printing the
+same bytes, and this program would not detect it. Closing that would take a per-cell STATIC
+check of the artifact the compiler under test emitted -- nine frames present, ten indirect
+transfers, no .constprop, .isra or .part. clone -- which is a harness capability this suite does
+not have and which no oracle here substitutes for, so the chain depth claimed for a compiler
+under test extends exactly as far as that artifact inspection.
+001_many_integer_parameters.expected carries the same statement for this whole area. This is
+plain standard C rather than a compiler attribute, so both sides of oracle (a) honour it for
+the same reason and neither needs to support an extension for the barrier to hold. It also
+makes the function-pointer load the ONLY volatile access in each call expression, which is what
+keeps the one-side-effecting-argument rule satisfied.
+
+MEASURED IN BOTH DIRECTIONS, on the reference drivers' own artifacts. WITHOUT the
 barrier, called by name, the reference compiler at -O2 leaves only level1 standing -- levels 2
 through 8 and the leaf are all inlined into it, so the nine frames would collapse to one and
 the property under test would not exist at that optimization level. WITH it, all nine

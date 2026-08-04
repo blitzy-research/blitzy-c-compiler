@@ -455,6 +455,15 @@ fn infra_ub_audit_gate() {
 ///
 /// A marker changes how a divergence is *classified*; it never changes whether the feature is
 /// *exercised*.
+///
+/// # Why this test asserts what a preflight gate has already blocked on
+///
+/// The audit itself lives in [`marker_integrity`] and is performed **once per process**, before any
+/// area compiles its first cell, so that a marker cannot excuse a divergence that this audit has not
+/// yet approved of. This test keeps its own, fuller assertion because the whole audit — every
+/// violation in full, the marker inventory, the curated-finding reconciliation and the
+/// classification tally — is what a maintainer fixes a register or a record from, and a gate line in
+/// fourteen area reports is not.
 #[test]
 fn infra_expected_divergence_register() {
     // Deliberately does not call `oracle_capabilities()`: this reads committed files only, so it
@@ -463,6 +472,162 @@ fn infra_expected_divergence_register() {
     // a run consisting only of tests that write none is exactly the case in which a previous run's
     // summary would otherwise survive and be mistaken for this run's verdict.
     begin_report_session();
+    let audit = marker_integrity();
+    print!("{}", audit.narrative());
+
+    assert!(
+        audit.violations().is_empty(),
+        "the expected-divergence markers and {} are not consistent — {} violation(s):\n{}",
+        classify::EXPECTED_DIVERGENCE_REGISTER,
+        audit.violations().len(),
+        audit
+            .violations()
+            .iter()
+            .map(|violation| format!("  - {}", violation.message()))
+            .collect::<Vec<String>>()
+            .join("\n"),
+    );
+}
+
+/// One defect found by [`marker_integrity`], and the area it bears on.
+///
+/// The area matters because it decides how widely the gate this audit feeds blocks. A defect in one
+/// program's marker says nothing about another area's programs, exactly as a failed
+/// undefined-behaviour gate does not; a defect in the register itself, or in the curated finding set,
+/// belongs to no single area and therefore governs every one of them.
+#[derive(Debug, Clone)]
+struct MarkerViolation {
+    /// The feature area this defect is attributable to, or `None` when it belongs to the whole run.
+    area: Option<String>,
+    /// What was found, in the sentence the test and the gate both report.
+    message: String,
+}
+
+impl MarkerViolation {
+    /// A defect attributable to one feature area.
+    fn in_area(area: impl Into<String>, message: impl Into<String>) -> MarkerViolation {
+        MarkerViolation {
+            area: Some(area.into()),
+            message: message.into(),
+        }
+    }
+
+    /// A defect that belongs to no single area and therefore governs every one of them.
+    fn run_wide(message: impl Into<String>) -> MarkerViolation {
+        MarkerViolation {
+            area: None,
+            message: message.into(),
+        }
+    }
+
+    /// The feature area this defect is attributable to, or `None` for a run-wide one.
+    fn area(&self) -> Option<&str> {
+        self.area.as_deref()
+    }
+
+    /// What was found.
+    fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// The whole bidirectional marker audit, performed once per process.
+#[derive(Debug)]
+struct MarkerIntegrity {
+    /// Every defect found, with the area each is attributable to.
+    violations: Vec<MarkerViolation>,
+    /// The full account the infrastructure test prints: inventory, reconciliation and tallies.
+    narrative: String,
+    /// How many markers the corpus committed, for the gate's one-line detail.
+    marker_count: usize,
+}
+
+impl MarkerIntegrity {
+    /// Every defect found, in the order the audit found them.
+    fn violations(&self) -> &[MarkerViolation] {
+        &self.violations
+    }
+
+    /// The full account, already formatted with its trailing newline.
+    fn narrative(&self) -> &str {
+        &self.narrative
+    }
+
+    /// How many markers the corpus committed.
+    fn marker_count(&self) -> usize {
+        self.marker_count
+    }
+
+    /// Every defect that bears on the given area: its own, plus every run-wide one.
+    ///
+    /// Written as a `match` rather than with an `Option` combinator so that the minimum supported
+    /// Rust version this repository documents (1.70) is respected: `Option::is_none_or` is the
+    /// natural spelling and is stable only from 1.82.
+    fn violations_for(&self, area: &str) -> Vec<&MarkerViolation> {
+        self.violations
+            .iter()
+            .filter(|violation| match violation.area() {
+                Some(owner) => owner == area,
+                None => true,
+            })
+            .collect()
+    }
+
+    /// The distinct areas this audit found a defect in, in the order it found them.
+    fn defective_areas(&self) -> Vec<String> {
+        let mut areas: Vec<String> = Vec::new();
+        for violation in &self.violations {
+            if let Some(area) = violation.area() {
+                if !areas.iter().any(|seen| seen == area) {
+                    areas.push(area.to_string());
+                }
+            }
+        }
+        areas
+    }
+
+    /// Whether any defect belongs to no single area, and so governs every one of them.
+    fn has_run_wide(&self) -> bool {
+        self.violations
+            .iter()
+            .any(|violation| violation.area().is_none())
+    }
+}
+
+/// Perform the bidirectional marker/register/classification audit once, and memoize it.
+///
+/// # Why this is a memoized function rather than the body of one test
+///
+/// Requirement 5's audit decides whether a marker may be trusted to *excuse* a divergence. Until it
+/// has passed, a marker classifying a real divergence as `XFAIL` is an unaudited excuse — and the
+/// built-in harness runs all eighteen tests concurrently in one process with no ordering between
+/// them, so an area could reach that classification, publish it, and be finished long before an
+/// independent infrastructure test got round to failing. Performing the audit here, once, and
+/// handing it to [`preflight`] as a **blocking gate** removes the race by construction: the audit is
+/// complete before any area compiles its first cell, and an area whose markers it faults is withheld
+/// rather than classified.
+///
+/// Memoized in a `OnceLock` for the same reason [`preflight`] is: the audit parses the register,
+/// re-loads every record that carries a marker, walks the curated finding set and exercises the
+/// classifier over every target, level, oracle and divergence class, and two consumers need the
+/// answer. It takes no [`Capabilities`]: it reads committed files only, which is what keeps it
+/// meaningful on a machine with no reference compiler and no emulator at all.
+///
+/// # Fail-closed, and total
+///
+/// Every failure mode is a **violation** rather than a panic — an unreadable register included. That
+/// is deliberate: this function is called from inside `preflight`'s initialization, and a panic there
+/// would leave the preflight unrecorded while the reports still had to be written. A violation
+/// instead blocks every area, is named in every report, and fails the infrastructure test with the
+/// same words. The one exception is [`corpus_inventory`], which is already a documented fatal for the
+/// whole suite because a corpus that cannot be enumerated leaves nothing to report about.
+fn marker_integrity() -> &'static MarkerIntegrity {
+    static INTEGRITY: OnceLock<MarkerIntegrity> = OnceLock::new();
+    INTEGRITY.get_or_init(audit_markers)
+}
+
+/// The audit itself. See [`marker_integrity`] for why it is performed exactly once.
+fn audit_markers() -> MarkerIntegrity {
     // The markers come from the corpus measurement rather than from a second pass of their own, and
     // that is what makes the two halves of this audit describe one corpus. The earlier enumeration
     // aborted on the first record it could not read, so on a corpus still being completed this test
@@ -472,36 +637,55 @@ fn infra_expected_divergence_register() {
     // is for every program. Fail-closed is preserved: an unreadable record still fails this test, but
     // it fails it having said what it found and what it could not.
     let markers: Vec<manifest::ExpectedDivergence> = corpus_inventory().markers().to_vec();
+    let mut narrative = String::new();
+    let mut violations: Vec<MarkerViolation> = Vec::new();
 
     let register_path = manifest_dir().join(classify::EXPECTED_DIVERGENCE_REGISTER);
     let register = match fs::read_to_string(&register_path) {
         Ok(register) => register,
-        Err(error) => panic!(
-            "the expected-divergence register {} could not be read: {error}.\n\nIt is a committed \
-             deliverable, not a generated artifact: requirement 5 requires every expected \
-             divergence to be auditable in one place, and this test is what keeps that place \
-             truthful. {} marker(s) are committed in the corpus and would go unregistered.\n\
-             Markers found: {}",
-            shown_path(&register_path),
-            markers.len(),
-            marker_identifier_list(&markers),
-        ),
+        // A violation rather than a panic, because this runs inside the preflight: see the
+        // "Fail-closed, and total" note on `marker_integrity`. It is run-wide, so it blocks every
+        // area — an unreadable register leaves no marker in the corpus auditable.
+        Err(error) => {
+            violations.push(MarkerViolation::run_wide(format!(
+                "the expected-divergence register {} could not be read: {error}. It is a committed \
+                 deliverable, not a generated artifact: requirement 5 requires every expected \
+                 divergence to be auditable in one place, and this audit is what keeps that place \
+                 truthful. {} marker(s) are committed in the corpus and would go unregistered. \
+                 Markers found: {}",
+                shown_path(&register_path),
+                markers.len(),
+                marker_identifier_list(&markers),
+            )));
+            return MarkerIntegrity {
+                violations,
+                narrative,
+                marker_count: markers.len(),
+            };
+        }
     };
 
     let registered = registered_identifiers(&register);
     let entries = parse_register_entries(&register);
-    let mut violations: Vec<String> = Vec::new();
 
     for marker in &markers {
+        // Every defect below is attributed to the area whose record carries the marker, because a
+        // marker can only ever excuse a divergence in the program it sits beside: faulting all
+        // fourteen areas for one bad marker would report thirteen defects that do not exist, exactly
+        // as the undefined-behaviour audit's own narrowing avoids.
+        let area = marker_area(marker);
         if !registered.iter().any(|entry| entry == marker.id()) {
-            violations.push(format!(
-                "marker {} is committed in {} ({}) but does not appear in {}; an unregistered \
-                 marker is exactly the silent exclusion requirement 5 forbids. Resolve it by \
-                 registering the marker or by retiring it from the record beside that program",
-                marker.id(),
-                marker.program_label(),
-                shown_path(marker.program_path()),
-                classify::EXPECTED_DIVERGENCE_REGISTER,
+            violations.push(MarkerViolation::in_area(
+                &area,
+                format!(
+                    "marker {} is committed in {} ({}) but does not appear in {}; an unregistered \
+                     marker is exactly the silent exclusion requirement 5 forbids. Resolve it by \
+                     registering the marker or by retiring it from the record beside that program",
+                    marker.id(),
+                    marker.program_label(),
+                    shown_path(marker.program_path()),
+                    classify::EXPECTED_DIVERGENCE_REGISTER,
+                ),
             ));
         }
 
@@ -514,49 +698,62 @@ fn infra_expected_divergence_register() {
             .filter(|entry| entry.identifier == marker.id())
             .collect();
         match matching.as_slice() {
-            [] => violations.push(format!(
-                "marker {} has no structured entry in {}; an entry is a heading naming the marker \
-                 followed by a table stating {}. Mentioning an identifier is not documenting a \
-                 divergence: without the fields there is nothing for this audit to compare, and the \
-                 register can drift away from the record it is supposed to mirror without any run \
-                 noticing",
-                marker.id(),
-                classify::EXPECTED_DIVERGENCE_REGISTER,
-                comma_list(&REGISTER_ENTRY_FIELDS),
+            [] => violations.push(MarkerViolation::in_area(
+                &area,
+                format!(
+                    "marker {} has no structured entry in {}; an entry is a heading naming the \
+                     marker followed by a table stating {}. Mentioning an identifier is not \
+                     documenting a divergence: without the fields there is nothing for this audit \
+                     to compare, and the register can drift away from the record it is supposed to \
+                     mirror without any run noticing",
+                    marker.id(),
+                    classify::EXPECTED_DIVERGENCE_REGISTER,
+                    comma_list(&REGISTER_ENTRY_FIELDS),
+                ),
             )),
             [entry] => {
                 for mismatch in register_entry_mismatches(marker, entry) {
-                    violations.push(format!("marker {} {mismatch}", marker.id()));
+                    violations.push(MarkerViolation::in_area(
+                        &area,
+                        format!("marker {} {mismatch}", marker.id()),
+                    ));
                 }
             }
-            many => violations.push(format!(
-                "marker {} has {} structured entries in {}, at lines {}; one marker is one \
-                 investigation and must have one entry, or a reader cannot tell which of them is \
-                 the authority and this audit cannot tell which to compare against",
-                marker.id(),
-                many.len(),
-                classify::EXPECTED_DIVERGENCE_REGISTER,
-                comma_list(
-                    &many
-                        .iter()
-                        .map(|entry| entry.heading_line.to_string())
-                        .collect::<Vec<String>>()
+            many => violations.push(MarkerViolation::in_area(
+                &area,
+                format!(
+                    "marker {} has {} structured entries in {}, at lines {}; one marker is one \
+                     investigation and must have one entry, or a reader cannot tell which of them \
+                     is the authority and this audit cannot tell which to compare against",
+                    marker.id(),
+                    many.len(),
+                    classify::EXPECTED_DIVERGENCE_REGISTER,
+                    comma_list(
+                        &many
+                            .iter()
+                            .map(|entry| entry.heading_line.to_string())
+                            .collect::<Vec<String>>()
+                    ),
                 ),
             )),
         }
 
-        violations.extend(basis_violations(marker));
+        for defect in basis_violations(marker) {
+            violations.push(MarkerViolation::in_area(&area, defect));
+        }
     }
 
     for identifier in &registered {
         if !markers.iter().any(|marker| marker.id() == identifier) {
-            violations.push(format!(
+            // Run-wide: the register lists a marker no record carries, so there is no area to
+            // attribute it to, and the register is a deliverable of the whole run.
+            violations.push(MarkerViolation::run_wide(format!(
                 "{} lists {} but no expectation record in the corpus carries that marker; the \
                  register must describe divergences that are actually exercised, not ones that \
                  were retired without retiring the entry",
                 classify::EXPECTED_DIVERGENCE_REGISTER,
                 identifier,
-            ));
+            )));
         }
     }
 
@@ -574,19 +771,21 @@ fn infra_expected_divergence_register() {
     // Fails closed: an unreadable or partially readable curated set is reported as a defect rather
     // than read as an empty one, so this audit can never announce that it validated a set it could not
     // enumerate. An absent directory is the one tolerated answer and yields an empty set honestly.
+    // Run-wide throughout: the curated finding set and its register are deliverables of the whole
+    // run rather than of any one area, so a defect in either governs every area.
     let curated = match curated_finding_directories() {
         Ok(curated) => curated,
         Err(defects) => {
-            violations.extend(defects);
+            violations.extend(defects.into_iter().map(MarkerViolation::run_wide));
             Vec::new()
         }
     };
     for directory in &curated {
         for defect in findings::curated_finding_defects(directory) {
-            violations.push(format!(
+            violations.push(MarkerViolation::run_wide(format!(
                 "the curated finding {} is not committable as it stands: {defect}",
                 shown_path(directory),
-            ));
+            )));
         }
     }
     // And the register's own table, read and held against those directories in both directions. A
@@ -597,23 +796,27 @@ fn infra_expected_divergence_register() {
     let register_rows = match findings_register_rows() {
         Ok(rows) => rows,
         Err(defect) => {
-            violations.push(defect);
+            violations.push(MarkerViolation::run_wide(defect));
             Vec::new()
         }
     };
-    violations.extend(findings_register_violations(&register_rows, &curated));
-    println!(
+    violations.extend(
+        findings_register_violations(&register_rows, &curated)
+            .into_iter()
+            .map(MarkerViolation::run_wide),
+    );
+    narrative.push_str(&format!(
         "curated findings — {} directory(ies) under {}, {} row(s) in it, each validated for \
-         completeness, identity, post-reduction consistency, disclosure and register agreement",
+         completeness, identity, post-reduction consistency, disclosure and register agreement\n",
         curated.len(),
         classify::FINDINGS_REGISTER,
         register_rows.len(),
-    );
+    ));
     for row in &register_rows {
-        println!(
-            "  {} [{}] status {} — {}",
+        narrative.push_str(&format!(
+            "  {} [{}] status {} — {}\n",
             row.id, row.class, row.status, row.directory
-        );
+        ));
     }
 
     // The inventory, and then how much of the corpus it was drawn from. Both halves are needed and
@@ -622,45 +825,51 @@ fn infra_expected_divergence_register() {
     // actually read. On a corpus still being completed those are different numbers, and the
     // difference is exactly one program's markers.
     let inventory = corpus_inventory();
-    violations.extend(inventory.marker_defects().iter().cloned());
-    println!(
-        "expected-divergence register — {} marker(s) in the corpus, {} identifier(s) in {} — {}",
+    violations.extend(
+        inventory
+            .marker_defects()
+            .iter()
+            .cloned()
+            .map(MarkerViolation::run_wide),
+    );
+    narrative.push_str(&format!(
+        "expected-divergence register — {} marker(s) in the corpus, {} identifier(s) in {} — {}\n",
         markers.len(),
         registered.len(),
         classify::EXPECTED_DIVERGENCE_REGISTER,
         inventory.coverage_sentence(),
-    );
+    ));
     // Named, not merely counted, and pushed into the violation list rather than printed and forgotten:
     // a record the audit could not read is a program whose marker — if it has one — is unregistered
     // as far as this test can tell, which is the silent exclusion requirement 5 forbids. Requirement 5
     // is enforced in both directions or not at all, so an audit that cannot see every record must say
     // so and fail, never pass on the strength of the records it happened to read.
     for entry in inventory.pending() {
-        violations.push(format!(
+        violations.push(MarkerViolation::run_wide(format!(
             "the expectation record for {entry}. Until it parses, this audit cannot tell whether \
              that program carries an expected-divergence marker, so requirement 5's bidirectional \
              check does not hold over the whole corpus — a marker in an unreadable record would be \
              neither registered nor noticed"
-        ));
+        )));
     }
     if !inventory.is_complete() {
-        println!(
+        narrative.push_str(&format!(
             "corpus completeness — planned {}, records readable {}, pending {}. The marker \
-             inventory above describes the readable records only.",
+             inventory above describes the readable records only.\n",
             inventory.planned(),
             inventory.records(),
             inventory.pending().len(),
-        );
+        ));
     }
     for marker in &markers {
-        println!(
-            "  {} [{}] {} — scope: {} — basis: {}",
+        narrative.push_str(&format!(
+            "  {} [{}] {} — scope: {} — basis: {}\n",
             marker.id(),
             marker.class().label(),
             marker.program_label(),
             marker.scope().raw(),
             marker.basis(),
-        );
+        ));
     }
 
     // And what each marker actually *does* to a verdict, which the two checks above cannot see. A
@@ -668,19 +877,25 @@ fn infra_expected_divergence_register() {
     // documents, while this compares the two predicates that decide whether a divergence is excused
     // — the classifier's authority and the finding writer's precondition — over every class, so a
     // marker can never absorb a divergence of a class it does not document.
-    violations.extend(marker_classification_violations(&markers));
+    let (classification_defects, classification_tally) = marker_classification_audit(&markers);
+    violations.extend(classification_defects);
+    narrative.push_str(&classification_tally);
 
-    assert!(
-        violations.is_empty(),
-        "the expected-divergence markers and {} are not consistent — {} violation(s):\n{}",
-        classify::EXPECTED_DIVERGENCE_REGISTER,
-        violations.len(),
-        violations
-            .iter()
-            .map(|violation| format!("  - {violation}"))
-            .collect::<Vec<String>>()
-            .join("\n"),
-    );
+    MarkerIntegrity {
+        violations,
+        narrative,
+        marker_count: markers.len(),
+    }
+}
+
+/// The feature area a marker belongs to, derived from the program it sits beside.
+///
+/// [`manifest::ExpectedDivergence`] carries the program's path rather than its area, and the driver
+/// already derives the pair the same way for every outcome it files, so this reuses that one rule
+/// instead of introducing a second.
+fn marker_area(marker: &manifest::ExpectedDivergence) -> String {
+    let (area, _) = corpus_identity(marker.program_path());
+    area
 }
 
 /// The pre-flight check: which oracles were discovered, and which arms will therefore run.
@@ -2342,11 +2557,15 @@ fn withheld_notes(
 ) -> Vec<String> {
     let mut notes = vec![format!(
         concat!(
-            "⚠️ NO CELL OF THIS AREA WAS RUN. {} preflight gate(s) governing `{}` did not",
-            " hold, so its {} program(s) were withheld before the first compile: requirement 1",
-            " makes undefined-behaviour freedom the precondition an oracle rests on, and a",
-            " comparison made without it is evidence of nothing. Nothing here was compiled,",
-            " classified or filed as a finding.",
+            "⚠️ NO CELL OF THIS AREA WAS RUN, AND NOTHING HERE IS EVIDENCE ABOUT THE COMPILER",
+            " UNDER TEST. {} preflight gate(s) governing `{}` did not hold, so its {} program(s)",
+            " were withheld before the first compile. Nothing here was compiled, classified or",
+            " filed as a finding, and the empty tally below can therefore never be read as",
+            " agreement. A gate withholds for one of two reasons and both are preconditions",
+            " rather than results: requirement 1 makes undefined-behaviour freedom the property",
+            " an oracle rests on, so a comparison made without it is evidence of nothing; and a",
+            " record whose own review has not completed has no authority to judge a compiler, so",
+            " requirement 6 gives the suite no standing to file what it would produce.",
         ),
         blocking.len(),
         spec.directory(),
@@ -2354,6 +2573,38 @@ fn withheld_notes(
     )];
     for gate in blocking {
         notes.push(format!("⚠️ withholding gate — {}", gate.describe()));
+    }
+    // Named individually, and named here rather than left to the gate's own one-line detail, because
+    // a reader of THIS area's report is the one person who needs to know exactly which record
+    // withheld it and what has to happen for the area to return.
+    let pending: Vec<&PendingRecord> = substantiation()
+        .pending()
+        .iter()
+        .copied()
+        .filter(|entry| entry.area == spec.directory())
+        .collect();
+    if !pending.is_empty() {
+        for entry in &pending {
+            notes.push(format!(
+                "⚠️ withheld record — {}/{} is pending re-substantiation, so no cell of it may \
+                 produce evidence. Outstanding: {}. Documented basis: {}.",
+                entry.area, entry.program, entry.outstanding, entry.basis,
+            ));
+        }
+        // The collateral is stated rather than left to be inferred. A preflight gate's finest
+        // granularity is the feature area, so the substantiated programs sharing this area are
+        // withheld alongside the pending record. Withholding a little more than strictly necessary is
+        // the safe direction; leaving a reader to work out that it happened is not.
+        let others = programs.len().saturating_sub(pending.len());
+        if others > 0 {
+            notes.push(format!(
+                "⚠️ withheld with it — the other {others} program(s) in `{}` have completed their \
+                 review, and are withheld only because a preflight gate is area-granular. They \
+                 return, unchanged, on the first run after the record(s) above are substantiated; \
+                 retiring the declaration is the whole of that work.",
+                spec.directory(),
+            ));
+        }
     }
     notes
 }
@@ -2538,16 +2789,19 @@ fn preflight(caps: &Capabilities) -> &'static PreflightGates {
 }
 
 impl PreflightGates {
-    /// Express the two gates in the form the report module records and renders.
+    /// Express the four kinds of gate in the form the report module records and renders.
     ///
     /// The flag probe contributes one gate governing every area, because flag parity is a property
     /// of the configuration rather than of any program. The audit contributes gates narrowed to the
     /// areas they bear on: a program in one area whose gate did not hold says nothing about another
     /// area's programs, and failing all fourteen for it would report fourteen defects where there is
-    /// one.
+    /// one. Marker integrity and record substantiation follow that same narrowing rule, each for its
+    /// own reason, stated where each gate is built.
     fn assemble(&self, config: &RunConfig) -> report::Preflight {
         let mut gates = vec![self.flag_gate()];
         gates.extend(self.audit_gates(config));
+        gates.extend(marker_gates());
+        gates.extend(substantiation_gates());
         report::Preflight::new(gates)
     }
 
@@ -2750,11 +3004,350 @@ const FLAG_GATE_NAME: &str = "flag-capability probe";
 /// The name the reports give the undefined-behaviour gate.
 const UB_GATE_NAME: &str = "undefined-behaviour audit";
 
+/// The name the reports give the expected-divergence marker gate.
+const MARKER_GATE_NAME: &str = "expected-divergence marker integrity";
+
+/// The name the reports give the record-substantiation gate.
+const SUBSTANTIATION_GATE_NAME: &str = "record substantiation";
+
 /// The requirement the flag-capability gate establishes.
 const REQUIREMENT_FLAGS: &str = "requirement 3 — verified flag handling";
 
 /// The requirement the undefined-behaviour gate establishes.
 const REQUIREMENT_UB: &str = "requirement 1 — undefined-behaviour freedom";
+
+/// The requirement the marker gate establishes.
+const REQUIREMENT_MARKERS: &str =
+    "requirement 5 — an expected divergence is marked, never silently excluded";
+
+/// The requirement the substantiation gate establishes.
+const REQUIREMENT_SUBSTANTIATION: &str =
+    "requirement 4 — the record is the reproduction authority, and requirement 6 — a finding is a \
+     deliverable the suite has standing to make";
+
+/// The marker audit as up to two gates, each narrowed to what it actually bears on.
+///
+/// # Why this is a gate and not only an infrastructure test
+///
+/// A marker's whole function is to make the difference between a divergence reported as a `FINDING`
+/// and one excused as an `XFAIL`. Requirement 5's audit is what establishes that a marker is entitled
+/// to do that — that it is registered, described, consistent with its record field for field, cites a
+/// basis that exists and says what it is cited for, and excuses only the divergence class it
+/// documents. Until the audit has passed, a marker applying itself is an unaudited excuse, and the
+/// built-in harness's concurrency means an area could reach that classification, publish it in its
+/// report and finish before an independent test failed. So the audit is performed inside
+/// [`preflight`] — once, before any area compiles — and an area whose markers it faults is withheld
+/// rather than classified. `infra_expected_divergence_register` keeps its own fuller assertion,
+/// because the whole audit is what a maintainer fixes a register from.
+///
+/// # Why two gates rather than one
+///
+/// Exactly the reason [`PreflightGates::audit_gates`] gives: a marker can only ever excuse a
+/// divergence in the program it sits beside, so a defective marker faults **its** area and no other.
+/// A defect in the register itself, in the curated finding set or in the corpus enumeration belongs to
+/// no single area and therefore governs every one of them. Both gates are `Failed` and both block
+/// unconditionally: nothing was merely unavailable here — the audit reads committed files only and
+/// always reaches an answer, so a defect is always a defect in the test material.
+fn marker_gates() -> Vec<report::PreflightGate> {
+    let audit = marker_integrity();
+    if audit.violations().is_empty() {
+        return vec![report::PreflightGate::new(
+            MARKER_GATE_NAME,
+            REQUIREMENT_MARKERS,
+            report::GateVerdict::Held,
+            format!(
+                "the bidirectional audit of {} marker(s) against {} held in every direction — \
+                 registration, structured description field for field, reverse reconciliation, \
+                 basis citation, and the classification contract over every target, level, oracle \
+                 and divergence class",
+                audit.marker_count(),
+                classify::EXPECTED_DIVERGENCE_REGISTER,
+            ),
+            Vec::new(),
+            false,
+        )];
+    }
+
+    let mut gates: Vec<report::PreflightGate> = Vec::new();
+    let defective = audit.defective_areas();
+    if !defective.is_empty() {
+        let count: usize = defective
+            .iter()
+            .map(|area| audit.violations_for(area).len())
+            .sum();
+        gates.push(report::PreflightGate::new(
+            format!("{MARKER_GATE_NAME} — marker(s) not entitled to excuse a divergence"),
+            REQUIREMENT_MARKERS,
+            report::GateVerdict::Failed,
+            format!(
+                "{count} defect(s) across {} area(s) — {} — so no marker in them may classify a \
+                 divergence as an expected one. Correct the marker in the program's own record, or \
+                 its entry in {}, until `infra_expected_divergence_register` passes",
+                defective.len(),
+                defective.join(", "),
+                classify::EXPECTED_DIVERGENCE_REGISTER,
+            ),
+            defective,
+            true,
+        ));
+    }
+    if audit.has_run_wide() {
+        let run_wide: Vec<&MarkerViolation> = audit
+            .violations()
+            .iter()
+            .filter(|violation| violation.area().is_none())
+            .collect();
+        gates.push(report::PreflightGate::new(
+            format!("{MARKER_GATE_NAME} — register or curated-finding defect"),
+            REQUIREMENT_MARKERS,
+            report::GateVerdict::Failed,
+            format!(
+                "{} defect(s) belong to {}, {} or the corpus enumeration rather than to any one \
+                 area, so they govern every area: {}",
+                run_wide.len(),
+                classify::EXPECTED_DIVERGENCE_REGISTER,
+                classify::FINDINGS_REGISTER,
+                first_sentences(&run_wide),
+            ),
+            Vec::new(),
+            true,
+        ));
+    }
+    gates
+}
+
+/// The record-substantiation audit as up to two gates.
+///
+/// # What this gate exists to stop
+///
+/// Structural discovery is not admission. The driver finds every source in the corpus, loads every
+/// record beside it and sweeps every declared cell — which is right, and is what keeps requirement 5's
+/// prohibition on silent exclusion honest. But a record that parses is not the same thing as a record
+/// whose contents have been reviewed, and this repository's own documentation says so: the enumerable
+/// matrix in `tests/conformance/README.md` and the honest-measurement section of
+/// `tests/conformance/EXPECTED_DIVERGENCES.md` both publish a **substantiated** column that is
+/// narrower than the structural one, and both name the record it excludes.
+///
+/// Without a gate, that distinction lived only in prose. Given a real compiler under test, an
+/// unsubstantiated record's `expected_stdout`, `expect_exit`, command templates and marker would all
+/// be used to judge that compiler, and its verdicts would enter the area report and the run summary
+/// indistinguishable from the substantiated ones — and a divergence over it could be filed as a
+/// FINDING, which is a deliverable asserting "the compiler did this". A suite has no standing to make
+/// that assertion from material whose own authority is still under review, which is why this fails
+/// closed rather than warning.
+///
+/// # Why it withholds an area rather than a single program
+///
+/// A preflight gate's finest granularity is the feature area, and deliberately so: it is the unit an
+/// area test asserts on and the unit a report is written for. So the gate names the area holding the
+/// pending record, `run_area` withholds that area before its first compile, publishes a report saying
+/// which record withheld it and that nothing was compiled, classified or filed, and then fails. The
+/// substantiated programs sharing that area are withheld with it; [`withheld_notes`] says so in the
+/// report rather than leaving a reader to infer it, and they return the moment the record is
+/// substantiated. Withholding a little more than strictly necessary is the safe direction: the unsafe
+/// direction is publishing one cell of evidence the suite cannot stand behind.
+///
+/// # Why the pending set is declared here
+///
+/// Substantiation is a **review state**, and no property of a file expresses it. It is deliberately
+/// not inferred from anything on disk: `oracle_b = disabled` happens to single out the same record
+/// today, and using it would be a false proxy that silently withheld the next legitimately narrowed
+/// record and stopped withholding this one the moment its narrowing changed. So the set is declared,
+/// each entry citing the committed documents that record the pending state and naming what is
+/// outstanding, and it is checked against the corpus in both directions — a declared record that is
+/// not in the corpus is itself a defect, because a stale withholding suppresses evidence for no
+/// reason and would not otherwise be visible.
+fn substantiation_gates() -> Vec<report::PreflightGate> {
+    let audit = substantiation();
+    let mut gates: Vec<report::PreflightGate> = Vec::new();
+
+    if !audit.stale().is_empty() {
+        // Run-wide: the driver's own admission data is wrong, so no area's admission can be trusted
+        // until it is corrected. This is the direction a reader would never otherwise see — a
+        // withholding that suppresses nothing, because it names something that is not there.
+        gates.push(report::PreflightGate::new(
+            format!("{SUBSTANTIATION_GATE_NAME} — stale withholding"),
+            REQUIREMENT_SUBSTANTIATION,
+            report::GateVerdict::Failed,
+            format!(
+                "{} declared pending record(s) name nothing in the corpus: {}. A withholding that \
+                 names a record which is not there suppresses no evidence and hides that it is \
+                 suppressing none, so the declaration is corrected or retired before any area is \
+                 judged",
+                audit.stale().len(),
+                audit.stale().join("; "),
+            ),
+            Vec::new(),
+            true,
+        ));
+    }
+
+    let pending = audit.pending();
+    if pending.is_empty() {
+        if audit.stale().is_empty() {
+            gates.push(report::PreflightGate::new(
+                SUBSTANTIATION_GATE_NAME,
+                REQUIREMENT_SUBSTANTIATION,
+                report::GateVerdict::Held,
+                format!(
+                    "every one of the {} record(s) the corpus holds is substantiated, so every \
+                     cell this run reaches is entitled to be read as evidence about the compiler \
+                     under test",
+                    corpus_inventory().records(),
+                ),
+                Vec::new(),
+                false,
+            ));
+        }
+        return gates;
+    }
+
+    let areas: Vec<String> = {
+        let mut seen: Vec<String> = Vec::new();
+        for entry in pending {
+            if !seen.iter().any(|area| area == entry.area) {
+                seen.push(entry.area.to_string());
+            }
+        }
+        seen
+    };
+    gates.push(report::PreflightGate::new(
+        format!("{SUBSTANTIATION_GATE_NAME} — record(s) pending re-substantiation"),
+        REQUIREMENT_SUBSTANTIATION,
+        report::GateVerdict::Failed,
+        format!(
+            "{} record(s) in area(s) {} have not completed their review, so nothing in those areas \
+             may be compiled, classified or filed as evidence about the compiler under test: {}",
+            pending.len(),
+            areas.join(", "),
+            pending
+                .iter()
+                .map(|entry| format!(
+                    "{}/{} — outstanding: {} (basis: {})",
+                    entry.area, entry.program, entry.outstanding, entry.basis
+                ))
+                .collect::<Vec<String>>()
+                .join("; "),
+        ),
+        areas,
+        true,
+    ));
+    gates
+}
+
+/// The first sentence of each of a few violations, for a gate's one-line detail.
+///
+/// A gate line is read in fourteen reports and has to stay one line; the whole violation belongs to
+/// `infra_expected_divergence_register`, which prints every one of them in full. Three is enough to
+/// tell a reader what kind of defect this is and where to look, and the count above it says how many
+/// there are in total.
+fn first_sentences(violations: &[&MarkerViolation]) -> String {
+    let shown: Vec<String> = violations
+        .iter()
+        .take(3)
+        .map(|violation| {
+            let message = violation.message();
+            match message.find(". ") {
+                Some(end) => message[..end].to_string(),
+                None => message.to_string(),
+            }
+        })
+        .collect();
+    if violations.len() > shown.len() {
+        format!(
+            "{}; and {} more, all listed by infra_expected_divergence_register",
+            shown.join("; "),
+            violations.len() - shown.len(),
+        )
+    } else {
+        shown.join("; ")
+    }
+}
+
+/// One record whose review has not completed, and why it is withheld.
+///
+/// Declared rather than inferred: see [`substantiation_gates`] for why no property of a file can
+/// express a review state, and why using one as a proxy would be worse than declaring it.
+struct PendingRecord {
+    /// The feature area directory holding it.
+    area: &'static str,
+    /// The program the record sits beside, without its extension.
+    program: &'static str,
+    /// The committed documents that record the pending state, cited so a reader can check it.
+    basis: &'static str,
+    /// What remains to be done before the record is substantiated.
+    outstanding: &'static str,
+}
+
+/// Every record whose review has not completed at this checkpoint.
+///
+/// Kept as a declaration in the driver because substantiation is a review state, and audited against
+/// the corpus in both directions by [`substantiation`]. **Retiring an entry is the whole of the work
+/// once its review completes**: delete the row, and the area it named is admitted again on the next
+/// run with no other change anywhere.
+const PENDING_RECORDS: [PendingRecord; 1] = [PendingRecord {
+    area: "13_floating_point",
+    program: "004_long_double_target_restricted",
+    basis: "tests/conformance/README.md, \"The enumerable matrix\" — substantiated column, 107 of \
+            108; and tests/conformance/EXPECTED_DIVERGENCES.md, \"Honest measurement\" — \
+            substantiated at this checkpoint",
+    outstanding: "the loose \"three different formats\" wording in the record's \
+                  expected_divergence observed field and the register's matching Observed row, \
+                  which the marker audit compares character for character and which must \
+                  therefore be corrected in one edit together",
+}];
+
+/// What the record-substantiation audit found.
+struct Substantiation {
+    /// The declared pending records that are present in the corpus, and so genuinely withheld.
+    pending: Vec<&'static PendingRecord>,
+    /// Declared pending records that name nothing in the corpus, which is a defect of its own.
+    stale: Vec<String>,
+}
+
+impl Substantiation {
+    /// The records genuinely withheld from producing evidence.
+    fn pending(&self) -> &[&'static PendingRecord] {
+        &self.pending
+    }
+
+    /// The declarations that name nothing in the corpus.
+    fn stale(&self) -> &[String] {
+        &self.stale
+    }
+}
+
+/// Resolve the declared pending set against the corpus once, and memoize it.
+///
+/// Both directions are checked, for the reason [`substantiation_gates`] records: a declared record
+/// that is present is withheld, and a declared record that is absent is a stale withholding and a
+/// defect. The corpus side comes from [`corpus_inventory`], which has already read every area, so this
+/// adds no scan of its own.
+fn substantiation() -> &'static Substantiation {
+    static SUBSTANTIATION: OnceLock<Substantiation> = OnceLock::new();
+    SUBSTANTIATION.get_or_init(|| {
+        let mut pending: Vec<&'static PendingRecord> = Vec::new();
+        let mut stale: Vec<String> = Vec::new();
+        for entry in &PENDING_RECORDS {
+            let record = corpus_root()
+                .join(entry.area)
+                .join(format!("{}.expected", entry.program));
+            let source = record.with_extension("c");
+            if record.is_file() && source.is_file() {
+                pending.push(entry);
+            } else {
+                stale.push(format!(
+                    "{}/{} is declared pending re-substantiation but {} is not a readable pair in \
+                     the corpus",
+                    entry.area,
+                    entry.program,
+                    shown_path(&record),
+                ));
+            }
+        }
+        Substantiation { pending, stale }
+    })
+}
 
 /// The distinct feature areas named by a list of audit results, in the order the corpus gave them.
 fn distinct_areas(results: &[(&ubaudit::ProgramAudit, &ubaudit::GateResult)]) -> Vec<String> {
@@ -2785,22 +3378,32 @@ fn preflight_gap(area: &str, blocking: &[&report::PreflightGate]) -> String {
     }
     text.push_str(
         "\nThese gates are not comparisons and they are not verdicts about the compiler under \
-         test. They establish the two preconditions the differential oracles rest on: that every \
-         flag this suite passes means the same thing to both compilers (requirement 3), and that \
-         every program in the corpus is free of undefined behaviour (requirement 1). Requirement 1 \
-         states the consequence in its own terms — a program containing undefined behaviour permits \
-         both compilers to do anything — so while a gate is unmet this area's PASSes are not \
-         evidence of agreement and its divergences are not evidence of a defect. That is why the \
-         area fails here rather than reporting a matrix nobody can read.\n\n\
+         test. They establish the four preconditions that give this area's cells their meaning: \
+         that every flag this suite passes means the same thing to both compilers (requirement 3); \
+         that every program in the corpus is free of undefined behaviour (requirement 1); that \
+         every expected-divergence marker is registered, described and consistent with its record \
+         before it is allowed to excuse anything (requirement 5); and that every record judging a \
+         compiler has completed its own review (requirements 4 and 6). Requirement 1 states the \
+         consequence in its own terms — a program containing undefined behaviour permits both \
+         compilers to do anything — and the other three fail the same way round: an unverified \
+         flag makes the two invocations incomparable, an unaudited marker can excuse a real \
+         divergence, and an unsubstantiated record has no authority to judge anything. So while a \
+         gate is unmet this area's PASSes are not evidence of agreement and its divergences are not \
+         evidence of a defect. That is why the area fails here rather than reporting a matrix nobody \
+         can read.\n\n\
          NO CELL OF THIS AREA WAS RUN. The gate is checked before the first compile, so nothing was \
-         built, nothing was classified, and no finding was filed — a finding produced from a program \
-         not shown to be free of undefined behaviour would assert something about the compiler that \
-         this suite has no standing to assert. The area's report was still written and states the \
-         withholding, the gate and the number of programs held back, so the correction can be \
-         checked against what the gate said.\n\n\
-         Fix the TEST PROGRAM the audit names — never the compiler — or install the tool the probe \
-         names, and run again. The full gate reports, with every command line and the compiler's own \
-         words, are printed by `cargo test --test conformance infra_ -- --nocapture`.",
+         built, nothing was classified, and no finding was filed — a finding is a deliverable \
+         asserting that the compiler did something, and producing one from a program not shown to be \
+         free of undefined behaviour, or from a record whose own review has not completed, would \
+         assert something this suite has no standing to assert. The area's report was still written \
+         and states the withholding, the gate, the record withheld where one was, and the number of \
+         programs held back, so the correction can be checked against what the gate said.\n\n\
+         The correction is always in the TEST MATERIAL or the machine, never in the compiler: fix \
+         the program the audit names, correct the marker or its register entry, complete the \
+         record's review and retire its entry from the driver's pending declaration, or install the \
+         tool the probe names — then run again. The full gate reports, with every command line and \
+         the compiler's own words, are printed by `cargo test --test conformance infra_ -- \
+         --nocapture`.",
     );
     text
 }
@@ -4454,24 +5057,33 @@ fn comma_list(items: &[impl AsRef<str>]) -> String {
 /// Folded into the register audit deliberately: it needs no compiler, no emulator and no toolchain —
 /// only the committed records — and the suite's test count is fixed by its own health gate, so a new
 /// `#[test]` is not available to spend.
-fn marker_classification_violations(markers: &[manifest::ExpectedDivergence]) -> Vec<String> {
-    let mut violations: Vec<String> = Vec::new();
+fn marker_classification_audit(
+    markers: &[manifest::ExpectedDivergence],
+) -> (Vec<MarkerViolation>, String) {
+    let mut violations: Vec<MarkerViolation> = Vec::new();
     let mut documented_refusals = 0usize;
     let mut undocumented_admissions = 0usize;
 
     for marker in markers {
+        // Attributed to the marker's own area for the reason given where the attribution is defined:
+        // a marker can only excuse a divergence in the program it sits beside.
+        let area = marker_area(marker);
         // The record is loaded from the program the marker governs, so the manifest handed to both
         // predicates is the very one a real cell would use — including its own program identity,
         // which `Finding::new` checks against the cell key.
         let record = match manifest::load_for_source(marker.program_path()) {
             Ok(record) => record,
             Err(error) => {
-                violations.push(format!(
-                    "marker {} governs {} but its expectation record could not be loaded: {error}. \
-                     Without the record neither the classifier's authority nor the finding writer's \
-                     precondition can be exercised, so the agreement between them is unestablished",
-                    marker.id(),
-                    marker.program_label(),
+                violations.push(MarkerViolation::in_area(
+                    &area,
+                    format!(
+                        "marker {} governs {} but its expectation record could not be loaded: \
+                         {error}. Without the record neither the classifier's authority nor the \
+                         finding writer's precondition can be exercised, so the agreement between \
+                         them is unestablished",
+                        marker.id(),
+                        marker.program_label(),
+                    ),
                 ));
                 continue;
             }
@@ -4482,13 +5094,16 @@ fn marker_classification_violations(markers: &[manifest::ExpectedDivergence]) ->
                 let key = match CellKey::new(record.area(), record.program(), target, opt) {
                     Ok(key) => key,
                     Err(error) => {
-                        violations.push(format!(
-                            "marker {}: the cell identity {}/{} @ {target} {} could not be built: \
-                             {error}",
-                            marker.id(),
-                            record.area(),
-                            record.program(),
-                            opt.flag(),
+                        violations.push(MarkerViolation::in_area(
+                            &area,
+                            format!(
+                                "marker {}: the cell identity {}/{} @ {target} {} could not be \
+                                 built: {error}",
+                                marker.id(),
+                                record.area(),
+                                record.program(),
+                                opt.flag(),
+                            ),
                         ));
                         continue;
                     }
@@ -4503,7 +5118,11 @@ fn marker_classification_violations(markers: &[manifest::ExpectedDivergence]) ->
                             class,
                         };
                         let (result, defects) = probe.audit();
-                        violations.extend(defects);
+                        violations.extend(
+                            defects
+                                .into_iter()
+                                .map(|defect| MarkerViolation::in_area(&area, defect)),
+                        );
                         match result {
                             ProbeResult::DocumentedRefused => documented_refusals += 1,
                             ProbeResult::UndocumentedAdmitted => undocumented_admissions += 1,
@@ -4515,11 +5134,11 @@ fn marker_classification_violations(markers: &[manifest::ExpectedDivergence]) ->
         }
     }
 
-    println!(
+    let tally = format!(
         "marker classification — {} marker(s) exercised over {} target(s) × {} level(s) × {} \
          oracle(s) × {} class(es): {} documented combination(s) refused by the finding writer as \
          expected divergences, {} undocumented combination(s) admitted as findings. A class the \
-         marker does not claim is NOT excused by it, even on an arm its scope names",
+         marker does not claim is NOT excused by it, even on an arm its scope names\n",
         markers.len(),
         Target::ALL.len(),
         OptLevel::ALL.len(),
@@ -4529,10 +5148,10 @@ fn marker_classification_violations(markers: &[manifest::ExpectedDivergence]) ->
         undocumented_admissions,
     );
 
-    violations
+    (violations, tally)
 }
 
-/// One (marker, cell, oracle, class) combination of [`marker_classification_violations`].
+/// One (marker, cell, oracle, class) combination of [`marker_classification_audit`].
 ///
 /// A value rather than a long argument list, following the `Side`/`CellPlan` idiom already used in
 /// this file: the four dimensions plus the record travel together because every check below asks

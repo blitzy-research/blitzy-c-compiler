@@ -77,18 +77,19 @@
  *
  * THE CALL BARRIER, AND WHY THESE BOUNDARIES WOULD OTHERWISE NOT EXIST.  An
  * aggregate-passing boundary is only under test if the call actually happens.
- * With direct calls to these static functions the reference compiler at -O2 leaves
- * only take_s8x10 standing: the other six are inlined away, so six of the seven
- * documented boundaries above would not be crossed at all at that level.  Every
- * call below therefore goes through a FILE-SCOPE volatile FUNCTION POINTER.  A
- * volatile lvalue must be re-read on every access, so no conforming compiler may
- * assume which function the pointer designates -- it can neither
- * inline nor clone the callee, and it must marshal each aggregate exactly as the
- * ABI prescribes because it cannot know what will receive it.  This is plain
- * standard C rather than a compiler attribute, so both sides of oracle (a)
- * honour it for the same reason.  Verified in the generated assembly of all four
- * targets at -O2: all seven callees are emitted unmodified, with no .constprop
- * and no .isra clone.
+ * Called by name these seven static functions are inlined away wholesale from -O1
+ * upward - six of the seven documented boundaries above go uncrossed at -O2 on
+ * x86-64, AArch64 and RISC-V 64, and ALL SEVEN go uncrossed on i686, where the
+ * loss is total; the sibling record carries the per-target count, because a
+ * single blanket figure would hide exactly that.  Every call below therefore goes
+ * through a FILE-SCOPE volatile FUNCTION POINTER.  A volatile lvalue must be
+ * re-read on every access, so no conforming compiler may establish at translation
+ * time which function the pointer designates, and every transfer is a genuine
+ * indirect call.  That is an OBSTACLE and not a prohibition; what the indirection
+ * does and does not guarantee, the standard citations for it, the measured -O2
+ * evidence on all four reference drivers and the residual risk it leaves for a
+ * compiler under test are stated once, in "THE CALL BOUNDARY IS ENFORCED, NOT
+ * HOPED FOR" below.  This paragraph states only why the indirection is here.
  *
  * EVALUATION-ORDER DISCIPLINE.  An access to a volatile object is an observable
  * side effect and argument evaluation order is unspecified, so every volatile
@@ -319,11 +320,13 @@ static volatile int vtag = 1;
 
 /* The call boundary, one volatile-qualified pointer per aggregate shape.
    Each is re-read at its call site, so every call is indirect at every
-   optimization level and every by-value aggregate parameter is opaque to scalar
-   replacement.  ISO C does not FORBID a clone or a scalarised copy; measured on
-   the reference toolchain at -O2 neither appears and no callee body is inlined.
-   Both variants of every shape travel through these pointers, so the folded and
-   the runtime call cross the same boundary. */
+   optimization level.  Whether a by-value aggregate parameter is additionally
+   left un-scalarised is an optimizer OUTCOME rather than a language guarantee -
+   ISO C does not FORBID a clone or a scalarised copy; measured on the reference
+   toolchain at -O2 neither appears and no callee body is inlined, and the sibling
+   record carries that evidence and the residual risk it leaves.  Both variants of
+   every shape travel through these pointers, so the folded and the runtime call
+   cross the same boundary. */
 static void (*volatile take_s8x10_p)(struct s8, struct s8, struct s8, struct s8,
                                      struct s8, struct s8, struct s8, struct s8,
                                      struct s8, struct s8, int) = take_s8x10;

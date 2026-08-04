@@ -1272,12 +1272,17 @@ genuinely different dimensions** that must never be collapsed into one another:
 - **Substantiated at this checkpoint** — the narrower, milestone figure. **107 of the 108 records**
   have been authored or re-substantiated in the checkpoint sequence that produced this state. The
   remaining one, `13_floating_point/004_long_double_target_restricted.expected`, is a **legacy record
-  pending re-substantiation**: it is committed, parses, is paired with its source and runs, so it is
+  pending re-substantiation**: it is committed, parses and is paired with its source, so it is
   not missing and does not reduce the structural figure, but its prose has not been through this
-  checkpoint's review. Its outstanding item is the loose *"three different formats"* wording in its
-  `observed` field and in §4.2's matching `Observed` row — there are **two** formats across three
-  object representations — and because §1.1's forward check compares those two character for
-  character, they must be corrected **in one edit together**.
+  checkpoint's review — and while that is true it is **withheld before its first compile** by the
+  record-substantiation preflight gate, so no cell of it runs and its feature area fails with an
+  explicit non-evidence report rather than publishing verdicts drawn from an unreviewed record. That
+  is requirement 6 refusing to let the suite assert something it has no standing to assert, not a
+  defect; retiring the record's row from the driver's `PENDING_RECORDS` declaration is the whole of
+  the work once its review completes. Its outstanding item is the loose *"three different formats"*
+  wording in its `observed` field and in §4.2's matching `Observed` row — there are **two** formats
+  across three object representations — and because §1.1's forward check compares those two character
+  for character, they must be corrected **in one edit together**.
 - **Admitted as evidence about `bcc`** — **zero**, because there is no `bcc` binary on this branch.
 
 | Matrix | Areas | Sources | Records | **Runnable programs** | `bcc` compile-and-run cells | Verdict outcome rows | Comparisons actually performed |

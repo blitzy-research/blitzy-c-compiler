@@ -104,15 +104,38 @@ COVERAGE OF THE BY-MEMORY SHAPE. For the 40-byte aggregate every one of the ten 
 read back rather than a sample of three, because a return path that corrupted only an
 interior member would otherwise leave no trace in stdout.
 
-THE CALL BARRIER, AND WHERE THE POINTER IS READ. Every call this program makes to the
-function whose ABI boundary is under test goes through a FILE-SCOPE volatile FUNCTION
-POINTER, and that is load-bearing rather than stylistic. A C11 volatile lvalue must be
-re-read on every access, so no conforming compiler may assume which function the pointer
-designates: it can neither inline the callee nor clone it, and it must marshal the
-arguments exactly as the ABI prescribes because it cannot know what will receive them.
-This is plain standard C rather than a compiler attribute, so both sides of oracle (a)
-honour it for the same reason and neither needs to support an extension for the barrier to
-hold.
+THE CALL BARRIER, WHAT IT IS AND IS NOT, AND WHERE THE POINTER IS READ. Every call this
+program makes to the function whose ABI boundary is under test goes through one of the
+fourteen FILE-SCOPE volatile FUNCTION POINTERS, and that is load-bearing rather than
+stylistic. WHAT ISO C REQUIRES: an access to a volatile object is a side effect belonging to
+the observable behaviour an implementation must reproduce (C11 5.1.2.3p2 and p6), and C11
+6.7.3p7 requires an expression referring to a volatile-qualified object to be evaluated
+strictly according to the abstract machine's rules -- so the pointer must be READ from memory
+rather than resolved at translation time, no conforming compiler may establish which function
+it designates, and control must be transferred to whatever function that load produced. WHAT
+ISO C DOES NOT REQUIRE: that the transfer reaches the callee's original entry point. A
+conforming implementation may introduce a specialised clone, scalarise the returned aggregate,
+or perform guarded devirtualization, and still honour the loaded value, because the observable
+behaviour is unchanged. An earlier form of this paragraph said the callee "can neither be
+inlined nor cloned", which is stronger than anything the standard says and is withdrawn -- the
+same withdrawal the ub_notes bullet above records, so that both halves of this record now
+describe the barrier the same way rather than contradicting each other. The barrier is
+therefore an optimization OBSTACLE whose effect is measured on named artifacts, never a
+language guarantee. This is plain standard C rather than a
+compiler attribute, so both sides of oracle (a) honour it for the same reason and neither needs
+to support an extension for the barrier to hold.
+
+THE RESIDUAL RISK IS RECORDED RATHER THAN PAPERED OVER. The counts below are evidence about
+the REFERENCE compiler's artifacts, not a property every compiler under test must have. A
+compiler that devirtualized through a specialised entry, or scalarised a returned aggregate
+into the caller's locals, could route a cell past the return mechanisms argued above while
+still printing the same bytes, and this program would not detect that. Closing it would take a
+per-cell STATIC check of the artifact the compiler under test emitted -- an indirect transfer
+present, no specialised clone of any of the fourteen boundary helpers -- which is a harness
+capability this suite does not have and which no oracle here substitutes for. Until it does,
+the boundary coverage claimed for a compiler under test extends exactly as far as that artifact
+inspection; 001_many_integer_parameters.expected carries the same statement for this whole
+area.
 
 The volatile pointer is read ONCE PER RUN, at the top of main, into a plain local function
 pointer, and every call site uses that local. That placement is deliberate and it is what

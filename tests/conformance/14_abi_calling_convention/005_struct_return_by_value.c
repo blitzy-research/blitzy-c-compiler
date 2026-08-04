@@ -60,20 +60,27 @@
  *
  * THE CALL BARRIER, AND WHY THESE RETURN BOUNDARIES WOULD OTHERWISE NOT EXIST.
  * A return boundary is only under test if the call actually happens.  With direct
- * calls to these static producers the reference compiler at -O2 leaves only
- * make_sbig standing: every small, mixed and homogeneous-float return, and both
- * forwarding consumers, are inlined away, so six of the seven documented return
- * mechanisms and both forwarding paths would not be exercised at all at that
- * level.  Every producer and every consumer below is therefore
- * reached through a FILE-SCOPE volatile FUNCTION POINTER.  A volatile lvalue
- * must be re-read on every access, so no conforming compiler may assume which
- * function the pointer designates: it can neither inline nor clone the callee,
- * and it must return the aggregate exactly as the ABI prescribes because it
- * cannot know what produced it.  This is plain standard C rather than a compiler
- * attribute, so both sides of oracle (a) honour it for the same reason.
- * Verified in the generated assembly of all four targets at -O2: all seven
- * producers and both consumers are emitted unmodified, with no .constprop and no
- * .isra clone.
+ * calls to these static helpers the reference compiler at -O1 and -O2 leaves only
+ * make_sbig standing out of the fourteen that carry a boundary: every small,
+ * mixed and homogeneous-float return, and all seven forwarding consumers, are
+ * inlined away, so six of the seven documented return mechanisms and every one of
+ * the seven forwarding paths would not be exercised at all at those levels.
+ * Every producer and every consumer below is therefore reached through a
+ * FILE-SCOPE volatile FUNCTION POINTER - fourteen of them, one per helper whose
+ * boundary is under test.  A volatile lvalue must be read from memory rather than
+ * resolved at translation time, so no conforming compiler may establish which
+ * function the pointer designates, and every transfer is a genuine indirect call.
+ * Where that read happens is a separate question with its own answer below: main
+ * takes one snapshot of each pointer, because the opacity comes from where the
+ * value CAME FROM and not from how often it is fetched.  That is an
+ * OBSTACLE and not a prohibition; what the indirection does and does not
+ * guarantee, the standard citations for it, and the residual risk it leaves for a
+ * compiler under test are stated once, in "THE RETURN BOUNDARY IS ENFORCED, NOT
+ * HOPED FOR" below.  This is plain standard C rather than a compiler attribute,
+ * so both sides of oracle (a) honour it for the same reason.  Measured with
+ * gcc 13.4.0 at -O2 on all four reference drivers: all seven producers and all
+ * seven consumers are emitted unmodified, with no .constprop, no .isra and no
+ * .part clone anywhere.
  *
  * EVALUATION-ORDER DISCIPLINE, AND WHY IT REACHES THE FUNCTION POINTERS TOO.  An
  * access to a volatile object is an observable side effect, and C11 6.5.2.2p10
@@ -104,12 +111,14 @@
  * boundary exists to guarantee.
  *
  * The same counting over DIRECT calls is what makes the boundary necessary rather
- * than decorative: called by name, these static producers leave the reference
- * compiler at -O1 and above with one helper standing out of nine and four calls out
- * of forty, so six of the seven return mechanisms and both forwarding paths would
- * not be exercised at all above -O0.  Any other compiler may inline differently
- * again, which is why the boundary is expressed in the source rather than left to
- * an implementation's judgement.
+ * than decorative: called by name, these static helpers leave the reference
+ * compiler at -O1 and above with two of the fifteen standing on every one of the
+ * four targets - make_sbig and the element printer print_sbig, which carries no
+ * boundary of its own - so exactly ONE of the fourteen boundary-carrying helpers
+ * survives, and six of the seven return mechanisms and every one of the seven
+ * forwarding paths would not be exercised at all above -O0.  Any other compiler
+ * may inline differently again, which is why the boundary is expressed in the
+ * source rather than left to an implementation's judgement.
  *
  * Padding discipline: sizeof is never printed and no aggregate is ever memcmp'd.
  * Only named members are read back.
@@ -127,13 +136,18 @@
  * for an optimizer to inline, and an inlined maker returns nothing: the returned
  * aggregate is scalar-replaced into the caller's own locals and the return
  * convention - register pair, register plus floating register, or hidden pointer
- * - is never exercised at all.  With direct calls the reference compiler at -O2
- * leaves only four of the twenty intended maker and consumer calls per variant
- * standing, every other one being inlined, so six of the seven return shapes would
- * have no boundary left to test.  A volatile
- * pointer must be re-read on every access, so the value main snapshots out of it
- * cannot be established at translation time: the designated function is opaque to
- * the optimizer and every call through the snapshot is genuinely indirect.  That
+ * - is never exercised at all.  Counted on the drivers' own artifacts: this file
+ * makes 98 maker and consumer calls in all, 49 per variant - 42 to the seven
+ * makers and 7 to the seven forwarding consumers - and with the pointers removed
+ * and the helpers called by name the reference compiler leaves 8 of those 98
+ * standing at -O1 and just 6 at -O2, identically on all four targets, every one of
+ * the survivors a call to make_sbig.  Six of the seven return shapes would
+ * therefore have no boundary left to test.  A volatile
+ * pointer must be read from memory rather than resolved at translation time, so
+ * the value main snapshots out of it cannot be established at translation time:
+ * the designated function is opaque to the optimizer and every call through the
+ * snapshot is genuinely indirect - measured as 98 indirect transfers per target at
+ * -O0, -O1 and -O2 alike, one for every call site above.  That
  * opacity follows from where the value CAME FROM rather than from how often the
  * pointer is fetched, which is why reading it once per run costs the barrier
  * nothing.  What it is NOT is a language-level prohibition: ISO C does not forbid a
@@ -222,10 +236,14 @@ static void consume_s24(struct s24 s, const char *t);
 static void consume_sbig(struct sbig s, const char *t);
 static void print_sbig(const char *label, const char *t, const struct sbig *s);
 
-/* The nine call barriers described in the banner.  Each is volatile, so the
- * pointer is re-read on every call and the callee can be neither inlined nor
- * specialised, which is what keeps all seven return mechanisms and both
- * forwarding paths under test at -O1 and -O2 as well as at -O0. */
+/* The fourteen call barriers described in the banner - one per producer and one
+ * per forwarding consumer.  Each is volatile, so the pointer is re-read on every
+ * call and no compiler can establish at translation time which function it
+ * designates, which is what keeps all seven return mechanisms and all seven
+ * forwarding paths reached through a real call at -O1 and -O2 as well as at -O0.
+ * That the callee is additionally left un-inlined and un-cloned is an optimizer
+ * OUTCOME rather than a language guarantee; measured on the reference drivers at
+ * -O2 it is, and the sibling record carries that evidence. */
 
 static volatile int vi[16] = {
     11, -12, 21, -22,
@@ -369,13 +387,17 @@ static void consume_sbig(struct sbig s, const char *t)
     print_sbig("fwd_sbig", t, &s);
 }
 
-/* The enforced return boundary, one volatile-qualified pointer per shape.  Each is re-read at
-   its call site, so every maker call is indirect at every optimization level, no maker body is
-   inlined, and no returned aggregate can be scalar-replaced into this caller's locals.  Both
-   variants of every shape travel through these pointers, so the folded and the runtime call
-   cross the same boundary.  Every forwarding consumer is indirected for the same reason: a
-   returned aggregate handed straight on as an argument has to survive both conventions in one
-   expression. */
+/* The enforced return boundary, one volatile-qualified pointer per shape.  Each is read once
+   per run, at the top of main, into a plain local that every call site then uses; the value
+   still ARRIVED through a volatile load, so no compiler can establish at translation time
+   which function it designates and every maker call is indirect at every optimization level.
+   Whether the maker body is additionally left un-inlined, and the returned aggregate left
+   un-scalarised, is an optimizer OUTCOME rather than something ISO C guarantees - measured on
+   the reference drivers at -O2 both hold, and the sibling record carries that evidence and the
+   residual risk it leaves.  Both variants of every shape travel through these pointers, so the
+   folded and the runtime call cross the same boundary.  Every forwarding consumer is indirected
+   for the same reason: a returned aggregate handed straight on as an argument has to survive
+   both conventions in one expression. */
 static struct s8 (*volatile make_s8_p)(int, int) = make_s8;
 static struct s16i (*volatile make_s16i_p)(int, int, int, int) = make_s16i;
 static struct s16m (*volatile make_s16m_p)(int, double) = make_s16m;

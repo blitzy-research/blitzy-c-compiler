@@ -40,15 +40,27 @@
  * documented boundary would never be crossed at that level and the program would
  * silently test less than it claims at two of its three optimization levels.
  * Every call below therefore goes through a FILE-SCOPE volatile FUNCTION POINTER.
- * A volatile lvalue must be re-read on every access, so no conforming compiler may
- * assume which function the pointer designates: it can
- * neither inline the callee nor clone it, and it must marshal the arguments
- * exactly as the ABI prescribes because it cannot know what will receive them.
- * This is plain standard C rather than a compiler attribute, so both sides of
- * oracle (a) honour it for the same reason and neither needs to support an
- * extension for the barrier to hold.  Verified in the generated assembly of all
- * four targets at -O2: take_mixed26 is emitted unmodified, with no .constprop
- * and no .isra clone, and the call site is a genuine indirect call.
+ * A volatile lvalue must be re-read on every access, so no conforming compiler
+ * may establish at translation time which function the pointer designates, and
+ * the transfer is therefore a genuine indirect call.  What that buys is an
+ * OBSTACLE rather than a prohibition, and the two are kept apart here because
+ * conflating them would overstate what this program proves: ISO C does NOT
+ * forbid a specialised clone, a scalarised copy of the body or a guarded
+ * devirtualization, each of which would honour the loaded value and still
+ * dissolve the classification under test.  Their absence is therefore MEASURED
+ * rather than asserted - with gcc 13.4.0 at -O2 on all four reference drivers
+ * take_mixed26 is emitted unmodified, no symbol carries .constprop, .isra or
+ * .part., and both call sites are genuine indirect transfers, two per target.
+ * Those are artifacts of the REFERENCE compiler, so the boundary this program
+ * claims to cover holds for a compiler under test only as far as the same
+ * artifact inspection shows that it does; the residual risk that leaves, and the
+ * per-cell static check that would close it, are recorded in
+ * 001_many_integer_parameters.expected.  The mechanism is plain standard C
+ * rather than a compiler attribute, so both sides of oracle (a) honour it for
+ * the same reason and neither needs to support an extension for the barrier to
+ * hold.  The full account, including the standard citations, is the section
+ * "THE CALL BOUNDARY IS ENFORCED, NOT HOPED FOR" below; this paragraph states
+ * only why the indirection is here at all.
  *
  * EVALUATION-ORDER DISCIPLINE.  An access to a volatile object is an observable
  * side effect and argument evaluation order is unspecified, so every volatile
