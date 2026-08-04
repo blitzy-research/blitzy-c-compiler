@@ -29,7 +29,7 @@ pie title Project Completion — 92.4%
 
 - ✅ All **121+ AAP-required files** created — 100% file delivery rate
 - ✅ **145,788 lines** of Rust compiler source across 82 modules in 9 subsystems
-- ✅ **32,952 lines** of test code with **3,924 tests passing**, 0 failures
+- ✅ **32,952 lines** of test code with **3,942 tests passing**, 0 failures
 - ✅ **Zero compilation errors**, zero warnings, clippy clean, rustfmt clean
 - ✅ **Four architecture backends** (x86-64, i686, AArch64, RISC-V 64) with runtime-verified correctness via QEMU
 - ✅ **Complete C11 frontend** with GCC extensions: preprocessor, lexer, recursive-descent parser
@@ -108,7 +108,7 @@ pie title Project Completion — 92.4%
 | Real-World Validation Execution (SQLite/Lua/zlib/Redis) | 8 | High |
 | Shared Library (-shared) End-to-End Validation | 6 | High |
 | DWARF v4 Debugger Compatibility Testing (GDB/LLDB) | 6 | Medium |
-| C11 Standard Corner Case Compliance Testing | 5 | Medium |
+| C11 Standard Corner Case Compliance Testing — ✅ Addressed by the differential conformance suite (`cargo test --test conformance`) | 5 | Medium |
 | Cross-Compilation Sysroot Path Diversity Testing | 4 | Medium |
 | Performance Profiling on Large Codebases | 4 | Medium |
 | Production Packaging and Distribution | 4 | Low |
@@ -150,8 +150,9 @@ pie title Project Completion — 92.4%
 | Integration — CLI | Rust #[test] | 43 | 43 | 0 | N/A | Flag parsing, error exit codes, output naming |
 | Integration — Multi-arch | Rust #[test] | 24 | 24 | 0 | N/A | Cross-arch hello world and factorial on all 4 targets |
 | Integration — Hello World | Rust #[test] | 12 | 12 | 0 | N/A | End-to-end smoke tests on all 4 architectures |
+| Integration — Differential Conformance | Rust #[test] | 18 | 18 | 0 | N/A | 14 feature-area tests + 4 infrastructure tests; oracle-based differential/cross-backend/golden comparison over 108 C programs × 4 targets × -O0/-O1/-O2 |
 | Validation — SQLite/Lua/zlib/Redis | Rust #[test] | 68 | 55 | 0 | N/A | 13 tests ignored (require external source download) |
-| **Totals** | | **3,937** | **3,924** | **0** | | **13 ignored by design** |
+| **Totals** | | **3,955** | **3,942** | **0** | | **13 ignored by design** |
 
 All test results originate from Blitzy's autonomous validation execution. The 13 ignored tests are SQLite validation tests that require downloading the SQLite amalgamation from the internet — they are gated by the `#[ignore]` attribute by design.
 
@@ -245,7 +246,7 @@ All test results originate from Blitzy's autonomous validation execution. The 13
 | Real-world codebase compilation failures (SQLite/Lua/zlib/Redis) | Technical | High | Medium | Validation suite scaffolding complete; requires execution with actual source downloads | Open — Requires human execution |
 | Shared library dynamic loader incompatibility | Technical | Medium | Medium | Code generation and linker support .dynamic/.dynsym/.plt/.got; needs runtime testing with dlopen | Open — Requires runtime validation |
 | DWARF v4 debugger parsing failures | Technical | Medium | Low | Structural tests pass; needs GDB/LLDB interactive debugging verification | Open — Requires manual testing |
-| C11 corner case non-compliance | Technical | Medium | Medium | Comprehensive parser and sema tests; edge cases in complex declarators and type conversions may remain | Open — Requires targeted testing |
+| C11 corner case non-compliance | Technical | Medium | Medium | Comprehensive parser and sema tests; edge cases in complex declarators and type conversions may remain; targeted differential conformance testing now exercises integer conversions, constant expressions, initializers, bitfields, and complex declarators against independent oracles | Open — Requires targeted testing |
 | Cross-compilation sysroot path variance | Operational | Low | Medium | --sysroot implemented; different distros place CRT objects in different paths | Mitigated — sysroot flag available |
 | ELF section layout edge cases | Technical | Medium | Low | Relocation overflow checking implemented; complex section merging scenarios may have edge cases | Partially mitigated |
 | Performance degradation on very large inputs (>500K LOC) | Technical | Low | Low | SQLite (230K LOC) at 0.43s and 180MB is well within bounds; arena allocator manages memory | Mitigated |
@@ -299,7 +300,7 @@ The bcc (Blitzy C Compiler) project has been autonomously implemented to **92.4%
 - **189K lines of code** across 130 files created from a greenfield repository
 - **Complete 9-subsystem compiler pipeline**: preprocessor → lexer → parser → sema → IR → optimizer → codegen → linker → ELF
 - **Four architecture backends** (x86-64, i686, AArch64, RISC-V 64) all producing correct executables verified via QEMU
-- **3,924 tests passing** with zero failures — spanning unit, integration, and structural validation tests
+- **3,942 tests passing** with zero failures — spanning unit, integration, and structural validation tests
 - **Zero compilation errors**, zero warnings, and clean linting across the entire codebase
 - **Performance exceeding requirements**: SQLite benchmark at 0.43s (vs. 60s threshold) and 180MB RSS (vs. 2GB threshold)
 
@@ -399,6 +400,7 @@ cargo test --test optimization     # Optimization pass tests
 cargo test --test cli              # CLI integration tests
 cargo test --test multiarch        # Multi-architecture tests
 cargo test --test hello_world      # End-to-end smoke tests
+cargo test --test conformance      # Differential conformance suite
 
 # Run validation suite (requires internet for source download)
 cargo test --test validation -- --ignored
@@ -462,7 +464,7 @@ cargo build --release 2>&1 | tail -1
 
 # Verify all tests pass
 cargo test 2>&1 | grep "test result"
-# Expected: test result: ok. 3924 passed; 0 failed; 13 ignored; ...
+# Expected: test result: ok. 3942 passed; 0 failed; 13 ignored; ...
 
 # Verify binary exists and runs
 ./target/release/bcc --help 2>&1 | head -3
@@ -498,6 +500,7 @@ echo 'int main() { return 42; }' > /tmp/test.c
 | `cargo build --release` | Build bcc compiler (optimized release mode) |
 | `cargo test` | Run all unit and integration tests |
 | `cargo test --test <name>` | Run specific integration test file |
+| `cargo test --test conformance` | Run the differential conformance suite |
 | `cargo test -- --ignored` | Run ignored tests (validation suite) |
 | `cargo clippy -- -D warnings` | Lint check with warnings as errors |
 | `cargo fmt -- --check` | Format verification |
