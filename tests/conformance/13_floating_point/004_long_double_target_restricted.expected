@@ -31,9 +31,9 @@ invalidating the record. Measured, for contrast: the non-dyadic quotient 1.0L / 
 fractional digits gives a different value on the two x87 targets than on the two binary128 targets.
 
 THE FORMAT THE ROUND TRIP RELIES ON IS ESTABLISHED, NOT ASSERTED BY WIDTH. sizeof(double) == 8
-establishes that the type occupies eight bytes and nothing more; it does not establish the radix or the
-significand width, and an earlier form of this program's commentary wrongly claimed it did. The
-documented basis for the format is each target's own ABI -- the System V i386 and x86-64 psABIs,
+establishes that the type occupies eight bytes and nothing more; it establishes neither the radix nor
+the significand width, so width alone could not carry this claim. The documented basis for the format
+is each target's own ABI -- the System V i386 and x86-64 psABIs,
 AAPCS64 and the RISC-V calling convention all specify IEEE binary64 for double -- and the property is
 CHECKED at run time by the double_significand line, because a floating comparison is not an integer
 constant expression and C11 6.6p6 keeps it out of a static assertion. The probe adds 1/2^52 and 1/2^53
@@ -74,9 +74,11 @@ HERMETICITY. Every input is a literal in this source. Nothing is opened, nothing
 environment, the command line, the clock or the file system, and no storage is allocated.
 
 GATE. The default warning gate applies unmodified and no `ub_audit_flags` key appears:
--Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. Verified clean under that
-gate with all four reference drivers and with the alternate reference compiler, and clean under
--fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are reference-compiler-only.
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. It is clean under that gate
+in the single native compile-only invocation the suite makes of it, clean under the alternate
+reference compiler this suite may select in its place, and clean under the one instrumented native
+build of -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+reference-compiler-only.
 
 NO HEADER IS INCLUDED and printf is declared by hand, because bcc ships no standard I/O header.
 END

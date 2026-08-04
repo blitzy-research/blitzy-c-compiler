@@ -74,13 +74,12 @@ bundles freestanding headers only and ships no stdio.h, so an include of it woul
 the reference side and fail on the compiler-under-test side, manufacturing a divergence caused
 by the test rather than by the compiler.
 
-No deviation from the default warning gate is requested, and none is needed. Measured on this
-branch with gcc 13.4.0 and qemu-user 10.1.0: the full default gate -Wall -Wextra -pedantic
--Wconversion -Wsign-conversion -Wshadow -Werror produces zero diagnostics on all four target
-drivers at -O0, -O1 and -O2; the sanitizer gate -fsanitize=undefined,address
--fno-sanitize-recover=all builds, runs to completion and exits 0 with no diagnostic at all
-three levels; and all twelve cells of the declared matrix produce byte-identical stdout with
-exit status 0 and an empty standard error.
+No deviation from the default warning gate is requested, and none is needed. The full default
+gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror produces zero
+diagnostics in the single native compile-only invocation the suite makes of it; the sanitizer
+gate -fsanitize=undefined,address -fno-sanitize-recover=all builds, runs to completion and
+exits 0 with no diagnostic in its one instrumented native build; and all twelve cells of the
+declared matrix produce byte-identical stdout with exit status 0 and an empty standard error.
 END
 impl_defined_notes <<END
 This record narrows nothing. It declares all four targets, all three optimization levels, all

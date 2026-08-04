@@ -32,9 +32,9 @@ be evaluated: intmax_t in the preprocessor, and the 32-bit int all four targets 
 been translated. No negative value is ever shifted. The division -7 / 2 and the modulo 17 % 5
 both have non-zero divisors; they assert truncation toward zero and a dividend-signed remainder,
 which C99 onward mandates of every conforming implementation (C11 6.5.5p6), so the results are
-fixed by the language rather than by the target. Both were nevertheless measured identical on
-all four targets before this record was written, which is why no target is narrowed and all
-three oracles stay enabled.
+fixed by the language rather than by the target. Both are nevertheless identical on all four
+targets in fact as well as in principle, which is why no target is narrowed and all three
+oracles stay enabled.
 
 An undefined identifier in a #if is DEFINED behaviour, not undefined behaviour. C11 6.10.1p4
 requires that after macro expansion and the defined operator have been applied, every remaining
@@ -91,12 +91,12 @@ precisely the shape of defect a structural token-stream test is weakest at detec
 output oracle is strongest at.
 
 No deviation from the default warning gate is requested, and none is sanctioned for this area.
-Verified empirically on this branch with gcc 13.4.0 and qemu-user 10.1.0: the default gate
-(-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
-diagnostics at -O0, -O1 and -O2; the sanitizer gate (-fsanitize=undefined,address
--fno-sanitize-recover=all) builds, runs to completion and exits 0 with nothing on standard
-error; and all twelve cells of the declared matrix produce byte-identical stdout with exit
-status 0 and an empty standard error.
+The default gate (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+produces zero diagnostics in the single native compile-only invocation the suite makes of it;
+the sanitizer gate (-fsanitize=undefined,address -fno-sanitize-recover=all) builds, runs to
+completion and exits 0 with nothing on standard error in its one instrumented native build;
+and all twelve cells of the declared matrix produce byte-identical stdout with exit status 0
+and an empty standard error.
 END
 impl_defined_notes <<END
 Every construct exercised here is documented as supported - docs/technical-specifications.md

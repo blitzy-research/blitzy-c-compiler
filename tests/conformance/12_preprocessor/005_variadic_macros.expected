@@ -26,11 +26,13 @@ read before it is written. No object is modified twice between sequence points. 
 side-effecting argument.
 
 Every variadic macro invocation is strictly conforming. C11 6.10.3p4 requires an invocation of a
-macro whose parameter list ends in an ellipsis to supply more arguments than there are parameters, so
-every invocation of the two forwarding macros supplies at least one variadic argument. The empty
-variadic list is reached only through spellings that satisfy that rule: a bare `#define M(...)`
-invoked as `M()`, which supplies one empty argument, and the stringize operator applied to an empty
-list, whose result C11 6.10.3.2p2 fixes as the empty string.
+macro whose parameter list ends in an ellipsis to supply more arguments than there are parameters. The
+two macros that carry a named parameter, and the two wholly variadic macros that forward to them, are
+each invoked only with at least one variadic argument, so every one of those invocations clears the
+rule with room to spare. The empty variadic list is reached only through the three bare-form
+invocations, whose macros have no named parameter at all: a `#define M(...)` invoked as `M()` supplies
+one empty argument, which is one more than the zero parameters the rule counts, and the stringize
+operator applied to that empty list yields the empty string C11 6.10.3.2p2 fixes.
 
 Stringizing is deterministic rather than incidental. 6.10.3.2p2 deletes white space before the first
 token and after the last and collapses each remaining run to a single space, so the two-token list
@@ -38,9 +40,9 @@ stringizes to the same text under every conforming implementation.
 
 ARITY OF THE STRINGIZING MACRO. The stringizing macro is itself declared variadic, and that is a
 correctness requirement rather than a stylistic choice. A one-parameter stringizing macro handed a
-comma-separated list is an arity error, not a comparison: measured on the same list this program
-stringizes, gcc 13.4.0 reports `passed 2 arguments, but takes just 1` and clang 20.1.8 reports "too
-many arguments provided to function-like macro invocation". Declaring it variadic is what lets one
+comma-separated list is an arity error, not a comparison: the reference compiler reports `passed 2
+arguments, but takes just 1` and the alternate reference compiler reports that too many arguments
+were provided to a function-like macro invocation. Declaring it variadic is what lets one
 macro legally receive an empty list, a single token and several tokens, which is precisely the
 three-way coverage the golden record asserts. Reducing it to a single named parameter would convert
 three live assertions into a compile failure owned by this test rather than by either compiler.
@@ -58,9 +60,10 @@ environment, the command line, the clock or the file system, and no storage is a
 is reproducible from this source and this record alone.
 
 GATE. The default warning gate applies unmodified and no `ub_audit_flags` key appears:
--Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. The program was verified
-clean under that gate with all four reference drivers and with the alternate reference compiler, and
-it builds and runs clean under -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. The program is clean under
+that gate in the single native compile-only invocation the suite makes of it, and it builds and runs
+clean in the one instrumented native build of -fsanitize=undefined,address
+-fno-sanitize-recover=all. Both gates are
 reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
 untouched.
 
@@ -84,24 +87,29 @@ impl_defined_notes <<END
 THREE SPELLINGS ARE EXCLUDED, EACH NARROWLY AND EACH FOR A STATED REASON. No target, no optimization
 level and no oracle is narrowed, and no expected-divergence marker is attached.
 
-THE GNU COMMA SWALLOW, `, ##__VA_ARGS__`, IS EXCLUDED. An earlier form of this program used it to
-reach the zero-argument case. Pasting a comma with __VA_ARGS__ has no meaning in C11 -- it is a GNU
-extension -- and the alternate reference compiler this suite may legitimately select as its oracle
-rejects it outright under the audit gate this area declares: seven -Wgnu-zero-variadic-macro-arguments
-errors, measured with clang 20.1.8. A construct that cannot survive the audit gate of a compiler that
+THE GNU COMMA SWALLOW, `, ##__VA_ARGS__`, IS EXCLUDED. Pasting a comma with __VA_ARGS__ has no
+meaning in C11 -- it is a GNU extension -- and the alternate reference compiler this suite may
+legitimately select as its oracle rejects it outright under the audit gate this area declares, one
+-Wgnu-zero-variadic-macro-arguments error per invocation. A construct that cannot survive the audit
+gate of a compiler that
 may serve as the oracle cannot be the subject of a comparison, because the failure would be the
 test's rather than the compiler's. Per constraint C3 the exclusion is stated rather than left silent,
 and it is narrow: the zero-variadic-argument case, which is the property that spelling existed to
-reach, is still exercised twice by strictly conforming means. The extension belongs with the other GCC
+reach, is still exercised three times by strictly conforming means. The extension belongs with the
+other GCC
 extensions in area 08, whose programs declare a gate suited to non-standard constructs.
 
 THE C2X OPTIONAL-COMMA VARIADIC OPERATOR IS EXCLUDED because no repository document enumerates support
 for it, so a compile failure arising from it would be attributable to this test rather than to the
 compiler under test.
 
-AN EXPLICIT EMPTY TRAILING MACRO ARGUMENT IS EXCLUDED because the reference compiler itself rejects
-that spelling with a syntax error, so it could not form the basis of a comparison between two
-compilers in the first place.
+AN EXPLICITLY EMPTY TRAILING MACRO ARGUMENT IS EXCLUDED, and not because the preprocessor refuses
+it. It does not: `LOG("x\n", )` supplies one empty argument and preprocesses with no diagnostic under
+the full gate. What it produces is `printf("x\n", )`, whose trailing comma is a syntax error in the
+CALL -- the same dangling comma the GNU swallow exists to delete. The construct is therefore unusable
+for a comparison for a reason that lies in neither compiler's variadic machinery, and the behaviour
+it would have reached is already covered by the wholly variadic form, which is exercised at two
+levels of expansion.
 
 WIDTH NORMALIZATION. Every printed value is an int or a string constant written in this source, so no
 target-varying width and no plain-char signedness can influence a byte of stdout.

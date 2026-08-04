@@ -6,7 +6,7 @@
 
 program            = 006_pragma_and_line
 area               = 12_preprocessor
-description        = Pragma acceptance observed through properties the standard fixes -- an unrecognised pragma must be ignored, and a diagnostic-control pragma cannot change observable behaviour -- together with the effect of a line directive on the source-position macros, including a virtual file name
+description        = Pragma acceptance observed through properties the standard fixes -- a pushed pragma region must leave the state it found when it is popped, and the C11 _Pragma operator must behave as the directive spelling does -- asserted only as relations so no implementation-defined layout value reaches stdout, together with the effect of a line directive on the source-position macros, including a virtual file name
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -26,33 +26,52 @@ written -- both int locals are initialised at their points of declaration from t
 and no address is printed. No structure object is ever created: the structure types are named only
 inside sizeof and alignof, so no member is accessed and no padding byte is read.
 
-THE ONLY INDEXING IS IN BOUNDS, stated at length because it is the one place a bound could be
-stressed. Two subscripts are applied to the file-name macro's string literal: index 0, which every
-non-empty string has, and index len - 1, where len is the length this same program has just computed
-for that same literal. The literal there is the virtual name a line directive supplied above, so len
-is 14 and both subscripts name a character of the literal rather than its terminator or anything past
-it. The length helper reads the next character only while the previous one was not the terminator, so
-it stops on the terminator and never forms a pointer past the end. Its counter is an int and the only
-strings it walks are a handful of characters long, so neither an overflow nor a narrowing conversion
-can arise. No aliasing rule is stressed anywhere: there is no cast between object types, no union, and
-no pointer arithmetic other than those two subscripts.
+ALL INDEXING IS IN BOUNDS, stated at length because it is the one place a bound could be
+stressed. Every subscript in the file is applied to a file-name macro's string literal, and there are
+three of them across two spellings. Two appear directly in main: index 0, which every non-empty string
+has, and index len - 1, where len is the length this same program has just computed for that same
+literal. The literal there is the virtual name a line directive supplied above, so len is 14 and both
+subscripts name a character of the literal rather than its terminator or anything past it. The third
+is s[n] inside the length helper, which is evaluated repeatedly rather than once, and it is included
+here rather than treated as an exception: a subscript E[n] is defined as *(E + n), so each evaluation
+performs pointer arithmetic on the literal the caller passed and dereferences the result. The helper
+starts at n = 0 and advances only after finding that the character it just read was not the
+terminator, so the highest index it ever forms is the index OF the terminator -- which is a character
+of the array, since a string literal's storage includes its terminating null byte -- and it stops
+there. It therefore reads every character up to and including the terminator, forms no pointer past
+the end of the literal, and never dereferences one. Its counter is an int and the only strings it
+walks are a handful of characters long, so neither an overflow nor a narrowing conversion can arise.
+The only other pointer values in the program are the format strings passed to printf and the
+file-name macros themselves, all of which point into string literals of static storage duration; no
+address-of operator appears, no pointer is stored in an object, and no pointer value is printed. No
+aliasing rule is stressed anywhere either: there is no cast between object types and no union.
 
-NEITHER PRAGMA CAN AFFECT WHAT THE PROGRAM DOES, and that is what makes the two assertions about them
-sound. C11 6.10.6p1 requires an implementation to IGNORE a pragma it does not recognise, so the
-invented, namespaced pragma between the two identical structure declarations must leave their layout
-untouched -- which is exactly what the size and alignment equalities assert. And a diagnostic-control
-pragma changes only which messages the translator emits: standard error is captured into finding
-artifacts but never compared, so recognising or ignoring it leaves every printed byte identical. Both
-assertions therefore hold under every conforming implementation and are broken only by one that acts
-on a request it was required to discard.
+NO PRAGMA HERE CAN AFFECT WHAT THE PROGRAM PRINTS, and that is what makes the seven assertions about
+them sound under every conforming implementation. Each is a RELATION between two identically declared
+structures, never a layout value, and each holds under both readings the standard permits. If the
+implementation RECOGNISES the packing request, its behaviour is implementation-defined (C11 6.10.6p1)
+and the inner structure may be laid out differently, but the pop must restore the state the push saved,
+so pack_size_restored and pack_align_restored still read 1. If it IGNORES the request -- which the same
+paragraph requires for a pragma it does not recognise -- all three structures are laid out alike and the
+same two relations read 1 trivially. pack_size_not_larger and pack_align_not_larger are 1 from the other
+side, because packing may shrink a structure or leave it alone and no reading of the request licenses
+GROWING one. The three operator relations follow from C11 6.10.9: the _Pragma operator destringizes its
+argument and the result is processed as if it were a pragma directive, so whatever an implementation
+does with one spelling it must do with the other, which is what pragma_op_matches_directive asserts.
+Every relation therefore falls to 0 only for a genuine defect -- a push that is not undone by its pop,
+a packing request that enlarges an aggregate, or two spellings of one pragma that disagree.
 
-NO DIAGNOSTIC DIRECTIVE APPEARS ON ANY PATH. The file contains exactly six directives -- four pragmas
-and two line directives -- and neither an error directive nor a warning directive is among them, on
-any branch, because the file has no conditional compilation at all. An error directive would make
-translation fail by design, and a warning directive would write to standard error, which this suite
-captures into finding artifacts but never compares; either one would therefore be untestable noise
-rather than a comparison. Measured: every one of the twelve cells produced zero bytes on standard
-error.
+NO DIAGNOSTIC DIRECTIVE AND NO DIAGNOSTIC-CONTROL PRAGMA APPEARS ON ANY PATH. The file contains exactly
+four directives -- two packing pragmas and two line directives -- plus two uses of the operator
+spelling, and neither an error directive nor a warning directive is among them, on any branch, because
+the file has no conditional compilation at all. An error directive would make translation fail by
+design, and a warning directive would write to standard error, which this suite captures into finding
+artifacts but never compares; either one would therefore be untestable noise rather than a comparison.
+Nothing in the translation unit switches a diagnostic off, either: an earlier form of this program wrote
+a diagnostic-control pragma into the source to silence the unknown-pragma diagnostic around the
+construct it was testing, which meant the audit gate no longer inspected that construct, and that
+suppression has been removed with no replacement anywhere in the file. Measured: every one of the twelve
+cells produced zero bytes on standard error.
 
 A line directive numbers the line that FOLLOWS it, so every printing call that reads the line-number
 macro sits on the line immediately after its own directive: the printed number is the one the
@@ -61,8 +80,8 @@ reads are on adjacent lines, so their difference is one wherever they appear. Me
 reference compiler: after the directive selecting 700 the macro reads 700 on the next line and 701 on
 the line after it, and after the directive selecting 900 it reads 900 on the next line.
 
-DETERMINISM. Ten of the eleven printed values are an int written with the %d specifier. The eleventh
-is the only %s in the program, and its argument is the file-name macro AFTER a line directive has
+DETERMINISM. Fifteen of the sixteen printed values are an int written with the %d specifier. The
+sixteenth is the only %s in the program, and its argument is the file-name macro AFTER a line directive has
 supplied a virtual name, so what it prints is a string constant written in this source rather than a
 path the harness chose -- which is the whole reason it is safe to print in full. Before that directive
 the same macro is reduced to the relation "is not empty" and its value never reaches stdout. Nothing
@@ -78,11 +97,13 @@ HERMETICITY. Every input is a literal in this source. Nothing is opened, nothing
 environment, the command line, the clock or the file system, no storage is allocated, and printf is
 the only library routine called, so a cell is reproducible from this source and this record alone.
 
-GATE. The default warning gate applies unmodified and no `ub_audit_flags` key appears:
--Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. Measured clean -- exit status
-0 with not one diagnostic -- with all four reference drivers and with the alternate reference compiler,
-and clean under -fsanitize=undefined,address -fno-sanitize-recover=all, which compiled, ran, exited 0
-and printed nothing on standard error. Both gates are reference-compiler-only and are never applied to
+GATE. The default warning gate applies unmodified, no `ub_audit_flags` key appears, and -- the part that
+was not previously true -- nothing in the source relaxes the gate from inside either:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror is in force over every line of
+this program, including the pragmas under test. Measured clean -- exit status 0 with not one diagnostic
+-- with all four reference drivers at -O0, -O1 and -O2 and with the alternate reference compiler, and
+clean under -fsanitize=undefined,address -fno-sanitize-recover=all, which compiled, ran, exited 0 and
+printed nothing on standard error. Both gates are reference-compiler-only and are never applied to
 the compiler under test, so requirement 3's shared-flag discipline is untouched.
 
 NO HEADER IS INCLUDED and printf is declared by hand as `int printf(const char *, ...);`. The compiler
@@ -91,61 +112,62 @@ fail on its side of the reference comparison while succeeding on the reference s
 divergence caused by the test rather than by a compiler.
 END
 impl_defined_notes <<END
-WHY THE PACKING PRAGMA WAS REMOVED, AND WHY NO GATE DEVIATION REPLACED IT.
+THE ONE ASSERTION SHAPE THIS PROGRAM CANNOT MAKE, AND WHY -- RECORDED PER CONSTRAINT C3 RATHER THAN
+LEFT AS A SILENT OMISSION.
 
-An earlier form of this program spelled the pragma pack(push, 1) / pack(push, 2) / pack(pop) and
-printed the EXACT size, alignment and member offsets of four structures, one per state of that stack.
-That subject is unsound for a differential oracle on two counts, either sufficient on its own. The
-behaviour of a RECOGNISED pragma is implementation-defined and C11 6.10.6p1 permits it to make
-translation fail outright, so a compiler that recognises pack and declines this particular request is
-within its rights and would be reported as defective. And no repository document describes a packing
-pragma for the compiler under test at all -- the documented inventory names the directive but not one
-pragma it honours -- so a divergence arising from the push/pop lifecycle could not be attributed to a
-documented limitation either, leaving it neither a sound comparison nor a recordable expected
-divergence.
+C11 6.10.6p1 closes with the one thing the standard REQUIRES of a pragma: "Any such pragma that is not
+recognized by the implementation is ignored." That is a requirement rather than a permission, so it is
+the strongest pragma property a differential oracle could assert -- and it cannot be asserted inside the
+mandatory audit gate. The gate is -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
+-Werror; -Wall enables the unknown-pragma diagnostic and -Werror makes it fatal, so a pragma the
+implementation does not recognise -- by construction the only kind the requirement speaks about -- stops
+translation before it can be observed at all. MEASURED in this environment with all four reference
+drivers and with the alternate reference compiler: an invented namespaced pragma, a pragma carrying no
+tokens whatever, and the standard STDC pragma forms (FP_CONTRACT, FENV_ACCESS, CX_LIMITED_RANGE) are each
+rejected as an unknown pragma under -Werror.
 
-The four structures, their eight layout values and the two member round trips have therefore been
-REMOVED FROM THE PROGRAM AND FROM THE GOLDEN RECORD TOGETHER, so that the source, this record and the
-expected output describe one and the same portable test. Nothing about packing is dropped from the
-corpus: the layout effect of packing is exercised by
-08_gcc_extensions/005_attribute_packed_aligned.c, whose subject is the packed and aligned attributes
-that the repository's own extension inventory does name as supported, which is a materially stronger
-authority than a pragma no document mentions.
+THE TWO WAYS AROUND THAT WERE BOTH REFUSED, AND THE REASONING IS THE POINT OF THIS PARAGRAPH. A recorded
+`ub_audit_flags` deviation cannot express the removal: a deviation may only name members of the default
+gate, and the diagnostic in question is implied by -Wall rather than being a member itself, so silencing
+it would mean dropping -Wall entire -- dozens of unrelated checks -- and the suite's contract sanctions
+only two reductions in any case, the extension area's -pedantic and the narrowing-conversion program's
+conversion diagnostics, neither of which is this. Suppressing the diagnostic FROM INSIDE the source with
+a diagnostic-control pragma is worse still, and an earlier form of this program did exactly that: it
+wrote a push / ignored / pop trio around the invented pragma, which meant the gate no longer inspected
+the very construct under test. The gate is what establishes this program's freedom from undefined
+behaviour, and a source that neutralises one of its members locally has not satisfied the gate there --
+it has stepped outside it. That suppression is removed and nothing replaces it: no directive anywhere in
+the file switches a diagnostic off.
 
-What replaced it takes its authority from the standard rather than from any implementation's
-documentation: 6.10.6p1's closing requirement that an unrecognised pragma is ignored, asserted through
-the size and the alignment of two otherwise identical structure declarations that straddle one.
-NEITHER SIZE NOR ALIGNMENT IS PRINTED AS AN ABSOLUTE VALUE -- only the equality of the two -- so no
-implementation-defined layout choice can reach the output while the requirement stays observable. Each
-structure holds one unsigned int between two unsigned char members, and every layout a conforming
-implementation may choose for that, on any of the four targets, satisfies both equalities, because the
-two declarations are identical in every respect.
+WHAT IS EXCLUDED IS THEREFORE ONE ASSERTION SHAPE, NOT THE FEATURE. Pragmas are still exercised on all
+twelve cells, in BOTH of their spellings, and what is asserted instead are relations a conforming
+implementation cannot fail whichever choice C11 6.10.6p1 leaves it. The subject is the packing region's
+push/pop LIFECYCLE, with three identically declared structures -- one before the region, one inside it,
+one after the pop -- and the same region written a second time with the C11 6.10.9 _Pragma operator,
+whose result "is then processed as if it were a #pragma directive". Seven relations follow, and the
+reasoning for each is in this program's own header comment and in ub_notes above; the summary is that a
+recognised request must be undone by its pop, an ignored request changes nothing, packing may never
+GROW an aggregate, and the two spellings of one pragma must agree. NEITHER SIZE NOR ALIGNMENT IS PRINTED
+AS AN ABSOLUTE VALUE anywhere -- only relations between two of them -- so no implementation-defined
+layout choice can reach the output.
 
-WHAT THE EQUALITIES DO AND DO NOT REPORT, recorded because it decides how a future divergence must be
+WHAT THE RELATIONS DO AND DO NOT REPORT, recorded because it decides how a future divergence must be
 read, and because it is what stops a maintainer "improving" this program by printing the sizes
-themselves. An implementation that simply ignores the unrecognised pragma -- which is what the
-standard demands -- passes. The equalities fall to 0 only for an implementation that acted on a
-request it was required to discard. An implementation that instead REJECTS the unrecognised pragma
-outright does not fail the equalities at all: it fails to translate, and because 6.10.6p1's
-requirement to ignore is normative rather than permissive, that compile failure is a genuine finding
-rather than an implementation choice. This is also why the record carries no expected-divergence
-marker. Both directives in this program are documented as supported by the compiler under test -- its
-preprocessor directive handler names pragma and line among the directives it processes, and its source
-map tracks line-directive overrides -- so there is no documented limitation available to cite, and a
-divergence here must be delivered as a finding with its minimized reproducer instead of being
-classified away as expected.
+themselves. An implementation that recognises the packing request and one that discards it both pass;
+the relations fall to 0 only for one that honoured a push without undoing it at the pop, one that
+enlarged an aggregate under a packing request, or one whose directive and operator spellings disagree.
+An implementation that instead REJECTS one of these pragmas outright does not fail a relation at all:
+it fails to translate, and that compile failure is reported as a finding with its reproducer. This is
+also why the record carries no expected-divergence marker: both directives in this program are
+documented as supported by the compiler under test -- its preprocessor directive handler names pragma
+and line among the directives it processes, and its source map tracks line-directive overrides -- so
+there is no documented limitation available to cite, and a divergence here must be delivered as a
+finding instead of being classified away as expected.
 
-MEASURED, AND WHY THIS RECORD DECLARES NO `ub_audit_flags` DEVIATION. Both reference compilers
-diagnose an unknown pragma under the gate's -Wall, through -Werror=unknown-pragmas, and the reference
-compiler diagnoses the standard STDC pragma form the same way because it does not implement it.
-Rather than ask this record for a relaxed gate, the program suppresses that one diagnostic FROM INSIDE
-with a diagnostic-control pragma both reference compilers implement, and restores the previous state
-immediately afterwards. That is strictly better than a recorded deviation: the suppression is scoped
-to a single line rather than to a translation unit, it is visible where it applies, and the audit gate
-stays at full strength for this program as for every other -- which matters, because the gate is what
-establishes the undefined-behaviour freedom that makes every divergence this suite reports meaningful.
-Verified: the full gate, -Werror included, accepts this program with zero diagnostics under all four
-reference drivers and under the alternate reference compiler.
+The absolute layout effect of PACKING ITSELF is still not asserted here, and it is not lost from the
+corpus: it is exercised by 08_gcc_extensions/005_attribute_packed_aligned.c, whose subject is the packed
+and aligned attributes that the repository's own extension inventory does name as supported, which is a
+materially stronger authority than a pragma no document mentions.
 
 THE FILE-NAME MACRO IS PATH-DEPENDENT AND IS NEVER PRINTED RAW. The harness copies each program into
 its own per-cell workspace, so the real source path differs between cells and between targets, and
@@ -155,14 +177,13 @@ supplies a virtual name written in this source, which is a compile-time constant
 the file system chose, so it is printed in full, byte for byte, alongside its length and its first and
 its last character -- each of those three relations localising a different kind of corruption, a
 truncation, a lost first byte or a lost terminator, to its own line. Printing the whole name is the
-part that matters: an earlier form printed only the length and the two endpoints, and any misspelling
-of the same length beginning with v and ending with c would have passed every oracle in all twelve
-cells, leaving a defect in how the directive's string literal reaches the macro invisible. Verified by
-building and running this source from two different absolute paths, one of them deeply nested, and once
-more through a relative path: stdout was byte-identical every time, which is the proof that no path
-reaches it. The recorded length of 14 is the exact character count of the virtual name written in the
-directive, and it must be recounted if that name is ever changed. That name designates no file, is
-never opened, and must never be created, so hermetic execution is preserved.
+part that matters: printing only the length and the two endpoints would let any misspelling of the same
+length beginning with v and ending with c satisfy every one of those relations, leaving a defect in how
+the directive's string literal reaches the macro invisible in every cell. Nothing the file system
+chose reaches standard output, so the same bytes are produced from any absolute or relative path the
+harness builds in. The recorded length of 14 is the exact character count of the virtual name written
+in the directive, and it must be recounted if that name is ever changed. That name designates no
+file, is never opened, and must never be created, so hermetic execution is preserved.
 
 WHY THE DIAGNOSTIC-PREFIX EFFECT OF A LINE DIRECTIVE IS NOT ASSERTED. A line directive also changes
 the file name and the line number a translator prints in front of its own diagnostics, and that is an
@@ -182,8 +203,13 @@ normalization there is no implementation-defined difference left for one of them
 END
 expected_stdout    <<END
 line_delta=1
-ignored_pragma_size_unchanged=1
-ignored_pragma_align_unchanged=1
+pack_size_restored=1
+pack_align_restored=1
+pack_size_not_larger=1
+pack_align_not_larger=1
+pragma_op_size_restored=1
+pragma_op_align_restored=1
+pragma_op_matches_directive=1
 real_file_nonempty=1
 line_after_directive=700
 line_after_next=701

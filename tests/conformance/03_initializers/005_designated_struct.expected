@@ -53,9 +53,17 @@ array-member designators .a[0], .a[2] and .a[3] are all within the declared boun
 of 4.
 
 No shifts, no pointer casts, no aliasing -- each object is read only through its
-own declared type. No object is modified after initialization, so nothing is
-modified twice between sequence points. Each printf call has at most one argument
-with a side effect, and none has one.
+own declared type. Nothing is modified twice between two sequence points. The
+seven initialized structures are never modified after their initializers at all,
+so every value printed is the value its initializer gave it; the only object that
+is modified is the loop counter i, assigned in the initial clause of each of the
+three for statements at 005_designated_struct.c lines 116, 121 and 138 and
+incremented in each of their controlling expressions. Every one of those
+assignments and increments is a full expression of its own, so each is separated
+from every other access to i by a sequence point, and the bound i < 4 is a literal
+equal to the extent of the array member it walks, so i neither overflows nor
+leaves an array. Each printf call has at most one argument with a side effect, and
+none has one.
 
 NO PADDING BYTE IS READ OR COMPARED. Only named members are accessed; no struct is
 printed as a whole and no object representation is inspected. Padding contents are
@@ -63,17 +71,31 @@ unspecified, so this is essential to the soundness of the byte-exact comparison.
 All three struct types are composed exclusively of int members and an int array,
 so on every supported target they have no internal padding in any case.
 
-EVERY INITIALIZER IN THIS PROGRAM IS DESIGNATED, AND THAT IS DELIBERATE. Under the
-mandated authoring gate, -Wextra enables -Wmissing-field-initializers and -Werror
-promotes it to a hard error. Measurement with the reference compiler established
-that in C this diagnostic does NOT fire for designated initializers, nor for the
-{ 0 } idiom, but DOES fire for a positional partial struct such as
-`struct outer v = { 1 };`. Omitting members is therefore safe here precisely
-because every initializer is designated. No initializer in this program may be
-converted to positional form. The positional-partial-struct spelling is exercised
-nowhere in area 03, and that exclusion together with its reason is recorded in
-003_partial_zero_fill.expected, which is the program whose subject is implicit zero
-fill.
+EVERY PARTIAL INITIALIZER LIST IN THIS PROGRAM IS INTRODUCED BY A DESIGNATOR, AND
+THAT IS DELIBERATE. Under the mandated authoring gate, -Wextra enables
+-Wmissing-field-initializers and -Werror promotes it to a hard error. Measurement
+with the reference compiler established that in C this diagnostic does NOT fire for
+a list whose members are named by designators, nor for the { 0 } idiom, but DOES
+fire for a positional partial struct such as `struct outer v = { 1 };`. Omitting
+members is therefore safe here precisely because no list omits a member without a
+designator naming where the values it does supply belong.
+
+The rule is stated that way rather than as "every initializer is designated",
+because two spellings in this program are positional on purpose and the precise
+rule is what makes both of them safe. Every nested brace list is written
+POSITIONALLY and is COMPLETE -- { 2, 3 } and { 12, 13 } and { 42, 43 } fill both
+members of struct inner, and { 62, 63, 64, 65 } fills all four elements of a[4] --
+so nothing is omitted for the diagnostic to fire on. And g_then_pos is the
+deliberate designator-to-positional continuation the program exists to test:
+{ .in = { 42, 43 }, 44 } supplies its trailing value POSITIONALLY, continuing from
+the member the designator selected, which is exactly the construct described above
+and the one whose lowering a compiler can get wrong. It is a partial list -- tag is
+never named -- and it draws no diagnostic because the designator .in establishes
+where the continuation begins. What may not be done in this program is to convert
+one of the DESIGNATED partial lists into a purely positional partial list. The
+positional-partial-struct spelling is exercised nowhere in area 03, and that
+exclusion together with its reason is recorded in 003_partial_zero_fill.expected,
+which is the program whose subject is implicit zero fill.
 END
 impl_defined_notes <<END
 All printed values are int and are printed with %d only. The program contains no
@@ -81,8 +103,10 @@ long, size_t, ptrdiff_t, intptr_t, float, double or long double, so the measured
 width difference between i686 (4-byte long and pointer) and the other three
 targets (8-byte) cannot affect the output.
 
-No character data is used, so the measured plain-char signedness difference
-(signed on x86_64 and i686, unsigned on aarch64 and riscv64) cannot arise.
+The only character data is the format-string literals, whose bytes printf copies
+through unchanged. No plain-char value is read as a number, converted, compared or
+formatted numerically, so the measured plain-char signedness difference (signed on
+x86_64 and i686, unsigned on aarch64 and riscv64) cannot arise.
 
 No address or pointer value is printed, and no struct is printed as a whole, so
 padding bytes -- whose contents are unspecified -- are never observed.

@@ -102,9 +102,9 @@
 //! distinguishes two findings.
 //!
 //! Every part is present in full, which is the property that matters: **two different divergences
-//! can never name the same directory**, so one can never overwrite another's evidence. An earlier
-//! design abbreviated the names to a fixed width and distinguished the remainder with four decimal
-//! digits of a hash; chosen program names could collide under it, and a collision here silently
+//! can never name the same directory**, so one can never overwrite another's evidence. Abbreviating
+//! the names to a fixed width and distinguishing the remainder with four decimal digits of a hash
+//! would not carry that property: program names can collide under it, and a collision here silently
 //! replaces one finding's reproducer and captures with another's.
 //!
 //! It is **derived, never counted**, and that is a correctness requirement rather than a
@@ -206,8 +206,8 @@ use super::{
     read_file_bounded, redact_secrets, remove_entry, require_contained_corpus_file,
     require_directory_chain_below, require_replaceable, run_generation, sanitize_text_for_report,
     shown_path, stable_digest, CellKey, CompilerSide, DivergenceClass, HarnessError, HarnessResult,
-    OptLevel, Oracle, Outcome, Replaceable, Target, Verdict, DIGEST_HEX_DIGITS,
-    MAX_INSPECTED_FILE_BYTES,
+    OptLevel, Oracle, Outcome, Replaceable, Target, Verdict, CAPTURE_RETAINED_BYTES_MAX,
+    DIGEST_HEX_DIGITS, MAX_INSPECTED_FILE_BYTES,
 };
 
 /// The reproducer: a **verbatim**, byte-for-byte copy of the corpus program.
@@ -423,10 +423,10 @@ pub const FINDING_RUN_COUNT_MAX: u64 = 1536;
 /// splitting the one thing they need to see.
 ///
 /// The consequence is that two or three oracles publish into the *same* directory, and three of its
-/// artifacts — the manifest, the reproduction script and the diff — have per-oracle content. An
-/// earlier form of this module re-rendered each of them from the contributing oracle alone and wrote
-/// them with a plain overwrite, so the last oracle to file silently replaced the first's observation,
-/// its capture roster, its comparison block and its diff. The directory then described one arm while
+/// artifacts — the manifest, the reproduction script and the diff — have per-oracle content.
+/// Re-rendering each of them from the contributing oracle alone and writing them with a plain
+/// overwrite would let the last oracle to file silently replace the first's observation, its capture
+/// roster, its comparison block and its diff. The directory would then describe one arm while
 /// claiming, on its own `observed_by` line, to speak for all of them.
 ///
 /// So each oracle's sections are **kept**, and the three merged artifacts are re-rendered from the
@@ -499,12 +499,12 @@ struct DirectoryLedger {
 ///
 /// # Why one lock rather than two atomics and a map
 ///
-/// The ceilings are checked and then charged. An earlier form of this module loaded two atomics to
-/// check and `fetch_add`ed them to charge, which is two operations with a window between them: two
-/// threads could each read a total below the ceiling and each add to it, and the run would publish
-/// past a bound it had just verified. Worse, the charge was the *whole* directory size on every
-/// contribution, so a directory two oracles filed into was counted twice over and a run could refuse
-/// a legitimate finding on the strength of bytes that were never written.
+/// The ceilings are checked and then charged, and those two steps must not be separable. Loading two
+/// atomics to check and `fetch_add`ing them to charge is two operations with a window between them:
+/// two threads could each read a total below the ceiling and each add to it, and the run would publish
+/// past a bound it had just verified. Charging the *whole* directory size on every contribution has a
+/// second defect on top of that — a directory two oracles filed into would be counted twice over, and
+/// a run could refuse a legitimate finding on the strength of bytes that were never written.
 ///
 /// Holding the totals and the contributions together means a contribution **reserves the exact
 /// delta** — the merged directory's new size less what this directory has already been charged — in
@@ -923,12 +923,12 @@ fn build_contribution(
 // manifest describing one divergence beside captures produced by another. Nobody reading it could
 // tell, which makes a collision worse than a crash.
 //
-// An earlier form of this identifier abbreviated the area and program names to a fixed character
-// budget, cut them at a hyphen, and distinguished what remained with four decimal digits of a
-// 64-bit hash. Neither half of that is sound. Abbreviation is not injective — two programs whose
-// kebab-cased names agree on their first characters render identically, and cutting at a hyphen
-// collapses more pairs still — and four decimal digits leave ten thousand buckets, so the
-// discriminator is a coincidence away from being no discriminator at all.
+// Abbreviating the area and program names to a fixed character budget, cutting them at a hyphen and
+// distinguishing what remains with four decimal digits of a 64-bit hash would be unsound in both
+// halves. Abbreviation is not injective — two programs whose kebab-cased names agree on their first
+// characters render identically, and cutting at a hyphen collapses more pairs still — and four
+// decimal digits leave ten thousand buckets, so the discriminator would be a coincidence away from
+// being no discriminator at all.
 //
 // The identifier below is injective by construction instead, which is what removes the need for any
 // collision check: a pre-existing directory bearing this name can only ever be the same identity.
@@ -1571,9 +1571,8 @@ impl FindingId {
     ///   field can neither absorb nor be confused with the slug before it.
     ///
     /// Nothing is abbreviated or truncated, deliberately — truncating the descriptive part is
-    /// precisely how an earlier form of this function could map two distinct programs onto one
-    /// directory, and reducing the digest to four decimal digits left ten thousand buckets where a
-    /// collision was a coincidence away. The digest is carried at full width and produced by the
+    /// precisely what would map two distinct programs onto one directory, and reducing the digest to
+    /// four decimal digits would leave ten thousand buckets where a collision is a coincidence away. The digest is carried at full width and produced by the
     /// harness's shared [`stable_digest`], so a digest written here means the same thing as a digest
     /// written by a report.
     pub fn derive(key: &CellKey, class: DivergenceClass) -> FindingId {
@@ -1943,6 +1942,42 @@ impl Finding {
             ));
         }
 
+        // The record is about to become this finding's `reproducer.expected` — the artifact
+        // requirement 4 promises a maintainer can render by hand, with no harness, to reproduce the
+        // cell. So the build templates are re-examined here, at the point of publication, against the
+        // same authority that admitted them: `manifest::build_template_publication_defects`. Asking
+        // the parser's own function rather than restating its rule is the point — an admission rule
+        // and a publication rule written as two pieces of code are two rules, and the moment they
+        // disagree one of them is not enforced. The suite already learned that lesson once, where the
+        // finding writer's marker precondition asked a different predicate from the classifier's.
+        //
+        // Nothing in the committed corpus can reach this: every record's templates are the canonical
+        // pair, and a non-canonical literal is refused at load. It exists for the case that matters —
+        // a record edited between load and publication, or a future caller that assembles a manifest
+        // by another route — because a reproduction line a maintainer is invited to paste is the last
+        // place to rely on a check only the harness performs.
+        for (side, template) in [
+            ("bcc_command", manifest.bcc_command()),
+            ("ref_command", manifest.ref_command()),
+        ] {
+            if let Some(defect) = manifest::build_template_publication_defects(template)
+                .into_iter()
+                .next()
+            {
+                return Err(HarnessError::new(
+                    context,
+                    format!(
+                        "the record's `{side}` cannot be published as a reproduction recipe: \
+                         {defect}. The record travels beside the reproducer as \
+                         {REPRODUCER_RECORD_NAME}, and requirement 4 makes its templates the commands a \
+                         maintainer renders by hand, so a finding is not written at all rather than \
+                         written with a recipe that names an argument this run never passed",
+                        defect = sanitize_text_for_report(&defect)
+                    ),
+                ));
+            }
+        }
+
         let record = require_contained_corpus_file(
             &context,
             "expectation record of the program under test",
@@ -2055,8 +2090,13 @@ impl Finding {
                  this divergence is undocumented and is NOT excused by it. A marker is never \
                  widened to absorb a divergence it does not describe, because that would launder a \
                  genuine second defect into an expected divergence while the register still \
-                 documented only the first; if this divergence is also documented, it needs its own \
-                 marker in this program's record and in {EXPECTED_DIVERGENCE_REGISTER} both",
+                 documented only the first. If this divergence is also documented, it needs a \
+                 marker of its own — and a record holds at most one marker block, so give it a \
+                 minimized program of its own, with its own record carrying that marker and its own \
+                 entry in {EXPECTED_DIVERGENCE_REGISTER}. Do NOT add a second marker block beside \
+                 the one above: the record grammar admits one, and a duplicated key is a hard parse \
+                 error that would take the whole program out of the run rather than documenting \
+                 anything",
                 marker.id(),
                 marker.class(),
                 marker.scope().raw()
@@ -2980,7 +3020,7 @@ const SH_MKTEMP_MSG: &str = "created with `mktemp -d` under a 077 umask";
 /// Emitted into a single `unset -f` so an inherited exported shell function cannot stand in for one of
 /// them. `command` is included deliberately: unsetting a *function* by that name leaves the builtin
 /// intact, and the builtin is what the rest of the script relies on to bypass function lookup.
-const SH_HELPERS: &str = "command printf mktemp rm env cmp cat diff kill test";
+const SH_HELPERS: &str = "command printf mktemp rm mv env cmp cat diff kill test wc dd";
 
 /// The shell function through which every reproduced invocation is run.
 ///
@@ -3063,6 +3103,97 @@ const TERMINATION_SIGNALLED: &str = "signalled";
 /// on the strength of the script having performed the kill, never on the strength of a status, so no
 /// exit code a program can return will produce it and no expiry can fail to.
 const TERMINATION_TIMEOUT: &str = "timeout";
+
+/// Classification written out of band for a command the script terminated for flooding its capture.
+///
+/// A fourth token rather than reusing [`TERMINATION_TIMEOUT`], because the two are different events
+/// and a reader acting on the wrong one wastes their time: a timeout says the program never finished,
+/// while this says the program was still running normally and was cut off because one of its captured
+/// streams reached its byte quota. Recording a flood as a timeout would send a maintainer looking for
+/// a hang that never happened, and it would also make the two sides' terminations compare equal in
+/// the closing block when one had flooded and the other had genuinely hung.
+///
+/// Like the other three it is written on the strength of what the script DID, never of a status.
+const TERMINATION_FLOODED: &str = "flooded";
+
+/// Shell variable holding the per-stream byte quota every reproduced capture is bounded by.
+///
+/// # Why a reproduction script needs a byte quota at all
+///
+/// The watchdog bounds an invocation in TIME. It said nothing about VOLUME, and the two are
+/// independent: a program that writes without pause fills the reader's disk for the whole of its
+/// budget, and a finding may hold several build-and-run captures, so the exposure multiplies by the
+/// number of invocations in the script. The streams being redirected are the output of a *compiler
+/// under investigation* and of a *program that already misbehaved once* — the two least trustworthy
+/// producers in the suite — so an unbounded `>` is a resource-consumption defect in an artifact whose
+/// whole purpose is to be executed by somebody else on their own machine.
+///
+/// The quota is therefore the harness's own retention quota, [`CAPTURE_RETAINED_BYTES_MAX`], so a
+/// reproduction retains exactly as much of a stream as the run that recorded it did. Declared as a
+/// variable with a default rather than baked in, so a reader investigating a genuinely large output
+/// raises one number instead of editing the script's logic.
+const VAR_CAPTURE_BYTES_MAX: &str = "CAPTURE_BYTES_MAX";
+
+/// Shell variable holding the ceiling on what the WHOLE script may retain, across every capture.
+///
+/// The per-stream quota alone bounds each file but not their sum, and a finding can hold two sides ×
+/// (build stdout, build stderr, run stdout, run stderr) — eight streams. Eight times the per-stream
+/// quota is a great deal more than any legitimate evidence needs, so the script also carries a total:
+/// each invocation's effective quota is the per-stream quota or whatever remains of this ceiling,
+/// whichever is smaller.
+///
+/// Four times the per-stream quota by default, which is generous for evidence (the corpus's largest
+/// golden is under three kilobytes) and still bounds the whole script at a size a reader can hold and
+/// inspect. Exhausting it takes four flooded streams, and a finding with four flooded streams is one
+/// where truncation is exactly the right answer.
+const VAR_FINDING_BYTES_MAX: &str = "FINDING_BYTES_MAX";
+
+/// Multiple of the per-stream quota that the whole-script ceiling defaults to.
+const FINDING_CAPTURE_QUOTA_MULTIPLE: u64 = 4;
+
+/// Multiple of the whole-script ceiling at which the kernel's own file-size limit is set.
+///
+/// The limit is a **backstop**, not the quota, and the distinction is what makes it safe to set at
+/// all. The quota decides what is retained; the watchdog's poll decides when a flood stops the
+/// invocation; this decides how much the producer can write in between two polls, which is the one
+/// thing neither of the other two can bound — a shell polls at second granularity and `yes` was
+/// measured writing 3.8 GB before the first poll. Four times the ceiling keeps it far above anything
+/// a legitimate build or run produces, because the limit applies to every file the command creates,
+/// the executable included.
+const FILE_LIMIT_MULTIPLE: u64 = 4;
+
+/// Floor on the kernel file-size limit, in the 512-byte blocks `ulimit -f` counts.
+///
+/// 32 MiB. A reader who lowers the byte quota to inspect a prefix must not thereby lower the limit
+/// onto the artifact a compiler is being asked to write: a statically linked binary of the kind this
+/// corpus builds is one or two megabytes, so a floor well above that keeps the backstop from turning
+/// a deliberately small quota into a failed build.
+const FILE_LIMIT_FLOOR_BLOCKS: u64 = 65_536;
+
+/// Shell variable holding the path to `wc`, discovered on the reader's machine.
+///
+/// The quota needs one measurement no shell builtin can make: the size of a file. `wc -c` is the
+/// POSIX way to take it, and it is probed rather than assumed for the same reason `setsid` is —
+/// absence is reported as a stated degradation, and the script says plainly that the capture is
+/// unbounded on a machine without it rather than implying a bound it cannot enforce.
+const VAR_WC: &str = "WC";
+
+/// Shell variable holding the path to `dd`, discovered on the reader's machine.
+///
+/// Truncation is what makes the bound on RETAINED bytes exact rather than best-effort: the watchdog
+/// notices a breach at most one poll interval after it happens, so the file on disk can be a little
+/// larger than the quota by the time the kill lands, and `dd` is the POSIX way to keep the first
+/// quota bytes and discard the rest. Probed, and its absence stated, like `wc` above.
+const VAR_DD: &str = "DD";
+
+/// Shell function that accounts for one captured stream and truncates it to its quota.
+///
+/// Separate from [`SH_BOUNDED`] because it is called four times per invocation — twice to measure and
+/// twice to report — and because the accounting is the part a reader is most likely to want to change.
+const SH_CAPTURE_ACCOUNT: &str = "capture_account";
+
+/// Shell function that reports one file's size in bytes, or `0` when it cannot be measured.
+const SH_CAPTURE_BYTES: &str = "capture_bytes";
 
 /// The tool paths a reproduction script lifts into its preamble.
 ///
@@ -3648,10 +3779,19 @@ fn render_script_own_environment() -> String {
          most damaging are additionally invoked through `command`, which suppresses function lookup on \
          its own.",
     ));
-    text.push_str(&format!("unset -f {SH_HELPERS} 2>/dev/null || :\n"));
+    text.push_str(&format!("unset -f {SH_HELPERS} 2>| /dev/null || :\n"));
     text.push_str(&comment(
         "noclobber: every redirection below creates its target exclusively, so none can write \
          through a file — or a symbolic link, including a dangling one — that is already at the name.",
+    ));
+    text.push_str(&comment(
+        "Consequence, and the reason every discard in this script is written `>| /dev/null` rather \
+         than `> /dev/null`: with noclobber set, both dash and bash refuse a plain `>` onto a name \
+         that already exists, and /dev/null always exists. A plain discard therefore does not \
+         silently discard — it fails the redirection, so the command it belonged to never runs at \
+         all. `>|` is the POSIX override, and it is spelled out at every discard so a later edit \
+         cannot quietly reintroduce a probe that always reports the tool missing, or an `unset -f` \
+         that never unsets anything.",
     ));
     text.push_str("set -C\n");
     text.push_str("umask 077\n\n");
@@ -3710,7 +3850,7 @@ fn render_scratch_setup() -> String {
          directory {SH_MKTEMP_MSG} closes it instead: the name is unpredictable, the creation is \
          exclusive, and nothing existed inside it to plant."
     )));
-    text.push_str("if ! command -v mktemp > /dev/null 2>&1; then\n");
+    text.push_str("if ! command -v mktemp >| /dev/null 2>&1; then\n");
     text.push_str(
         "    printf 'mktemp is required: this script always writes into a private directory it \
          creates itself, and mktemp is what creates one exclusively under an unpredictable name\\n' \
@@ -3887,13 +4027,39 @@ fn render_isolated_environment() -> String {
          the reader's, which is what the run did."
     )));
     text.push_str(&format!("{SH_ISOLATED}() {{\n"));
-    text.push_str("    if ! command -v env > /dev/null 2>&1; then\n");
+    text.push_str("    if ! command -v env >| /dev/null 2>&1; then\n");
     text.push_str(
         "        printf 'env is required: the recorded run cleared the environment before spawning, \
          and reproducing a build under an inherited environment would reproduce a different \
          invocation\\n' >&2\n",
     );
     text.push_str("        exit 1\n");
+    text.push_str("    fi\n");
+    // The catastrophe bound on file growth, set here because this is the last shell context before
+    // the exec and therefore the only place a limit can be imposed on the command without also
+    // imposing it on the script. It is a backstop and not the quota: the watchdog's poll is what
+    // notices a flood and classifies it, and `capture_account` is what bounds retention, but both
+    // observe at a one-second granularity and a determined producer can write gigabytes inside one
+    // interval — measured at 3.8 GB from `yes` before the first poll. This limit is what the kernel
+    // enforces continuously in between, so the exposure is bounded by a number rather than by how
+    // fast the reader's disk is.
+    //
+    // Deliberately far above the retention quota, and floored, because it applies to EVERY file the
+    // command creates — including the executable a compiler is being asked to produce. A limit at the
+    // quota would make a reader who lowered the quota to inspect a prefix watch the build fail
+    // instead, which would be a bound that broke the reproduction it was protecting.
+    text.push_str(&format!(
+        "    _i_blocks=$(( ({VAR_FINDING_BYTES_MAX} * {FILE_LIMIT_MULTIPLE}) / 512 ))\n"
+    ));
+    text.push_str(&format!(
+        "    if [ \"$_i_blocks\" -lt {FILE_LIMIT_FLOOR_BLOCKS} ]; then\n        \
+         _i_blocks={FILE_LIMIT_FLOOR_BLOCKS}\n    fi\n"
+    ));
+    text.push_str("    if ! ulimit -f \"$_i_blocks\" 2>| /dev/null; then\n");
+    text.push_str(
+        "        command printf '%s\\n' 'note: this shell would not set a file-size limit, so a \
+         runaway command is bounded only by the byte quota polled once a second' >&2\n",
+    );
     text.push_str("    fi\n");
     text.push_str(&format!("    if [ -n \"${{{VAR_SETSID}:-}}\" ]; then\n"));
     text.push_str(&format!("        set -- \"${VAR_SETSID}\" \"$@\"\n"));
@@ -4115,11 +4281,12 @@ fn render_bounded_invocation(
 ///   *it* is the direct child and the program is its descendant, so killing the child alone would
 ///   leave the program running past the bound — the one failure mode a watchdog exists to prevent.
 ///
-///   An earlier form of this function tried to *discover* a group rather than create one: it read
-///   `ps -o pgid=` for the child and for itself and killed the group when the two differed. Both
-///   halves were unsound. A launch the shell does not job-control leaves the child in the script's own
-///   group, so the two agreed and every descendant survived the bound; and the discovery depended on
-///   `ps`, whose absence silently downgraded the kill to the direct child with nothing said about it.
+///   Discovering a group rather than creating one would be unsound in two independent ways, which is
+///   why this function does not attempt it. Reading `ps -o pgid=` for the child and for itself and
+///   killing the group when the two differ fails because a launch the shell does not job-control
+///   leaves the child in the script's own group: the two agree and every descendant survives the
+///   bound. It also depends on `ps`, whose absence would silently downgrade the kill to the direct
+///   child with nothing said about it.
 ///
 ///   So the script **creates** the group it will kill. The launch goes through `setsid` when the
 ///   reader's machine has it, which makes the child a session and process-group leader, so its PGID is
@@ -4131,10 +4298,10 @@ fn render_bounded_invocation(
 ///
 ///   `setsid` is applied *inside* [`SH_ISOLATED`], in front of the command handed to `env`, and it
 ///   has to be: `setsid` is a program, so it can only exec another program, and a launch of the shape
-///   `setsid isolated …` names a shell function it cannot exec. That shape fails to start anything —
-///   status 127, `setsid: failed to execute isolated` on stderr — while the comparison below still
-///   runs and prints a verdict about two empty streams, which is the one outcome an artifact whose
-///   purpose is reproduction must never produce. Applying it inside costs nothing the group needs:
+///   `setsid isolated …` names a shell function it cannot exec. That shape starts nothing at all: the
+///   launch fails with an exec error, while the comparison below still runs and prints a verdict about
+///   two empty streams, which is the one outcome an artifact whose purpose is reproduction must never
+///   produce. Applying it inside costs nothing the group needs:
 ///   [`SH_ISOLATED`] `exec`s, `env` `exec`s, and `setsid` establishes the session in that same
 ///   process, so the PID the shell backgrounded is still the group leader.
 ///
@@ -4147,6 +4314,42 @@ fn render_bounded_invocation(
 /// The polling interval is one second, which is coarse for a machine and imperceptible to a reader
 /// waiting on a reproduction. A finer interval would spawn thirty times as many `sleep` processes to
 /// discover the same thing.
+///
+/// # The fifth property: the capture is bounded in BYTES as well as in time
+///
+/// Everything above bounds how LONG an invocation runs. Nothing bounded how MUCH it wrote, and the
+/// two are independent: `> "$_b_stdout" 2> "$_b_stderr"` will accept as many bytes as the producer
+/// cares to emit for the whole of the budget, and the producers here are a compiler under
+/// investigation and a program that already misbehaved once. A finding may hold several invocations,
+/// so the exposure multiplies. An artifact written to be run on somebody else's machine must not be
+/// able to fill their disk while reporting success, so the watchdog now also polls the two capture
+/// files and treats a quota breach as a first-class outcome:
+///
+/// - **Each stream has a quota**, [`VAR_CAPTURE_BYTES_MAX`], defaulting to the harness's own
+///   retention quota so a reproduction retains what the run retained. **The script has a ceiling**
+///   too, [`VAR_FINDING_BYTES_MAX`], and each invocation's effective quota is the smaller of the
+///   per-stream quota and what remains of the ceiling — so the bound is per stream *and* per finding
+///   rather than per stream alone.
+/// - **A breach terminates the invocation** through the same owned process group a timeout uses, so a
+///   flooding program is stopped rather than merely observed, and it is classified out of band as
+///   [`TERMINATION_FLOODED`] — never as [`TERMINATION_TIMEOUT`], which would describe an event that
+///   did not happen and would compare equal to a genuine hang on the other side.
+/// - **Retention is then exact.** The watchdog sees a breach at most one poll interval after it
+///   occurs, so the file can overshoot before the kill lands; [`SH_CAPTURE_ACCOUNT`] keeps the first
+///   quota bytes with `dd` and discards the rest. Produced, retained and truncated are all printed,
+///   because a reader has to know that what they are looking at is a prefix.
+/// - **A truncated capture cannot report a successful reproduction.** The closing comparison block
+///   consults the accumulated truncation count and refuses to conclude "the divergence did not
+///   reproduce" from a stream it only partly holds — an absence of difference in a prefix is not an
+///   absence of difference.
+///
+/// What the bound does and does not guarantee is stated in the script rather than implied. RETAINED
+/// bytes are bounded absolutely. PRODUCED bytes are bounded by the quota plus whatever the producer
+/// writes inside one poll interval, because a POSIX shell cannot cap a redirection's growth without
+/// interposing a filter, and interposing one would take the process group away from the watchdog —
+/// exactly the unsound shape the earlier `ps`-based group discovery had. The harness makes the same
+/// trade for the same reason: it bounds retention and keeps draining. A machine without `wc` cannot
+/// measure at all, and there the script says the capture is unbounded rather than pretending.
 fn render_bounded_run_function() -> String {
     let mut text = String::new();
     text.push_str(&comment(&format!(
@@ -4177,9 +4380,52 @@ fn render_bounded_run_function() -> String {
          a chain of exec calls in one process. Without `setsid` the fallback kills the direct child \
          only, and says so on stderr."
     )));
+    text.push_str(&comment(&format!(
+        "Each captured stream is bounded in BYTES as well as in time: ${VAR_CAPTURE_BYTES_MAX} per \
+         stream, and ${VAR_FINDING_BYTES_MAX} across this whole script. The producers being captured \
+         are a compiler under investigation and a program that already misbehaved once, and an \
+         unbounded redirection would let either fill your disk for the whole of its time budget while \
+         this script still reported a comparison. Raise either number if a finding genuinely needs \
+         more; both are declared here and used nowhere else."
+    )));
+    text.push_str(&comment(&format!(
+        "What the bound guarantees, exactly: RETAINED bytes never exceed the quota, because \
+         {SH_CAPTURE_ACCOUNT} keeps the first quota bytes and discards the rest. PRODUCED bytes are \
+         bounded by the quota plus whatever the producer writes within one poll interval, because a \
+         POSIX shell cannot cap a redirection's growth without interposing a filter in front of it, \
+         and interposing one would take the process group away from the watchdog. The run that \
+         recorded this finding makes the same trade for the same reason. A breach is not tolerated \
+         quietly either way: it terminates the invocation through the group below."
+    )));
     text.push_str(&format!(
-        "{VAR_SETSID}=$(command -v setsid 2> /dev/null || :)\n\n"
+        "{VAR_SETSID}=$(command -v setsid 2>| /dev/null || :)\n"
     ));
+    text.push_str(&comment(
+        "`wc` measures, `dd` truncates. Both are probed rather than assumed, and the absence of \
+         either is stated on stderr where it changes what the bound can do, never left implied.",
+    ));
+    text.push_str(&format!("{VAR_WC}=$(command -v wc 2>| /dev/null || :)\n"));
+    text.push_str(&format!("{VAR_DD}=$(command -v dd 2>| /dev/null || :)\n"));
+    text.push_str(&format!(
+        "{VAR_CAPTURE_BYTES_MAX}=${{{VAR_CAPTURE_BYTES_MAX}:-{}}}\n",
+        CAPTURE_RETAINED_BYTES_MAX
+    ));
+    text.push_str(&format!(
+        "{VAR_FINDING_BYTES_MAX}=${{{VAR_FINDING_BYTES_MAX}:-{}}}\n",
+        CAPTURE_RETAINED_BYTES_MAX * FINDING_CAPTURE_QUOTA_MULTIPLE
+    ));
+    text.push_str(&comment(
+        "Retained across every invocation below: the running total this script has kept, and how \
+         many streams it had to truncate. The closing comparison reads the second one, because a \
+         comparison over a stream held only in part cannot conclude that nothing differed.",
+    ));
+    text.push_str("captures_retained_total=0\n");
+    text.push_str("captures_truncated=0\n");
+    // Reset per invocation inside the watchdog, and declared here as well so that `set -u` is
+    // satisfied on any path that reaches the accounting helper without having gone through the
+    // watchdog first.
+    text.push_str("capture_over_quota=0\n\n");
+    text.push_str(&render_capture_accounting_functions());
     text.push_str(&format!("{SH_BOUNDED}() {{\n"));
     text.push_str("    _b_status=$1\n");
     text.push_str("    _b_stdout=$2\n");
@@ -4189,11 +4435,23 @@ fn render_bounded_run_function() -> String {
     text.push_str(&format!(
         "    _b_outer=$(( _b_budget + ${{{VAR_OUTER_MARGIN}:-5}} ))\n"
     ));
+    // The effective quota for THIS invocation: the per-stream quota, or what is left of the whole
+    // script's ceiling if that is smaller. Computed with `if` rather than `&&`, because `set -e`
+    // aborts on an AND-OR list whose last command fails and a false `[` would end the script.
+    text.push_str(&format!(
+        "    _b_quota=$(( {VAR_FINDING_BYTES_MAX} - captures_retained_total ))\n"
+    ));
+    text.push_str("    if [ \"$_b_quota\" -lt 0 ]; then\n        _b_quota=0\n    fi\n");
+    text.push_str(&format!(
+        "    if [ \"$_b_quota\" -gt \"${VAR_CAPTURE_BYTES_MAX}\" ]; then\n        \
+         _b_quota=${VAR_CAPTURE_BYTES_MAX}\n    fi\n"
+    ));
+    text.push_str("    _b_over=0\n");
     // Two launches, one per outer-net choice. The process group is NOT a third choice made here:
     // `setsid` is a program and cannot execute a shell function, so a launch of the shape
-    // `setsid isolated …` fails to exec — measured as status 127 on every bounded invocation, with
-    // `setsid: failed to execute isolated` on stderr, which reproduces nothing while still printing a
-    // comparison. The group is therefore established inside [`SH_ISOLATED`], in front of the command
+    // `setsid isolated …` fails to exec and starts nothing, which reproduces nothing while still
+    // printing a comparison. The group is therefore established inside [`SH_ISOLATED`], in front of
+    // the command
     // `env` is given, where the thing `setsid` execs is a program. The process the shell backgrounds
     // is still the group leader, because that path is a chain of `exec`s in one process.
     //
@@ -4215,21 +4473,39 @@ fn render_bounded_run_function() -> String {
     text.push_str("    _b_waited=0\n");
     text.push_str("    _b_killed=0\n");
     text.push_str("    while [ \"$_b_waited\" -lt \"$_b_budget\" ]; do\n");
-    text.push_str("        kill -0 \"$_b_child\" 2> /dev/null || break\n");
+    text.push_str("        kill -0 \"$_b_child\" 2>| /dev/null || break\n");
+    // The volume check, on the same poll as the liveness check: one `sleep` already paces this loop,
+    // so measuring here costs two `wc` invocations per second and no extra waiting. Only reachable
+    // when `wc` is present; where it is not, `_b_over` stays 0 and the degradation is printed once,
+    // after the loop, so a reader is told the capture ran unbounded rather than left to assume it did
+    // not.
+    text.push_str(&format!("        if [ -n \"${{{VAR_WC}:-}}\" ]; then\n"));
+    text.push_str(&format!(
+        "            if [ \"$({SH_CAPTURE_BYTES} \"$_b_stdout\")\" -gt \"$_b_quota\" ] || \
+         [ \"$({SH_CAPTURE_BYTES} \"$_b_stderr\")\" -gt \"$_b_quota\" ]; then\n"
+    ));
+    text.push_str("                _b_over=1\n");
+    text.push_str("                break\n");
+    text.push_str("            fi\n");
+    text.push_str("        fi\n");
     text.push_str("        sleep 1\n");
     text.push_str("        _b_waited=$(( _b_waited + 1 ))\n");
     text.push_str("    done\n");
-    text.push_str("    if kill -0 \"$_b_child\" 2> /dev/null; then\n");
+    // One kill for two reasons, deliberately: a flood and an expiry both mean "this invocation must
+    // stop now", and routing them through the same group signal is what keeps a flooding program from
+    // outliving the script the way a hanging one would. Which of the two happened is decided below,
+    // from `_b_over` and `_b_killed`, never from a status.
+    text.push_str("    if kill -0 \"$_b_child\" 2>| /dev/null; then\n");
     text.push_str("        _b_killed=1\n");
     // The group this script created, confirmed to exist before it is signalled. `setsid` makes the
     // child a group leader, so the group is the child's PID; `kill -0` on the negated PID proves the
     // group is there and signallable rather than assuming the launch took that path.
     text.push_str(&format!(
-        "        if [ -n \"${{{VAR_SETSID}:-}}\" ] && kill -0 \"-$_b_child\" 2> /dev/null; then\n"
+        "        if [ -n \"${{{VAR_SETSID}:-}}\" ] && kill -0 \"-$_b_child\" 2>| /dev/null; then\n"
     ));
-    text.push_str("            kill -9 \"-$_b_child\" 2> /dev/null || :\n");
+    text.push_str("            kill -9 \"-$_b_child\" 2>| /dev/null || :\n");
     text.push_str("        else\n");
-    text.push_str("            kill -9 \"$_b_child\" 2> /dev/null || :\n");
+    text.push_str("            kill -9 \"$_b_child\" 2>| /dev/null || :\n");
     // The stated degradation, printed in the script the reader is running: without a group of its own
     // only the direct child can be signalled safely, so a program behind a timeout utility may outlive
     // the bound. A bound that quietly does less than it claims is worse than none.
@@ -4243,7 +4519,36 @@ fn render_bounded_run_function() -> String {
     // Reaped whichever path was taken, so the script leaves no zombie behind.
     text.push_str("    status=0\n");
     text.push_str("    wait \"$_b_child\" || status=$?\n");
-    text.push_str("    if [ \"$_b_killed\" -eq 1 ]; then\n");
+    // Accounted for after the reap, so nothing is still writing to either file while it is measured
+    // and truncated. Both streams are accounted for even when neither breached, because the produced
+    // and retained figures are evidence in their own right: a reader comparing two runs needs to know
+    // that both held the whole of what was written.
+    text.push_str("    capture_over_quota=0\n");
+    text.push_str(&format!(
+        "    {SH_CAPTURE_ACCOUNT} \"$_b_stdout\" \"$_b_quota\" stdout\n"
+    ));
+    text.push_str(&format!(
+        "    {SH_CAPTURE_ACCOUNT} \"$_b_stderr\" \"$_b_quota\" stderr\n"
+    ));
+    text.push_str(&format!("    if [ -z \"${{{VAR_WC}:-}}\" ]; then\n"));
+    text.push_str(
+        "        command printf '%s\\n' 'note: wc is absent, so no capture could be measured and \
+         the byte quota was not enforced for this invocation; its streams are whatever the command \
+         chose to write' >&2\n",
+    );
+    text.push_str("    fi\n");
+    // The classification, in the one order that cannot mislead. A flood is reported as a flood even
+    // when the kill it triggered is the same kill an expiry would have performed, because the script
+    // knows which condition broke the loop and the reader cannot recover it from a status.
+    //
+    // `capture_over_quota` is consulted as well as `_b_over`, and that is what keeps the answer right
+    // when the file-size backstop fires before the poll does: the kernel signals the producer, the
+    // shell sees a signal death, and reporting `signalled 153` would describe the mechanism instead
+    // of the event. A stream that exceeded its quota means the invocation flooded, however it was
+    // stopped.
+    text.push_str("    if [ \"$_b_over\" -eq 1 ] || [ \"$capture_over_quota\" -gt 0 ]; then\n");
+    text.push_str(&format!("        termination={TERMINATION_FLOODED}\n"));
+    text.push_str("    elif [ \"$_b_killed\" -eq 1 ]; then\n");
     text.push_str(&format!("        termination={TERMINATION_TIMEOUT}\n"));
     text.push_str(&format!(
         "    elif [ \"$status\" -ge {SHELL_SIGNAL_STATUS_BASE} ]; then\n"
@@ -4258,6 +4563,116 @@ fn render_bounded_run_function() -> String {
     text.push_str("    fi\n");
     text.push_str("    printf '%s\\n' \"$termination\" > \"$_b_status\"\n");
     text.push_str("}\n");
+    text
+}
+
+/// Render the two helpers that measure a captured stream and hold it to its quota.
+///
+/// # Why measuring is a function and not an inline expression
+///
+/// It is called on both streams on every poll and again on both after the reap, and it has to answer
+/// `0` rather than fail for a file that does not exist yet — the redirection creates it, but the first
+/// poll can arrive before the producer has written anything, and under `set -e` a bare `wc` on a
+/// missing path would end the script. `$(( ))` around the measurement also absorbs the leading blanks
+/// some `wc` implementations print, which would otherwise make the comparison a string comparison.
+///
+/// # Why accounting is a function and not four lines at each call site
+///
+/// Three things have to happen together and in one order: measure what was produced, keep only the
+/// first quota bytes, and report the difference. Splitting them across call sites is how one of the
+/// three comes to be forgotten in one place — and the one most likely to be forgotten is the report,
+/// which is the only part the reader sees. It also owns the two running totals, so
+/// `captures_retained_total` and `captures_truncated` are updated in exactly one place and cannot
+/// disagree with what was printed.
+///
+/// Truncation writes through a sibling `.part` file and renames it, rather than rewriting the capture
+/// in place: `dd` cannot read and write one file at once, and the shell's own `>` is refused here by
+/// `set -C` on a name that already exists. The sibling is guarded by [`SH_REFUSE_EXISTING`] like every
+/// other path this script writes, so a planted name is refused rather than written through.
+fn render_capture_accounting_functions() -> String {
+    let mut text = String::new();
+    text.push_str(&comment(&format!(
+        "{SH_CAPTURE_BYTES} <file> prints the size of a captured stream in bytes, or 0 when it \
+         cannot be measured — the file may not exist yet on the first poll, and `wc` may be absent \
+         altogether."
+    )));
+    text.push_str(&format!("{SH_CAPTURE_BYTES}() {{\n"));
+    text.push_str(&format!(
+        "    if [ -n \"${{{VAR_WC}:-}}\" ] && [ -f \"$1\" ]; then\n"
+    ));
+    text.push_str(&format!(
+        "        command printf '%s\\n' \"$(( $(\"${VAR_WC}\" -c < \"$1\") ))\"\n"
+    ));
+    text.push_str("    else\n");
+    text.push_str("        command printf '%s\\n' 0\n");
+    text.push_str("    fi\n");
+    text.push_str("}\n\n");
+    text.push_str(&comment(&format!(
+        "{SH_CAPTURE_ACCOUNT} <file> <quota> <label> reports what one stream produced and what this \
+         script retained of it, truncating the retained copy to the quota so retention is bounded \
+         exactly rather than approximately."
+    )));
+    text.push_str(&comment(
+        "A truncated stream is stated as truncated on every line that mentions it, and it also \
+         raises the counter the closing comparison consults: a comparison over a prefix cannot \
+         conclude that nothing differed, so this script will not claim a divergence failed to \
+         reproduce on evidence it holds only in part.",
+    ));
+    text.push_str(&format!("{SH_CAPTURE_ACCOUNT}() {{\n"));
+    text.push_str("    _c_file=$1\n");
+    text.push_str("    _c_quota=$2\n");
+    text.push_str("    _c_label=$3\n");
+    text.push_str(&format!(
+        "    _c_produced=$({SH_CAPTURE_BYTES} \"$_c_file\")\n"
+    ));
+    text.push_str("    _c_retained=$_c_produced\n");
+    text.push_str("    _c_truncated=no\n");
+    text.push_str(&format!(
+        "    if [ -n \"${{{VAR_WC}:-}}\" ] && [ \"$_c_produced\" -gt \"$_c_quota\" ]; then\n"
+    ));
+    text.push_str("        _c_truncated=yes\n");
+    text.push_str("        captures_truncated=$(( captures_truncated + 1 ))\n");
+    text.push_str("        capture_over_quota=$(( capture_over_quota + 1 ))\n");
+    text.push_str(&format!("        if [ -n \"${{{VAR_DD}:-}}\" ]; then\n"));
+    // Retention is exact for ANY quota, which takes two copies rather than one. The first moves
+    // whole kibibytes, so a partial read cannot silently shorten the result; the second appends the
+    // remainder a byte at a time, which is at most 1023 reads and is what keeps a quota that is not
+    // a multiple of 1024 — including one a reader sets deliberately small to inspect a prefix — from
+    // rounding down to nothing. `>>` is used for the append because noclobber restrains `>` only.
+    text.push_str("            _c_blocks=$(( _c_quota / 1024 ))\n");
+    text.push_str("            _c_rest=$(( _c_quota % 1024 ))\n");
+    text.push_str(&format!(
+        "            {SH_REFUSE_EXISTING} \"$_c_file.part\"\n"
+    ));
+    text.push_str(&format!(
+        "            \"${VAR_DD}\" if=\"$_c_file\" of=\"$_c_file.part\" bs=1024 \
+         count=\"$_c_blocks\" 2>| /dev/null || :\n"
+    ));
+    text.push_str("            if [ \"$_c_rest\" -gt 0 ]; then\n");
+    text.push_str(&format!(
+        "                \"${VAR_DD}\" if=\"$_c_file\" bs=1 skip=\"$(( _c_blocks * 1024 ))\" \
+         count=\"$_c_rest\" 2>| /dev/null >> \"$_c_file.part\" || :\n"
+    ));
+    text.push_str("            fi\n");
+    text.push_str("            command rm -f \"$_c_file\"\n");
+    text.push_str("            command mv \"$_c_file.part\" \"$_c_file\"\n");
+    text.push_str(&format!(
+        "            _c_retained=$({SH_CAPTURE_BYTES} \"$_c_file\")\n"
+    ));
+    text.push_str("        else\n");
+    text.push_str(
+        "            command printf '%s\\n' 'note: dd is absent, so the oversized capture could \
+         not be truncated to its quota and is retained as produced' >&2\n",
+    );
+    text.push_str("        fi\n");
+    text.push_str("    fi\n");
+    text.push_str("    captures_retained_total=$(( captures_retained_total + _c_retained ))\n");
+    text.push_str(
+        "    command printf 'capture %s : produced %s byte(s), retained %s of a %s-byte quota, \
+         truncated %s\\n' \"$_c_label\" \"$_c_produced\" \"$_c_retained\" \"$_c_quota\" \
+         \"$_c_truncated\"\n",
+    );
+    text.push_str("}\n\n");
     text
 }
 
@@ -4379,7 +4794,7 @@ fn render_comparison_block(finding: &Finding, captures: &[&Capture]) -> String {
     // and the block says so in those terms.
     if has_comparable_output(subject) && has_comparable_output(authority) {
         // --- stdout --------------------------------------------------------------------------
-        block.push_str("if command -v cmp > /dev/null 2>&1; then\n");
+        block.push_str("if command -v cmp >| /dev/null 2>&1; then\n");
         block.push_str(&format!(
             "    if cmp {authority_file} {subject_file}; then\n"
         ));
@@ -4424,7 +4839,24 @@ fn render_comparison_block(finding: &Finding, captures: &[&Capture]) -> String {
         block.push_str("differed=1\n\n");
     }
 
-    block.push_str("if [ \"$differed\" -eq 0 ]; then\n");
+    // Truncation is checked before the verdict, and only the NEGATIVE verdict is withheld by it. A
+    // difference found in a prefix is still a difference — the bytes that differed differed — so a
+    // reproduction that succeeded is reported as it stands. The absence of a difference in a prefix
+    // is not the absence of a difference, so that conclusion is refused outright rather than
+    // qualified: an artifact whose purpose is to settle whether a divergence still exists must not
+    // answer "no" from evidence it holds only in part.
+    block.push_str("if [ \"$captures_truncated\" -gt 0 ] && [ \"$differed\" -eq 0 ]; then\n");
+    block.push_str(
+        "    printf '\\nRESULT: INCONCLUSIVE — %s captured stream(s) reached the byte quota and \
+         were truncated, so no difference was found in what was retained but the streams are held \
+         only in part.\\n' \"$captures_truncated\"\n",
+    );
+    block.push_str(&format!(
+        "    printf 'This is NOT a report that the divergence failed to reproduce. Raise \
+         ${VAR_CAPTURE_BYTES_MAX} and ${VAR_FINDING_BYTES_MAX} until no capture is truncated, then \
+         run this script again.\\n'\n"
+    ));
+    block.push_str("elif [ \"$differed\" -eq 0 ]; then\n");
     block.push_str(
         "    printf '\\nRESULT: neither stdout nor status differed here, so the recorded \
          divergence did NOT reproduce.\\n'\n",
@@ -4437,6 +4869,13 @@ fn render_comparison_block(finding: &Finding, captures: &[&Capture]) -> String {
     block.push_str(
         "    printf '\\nRESULT: the recorded divergence reproduced, which is the finding.\\n'\n",
     );
+    block.push_str("    if [ \"$captures_truncated\" -gt 0 ]; then\n");
+    block.push_str(
+        "        printf 'Note: %s captured stream(s) were truncated at the byte quota. The \
+         difference above is real - the bytes that differed differed - but the streams beside this \
+         script are prefixes.\\n' \"$captures_truncated\"\n",
+    );
+    block.push_str("    fi\n");
     block.push_str("fi\n");
     block
 }
@@ -4710,10 +5149,9 @@ fn assemble_manifest(
     // oracle observed it, so a reader never has to wonder whether an absent field means one observer
     // or an older manifest.
     //
-    // There is deliberately no singular `oracle =` line. An earlier form of this manifest carried one,
-    // naming whichever contribution happened to write last, beside an `observed_by` line naming all of
-    // them — two fields making incompatible claims about the same directory. The per-oracle account is
-    // now a section apiece, below.
+    // There is deliberately no singular `oracle =` line. One would name whichever contribution
+    // happened to write last, beside an `observed_by` line naming all of them — two fields making
+    // incompatible claims about the same directory. The per-oracle account is a section apiece, below.
     text.push_str(&format!(
         "observed_by      = {}\n",
         observers
@@ -5066,10 +5504,9 @@ fn capture_artifact_inventory(capture: &Capture) -> Vec<(String, u64, String)> {
 /// # Why an inventory rather than a prose roster
 ///
 /// The roster above it is for a reader. This is for a validator, and the distinction is what closes a
-/// real hole: an earlier form of the completeness check established only that `outputs/` existed and
-/// held *something*, so a directory that had lost every capture but one — or had gained a file nobody
-/// published — was certified complete. A report row then read as a recorded observation with the
-/// observation missing.
+/// real hole: a completeness check that established only that `outputs/` existed and held *something*
+/// would certify a directory that had lost every capture but one, or had gained a file nobody
+/// published. A report row would then read as a recorded observation with the observation missing.
 ///
 /// Each line names one file, the role that produced it, the target and optimization level it belongs
 /// to, its exact byte count and the digest of its bytes. `require_complete` and
@@ -5345,11 +5782,11 @@ fn parse_inventory(text: &str, prefix: &str) -> (Vec<InventoryEntry>, Vec<String
 ///
 /// # The hole this closes
 ///
-/// An earlier form of the completeness check established that `outputs/` was a directory and that it
-/// held *something*. A finding that had lost every capture but one satisfied it; so did one that had
-/// gained a file nobody published; so did one whose captures had been edited. The report row then read
-/// as a recorded observation with the observation missing or altered, which is the one shape of report
-/// that actively misleads — worse than a failure, because it looks like a result.
+/// A completeness check that established only that `outputs/` was a directory holding *something*
+/// would be satisfied by a finding that had lost every capture but one, by one that had gained a file
+/// nobody published, and by one whose captures had been edited. The report row would then read as a
+/// recorded observation with the observation missing or altered, which is the one shape of report that
+/// actively misleads — worse than a failure, because it looks like a result.
 ///
 /// So the inventory is validated in **both** directions, against exact producer triplets:
 ///
@@ -5781,9 +6218,9 @@ pub fn curated_finding_defects(directory: &Path) -> Vec<String> {
     // committed register names a curated finding `F-NNNN-<slug>`, deliberately: a sequential number a
     // human assigns is what a person cites in an issue, and a derived digest-and-slug name is not.
     //
-    // An earlier form of this check required the directory basename to equal the generated identifier,
-    // which made the register's own naming rule unsatisfiable — every promoted finding was reported as
-    // a defect for being named the way the register says to name it. So both forms are accepted, and
+    // Requiring the directory basename to equal the generated identifier would make the register's own
+    // naming rule unsatisfiable — every promoted finding would be reported as a defect for being named
+    // the way the register says to name it. So both forms are accepted, and
     // which one applies is not left to inference: a directory named in the curated form must declare
     // that name in its own `curated_id` line, so the manifest states the identity the register indexes
     // it under **and** the generated identity the evidence was produced under, and neither can
@@ -5885,12 +6322,12 @@ pub fn curated_finding_defects(directory: &Path) -> Vec<String> {
         }
     }
 
-    // Every capture, too. An earlier form of this check deliberately exempted `outputs/`, reasoning
-    // that a captured stream is evidence and must not be rewritten. The first half of that is right
-    // and the conclusion did not follow: a compiler diagnostic naming `/home/<someone>/checkout/...`
-    // is exactly as disclosing in `outputs/bcc-aarch64-O2.compile.stderr` as it is in `commands.sh`,
-    // and it is the artifact most likely to carry one, because a compiler prints the paths it was
-    // given. Exempting it left the largest disclosure surface in the directory unexamined.
+    // Every capture, too. Exempting `outputs/` on the reasoning that a captured stream is evidence and
+    // must not be rewritten gets the premise right and the conclusion wrong: a compiler diagnostic
+    // naming `/home/<someone>/checkout/...` is exactly as disclosing in
+    // `outputs/bcc-aarch64-O2.compile.stderr` as it is in `commands.sh`, and it is the artifact most
+    // likely to carry one, because a compiler prints the paths it was given. Exempting it would leave
+    // the largest disclosure surface in the directory unexamined.
     //
     // What changes is only *what is done about it*: this reports, and never rewrites. Elision is a
     // curator's decision, taken before promotion and recorded in `FINDINGS.md`, because redacting a
@@ -5988,10 +6425,9 @@ fn curated_capture_texts(
 ///
 /// The captured streams under `outputs/` are **also** scanned — recursively, by
 /// [`curated_capture_texts`] — and are listed separately rather than here only because they are
-/// enumerated from the filesystem rather than named in advance. Exempting them, as an earlier form of
-/// this check did, left the largest disclosure surface in the directory unexamined: a compiler prints
-/// the paths it was given, so `outputs/*.compile.stderr` is the artifact most likely to carry an
-/// absolute home path.
+/// enumerated from the filesystem rather than named in advance. Exempting them would leave the largest
+/// disclosure surface in the directory unexamined: a compiler prints the paths it was given, so
+/// `outputs/*.compile.stderr` is the artifact most likely to carry an absolute home path.
 ///
 /// What differs is only the remedy. A captured stream is evidence, so nothing here rewrites one:
 /// elision is a curator's decision, taken before promotion and recorded in `FINDINGS.md`, because

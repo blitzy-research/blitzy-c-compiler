@@ -26,8 +26,12 @@ is the literal 1, strictly less than the 32-bit width of the promoted operand, a
 negative value is ever shifted left. No aliasing violation, no uninitialized read, no
 object modified twice between sequence points, at most one side-effecting argument per
 call, no dependence on padding bytes.
-Every narrowing is written as an explicit cast, which keeps the strict warning gate clean
-without any deviation. The _Generic controlling expressions are unevaluated, so they report
+Every NARROWING is written as an explicit cast, which keeps the strict warning gate clean
+without any deviation. The widening conversions the language performs implicitly are still
+present and are not being denied -- the integer promotion of each signed char and unsigned char
+operand to int, the initialization conversions of the volatile objects, and the default argument
+promotions at each printf call -- and every one of them is value-preserving, which is why none
+needs a cast and none raises a diagnostic. The _Generic controlling expressions are unevaluated, so they report
 promoted types without converting at run time.
 END
 impl_defined_notes <<END

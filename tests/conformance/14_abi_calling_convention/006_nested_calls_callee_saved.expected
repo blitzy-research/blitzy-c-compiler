@@ -6,7 +6,7 @@
 
 program            = 006_nested_calls_callee_saved
 area               = 14_abi_calling_convention
-description        = A nine-frame chain of genuinely out-of-line calls -- eight pressure frames above one leaf -- in which each pressure frame keeps ten independent values live across its nested call and prints them only after that call returns, so that a callee-saved register the callee failed to restore changes exactly one frame's output
+description        = A nine-frame chain of genuinely out-of-line calls -- eight pressure frames above one leaf -- in which each pressure frame keeps ten independent values live across its nested call and prints them only after that call returns, so that a callee-saved register the callee failed to restore shows up in the output of each frame it affects -- and where a wrong value propagates down the chain, in the first frame whose line differs and in every later frame that reads it
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -50,12 +50,14 @@ Free of undefined and unspecified behaviour by construction:
   and small.
 - No shift operator appears, so no shift count can be out of range.
 - THE ONLY INDEXING IS INTO THE PROGRAM'S OWN STATIC TABLES, with constant subscripts written
-  literally at each use -- vlive_i[6][3] and the like -- so every subscript is inside its
-  declared bound by inspection and no computed index exists. The only pointer values are the
-  address of a string literal threaded through the chain as a tag, and the eight addresses of
-  plive_target elements held in vlive_p; a pointer is dereferenced only to print the int it
-  designates, and none is printed, converted to an integer, or modified. No pointer
-  arithmetic is performed anywhere.
+  literally at each use -- vlive_i[6][3] and the like -- so the pointer arithmetic the language
+  performs for each subscript stays inside the object by inspection and no computed index
+  exists. The only pointer values are the address of a string literal threaded through the chain
+  as a tag, and the eight addresses of plive_target elements formed once by &plive_target[k]
+  with literal k and held in vlive_p; a pointer is dereferenced only to print the int it
+  designates, and none is printed, converted to an integer, compared against a pointer into a
+  different object, or modified. No pointer arithmetic beyond those in-bounds subscripts is
+  performed anywhere, and no one-past-the-end pointer is formed.
 - No read of uninitialized storage. Every local of all nine chain functions is initialized at
   its declaration, and every volatile object has a static initializer. main's five locals are
   the one deliberate exception to the declaration form: they are declared and then assigned,
@@ -73,7 +75,7 @@ Free of undefined and unspecified behaviour by construction:
   rather than argued. An access to a volatile object IS an observable side effect and the
   order in which a call's arguments are evaluated is unspecified, so every volatile datum
   is read exactly once, in a statement of its own, and only the resulting plain locals are
-  passed. Machine-checked on this branch: flattening the program into statements and
+  passed. Machine-checked: flattening the program into statements and
   counting references to its volatile objects finds NO statement with more than one. The
   snapshots cost nothing in coverage, because each is itself a load from volatile storage
   that the optimizer may neither fold nor elide, so every value the callee receives was
@@ -83,10 +85,11 @@ Free of undefined and unspecified behaviour by construction:
   opened, no socket is created, no environment variable and no program argument is read,
   and no storage is obtained from the heap.
 - main returns 0, inside the 0-125 range the suite requires.
-- Verified empirically on this branch: the default strict warning gate
+- Verified rather than asserted: the default strict warning gate
   (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
-  diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
-  -fno-sanitize-recover=all runs to completion with empty stderr and exit status 0.
+  diagnostics in the single native compile-only invocation the suite makes of it, and
+  -fsanitize=undefined,address -fno-sanitize-recover=all runs to completion with empty
+  stderr and exit status 0 in its one instrumented native build.
 END
 impl_defined_notes <<END
 THE PRESERVED REGISTER SETS, STATED IN FULL. What follows is what each ABI REQUIRES a
@@ -112,10 +115,17 @@ nothing across one. Ten live values is more than the narrowest of those preserve
 hold, so on every target some of them must survive the call somewhere other than a preserved
 register -- but which value goes where is the compiler's choice, and this program does not
 assert it. What it asserts is the OBSERVABLE consequence: if any of the ten fails to survive
-the call, the printed line for that frame changes and the divergence localises to the exact
-frame. Eighty values are held across a call in total, ten in each of eight frames, and the
-chain's returned total of 192 is printed as well, so a value lost in any frame shows up twice
--- once in that frame's own line and once in the total.
+the call, the printed line for that frame changes, so the divergence is localised to the frames it
+actually reaches rather than summarised -- one frame where a single register is clobbered, and every
+affected frame where the failure is systemic. Eighty values are held across a call in total, ten in
+each of eight frames, and every one of the eighty reaches its frame's own printed line, so every one
+is detected there. The chain's returned total of 192 is printed as well, and it is a SECOND, partial
+witness rather than a duplicate of the first: each frame returns inner + a + b + c + d + e + f, so
+only the SIX INTS of a frame feed the total. A lost int therefore shows up twice, once in its
+frame's line and once in the total; a lost double or a lost pointer shows up once, in its frame's
+line alone, because neither x, y, z nor *p is summed into the return value. Both are caught; only
+the redundancy differs, and an earlier form of this paragraph wrongly claimed all ten appeared in
+the total.
 
 THE TWO LIVE POINTERS, AND WHY THEIR WIDTH IS THE ONE THING ABOUT THEM THAT DIFFERS. Each
 pressure frame holds two pointers across its nested call: the const char *tag it was handed,
@@ -139,12 +149,12 @@ prescribes because it cannot know what will receive them. This is plain standard
 than a compiler attribute, so both sides of oracle (a) honour it for the same reason and
 neither needs to support an extension for the barrier to hold. It also makes the
 function-pointer load the ONLY volatile access in each call expression, which is what
-keeps the one-side-effecting-argument rule satisfied. Measured before-state on this branch:
-with direct calls, gcc 13.4.0 at -O2 left only level1 standing -- levels 2 through 8 and the
-leaf were all inlined into it, so the nine frames collapsed to one and the property under
-test did not exist at that optimization level. Measured after: all nine functions are emitted
-unmodified at -O0, -O1 and -O2 on all four targets, with no .constprop and no .isra clone
-anywhere.
+keeps the one-side-effecting-argument rule satisfied. MEASURED IN BOTH DIRECTIONS. WITHOUT the
+barrier, called by name, the reference compiler at -O2 leaves only level1 standing -- levels 2
+through 8 and the leaf are all inlined into it, so the nine frames would collapse to one and
+the property under test would not exist at that optimization level. WITH it, all nine
+functions are emitted unmodified at -O0, -O1 and -O2 on all four targets, with no .constprop
+and no .isra clone anywhere.
 
 MEASURED STACK USE, not estimated. From the reference compiler's -O0 prologues on each
 target: x86_64 eight 96-byte frames plus one 48 and one 32, with ten 8-byte return-address
@@ -177,9 +187,8 @@ marker XD-TYPE-LONGDOUBLE-001 scoping that oracle.
 No target is dropped, no oracle is disabled and this record carries no expected-divergence
 marker: a cross-backend divergence here is a GENUINE FINDING rather than an
 implementation-defined difference, because nothing implementation-defined reaches the
-output. Measured on this branch with gcc 13.4.0 and the matching i686, aarch64 and riscv64
-cross drivers, executed natively and under QEMU user-mode 10.1.0: stdout is byte-identical
-and the exit status is 0 in all twelve target-and-optimization-level cells.
+output. Measured rather than assumed: stdout is byte-identical and the exit status is 0 in all
+twelve target-and-optimization-level cells.
 END
 expected_stdout    <<END
 nest_folded_L9 seed=180 fseed=9.0000 r=216

@@ -1,91 +1,111 @@
-/* Flexible array member declaration and sizing (C11 6.7.2.1p18).
+/* Flexible array member declaration, sizing and ELEMENT ACCESS (C11 6.7.2.1p18).
  *
  * A flexible array member is an incomplete array as the last member of a struct
  * that has more than one named member, and it contributes NOTHING to sizeof the
- * struct.  The usual idiom for populating one -- a heap allocation sized as the
- * fixed header plus n elements -- is unavailable here: no header may be included,
- * so no allocator is even declared, and the suite is hermetic, so no dynamic
- * allocation is performed at all.  The storage is therefore an
- * allocated-equivalent STATIC object.
+ * struct.  Three things about it are observable and all three are observed here:
+ * the declaration is accepted, the member's zero contribution to sizeof is
+ * measured, and its ELEMENTS are read and written through the member itself --
+ * `p->data[i]` -- which is the access the compiler must compute an address for and
+ * therefore the part of the feature a layout or address-arithmetic defect would
+ * corrupt.
  *
- * WHAT THIS PROGRAM DELIBERATELY DOES NOT DO, AND WHY -- ELEMENT ACCESS THROUGH
- * THE FLEXIBLE MEMBER ITSELF.
+ * HOW THE ELEMENT ACCESS IS MADE WELL DEFINED, WHICH IS THE WHOLE DESIGN OF THIS
+ * PROGRAM.  C11 6.7.2.1p18 says the member "behaves as if that member were replaced
+ * with the longest array (with the same element type) that would not make the
+ * structure larger than THE OBJECT BEING ACCESSED", and adds that if the replacement
+ * array would have no elements "the behavior is undefined if any attempt is made to
+ * access that element".  So the accessed object must genuinely be larger than the
+ * header, and 6.7.2.1p20's own EXAMPLE 2 shows the construction that makes it so: an
+ * allocation of `sizeof(struct fam)` plus room for n elements, after which the object
+ * behaves as if `data` had n elements.  That is exactly what fam_alloc does below,
+ * with n == FAM_CAP, so every subscript in FAM_LIVE_MAX range is inside the
+ * replacement array by the standard's own account rather than by inference.
  *
- * An earlier form of this program subscripted the flexible member through a
- * `struct fam *` aimed at the union arm, `p->data[i]`.  That access is not
- * defensible under C11 6.7.2.1p18, which says the member "behaves as if that
- * member were replaced with the longest array (with the same element type) that
- * would not make the structure larger than THE OBJECT BEING ACCESSED", and adds
- * that if the replacement array would have no elements "the behavior is undefined
- * if any attempt is made to access that element".  The object being accessed
- * there is the `struct fam` union member, whose size is `sizeof(struct fam)` --
- * four bytes, the header alone -- so the replacement array has no elements and
- * every one of those subscripts was an out-of-bounds access, on the read side and
- * on the write side alike.  The union makes the two arms ALIAS legitimately; it
- * does not make either arm larger than it is declared to be.
+ * An earlier form of this program instead aimed a `struct fam *` at a union arm whose
+ * declared size was four bytes -- the header alone -- and subscripted that.  Under the
+ * rule above the replacement array there has no elements, so every one of those
+ * subscripts was undefined, and the exclusion of element access that replaced them
+ * was recorded rather than silently dropped.  Neither compromise is needed: the
+ * allocated object removes the undefined behaviour AND restores the coverage.
  *
- * The only construction the standard unambiguously supports is an allocated object
- * genuinely larger than the header, and that is out of reach here: a portable
- * declaration of an allocation function needs `size_t`, which is `unsigned int` on
- * the 32-bit target and `unsigned long` on the other three, so one spelling cannot
- * serve all four; the corpus forbids including the header that would define it; and
- * a declaration without a prototype was measured to be rejected outright by the
- * reference compiler AND by the alternate reference compiler under the mandatory
- * warning gate.  Reaching for it would trade a soundness defect for a portability
- * one.
+ * WHY AN ALLOCATOR CAN BE DECLARED HERE WITHOUT A HEADER AND WITHOUT LOSING A TARGET.
+ * The corpus rule is that a program includes no header and hand-declares the libc
+ * prototypes it needs, and the obstacle was always that `malloc` takes `size_t`, which
+ * is `unsigned int` on the 32-bit target and `unsigned long` on the other three, so no
+ * single spelling serves all four and an unprototyped declaration is rejected by the
+ * mandatory gate.  The size type is therefore SELECTED BY THE ARCHITECTURE MACRO the
+ * compiler predefines, in the same style as 12_preprocessor/004_predefined_macros.c
+ * and 10_declarations_and_types/007_alignof_alignas.c, with an error directive on the
+ * unrecognised branch so a fifth target cannot silently inherit a wrong width.  The
+ * declaration then matches the target's own `size_t` exactly, which was MEASURED
+ * clean -- no -Wbuiltin-declaration-mismatch -- under the full gate with all four
+ * reference drivers at -O0, -O1 and -O2.  Hermeticity is untouched: an allocation
+ * reaches no file, no socket and no path, and every block obtained is released before
+ * main returns, which the address sanitizer's leak checker verifies.
  *
- * So the exclusion is narrow, deliberate and recorded.  Everything about the
- * feature that CAN be observed without that access still is: the declaration is
- * accepted, the sizeof contribution is measured, the incomplete type crosses a
- * function boundary, and the member the two union arms share is written through one
- * arm and read through the other -- which is exactly the access C11 6.5.2.3p6
- * sanctions for a union of structures with a common initial sequence.  Element data
- * is carried by the SIZED arm, where the elements are actually declared and where
- * subscripting them is beyond argument.  Per constraint C3 this is stated here and
- * in this program's expectation record rather than left silent, and no language
- * feature is dropped: what is excluded is one unsound way of reaching a feature that
- * remains under test.
+ * ALLOCATION FAILURE IS HANDLED DETERMINISTICALLY RATHER THAN ASSUMED AWAY.  The
+ * request is 36 bytes; if it were nevertheless refused, printing the elements would
+ * dereference a null pointer.  Each allocation is therefore checked, and a refusal
+ * prints one fixed diagnostic line and returns a fixed non-zero status inside the
+ * suite's 0-125 range -- so even that path is byte-deterministic and would be reported
+ * as an exit-code divergence rather than as a crash.
  *
- * Direct initialization -- static struct fam d = { 3, {1,2,3} }; -- is not
- * available either: initializing a flexible array member is a compiler extension
- * rather than standard C, and the mandatory -pedantic -Werror gate exists precisely
- * to reject one, with no deviation sanctioned for this area.  The exclusion is
- * scoped to that one SPELLING of the initializer and rests on the plan rather than
- * on difficulty: this program's entry prescribes access through allocated-equivalent
- * static storage and assigns GNU extensions to the 08_gcc_extensions area, and the
- * reason is recorded in this program's expectation record.  It costs no coverage of
- * the FEATURE -- declaration, the sizeof contribution, access through the incomplete
- * type across a function boundary, and mutation through both union arms are all
- * exercised below, at both storage durations.
+ * Direct initialization -- static struct fam d = { 3, {1,2,3} }; -- is still not
+ * available, and that exclusion is unchanged: initializing a flexible array member is
+ * a compiler extension rather than standard C, and the mandatory -pedantic -Werror
+ * gate exists precisely to reject one, with no deviation sanctioned for this area.
+ * The exclusion is scoped to that one SPELLING of the initializer and rests on the
+ * plan rather than on difficulty -- GNU extensions belong to the 08_gcc_extensions
+ * area -- and the reason is recorded in this program's expectation record.  It costs
+ * no coverage: the allocated object below is filled by assignment through the
+ * flexible member, which is the access an initializer would otherwise have performed.
  *
- * The storage is therefore spelled as a union pairing the flexible-array struct with
- * a same-prefix SIZED struct, which is gate-clean at -O0, -O1 and -O2 and
- * sanitizer-clean, and which appears once at file scope and once at block scope so
- * that the data-section image and the emitted-store path are both covered.
- *
- * The union is also the better answer on its own merits, not merely the one that
- * compiles.  A bare "static int backing[N]" cast to "struct fam *" would be a
- * strict-aliasing violation: the storage would be written as an int array and read
- * through an unrelated struct type.  Placing both types in the SAME union makes
- * the aliasing legitimate by construction -- C11 6.5.2.3p6 permits inspecting the
- * common initial sequence of structures that share a union, which here is the
- * leading "int count", and the two data arrays begin at the same offset with the
- * same element type, so every access reads or writes storage last written through
- * an lvalue of that same type.
+ * THE UNION IS KEPT, because it tests something the allocated object cannot.  It
+ * pairs the flexible-array struct with a same-prefix SIZED struct, so the member the
+ * two arms share can be written through one arm and read through the other -- exactly
+ * the access C11 6.5.2.3p6 sanctions for a union of structures with a common initial
+ * sequence -- and it appears once at file scope and once at block scope so that the
+ * data-section image and the emitted-store path are both covered.  A compiler can get
+ * the static image right and the run-time stores wrong, so both are held side by side.
+ * Only the SHARED member is reached through the flexible arm of a union; the union's
+ * elements are always reached through the sized arm, where they are declared.  The
+ * union also makes its aliasing legitimate by construction: a bare "static int
+ * backing[N]" cast to "struct fam *" would be a strict-aliasing violation, whereas
+ * placing both types in the SAME union permits inspecting their common initial
+ * sequence, and the two data arrays begin at the same offset with the same element
+ * type.
  *
  * Every value is int and every conversion is printed with %d, sizeof is never
- * applied to a pointer, and both sizeof results are cast to int before reaching the
+ * applied to a pointer, and every sizeof result is cast to int before reaching the
  * variadic call, so no target-varying width reaches the output.  Because int is 4
  * bytes and 4-byte aligned on all four targets, no padding sits between count and
  * data in either union arm and both printed sizes follow by derivation:
  * sizeof(struct fam) is 4, the flexible array member adding nothing, and
  * sizeof(union fam_storage) is 4 + 8*4 = 36.  No object representation is inspected
  * and nothing is read byte by byte, so neither padding nor endianness can influence
- * the output, and no address is ever printed -- the two views are reached only
- * through int-typed lvalues at identical offsets.
+ * the output, and no address is ever printed -- neither the allocated block's nor
+ * either union view's, which are reached only through int-typed lvalues.
  */
 
 int printf(const char *, ...);
+
+/* The target's own size_t width, selected by the architecture macro the compiler
+ * predefines rather than by a header this corpus may not include.  measured: this
+ * spelling matches the built-in declaration exactly on all four reference drivers,
+ * so the gate raises no built-in-declaration-mismatch diagnostic.  The error
+ * directive is deliberate: a fifth target must fail to TRANSLATE rather than inherit
+ * a silently wrong argument width. */
+#if defined(__i386__) || defined(__i386)
+typedef unsigned int fam_alloc_size;
+#elif defined(__x86_64__) || defined(__amd64__) || defined(__aarch64__) \
+    || defined(__arm64__) || defined(__riscv) || defined(__riscv__)
+typedef unsigned long fam_alloc_size;
+#else
+#error "unsupported target: the allocation-size type must match this target's size_t"
+#endif
+
+void *malloc(fam_alloc_size);
+void free(void *);
 
 struct fam { int count; int data[]; };
 
@@ -97,10 +117,56 @@ struct fam_header { int count; };
 
 #define FAM_CAP 8
 
+/* The largest count any object in this program ever carries.  Every loop below is
+ * bounded by an object's own count, and every count assigned is at most this, which
+ * is strictly less than FAM_CAP -- so no subscript can reach the end of the
+ * replacement array, and no one-past-the-end pointer is ever formed. */
+#define FAM_LIVE_MAX 6
+
 union fam_storage {
     struct fam flex;
     struct { int count; int data[FAM_CAP]; } sized;
 };
+
+/* Allocate a struct fam with room for FAM_CAP elements, which is what makes
+ * `p->data[i]` well defined for i < FAM_CAP: C11 6.7.2.1p18 sizes the replacement
+ * array against the object being accessed, and this object is genuinely
+ * sizeof(struct fam) + FAM_CAP * sizeof(int) bytes.  The element count is stored in
+ * the header so every consumer takes its bound from the object rather than from a
+ * constant repeated at the call site.  Returns a null pointer if the request is
+ * refused; every caller checks. */
+static struct fam *fam_alloc(int count)
+{
+    struct fam *p = malloc(sizeof(struct fam) + (fam_alloc_size)FAM_CAP * sizeof(int));
+    int i;
+
+    if (p == 0) {
+        return 0;
+    }
+    /* Every element of the replacement array is written before any is read, so no
+     * indeterminate value is ever observed: the caller's live prefix is filled by
+     * fam_fill afterwards, and the tail is zeroed here. */
+    for (i = 0; i < FAM_CAP; i++) {
+        p->data[i] = 0;
+    }
+    p->count = count;
+    return p;
+}
+
+/* Sums the live prefix THROUGH THE FLEXIBLE MEMBER, taking its bound from the
+ * object's own header.  This is the read path a defect in flexible-member address
+ * arithmetic would corrupt, and it is deliberately expressed as a separate function
+ * so the access also crosses a function boundary carrying the incomplete type. */
+static int fam_sum(const struct fam *p)
+{
+    int i;
+    int total = 0;
+
+    for (i = 0; i < p->count; i++) {
+        total += p->data[i];
+    }
+    return total;
+}
 
 static union fam_storage g_store = {
     .sized = { 5, { 100, 200, 300, 400, 500, 0, 0, 0 } }
@@ -130,6 +196,20 @@ static int sum_prefix(const union fam_storage *u)
     return total;
 }
 
+/* Fills the first `count` elements THROUGH THE FLEXIBLE MEMBER with a deterministic
+ * arithmetic series, and records the count in the object's header.  Every subscript is
+ * below the caller's count, which is at most FAM_LIVE_MAX and therefore inside the
+ * FAM_CAP-element replacement array fam_alloc established. */
+static void fam_fill(struct fam *p, int count, int first, int step)
+{
+    int i;
+
+    p->count = count;
+    for (i = 0; i < count; i++) {
+        p->data[i] = first + i * step;
+    }
+}
+
 int main(void)
 {
     struct fam *p = &g_store.flex;
@@ -141,7 +221,15 @@ int main(void)
         .sized = { 4, { 11, 22, 33, 44, 0, 0, 0, 0 } }
     };
     struct fam *lp = &l_store.flex;
+    /* The allocated object, whose whole purpose is that its elements are reached
+     * through the flexible member itself. */
+    struct fam *ap = fam_alloc(0);
     int i;
+
+    if (ap == 0) {
+        printf("alloc_refused=1\n");
+        return 3;
+    }
 
     /* Sizing.  The absolute size of the flexible-array struct is printed because it is
      * four on every one of the four targets by derivation -- one int member, and int is
@@ -201,5 +289,39 @@ int main(void)
         printf("l_after[%d]=%d\n", i, l_store.sized.data[i]);
     }
     printf("l_after_sum=%d\n", sum_prefix(&l_store));
+
+    /* ELEMENT ACCESS THROUGH THE FLEXIBLE MEMBER, on an object genuinely large enough
+     * for it.  Every read and every write below applies a subscript to
+     * `struct fam::data`, which is the address computation the union arms could never
+     * exercise.  Each element is printed individually so a single wrong slot localizes
+     * to one index rather than to the aggregate, and the sum is taken across a function
+     * boundary that knows only the incomplete type. */
+    printf("alloc_sizeof_header=%d\n", (int)sizeof(struct fam));
+    printf("alloc_initial_count=%d\n", ap->count);
+    fam_fill(ap, 5, 7, 11);
+    printf("alloc_count=%d\n", ap->count);
+    for (i = 0; i < ap->count; i++) {
+        printf("alloc_data[%d]=%d\n", i, ap->data[i]);
+    }
+    printf("alloc_sum=%d\n", fam_sum(ap));
+
+    /* Mutation through the flexible member, in separate statements so no object is
+     * modified twice between sequence points.  The count grows to FAM_LIVE_MAX, which
+     * is 6 against a capacity of 8, so index 5 -- written here before it is read -- is
+     * the highest the program ever touches.  The largest printed value is the sum of
+     * 7, 999, 29, 40, 51 and 61, which is 1187, far inside INT_MAX. */
+    ap->data[1] = 999;
+    ap->count = FAM_LIVE_MAX;
+    ap->data[5] = 61;
+    printf("alloc_after_count=%d\n", ap->count);
+    for (i = 0; i < ap->count; i++) {
+        printf("alloc_after[%d]=%d\n", i, ap->data[i]);
+    }
+    printf("alloc_after_sum=%d\n", fam_sum(ap));
+    printf("alloc_after_count_via_boundary=%d\n", prefix_count(ap));
+
+    /* Released before main returns, so the address sanitizer's leak checker is
+     * satisfied and the program owns no storage at exit. */
+    free(ap);
     return 0;
 }

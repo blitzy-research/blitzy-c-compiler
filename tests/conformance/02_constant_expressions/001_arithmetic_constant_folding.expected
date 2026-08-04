@@ -70,10 +70,12 @@ leaves implementation-defined, so a record may not assume it -- nor the order th
 change a printed byte. Each printf call takes its format string and exactly one value argument, so
 there is no second argument whose evaluation could interleave with it, and the two short-circuit
 lines impose their own sequencing on their operands rather than relying on an unspecified order.
-THERE ARE NO POINTERS IN THIS PROGRAM AT ALL. No object address is taken, no array is declared and
-no aggregate is declared, so there is no aliasing rule to break, no one-past-the-end question to
-answer, no object representation to inspect, no padding byte to observe and no dependence on the
-relative addresses of unrelated objects.
+THE ONLY POINTERS IN THIS PROGRAM ARE THE FORMAT STRINGS. No object address is taken, no array of
+the program's own is declared and no aggregate is declared, so the only pointer values that exist
+are the ones the string literals decay to at each printf call -- never printed, never compared,
+never converted to an integer and never arithmetic operands. There is therefore no aliasing rule to
+break, no one-past-the-end question to answer, no object representation to inspect, no padding byte
+to observe and no dependence on the relative addresses of unrelated objects.
 OUTPUT IS FULLY DETERMINISTIC: no address, no timestamp, no randomness, no locale-dependent
 formatting, literal loop bounds throughout, and main returns 0, inside the 0-125 range the suite
 requires so that no exit status is truncated by the operating system. Every input is a literal in
@@ -88,10 +90,10 @@ needed; the corpus has exactly two header exceptions, area 07's stdarg.h and the
 bundled-header probe in area 12.
 THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
 is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
--Wconversion -Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers,
-and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
--fno-sanitize-recover=all. Both gates are reference-compiler-only and are never applied to bcc, so
-requirement 3's shared-flag discipline is untouched.
+-Wconversion -Wsign-conversion -Wshadow -Werror in the single native compile-only invocation the
+suite's warning gate makes, and it builds and runs clean under the sanitizer gate
+-fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are reference-compiler-only and
+are never applied to bcc, so requirement 3's shared-flag discipline is untouched.
 END
 impl_defined_notes <<END
 This record narrows nothing. All four targets, all three optimization levels and all three
@@ -104,11 +106,11 @@ from a constant expression, so the answer comes from the constant evaluator, and
 volatile-qualified operands, which no implementation may read at translation time, so that
 answer comes from the code generator. Every fold_ line is printed immediately above the runtime_
 line that recomputes the same value, and their equality is the two-variant assertion this program
-exists to make. The mechanism was verified at instruction level rather than assumed: at
--O2 the shape volatile int x = 7; return x * 6; has to store the object, load it back and do the
-arithmetic -- gcc 13.4.0 emits it strength-reduced, as a lea and an add rather than an imul,
-which is still the backend computing the product -- where the non-volatile form collapses to a
-single immediate move of 42. Without the runtime half, optimization substitutes
+exists to make. The mechanism rests on the language rather than on any compiler's habits: an access
+to a volatile object is an observable side effect, so no implementation may satisfy the runtime half
+by folding the value at translation time -- it must store the object, load it back and do the
+arithmetic, whatever instructions it chooses for the arithmetic itself -- where the non-volatile form
+may collapse to a single immediate. Without the runtime half, optimization substitutes
 the folder's answer for the backend's and a code-generation defect escapes detection entirely
 while the suite still reports a pass. With it, a divergent fold_ line accuses the constant
 evaluator, a divergent runtime_ line accuses the backend, and a pair that disagrees with itself
@@ -166,9 +168,8 @@ value, so this is a real dependence rather than a formality, and it is stated he
 waved away. It is kept in the comparison for the same reason the shift is: the complement of a
 signed value is a printed value the constant evaluator and the code generator have to agree on
 bit for bit, which is the agreement this program exists to check -- and the runtime twin really
-does reach the backend, which was checked rather than assumed: for the volatile form gcc 13.4.0
-emits notl on x86-64 and i686, mvn on AArch64 and not on RISC-V 64. Every target this suite
-supports is two's complement, and C23 6.2.6.2 has since made that the only permitted
+does reach the backend, because its operand is volatile and so may not be folded. Every target this
+suite supports is two's complement, and C23 6.2.6.2 has since made that the only permitted
 representation, so the dependence is safe on all four backends and cross-backend comparison of
 these two lines is sound as it stands. Nothing else in the program touches the representation:
 no value is produced by overflow, no object representation is inspected byte by byte, and no

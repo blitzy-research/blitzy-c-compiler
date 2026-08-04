@@ -3,10 +3,11 @@
    and the sibling record `004_long_double_target_restricted.expected` is committed beside this
    source and implements it exactly: `targets` names all four, `opt_levels` names all three,
    `oracle_a` and `oracle_c` are enabled, `oracle_b` alone is disabled with its measured reason
-   recorded, and a single golden stdout - measured on this branch and byte-identical across all
-   twelve cells - is what oracle (c) holds every cell to.  The cells resolve no VERDICT on this
-   branch, and the record is not the reason: there is no compiler under test here, so the
-   flag-capability probe is recorded UNPERFORMED and blocks every area unconditionally.
+   recorded, and a single golden stdout - byte-identical across all twelve cells - is what
+   oracle (c) holds every cell to.  The record also carries the active expected-divergence
+   marker XD-TYPE-LONGDOUBLE-001, class stdout_mismatch, scoped to oracle_b across all targets
+   and all optimization levels, which is what keeps the one disabled arm auditable in
+   EXPECTED_DIVERGENCES.md rather than silent.
 
    WHY THIS PROGRAM EXISTS.  Constraint C3 of the suite's brief forbids dropping a language
    feature because testing it is difficult, and requires that where a feature genuinely cannot
@@ -48,12 +49,13 @@
    says WHICH comparison is not made.  The marker says on whose authority, under which identifier
    and over which cells -- and it is the identifier that puts the exclusion into
    `EXPECTED_DIVERGENCES.md`, where the register's bidirectional audit resolves every marker against
-   an entry and every entry against a marker.  An earlier form of this record had the toggle and the
-   reason but no marker, and the consequence was precise rather than cosmetic: the run still reported
-   XFAIL, so the verdict claimed the authority of a documented expected divergence while the audit
-   could not see it, no identifier existed for a report row to cite, and no basis had been resolved
-   against any committed document.  That is a silent exclusion in the clothes of a documented one.
-   A record that disables an oracle without a marker scoping it is now rejected at parse time.
+   an entry and every entry against a marker.  A toggle and a reason WITHOUT a marker would not be
+   equivalent, and the difference is precise rather than cosmetic: the run would still report XFAIL,
+   so the verdict would claim the authority of a documented expected divergence while the audit could
+   not see it, no identifier would exist for a report row to cite, and no basis would have been
+   resolved against any committed document.  That is a silent exclusion in the clothes of a
+   documented one, and it is why a record that disables an oracle without a marker scoping it is
+   rejected at parse time.
 
    What the marker does NOT claim.  Not that the four backends disagree today -- they do not; every
    printed value was chosen to be exact in all three representations, and all twelve cells were
@@ -182,10 +184,9 @@
    input is a literal in this file: nothing is opened, nothing is read from the environment or the
    command line.  The program prints EIGHTEEN lines -- six folded, six runtime, three equivalence
    lines covering all twenty-three folded/runtime pairs one column each, the exactness
-   precondition, its significand probe, and the one width relation -- and exits 0.  An earlier form
-   printed twenty, because two further lines restated the conversion and comparison equivalence
-   columns verbatim under different labels; duplicated columns add no coverage while making the
-   stated line count wrong, so they were removed rather than renamed. */
+   precondition, its significand probe, and the one width relation -- and exits 0.  Each equivalence
+   column appears exactly once: restating a column under a second label would add no coverage while
+   making the stated line count wrong. */
 int printf(const char *, ...);
 
 /* The two structural preconditions the printable surface rests on, pinned at compile time
@@ -197,8 +198,7 @@ int printf(const char *, ...);
    WHAT A WIDTH DOES AND DOES NOT PROVE.  `sizeof(double) == 8` establishes that the type
    occupies eight bytes and nothing more: it does not by itself establish the radix, the
    significand width, or that the format is IEEE binary64 at all, since eight bytes could in
-   principle hold some other encoding.  An earlier form of this program's comment claimed
-   otherwise, and the claim was wrong.  The properties the round-trip guards below actually
+   principle hold some other encoding.  The properties the round-trip guards below actually
    depend on -- a radix-2 significand of exactly 53 bits -- are therefore established WHERE THEY
    CAN BE, at run time, by the `double_significand` line in `main`: a floating comparison is not
    an integer constant expression and C11 6.6p6 keeps it out of a static assertion, so the

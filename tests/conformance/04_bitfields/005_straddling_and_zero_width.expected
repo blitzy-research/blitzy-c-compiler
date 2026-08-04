@@ -98,8 +98,8 @@ containing structure carries (C11 6.7.2.1p11, and 6.7.2.1p15 for the padding).  
 the standard derives a four-byte allocation unit from a four-byte int, so the values below
 CANNOT be deduced from int's width, and this record does not claim they can.
 
-What supports them is measurement.  On all four supported targets, with gcc 13.3.0 and
-re-verified on this branch with gcc 13.4.0, the following were observed to agree exactly:
+What supports them is measurement.  On all four supported targets, with each target's own
+reference driver, the following were observed to agree exactly:
 
   - the allocation unit for a bitfield declared on an int base type is FOUR BYTES;
   - allocation within a unit proceeds from the LEAST SIGNIFICANT BIT UPWARD, and all four
@@ -109,13 +109,12 @@ re-verified on this branch with gcc 13.4.0, the following were observed to agree
     9-bit c occupies bits 8 through 16 and its 15-bit d occupies bits 17 through 31, which
     is what makes its printed byte image a non-trivial fact;
   - a field that does NOT fit in the remainder of the current unit STARTS A FRESH UNIT
-    rather than straddling the unit boundary.  This is the opposite of what an earlier form
-    of this record asserted, and the corpus already depends on the correct reading: struct
+    rather than straddling the unit boundary, and the corpus depends on that reading: struct
     nostraddle declares 20 + 20 + 24 bits, which would occupy 8 bytes if the unit boundary
     could be straddled and occupies 12 because it cannot -- and 12 is what the golden record
-    below states.  Independently re-measured on this branch with a two-field probe,
-    { a : 30; b : 4; }, which is 8 bytes on all four targets rather than the 5 or 8 a
-    straddling rule would give.  The struct's NAME records the same fact.
+    below states.  Independently measured with a two-field probe, { a : 30; b : 4; }, which is
+    8 bytes on all four targets rather than the 5 a straddling rule would give.  The struct's
+    NAME records the same fact.
   - each structure below carries no padding beyond the bytes the units themselves occupy, so
     its size is exactly the number of allocation units it spans -- 4 for a single 32-bit
     cover, 8 for the 64-bit cover, 12 for the three units nostraddle needs and for the three
@@ -147,12 +146,11 @@ the same-target reference capture beside the two it compared, and its manifest s
     finding, in which case the target's psABI is authoritative and is what a maintainer
     reads next.
 
-An earlier form of this record asserted flatly that a cross-backend divergence here is a
-genuine defect rather than an implementation-defined difference, while FINDINGS.md described
-a triage procedure under which same-target agreement makes it an ABI observation.  Both were
-reasoning correctly about the same distinction and neither DECIDED it, so the two documents
-could be read against each other.  The decision now lives in one place, in code, and both
-documents point at it.
+Asserting flatly that a cross-backend divergence here is a genuine defect rather than an
+implementation-defined difference would sit badly beside FINDINGS.md's triage procedure, under
+which same-target agreement makes it an ABI observation: both statements reason correctly about
+the same distinction and neither DECIDES it, so the two documents could be read against each
+other.  The decision therefore lives in one place, in code, and both documents point at it.
 
 Signed straddling fields are observed through read-back of their values rather than through a
 byte image, because the bit pattern of a negative value is a representation detail rather than a

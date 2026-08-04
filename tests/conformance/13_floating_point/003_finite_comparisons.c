@@ -62,11 +62,10 @@
  * property of the operands rather than a result the harness has recorded.  The
  * sibling record 003_finite_comparisons.expected acts on that property: the
  * exactness above is why it needs no target restriction, enables all three
- * oracles and carries no expected-divergence marker, and its golden stdout was
- * measured on this branch and is byte-identical across all twelve cells.  The
- * cells resolve no VERDICT yet, but not for want of a record: with no compiler
- * under test on this branch the flag-capability probe is recorded UNPERFORMED
- * and blocks every area unconditionally.  The widest floating type is
+ * oracles and carries no expected-divergence marker, and its golden stdout is
+ * byte-identical across all twelve cells, which is what lets oracle (b) compare
+ * the four backends with no narrowing and oracle (c) hold those bytes as the
+ * record.  The widest floating type is
  * deliberately absent: its representation differs across the four targets
  * (measured 16, 12, 16 and 16 bytes, x87 80-bit versus IEEE binary128), which is
  * 004_long_double_target_restricted.c's subject, and naming it here would
@@ -134,7 +133,10 @@
  * any kind, no division, no shift, and no conversion that could be out of range;
  * the one conversion present, float to double, is a widening and is exact.
  * Nothing is type-punned through a pointer or a union, so nothing depends on
- * representation; no pointer is formed at all; no object is modified twice
+ * representation; the only pointers formed anywhere are the `const char *` each
+ * format-string literal decays to in its printf call, and none of them is
+ * subjected to arithmetic or dereferenced by this translation unit; no object is
+ * modified twice
  * between sequence points; every volatile object is initialized at its
  * declaration, so no uninitialized storage is read; and every result is stored
  * in its own named variable before it is printed, so no call receives a
@@ -167,9 +169,7 @@
  * by the test rather than the compiler.  float.h is bundled but is deliberately
  * not named either: no FLT_ or DBL_ characteristic is needed here, and the
  * bundled-header probe is 12_preprocessor/003_bundled_header_inclusion.c's
- * subject.  No member of the prohibited set is spelled verbatim anywhere above,
- * so a mechanical audit of this file for a forbidden header stays free of a
- * comment that would otherwise read as a hit.
+ * subject.
  */
 
 int printf(const char *, ...);

@@ -43,8 +43,10 @@ identifier 0 is never used because it could not be distinguished from an
 unwritten slot.
 
 All arithmetic is on int values of small magnitude, so no signed overflow is
-possible. There are no shifts, no pointer arithmetic and no type punning,
-therefore no aliasing violation and no dependence on padding bytes. The only
+possible. There are no shifts and no type punning, therefore no aliasing violation and no
+dependence on padding bytes. The only pointer arithmetic is the arithmetic the language
+performs for a subscript: every index into trace is a counter provably inside its bound,
+and no pointer value is printed, converted to an integer or compared. The only
 character data is a string literal label passed as const char *; no character
 value is ever printed as a number. The for loop converges at i equal to j equal
 to five, and the while and do-while loops are bounded by i less than three with

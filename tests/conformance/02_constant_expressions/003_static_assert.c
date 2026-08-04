@@ -125,14 +125,25 @@ _Static_assert(_Alignof(char) <= sizeof(char) && _Alignof(short) <= sizeof(short
 _Static_assert(FOLD_SUM == 14, "a macro-supplied constant expression folds to 14");
 _Static_assert(FOLD_SHIFT == 64, "a shift identity within range folds to 64");
 _Static_assert(FOLD_WIDE == 65536, "a wide constant division folds to 65536");
-/* THE ONE EXECUTION-CHARACTER-SET FACT THIS PROGRAM OBSERVES, PINNED HERE.
+/* THE ONE EXECUTION-CHARACTER-SET CODE THIS PROGRAM COMPUTES, PINNED HERE.
  *
  * Exactly two of the printed lines carry a character's numeric code --
  * fold_char_a, which prints (int)'A' from a constant expression, and run_char_a,
  * which prints the same value back out of a volatile signed char.  Nothing else
- * in this file observes a character's value: msg is measured only by size and by
+ * in this file COMPUTES a character's value: msg is measured only by size and by
  * terminator offset, probe_char only by element size, and no line renders a
- * literal.  So a single assertion closes the whole accounting.
+ * literal of the program's own.  One assertion therefore closes the accounting for
+ * every character code this program computes.
+ *
+ * It does not, and cannot, account for the label bytes.  Every output line begins
+ * with a literal label -- fold_sum=, run_char_a= and the rest -- and those bytes
+ * are execution-character-set data too.  They are not asserted here because they
+ * are not computed: printf copies them through unchanged, and both sides of every
+ * comparison translate the same source with the same basic character set, so a
+ * character-set difference would move whole labels rather than change one number,
+ * on both sides identically.  That is a property of the environment, not of the
+ * compiler under test, and it is why the assertion below is scoped to the code and
+ * this paragraph is scoped to the labels.
  *
  * It is needed rather than decorative.  C11 5.2.1 leaves the members and codes of
  * the execution character set implementation-defined, and the explicit signed

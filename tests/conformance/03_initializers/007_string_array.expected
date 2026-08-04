@@ -76,19 +76,16 @@ operating system. Every input is a literal in this file: nothing is read from th
 clock, the file system or the network, and iteration order is fixed by literal bounds, so every cell
 is reproducible from this source and this record alone.
 No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
-bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no standard
-I/O header (docs/project-guide.md line 212), so naming one would fail on the bcc side of oracle (a)
-while succeeding on the reference side -- a spurious divergence caused by the test rather than by a
-compiler. This area is granted no header exception; the corpus has exactly two, area 07's stdarg.h
-and the dedicated bundled-header probe in area 12.
+That is the corpus-wide rule stated in tests/conformance/README.md, whose two sanctioned exceptions
+are area 07's stdarg.h and area 12's bundled-header probe; area 03 takes neither.
 This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
 under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under the
-sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
-reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched. The unbraced string literals initializing the two grids' inner arrays are brace elision,
-and they are gate-clean unaided because a string literal may initialize a character array without
-braces (C11 6.7.9p14), so no pragma is needed here.
+-Werror in the single native compile-only invocation the suite's warning gate makes, and it builds
+and runs clean under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both
+gates are reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag
+discipline is untouched. The unbraced string literals initializing the two grids' inner arrays are
+brace elision, and they are gate-clean unaided because a string literal may initialize a character
+array without braces (C11 6.7.9p14), so no pragma is needed here.
 END
 impl_defined_notes <<END
 This record narrows nothing: all four targets, all three optimization levels and all three
@@ -101,27 +98,29 @@ EXECUTION CHARACTER SET, PINNED AT TRANSLATION TIME. This program prints the num
 characters in its literals, and C11 5.2.1 leaves those values to the implementation -- nothing in
 the standard says 'a' is 97. All four supported targets were measured to use ASCII, and the source
 pins the characters it prints with two _Static_assert declarations: one conjunctive assertion naming
-fifteen letters (a, b, c, d, e, h, i, l, o, r, t, w, x, y and z at their ASCII codes) and one for the
-simple escape '\n' == 10. An implementation with a different execution character set therefore fails
-to TRANSLATE rather than printing different numbers that an oracle would have to attribute to a
-compiler defect. Verified by negative test: perturbing one asserted value makes translation stop with
-the assertion's own message.
-THE PINNING COVERS FIFTEEN OF THE SEVENTEEN LETTERS THIS PROGRAM PRINTS, NOT ALL SEVENTEEN, and the
-gap is stated here rather than rounded up, because a guarantee claimed wider than it is costs a
-reader more than one described exactly. 'f' (102) and 'g' (103) are printed and are not named by the
-conjunction; they occur only in the two automatic-duration twins, l_exact_u from "def" at index 2 and
-l_room from "gh" at index 0, which is why they are easy to miss. Neither is implied by its
-neighbours: C11 5.2.1 guarantees contiguity only for the digits, so 'e' == 101 and 'h' == 104 pin
-nothing between them. The residual is bounded and reaches no oracle in this environment -- all
-four targets were measured ASCII and all twelve configurations printed 102 and 103 -- but on a
-hypothetical non-ASCII target this program would translate and then print two byte values that
-differed for a conforming reason, and l_exact_u[2] and l_room[0] are exactly the two golden lines
-where that would surface. Note also that the assertion's own message says "every letter this program
-prints", which claims more than the conjunction delivers; this field is the accurate statement of the
-two. Closing the gap belongs in the program, by adding 'f' == 102 && 'g' == 103 to the conjunction --
-a change that alters no output at all, because a _Static_assert emits none -- and it must revise this
-paragraph and that message in the same change. It is recorded rather than performed here because
-the program is not this record's to edit and the residual blocks nothing.
+seventeen letters (a, b, c, d, e, f, g, h, i, l, o, r, t, w, x, y and z at their ASCII codes) and one
+for the simple escape '\n' == 10. An implementation with a different execution character set
+therefore fails to TRANSLATE rather than printing different numbers that an oracle would have to
+attribute to a compiler defect. Verified by negative test: perturbing one asserted value makes
+translation stop with the assertion's own message.
+THE PINNING IS EXHAUSTIVE -- ALL SEVENTEEN LETTERS THIS PROGRAM PRINTS ARE NAMED, and the count is
+spelled both here and in the assertion's own message so that the claim can be checked against the
+list rather than trusted. The seventeen are a, b, c, d, e from g_exact_u, g_room_u, g_extra_u,
+g_braced, g_concat and g_desig; x, y, z from g_exact_s and g_room_s; h, i from g_plain; h, e, l, o,
+w, r, d from the two grids; l, i, t through g_ptr; d, e, f from l_exact_u; and g, h from l_room.
+'f' (102) and 'g' (103) are the two an author is most likely to miss, and an earlier form of this
+program did miss them: they occur ONLY in the two automatic-duration twins declared inside main,
+l_exact_u from "def" at index 2 and l_room from "gh" at index 0, and nowhere in the file-scope
+literals. Neither is implied by its neighbours: C11 5.2.1 guarantees contiguity only for the digits,
+so 'e' == 101 and 'h' == 104 pin nothing between them and each had to be named explicitly. Adding
+them altered no output at all, because a _Static_assert emits none, so the golden block below is
+unchanged by the correction; what changed is that the two golden lines l_exact_u[2]=102 and
+l_room[0]=103 are now backed by a translation-time guarantee instead of resting on the measured fact
+that all four targets are ASCII. The assertion's message was corrected in the same edit, from a claim
+about "every letter this program prints" that the fifteen-letter conjunction did not deliver to the
+counted claim the seventeen-letter conjunction does, so the message, this paragraph and the
+conjunction now say the same thing. There is no residual: no printed character's value is
+unpinned, and any literal added later must extend the conjunction and its count together.
 The two NUMERIC escapes in g_escapes need no assertion -- C11 6.4.4.4p7 fixes \x41 and \102 at 65
 and 66 by their numeric value regardless of charset, which is precisely why they are spelled
 numerically -- whereas the simple escape \n does need one, because 6.4.4.4p4 gives it a
@@ -170,16 +169,16 @@ higher level either path may be folded into immediate operands, so both are comp
 levels rather than at one and their answers are printed separately. A volatile operand would add
 nothing, because the subject here is what an initializer produces rather than what an operator
 computes.
-MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
--O1 and -O2 -- twelve configurations -- and every one produced these 87 lines byte-identically with
-exit status 0, which is why oracle (b) compares this program's targets against each other without
-any narrowing and why oracle (c) can hold these bytes as the golden record. What would legitimately
-break that is a target whose execution character set is not ASCII, such as one using EBCDIC: it
-would print different byte values without being defective, and that would be an
-implementation-defined divergence to record as an expected divergence with this record's target list
-narrowed and the reason stated in this field -- never left to surface as a finding against a backend
-that did nothing wrong, and never resolved by dropping the string-literal initializer coverage
-this program exists to provide.
+WHY ALL THREE ORACLES ARE ENABLED WITH NO NARROWING, AND WHAT WOULD LEGITIMATELY BREAK IT. Every
+line printed below is target-invariant by the normalization argued above, so the same bytes are the
+right answer on each of the four backends; that is what makes cross-backend comparison sound and
+lets oracle (c) hold these bytes as the golden record. What would legitimately break that is a
+target whose execution character set is not ASCII, such as one using EBCDIC: it would print
+different byte values without being defective, and that would be an implementation-defined
+divergence to record as an expected divergence with this record's target list narrowed and the
+reason stated in this field -- never left to surface as a finding against a backend that did nothing
+wrong, and never resolved by dropping the string-literal initializer coverage this program exists to
+provide.
 END
 expected_stdout    <<END
 g_exact_u[0]=97

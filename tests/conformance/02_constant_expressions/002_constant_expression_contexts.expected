@@ -6,7 +6,7 @@
 
 program            = 002_constant_expression_contexts
 area               = 02_constant_expressions
-description        = The four contexts C requires an integer constant expression in -- array bounds, case labels, bitfield widths and enumerator initializers -- each observed at run time and paired with a volatile-operand twin that recomputes the same value
+description        = Four integer-constant-expression contexts exercised here -- file-scope array bounds, case labels, bit-field widths and enumerator values -- each observed at run time and paired with a volatile-operand twin that recomputes the same value, with _Static_assert controlling expressions covered as a further context by the same source
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -75,8 +75,12 @@ go through a compiler support routine that is not this program's subject; eight 
 reach exactly 2^33, so the quotient is 8 and the accumulated dividend is 8589934592 -- both printed
 above, and both nowhere near the long long maximum, whose 64-bit minimum width means no overflow is
 possible even on the 32-bit target. Plain long is never used.
-NO POINTER IS FORMED ANYWHERE IN THIS PROGRAM and there is no pointer arithmetic beyond array
-subscripting, so there is no aliasing rule to break, no one-past-the-end question to answer, no
+NO POINTER VALUE IS PRINTED, COMPARED OR CONVERTED, AND EVERY SUBSCRIPT IS PROVABLY IN BOUNDS. The
+pointer arithmetic the language performs for a[i] is present wherever an array is subscripted, and
+so are the pointers the format strings decay to; what does not happen is any of it escaping an
+object. Every subscript is a literal or a loop counter bounded by the same sizeof expression that
+declared the array, no address of an object is taken, no one-past-the-end pointer is dereferenced,
+and no pointer value reaches stdout or a comparison. So there is no aliasing rule to break, no
 object representation to inspect, no padding byte to observe and no dependence on the relative
 addresses of unrelated objects. Every object is accessed only through its own declared type, and the
 volatile struct is read and written only through its own members.
@@ -91,12 +95,15 @@ read is the optimization barrier, and the pattern keeps every full expression to
 and leaves every printf argument free of side effects, so the count and order of the volatile
 accesses is fixed by statement boundaries rather than left unspecified. Every volatile increment --
 the five walk counters -- stands alone in its own statement, and the loop counters compared against a
-sizeof expression are read, not modified, inside the controlling expression. The two switch dispatch
-lines are the one place worth naming: their two arguments are a constant-argument call and a
+sizeof expression are read, not modified, inside the controlling expression. The FOURTEEN switch
+dispatch lines -- seven dense (dense_sel0 through dense_sel5 and dense_default) and seven sparse
+(sparse_sel_minus5, sparse_sel9, sparse_sel42, sparse_sel100, sparse_sel1024, sparse_sel4000 and
+sparse_default) -- are the one place worth naming: each passes a constant-argument call and a
 volatile-argument call to the SAME PURE function, which only switches on its parameter and returns,
-so exactly one argument has an effect -- the volatile read -- and the other cannot be affected by it
-in either evaluation order, which is what makes those lines independent of the unspecified order of
-argument evaluation. No object is modified twice between two sequence points.
+so exactly one of the two arguments has an effect -- the volatile read -- and the other cannot be
+affected by it in either evaluation order, which is what makes every one of those lines independent
+of the unspecified order of argument evaluation. No object is modified twice between two sequence
+points.
 NO CONSTANT COMMA EXPRESSION APPEARS. A comma expression whose left operand has no side effect is
 rejected by -Werror=unused-value under the default gate, and folding through the comma operator is
 the subject of 006_conditional_and_comma_folding.c, which supplies side-effecting operands for it.
@@ -118,10 +125,11 @@ needed; the corpus has exactly two header exceptions, area 07's stdarg.h and the
 bundled-header probe in area 12.
 THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
 is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
--Wconversion -Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers,
-and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
--fno-sanitize-recover=all run natively to completion. Both gates are reference-compiler-only and are
-never applied to bcc, so requirement 3's shared-flag discipline is untouched.
+-Wconversion -Wsign-conversion -Wshadow -Werror in the single native compile-only invocation the
+suite's warning gate makes, and it builds and runs clean under the sanitizer gate
+-fsanitize=undefined,address -fno-sanitize-recover=all run natively to completion. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
 END
 impl_defined_notes <<END
 This record narrows nothing. All four targets, all three optimization levels and all three
@@ -191,14 +199,19 @@ a jump table or a comparison chain -- is at its discretion and is a property of 
 rather than of the printed result. The claim under test is that each selector value selects its own
 label and yields its own result, whatever code is emitted and however that code differs between
 targets or between optimization levels.
-WHAT WOULD LEGITIMATELY BREAK THAT, AND HOW IT MUST THEN BE HANDLED. A conforming target with a
-different sizeof(int) would print a different sparse_sel4000 line and a different
-enum_shifted/bound_wide pair without being defective. That is an implementation-defined
-divergence rather than a compiler defect, and it must then be recorded as an expected divergence
-with this record's target list narrowed and the reason stated in this field -- never left to
-surface as a finding against a backend that did nothing wrong, and never resolved by removing the
-sizeof-derived case label, which is one of the constant-expression contexts requirement 2 asks
-this program to cover.
+WHAT WOULD LEGITIMATELY BREAK THAT, AND HOW IT MUST THEN BE HANDLED. Exactly ONE printed line
+depends on sizeof(int): sparse_sel4000, whose selector is the constant expression
+(int)sizeof(int) * 1000 and is therefore 4000 only because int is four bytes on all four supported
+targets. A conforming target with a different sizeof(int) would print a different sparse_sel4000
+line without being defective. Nothing else here shares that dependence, and two lines that look as
+though they might do not: enum_shifted is CTX_SHIFTED, which is 1 << (WIDTH_BASE + 1) = 16 and is
+built from literals alone, and bound_wide is sizeof wide / sizeof wide[0], an element COUNT that is
+8 for any element size whatsoever. Should sparse_sel4000 ever differ, it is an implementation-defined
+divergence rather than a compiler defect, and it must then be recorded as an expected divergence with
+this record's target list narrowed and the reason stated in this field -- never left to surface as a
+finding against a backend that did nothing wrong, and never resolved by removing the sizeof-derived
+case label, which is one of the constant-expression contexts requirement 2 asks this program to
+cover.
 EXECUTION CHARACTER SET: NOT ENGAGED, VERIFIED RATHER THAN ASSERTED. C11 5.2.1 leaves the
 members of the execution character set and their codes implementation-defined, so a program
 that printed a character's numeric code, or rendered a literal as bytes, would owe an

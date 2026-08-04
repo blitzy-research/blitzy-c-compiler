@@ -1921,7 +1921,7 @@ impl Outcome {
         // `symbolize_roots` second, and it is the correction the disclosure finding asks for. An
         // outcome's own `Display` is what a failing area prints to the console, what a verdict row
         // carries into a report, and what a finding manifest quotes — three sinks that travel far
-        // beyond the machine that produced them. Every one of them previously carried the absolute
+        // beyond the machine that produced them. Left unelided, each would carry the absolute
         // location of this checkout, which names a continuous-integration workspace or an agent
         // clone. Applying the substitution *here* rather than at each sink is what makes the
         // guarantee hold: an outcome cannot exist carrying an unelided root, so no present or future
@@ -2307,12 +2307,11 @@ fn source_tree_overlap_defect(resolved: &Path) -> Option<String> {
             // default one does — so being inside it is not the answer on its own. Which *part* of it is
             // the answer, and that is a separate question with a separate rule.
             //
-            // An earlier form of this function simply continued here, and the consequence was not
-            // theoretical: `CARGO_TARGET_DIR=<package>/src/scratch` was accepted, and the roots' own
-            // per-run wholesale purge would then have been aimed inside the compiler's source tree.
-            // Constraint C1 forbids this suite from modifying that tree at all, so a configuration
-            // that lets it *delete* part of it is the one path by which a test could violate C1
-            // outright.
+            // Simply continuing here would not be a theoretical mistake: `CARGO_TARGET_DIR=<package>/
+            // src/scratch` would be accepted, and the roots' own per-run wholesale purge would then be
+            // aimed inside the compiler's source tree. Constraint C1 forbids this suite from modifying
+            // that tree at all, so a configuration that lets it *delete* part of it is the one path by
+            // which a test could violate C1 outright.
             if reference == package {
                 return in_package_subtree_defect(&candidate, &package);
             }
@@ -4920,15 +4919,14 @@ pub fn machine_fingerprint() -> String {
 ///   substitutes, and `commands.sh` already parameterizes every tool path as a shell variable. The
 ///   same holds for a credential: every value [`redact_secrets`] recognises is a value **this
 ///   process** was handed.
-/// - **Portable, and about any machine.** An earlier form of this function had only the exact half,
-///   and that made it a check about the wrong thing. A curated directory is validated on every
-///   machine that runs the suite, and a directory produced on machine A and audited on machine B
-///   passes the exact half trivially: B's roots are not in the text, and A's secrets were never in
-///   B's environment. The check therefore read as an audit of portability while actually asserting
-///   only "not produced here" — the strongest guarantee it could give being the one case where it
-///   was least needed. So a second, machine-independent half recognises the *shapes* private
-///   locations and credentials take on **every** machine, which is the half that still bites when
-///   the producing machine is somebody else's.
+/// - **Portable, and about any machine.** The exact half alone would be a check about the wrong thing.
+///   A curated directory is validated on every machine that runs the suite, and a directory produced
+///   on machine A and audited on machine B passes the exact half trivially: B's roots are not in the
+///   text, and A's secrets were never in B's environment. Such a check would read as an audit of
+///   portability while actually asserting only "not produced here" — the strongest guarantee it could
+///   give being the one case where it is least needed. So a second, machine-independent half
+///   recognises the *shapes* private locations and credentials take on **every** machine, which is
+///   the half that still bites when the producing machine is somebody else's.
 ///
 /// A digest of the producing machine's roots is recorded in each finding's `MANIFEST.txt`, so a
 /// curated directory also states whether the exact half applied when it was committed — see

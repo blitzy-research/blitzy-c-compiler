@@ -47,10 +47,19 @@ slot renames a whole group and is just as visible as a wrong value would be.
   rather than leaving it to the default argument promotion is also what keeps the program clean
   under the audit gate's -Wconversion, from which this area sanctions no deviation.
 - No index is out of range and no pointer past the end of an object is formed. Both staging
-  loops run from 0 to 13 over arrays of fourteen elements. No pointer arithmetic is performed
-  at all; the only pointers in the program are the format strings and the const char * returned
-  by variant_tag, which points into a string literal of static storage duration and therefore
-  stays valid for the lifetime of the program.
+  loops run from 0 to 13 over arrays of fourteen elements, and every one of the four arrays --
+  vdbl, vflt, plain_d and plain_f -- is subscripted only within that range. Those subscripts are
+  the program's pointer arithmetic, and they are counted rather than denied: E[k] is defined as
+  *(E + k), so each one decays its array to a pointer to the first element and adds an index the
+  loop has already bounded below the declared extent of fourteen, which means every derived
+  pointer points at an element of the array it came from and is dereferenced only there. The
+  program's other pointers are the format strings, the const char * returned by variant_tag --
+  which points into a string literal of static storage duration and therefore stays valid for the
+  lifetime of the program -- and the two volatile function pointers take_double15_p and
+  take_float15_p, which are objects of static storage duration initialised to the addresses of
+  two functions defined in this same translation unit and never reassigned, so each is re-read at
+  the point of call and always designates the function it was initialised with. No pointer
+  representation is ever printed and no pointer is converted to an integer.
 - No read of uninitialised storage. Every element of both volatile arrays and the volatile tag
   are initialised in their own declarations and written nowhere afterwards, and every plain
   staging destination is written by its loop or its assignment before it is ever read.
@@ -73,18 +82,38 @@ Staging costs the test nothing, which is why it is the right answer rather than 
 value that arrived through a volatile load stays opaque to the optimizer, so every argument is
 still materialised at run time and still marshalled through the ABI.
 
-THE CALL BOUNDARY IS ENFORCED RATHER THAN HOPED FOR, and in pure ISO C. Both callees are reached
+THE CALL BOUNDARY IS MADE HARD TO OPTIMIZE AWAY, IN PURE ISO C -- WHICH IS NOT THE SAME AS BEING
+GUARANTEED BY ISO C, and the difference is stated rather than glossed. Both callees are reached
 through a volatile-qualified function pointer instead of by name, because a fixed-arity static
 callee may legally be inlined at -O1 and -O2 and an inlined callee marshals nothing at all --
 the floating argument path this program exists to exercise would then never be crossed, and the
-register assignments argued above would be claims about code that was never emitted. A volatile
-pointer must be re-read at the point of call, so the designated function is unknown and the call
-is genuinely indirect; and because the address escapes into storage, the signature may not be
-cloned or scalarised either. An inlining attribute would have been shorter, but the documented
-attribute set for the compiler under test is packed, aligned, section, unused, deprecated,
-visibility and format (docs/technical-specifications.md line 506), so an attribute would risk a
-divergence caused by the test and would import an extension into an area whose subject is the
-calling convention.
+register assignments argued above would be claims about code that was never emitted.
+What the standard does require of the volatile pointer: an access to a volatile object is a side
+effect belonging to the observable behaviour an implementation must reproduce (C11 5.1.2.3p2 and
+p6), and C11 6.7.3p7 requires an expression referring to such an object to be evaluated strictly
+according to the abstract machine's rules -- so the pointer is RE-READ at each point of call and
+control goes to whatever function that load produced. What the standard does NOT require: that
+the transfer arrives at the callee's original entry. A conforming implementation may introduce a
+specialised clone, scalarise a copy of the body, or guard-devirtualize -- test the loaded pointer
+against a known function and take a specialised path when it matches -- and still honour the
+loaded value, since the observable behaviour is identical. An earlier form of this paragraph said
+the signature "may not be cloned or scalarised either"; that is stronger than the standard
+allows and is withdrawn.
+WHAT IS ACTUALLY VERIFIED, ON NAMED ARTIFACTS. Measured on the committed source with gcc 13.4.0
+at -O2 on all four reference drivers: take_double15 and take_float15 are each still emitted out
+of line under their own labels; no specialised clone appears anywhere, zero symbols carrying
+.constprop, .isra or .part.; and each of the four call sites per target is a genuine indirect
+transfer -- call *%reg on x86_64 and i686, blr on aarch64, jalr on riscv64. That is evidence
+about the reference compiler's output, not a property every compiler under test must have: one
+that devirtualized through a specialised entry could print the same bytes without crossing the
+boundary argued above, and this program would not detect it. Closing that gap would take a
+per-cell STATIC check of the artifact the compiler under test emitted, which is a harness
+capability this suite does not have; until then the claim is exactly what the measurement
+supports and no more.
+An inlining attribute would have been shorter, but the documented attribute set for the compiler
+under test is packed, aligned, section, unused, deprecated, visibility and format
+(docs/technical-specifications.md line 506), so an attribute would risk a divergence caused by
+the test and would import an extension into an area whose subject is the calling convention.
 
 No header is included. bcc ships no stdio.h -- its bundled set is the nine required freestanding
 headers plus a bonus stdatomic.h (docs/technical-specifications.md line 19 and lines 202-214) --
@@ -95,12 +124,12 @@ neither of the suite's two sanctioned header exceptions. main returns 0, inside 
 0-125 range. Nothing is allocated; no socket, file, environment variable, clock or random source
 is touched; and every input is a literal in the source.
 
-Verified empirically on this branch with gcc 13.4.0 and qemu-user 10.1.0: the default seven-flag
-warning gate (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces
-zero diagnostics at -O0, -O1 and -O2; the sanitizer gate (-fsanitize=undefined,address
--fno-sanitize-recover=all) runs to completion with empty output and exit status 0; and all twelve
-reference cells of the declared matrix produce byte-identical stdout with exit status 0 and an
-empty standard error.
+Verified rather than asserted: the default seven-flag warning gate (-Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror) produces zero diagnostics in the single native
+compile-only invocation the suite makes of it; the sanitizer gate (-fsanitize=undefined,address
+-fno-sanitize-recover=all) runs to completion with empty output and exit status 0 in its one
+instrumented native build; and all twelve reference cells of the declared matrix produce
+byte-identical stdout with exit status 0 and an empty standard error.
 END
 impl_defined_notes <<END
 This area exists because the four backends implement four different application binary
@@ -157,18 +186,23 @@ output are handled by construction instead:
 5. The format set is exactly %s and %.4f. Every float reaching the variadic printf carries an
    explicit (double) cast, so each conversion specification matches its argument's type after
    the default argument promotions; %d, %ld, %lu, %zu and %p never appear.
-6. No aggregate is declared, passed or returned, so no aggregate size, alignment or padding
-   difference between the targets can affect this program at all, and no member is read back.
+6. No struct or union is declared, passed or returned, so no record layout, member offset or
+   padding difference between the targets can affect this program at all, and no member is read
+   back. The four array objects vdbl, vflt, plain_d and plain_f are aggregates in C's own
+   terminology, and they are named here rather than glossed over: an array of a single scalar type
+   has no padding and no member offsets to differ, its element type is one of the two the program
+   is about, and no array is passed to or returned from any function -- each is only subscripted,
+   element by element, so what crosses a call boundary is always a scalar double or float.
    Aggregate argument passing belongs to 004_small_and_large_struct_passing and aggregate
    return to 005_struct_return_by_value.
 7. All four targets are little-endian and no byte-order-sensitive value is printed. sizeof is
-   never printed, no object is compared byte-wise, and no address or pointer value is printed:
-   the program observes parameter VALUES and nothing else.
+   never printed, no object is compared byte-wise, and no address or pointer representation is
+   printed: the program observes parameter VALUES and nothing else.
 
 Cross-target identity is therefore engineered by construction and then measured, not assumed.
-The golden record below was captured on this branch with gcc 13.4.0 and confirmed byte-identical
-across all twelve reference cells -- x86_64 natively and i686, aarch64 and riscv64 under
-qemu-user 10.1.0, each at -O0, -O1 and -O2 -- every one exiting 0 with an empty standard error.
+The golden record below is byte-identical across all twelve reference cells -- x86_64 natively
+and i686, aarch64 and riscv64 under emulation, each at -O0, -O1 and -O2 -- every one exiting 0
+with an empty standard error.
 END
 expected_stdout    <<END
 dbl_folded_d01=1.5000

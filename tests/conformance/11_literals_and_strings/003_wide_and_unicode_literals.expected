@@ -96,8 +96,8 @@ than by a divergence marker:
    than implementation-defined, and are asserted only so that an incorrect encoding is
    also refused at compile time rather than after the fact.
 
-MEASURED WIDE EXECUTION CHARACTER SET, per target, with the reference toolchain
-(gcc 13.4.0), which is what makes cross-backend comparison of the wide values sound:
+MEASURED WIDE EXECUTION CHARACTER SET, per target, with the suite's toolchain of record,
+which is what makes cross-backend comparison of the wide values sound:
 
   target    __STDC_ISO_10646__   sizeof(wchar_t)   wchar_t signedness   U+00A9 -> value
   x86_64    201706               4                 signed               169
@@ -113,8 +113,9 @@ restricted. The wchar_t signedness difference on aarch64 is real but cannot reac
 output, for the reason given in point 3.
 
 __STDC_ISO_10646__ IS DELIBERATELY NOT USED AS A COMPILE-TIME GATE. Requiring it was
-tried and rejected on measurement: clang 20.1.8 maps every universal-character-name in
-this program to its correct code point while defining no such macro at all, so gating on
+tried and rejected on measurement: the alternate reference compiler maps every
+universal-character-name in this program to its correct code point while defining no such
+macro at all, so gating on
 the advertisement rather than on the behaviour would refuse a compiler that is doing
 exactly the right thing -- and would refuse the compiler under test for a property the
 suite never needed it to announce. The macro is recorded above as corroborating evidence;

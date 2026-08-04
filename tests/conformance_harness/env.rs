@@ -442,13 +442,12 @@ const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// entire contribution is the cost of supervising a child that finished on time. That cost is
 /// therefore the whole of what qualification measures, and this is the ceiling.
 ///
-/// The number is set from measurement rather than taste. An implementation that supervises with a
-/// tight loop or a signal costs single-digit milliseconds; the implementation installed in the
-/// environment this suite was developed against (`timeout (uutils coreutils) 0.2.2`) polls its child
-/// on a 100 millisecond granularity and was measured at roughly 103 milliseconds *per invocation
-/// whatever the budget*. Twenty-five milliseconds sits an order of magnitude above the former and a
-/// quarter of the way to the latter, so the two are separated with margin on both sides rather than
-/// by a hair.
+/// The number is set from measurement rather than taste, because the two implementation strategies
+/// in circulation differ by more than an order of magnitude. One supervises with a tight loop or a
+/// signal and costs single-digit milliseconds; the other polls its child on a 100 millisecond
+/// granularity and charges roughly that *per invocation whatever the budget*. Twenty-five
+/// milliseconds sits an order of magnitude above the former and a quarter of the way to the latter,
+/// so the two are separated with margin on both sides rather than by a hair.
 ///
 /// The scale is what makes this worth measuring at all. A full matrix spawns at least 5,508 bounded
 /// invocations, so 103 milliseconds each is roughly 569 seconds of wall time added to a suite whose
@@ -1829,15 +1828,15 @@ fn untrusted_writer_reason(_metadata: &fs::Metadata) -> Option<&'static str> {
 /// **directory holding it** can have the file replaced beneath an unchanged name, and any
 /// **directory further up** can be renamed so that a different subtree answers to the same path.
 /// The second and third are the substitutions a name-based check cannot see, and the third is the
-/// one a parent-only check misses — measured here, where a mode-755 directory sat beneath a
-/// mode-2777 one and the entire subtree was replaceable while both the file and its own directory
-/// looked correct.
+/// one a parent-only check misses: a mode-755 directory sitting beneath a world-writable one leaves
+/// the entire subtree replaceable while both the file and its own directory look correct, which is
+/// why the walk does not stop at the immediate parent.
 ///
 /// Metadata is taken with the link-following call on purpose. On Linux a symbolic link's own
 /// permission bits are always `rwxrwxrwx` and carry no meaning, so inspecting the link rather than
-/// its target would report every link as world-writable and reject legitimate tools: two of the
-/// directories on this machine's search path are links, as is one of the two spellings under which
-/// its emulators are installed.
+/// its target would report every link as world-writable and reject legitimate tools. Search-path
+/// directories are routinely links, and so is one of the two spellings under which the emulators are
+/// commonly installed, so a link-rejecting check would fail on an ordinary installation.
 fn untrusted_reason(path: &Path) -> Option<String> {
     if let Ok(metadata) = fs::metadata(path) {
         if let Some(reason) = untrusted_writer_reason(&metadata) {
@@ -2566,11 +2565,11 @@ impl OuterNet {
 ///
 /// There is no override, and that is the point. The engagement is a *cost* decision — the watchdog in
 /// `execute.rs` is the authoritative bound in either case — so the only question is what this machine's
-/// implementation charges, and that is something to measure rather than to be told. An earlier form
-/// read an environment variable that could force the answer both ways; it was declared in no
-/// document, a malformed value silently became the default, and it did not reach the environment
-/// fingerprint, so a run's command topology could differ from another's with nothing in either run's
-/// artifacts to show it. Removing it makes the decision a function of the machine, and
+/// implementation charges, and that is something to measure rather than to be told. An environment
+/// variable able to force the answer either way would be declared in no document, would let a
+/// malformed value silently become the default, and would not reach the environment fingerprint, so
+/// one run's command topology could differ from another's with nothing in either run's artifacts to
+/// show it. Making the decision a function of the machine avoids all three, and
 /// [`OuterNet::summary`] records which way it went in the pre-flight report and in every finding.
 ///
 /// # The measurement

@@ -22,19 +22,30 @@
  * directly. That is what makes this program an ABI test at every optimization
  * level: an ordinary static callee may legally be inlined at -O1 and -O2, and
  * a callee that is inlined marshals nothing, so the parameter passing the
- * program claims to exercise would simply not happen.  Measured with gcc
- * 13.4.0 at -O2 across this area before the indirection was added: whole
- * groups of callees disappeared into their callers, and the ones that survived
- * did so only because they happened to be too large for the inliner's budget -
- * an accident of a heuristic, not a property of the test.
+ * program claims to exercise would simply not happen.  With direct calls the
+ * reference compiler at -O2 absorbs whole groups of callees into their callers,
+ * and the ones that survive do so only because they happen to be too large for
+ * the inliner's budget - an accident of a heuristic, not a property of the test.
  *
- * A volatile-qualified pointer removes the accident.  The value must be
- * re-read from memory at the point of call, so the compiler may not assume
- * which function it designates and must emit a genuine indirect call; and
- * because the callee's address escapes into storage, its signature may not be
- * cloned or scalarised either.  Verified at instruction level on all four
- * targets at -O2: an indirect call through the pointer, with the argument list
- * marshalled exactly as the ABI requires.
+ * A volatile-qualified pointer removes the accident, and what it removes it by
+ * is an OBSTACLE rather than a prohibition - a distinction worth keeping,
+ * because overstating it would overstate what this program proves.  ISO C does
+ * require the value to be re-read from memory at each point of call and control
+ * to go to whatever function that particular load produced: an access to a
+ * volatile object is a side effect belonging to the observable behaviour an
+ * implementation must reproduce (C11 5.1.2.3p2 and p6), and C11 6.7.3p7
+ * requires an expression referring to such an object to be evaluated strictly
+ * according to the abstract machine's rules.  ISO C does NOT forbid a
+ * specialised clone, a scalarised copy of the body, or a guarded
+ * devirtualization that tests the loaded pointer against a known function and
+ * takes a specialised path when it matches: all of those honour the loaded
+ * value and leave the observable behaviour unchanged.  So the property relied on
+ * is measured, not assumed - verified at instruction level with gcc 13.4.0 at
+ * -O2 on all four reference drivers: both callees still emitted out of line
+ * under their own labels, no symbol carrying .constprop, .isra or .part., and
+ * four genuine indirect transfers per target with the argument list marshalled
+ * exactly as the ABI requires.  The sibling record states the residual risk this
+ * leaves and what would close it.
  *
  * The mechanism is deliberately pure ISO C - a volatile function pointer,
  * nothing more.  A function attribute would have been the shorter spelling,
@@ -105,11 +116,13 @@ static volatile long long vllong[15] = {
     5000000013LL, -5000000014LL, 1LL
 };
 
-/* The enforced call boundary.  Each pointer is volatile-qualified, so it is
-   re-read at every call site and the callee it designates is unknown to the
-   optimizer: the call is indirect, the callee's body is not inlined, and its
-   signature is not cloned.  Both variants of both groups travel through these,
-   so the folded and the runtime call cross the same boundary. */
+/* The call boundary.  Each pointer is volatile-qualified, so ISO C requires it to
+   be re-read at every call site and control to go to whatever function that load
+   produced; the callee is therefore opaque to the optimizer and the call is
+   indirect.  That does not FORBID a specialised clone or a guarded
+   devirtualization - measured on the reference toolchain at -O2 neither appears,
+   and both bodies stay out of line.  Both variants of both groups travel through
+   these, so the folded and the runtime call cross the same boundary. */
 static void (*volatile take_int15_p)(int, int, int, int, int, int, int, int,
                                      int, int, int, int, int, int, int) =
     take_int15;

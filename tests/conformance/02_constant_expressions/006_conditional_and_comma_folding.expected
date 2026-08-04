@@ -49,15 +49,12 @@ sequenced in a statement of its own first and the counter is snapshotted into a 
 hits_then_seen, hits_else_seen, ticks_seen -- before the call. The one call that does receive a
 side-effecting argument, identity((ticks = ticks + 1, 6 * 7)) and its volatile twin, takes exactly
 one argument, so there is no second argument for its evaluation to be ordered against.
-EVERY COMMA EXPRESSION'S LEFT OPERAND PERFORMS A REAL SIDE EFFECT, BY DESIGN, AND THE REASON WAS
-MEASURED RATHER THAN ASSUMED. A comma expression whose left operand computes a value nobody uses is
-diagnosed: the probe `v = (1 + 1, 40 + 2);` compiled with gcc-13 under this suite's default gate
-reports `error: left-hand operand of comma expression has no effect [-Werror=unused-value]` followed
-by `cc1: all warnings being treated as errors`, and exits 1. Dropping only -Wall from the gate
-silences it, which confirms -Wunused-value is enabled by -Wall rather than by -Wextra or -pedantic.
-Area 02 sanctions no gate deviation, so the diagnostic was answered by rewriting the expressions --
-every left operand here is an assignment to volatile or plain storage, a counter increment, or a
-for-clause -- and never by weakening the gate, which would have traded a real check for a silence.
+EVERY COMMA EXPRESSION'S LEFT OPERAND PERFORMS A REAL SIDE EFFECT, BY DESIGN. A comma expression
+whose left operand computes a value nobody uses is what -Wunused-value exists to diagnose, and -Wall
+enables it while -Werror makes it fatal, so the default gate rejects that shape outright. Area 02
+sanctions no gate deviation, so the constraint is met by writing the expressions differently -- every
+left operand here is an assignment to volatile or plain storage, a counter increment, or a for-clause
+-- and never by weakening the gate, which would trade a real check for a silence.
 The restriction improves the program rather than constraining it: a side-effecting left operand is
 exactly what makes the sequence point observable, and observable sequencing is the interesting
 property of the comma operator.
@@ -88,12 +85,10 @@ only ever measured with sizeof, never read. sizeof does not evaluate its operand
 the volatile objects that appear inside a sizeof are not accessed there and the number of volatile
 accesses stays exactly what the source shows.
 NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, printf, is declared by
-hand as `int printf(const char *, ...);`. In fact the file contains no preprocessing directive of any
-kind. bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no
-standard I/O header (docs/project-guide.md line 212), so a directive naming that header would fail on
-the bcc side of oracle (a) while succeeding on the reference side -- a spurious divergence caused by
-the test rather than by the compiler under test. The corpus has exactly two header exceptions, area
-07's stdarg.h and the dedicated bundled-header probe in area 12, and neither applies here.
+hand as `int printf(const char *, ...);` -- the corpus-wide rule stated in
+tests/conformance/README.md, whose two sanctioned exceptions are area 07's stdarg.h and area 12's
+bundled-header probe, neither of which applies here. In fact the file contains no preprocessing
+directive of any kind.
 NOTHING IN THIS FILE IS A GCC EXTENSION, AND IN PARTICULAR THERE IS NO STATEMENT EXPRESSION. The
 sequence `({` does not occur anywhere in the program -- checked mechanically, by stripping comments
 and string literals and finding none -- and neither does typeof, __typeof__, any __-prefixed
@@ -105,9 +100,9 @@ nor a gate deviation, and neither is taken.
 THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
 is audited under the suite's full default gate. That is a measured claim, not an intention. It is
 clean -- zero diagnostics, empty stderr -- under -Wall -Wextra -pedantic -Wconversion
--Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers, twelve
-invocations in all; and it builds and then runs clean, with an empty stderr and exit status 0, under
-the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
+-Wsign-conversion -Wshadow -Werror in the single native compile-only invocation the suite's warning
+gate makes; and it builds and then runs clean, with an empty stderr and exit status 0, under the
+sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
 reference-compiler-only and are never applied to bcc -- the technical specification lists sanitizers
 among its explicit exclusions (docs/technical-specifications.md line 713, section 0.6.2) -- so
 requirement 3's shared-flag discipline is untouched by either of them.

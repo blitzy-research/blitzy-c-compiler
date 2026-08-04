@@ -49,11 +49,18 @@ Free of undefined and unspecified behaviour by construction:
 - NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and this is enforced structurally
   rather than argued. An access to a volatile object IS an observable side effect and the
   order in which a call's arguments are evaluated is unspecified, so every volatile datum
-  is read exactly once, in a statement of its own, and only the resulting plain locals are
-  passed. Machine-checked on this branch by flattening main into statements and counting
-  references to its volatile objects: there are seventeen volatile accesses in all -- four
-  in the loop body, the tag, ten aggregate members and the two function-pointer loads --
-  and NO statement holds more than one. The snapshots cost nothing in coverage, because
+  is read once per statement, in a statement of its own, and only the resulting plain
+  locals are passed. Machine-checked on this branch by flattening main into statements and
+  counting references to its volatile objects: there are SEVENTEEN SYNTACTIC ACCESS SITES
+  -- four in the loop body, the tag, ten aggregate members and the two function-pointer
+  loads -- and NO statement holds more than one. The two counts are distinguished because
+  the property under test is a statement-level one and the site count alone would misstate
+  the run: the four loop-body sites each execute five times, so the same seventeen sites
+  perform THIRTY-THREE DYNAMIC ACCESSES (4 x 5 + 1 + 10 + 2). That changes nothing about
+  the argument, and saying so is the point of separating them -- each of the twenty accesses
+  the loop performs is still one access in one statement, separated from the next by a
+  sequence point, so no two volatile accesses ever share an expression whatever the trip
+  count is. The snapshots cost nothing in coverage, because
   each is itself a load from volatile storage that the optimizer may neither fold nor
   elide, so every value the callee receives was genuinely materialised at run time and
   marshalled through the ABI; what changed is only that the loads are now SEQUENCED rather
@@ -62,12 +69,12 @@ Free of undefined and unspecified behaviour by construction:
   opened, no socket is created, no environment variable and no program argument is read, no
   clock and no random source is consulted, and no storage is obtained from the heap.
 - main returns 0, inside the 0-125 range the suite requires.
-- Verified empirically on this branch with gcc 13.4.0, which is why this record sanctions no
-  gate deviation and omits ub_audit_flags: the default strict warning gate
-  (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
-  diagnostics, both in the gate's own compile-only form and additionally at -O0, -O1 and
-  -O2; and the sanitizer gate (-fsanitize=undefined,address -fno-sanitize-recover=all,
-  native and dynamically linked) builds and then runs to completion with empty stderr, exit
+- Verified rather than asserted, which is why this record sanctions no gate deviation and
+  omits ub_audit_flags: the default strict warning gate (-Wall -Wextra -pedantic
+  -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero diagnostics in the single
+  native compile-only invocation the suite makes of it; and the sanitizer gate
+  (-fsanitize=undefined,address -fno-sanitize-recover=all, native and dynamically linked)
+  builds and then runs to completion in its one instrumented build with empty stderr, exit
   status 0, and stdout byte-identical to the golden record below.
 END
 impl_defined_notes <<END
@@ -93,8 +100,8 @@ neither needs to support an extension for the barrier to hold. It also makes the
 function-pointer load the ONLY volatile access in each call expression, which is what
 keeps the one-side-effecting-argument rule satisfied.
 
-WHY THE BARRIER EXISTS, MEASURED IN BOTH DIRECTIONS ON THIS BRANCH WITH GCC 13.4.0. Take it
-away, call the function by name, and the documented boundary stops being crossed at the two
+WHY THE BARRIER EXISTS, MEASURED IN BOTH DIRECTIONS. Take it away, call the function by name,
+and the documented boundary stops being crossed at the two
 optimization levels where it matters most. With the constant call site alone, no
 take_mixed26 is emitted at all at -O1 or -O2 on any of the four targets: a static function
 reached from one caller is inlined into it whatever its size, and twenty-six parameters are
@@ -108,8 +115,8 @@ pointer on x86-64, blr x8 on AArch64).
 
 WHAT IS KEPT OFF STDOUT, AND WHY. Width normalisation first: only int and double are passed
 as scalars and the aggregate holds two ints, so nothing whose width differs by target can
-reach the output. sizeof(long) and sizeof(void *) were measured as 4 on i686 and 8 on
-x86_64, aarch64 and riscv64 (docs/technical-specifications.md lines 457-462); no long,
+reach the output. sizeof(long) and sizeof(void *) are 4 on i686 and 8 on x86_64, aarch64 and
+riscv64 (docs/technical-specifications.md lines 457-462); no long,
 size_t, ptrdiff_t, intptr_t or pointer value is printed, and the conversion specifications
 used are exactly %d for int, %.4f for double and %s for char * -- %ld, %lu, %zu and %p
 appear nowhere. Pointers are passed but never printed: only the pointed-to int is, in
@@ -129,9 +136,8 @@ expected-divergence marker XD-TYPE-LONGDOUBLE-001 scoping that oracle.
 NOTHING IS NARROWED. No target is dropped, no oracle is disabled and this record carries no
 expected-divergence marker: a cross-backend divergence here is a GENUINE FINDING rather than
 an implementation-defined difference, because nothing implementation-defined reaches the
-output. Measured on this branch with gcc 13.4.0 and the matching i686, aarch64 and riscv64
-cross drivers, executed natively and under QEMU user-mode 10.1.0: stdout is byte-identical
-and the exit status is 0 in all twelve target-and-optimization-level cells.
+output. Measured rather than assumed: stdout is byte-identical and the exit status is 0 in all
+twelve target-and-optimization-level cells.
 END
 expected_stdout    <<END
 mix_folded_i1=201

@@ -71,20 +71,17 @@ the operating system. Nothing outside this file is read: every input is a litera
 socket, environment variable, clock, random source or locale is consulted, and iteration order is
 fixed by literal loop bounds, so every cell is reproducible from this source and this record alone.
 No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
-bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no standard
-I/O header (docs/project-guide.md line 212), so naming one would fail on the bcc side of oracle (a)
-while succeeding on the reference side -- a spurious divergence caused by the test rather than by a
-compiler. This area is granted no header exception; the corpus has exactly two, area 07's stdarg.h
-and the dedicated bundled-header probe in area 12.
+That is the corpus-wide rule stated in tests/conformance/README.md, whose two sanctioned exceptions
+are area 07's stdarg.h and area 12's bundled-header probe; area 03 takes neither.
 This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
 under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, with no diagnostic of any kind and no
-source-level diagnostic suppression anywhere in the translation unit, and it builds and runs clean
-under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
-reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched. One initializer spelling is excluded to reach that clean audit rather than suppressed
-inside it, and the exclusion, its measured reason and what the zero guarantee retains regardless
-are recorded in impl_defined_notes below.
+-Werror in the single native compile-only invocation the suite's warning gate makes, with no
+diagnostic of any kind and no source-level diagnostic suppression anywhere in the translation unit,
+and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
+-fno-sanitize-recover=all. Both gates are reference-compiler-only and are never applied to bcc, so
+requirement 3's shared-flag discipline is untouched. One initializer spelling is excluded to reach
+that clean audit rather than suppressed inside it, and the exclusion, its measured reason and what
+the zero guarantee retains regardless are recorded in impl_defined_notes below.
 END
 impl_defined_notes <<END
 This record narrows nothing that the harness reads: all four targets, all three optimization
@@ -105,18 +102,19 @@ spelling of that particular route exists that the unmodified gate accepts. No ad
 exists either: the gate's removable members are exactly -pedantic, for the GCC-extensions area, and
 -Wconversion with -Wsign-conversion, for the deliberate narrowing program, so -Wextra is not
 removable and area 03 is granted no deviation at all. A source-level diagnostic-suppression
-directive is not an alternative to that: it neutralizes a gate member from inside the translation
-unit while this record still claims the unchanged gate, which would make this record's own claim
-false rather than making the program clean. The spelling is therefore dropped from the source, and
+directive is not an alternative to that here: it would neutralize a gate member for a spelling this
+program does not need, and the area reserves that mechanism for the one construct it is required to
+carry and cannot otherwise obtain -- the overlapping designators in 004_designated_array.c, whose
+record declares its directives and their verified scope explicitly. The spelling is therefore dropped from the source, and
 constraint C3 is satisfied the way it asks to be -- the exclusion is narrow, it is scoped to one
 spelling, it changes no target, no optimization level and no oracle, and its reason is recorded here
 and in the program's own header comment. The specific loss is the positional-cursor route through a
-STRUCT, at the three descent depths and in the array-of-struct-element form the excluded objects
-used to cover; that loss is stated rather than left to be inferred.
-THE ZERO GUARANTEE ITSELF LOSES NOTHING, which is what keeps the exclusion narrow. The same
-measurement established that -Wmissing-field-initializers does NOT fire for a designated
-initializer, nor for the `= { 0 }` idiom, nor for a partial ARRAY, nor for a partial
-array-of-struct, nor for partial two-dimensional rows -- GCC treats the all-zero idiom as
+STRUCT, at the three descent depths and in the array-of-struct-element form the excluded spelling
+would cover; that loss is stated rather than left to be inferred.
+THE ZERO GUARANTEE ITSELF LOSES NOTHING, which is what keeps the exclusion narrow.
+-Wmissing-field-initializers does NOT fire for a designated initializer, nor for the `= { 0 }`
+idiom, nor for a partial ARRAY, nor for a partial array-of-struct, nor for partial two-dimensional
+rows -- GCC treats the all-zero idiom as
 intentional and treats element omission as unremarkable -- so all nine zero-fill situations, which
 are the whole of this program's mandate, are written plainly and all remain under test. Positional
 exhaustion is itself still exercised here: g_arr and l_arr are int[6] = { 1, 2 }, which the gate
@@ -162,14 +160,12 @@ reproduces the section placement at -O2 therefore will not find the -O0 answer, 
 implementation's freedom rather than this record being wrong. It is also exactly why the sweep covers
 -O0, -O1 and -O2 rather than one level: the VALUES read back may not change however the
 initialization is realized, and those values are the only thing the three oracles compare.
-MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
--O1 and -O2 -- twelve configurations -- and every one produced these 75 lines byte-identically
-with exit status 0, which is why oracle (b) compares this program's targets against each other
-without any narrowing and why oracle (c) can hold these bytes as the golden record. The same
-twelve configurations were re-measured after the excluded spelling was removed, so the 75 lines
-below are the current source's output rather than a residue of an earlier one. The output is a
-fixed sequence of 75 key=value lines, one per property claimed and nothing summarized, so one
-divergent line localizes the defect to one zero-fill situation.
+WHY ALL THREE ORACLES ARE ENABLED WITH NO NARROWING. Every line printed below is target-invariant
+by the normalization argued above -- only int values, no representation and no character code -- so
+the same bytes are the right answer on each of the four backends. That is what makes cross-backend
+comparison sound and lets oracle (c) hold these bytes as the golden record. The output is a fixed
+sequence of 75 key=value lines, one per property claimed and nothing summarized, so one divergent
+line localizes the defect to one zero-fill situation.
 END
 expected_stdout    <<END
 g_arr[0]=1

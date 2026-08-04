@@ -34,14 +34,14 @@
  *
  * THE CALL BARRIER, AND WHY THE ABI BOUNDARY WOULD OTHERWISE NOT EXIST.  A
  * twenty-six parameter boundary is only under test if the call actually happens.
- * Measured with gcc 13.4.0 at -O2, a direct call to a static function whose
- * arguments are all known lets the optimizer specialise the callee -- the only
- * function emitted was take_mixed26.constprop.0, a clone with the constants
- * folded in, so the documented boundary was never crossed at that level and the
- * program silently tested less than it claimed at two of its three optimization
- * levels.  Every call below therefore goes through a FILE-SCOPE volatile
- * FUNCTION POINTER.  A volatile lvalue must be re-read on every access, so no
- * conforming compiler may assume which function the pointer designates: it can
+ * A direct call to a static function whose arguments are all known lets the
+ * optimizer specialise the callee: at -O2 the reference compiler emits only
+ * take_mixed26.constprop.0, a clone with the constants folded in, so the
+ * documented boundary would never be crossed at that level and the program would
+ * silently test less than it claims at two of its three optimization levels.
+ * Every call below therefore goes through a FILE-SCOPE volatile FUNCTION POINTER.
+ * A volatile lvalue must be re-read on every access, so no conforming compiler may
+ * assume which function the pointer designates: it can
  * neither inline the callee nor clone it, and it must marshal the arguments
  * exactly as the ABI prescribes because it cannot know what will receive them.
  * This is plain standard C rather than a compiler attribute, so both sides of
@@ -70,12 +70,18 @@
  * emitted.  Measured with gcc 13.4.0 at -O2 across this area before the
  * indirection was added: whole groups of callees vanished into their callers, and
  * the survivors survived only by exceeding the inliner's size budget - an
- * accident of a heuristic rather than a property of the test.  A volatile pointer
- * must be re-read at the point of call, so the designated function is unknown and
- * the call is genuinely indirect; because the address escapes into storage, the
- * signature may not be cloned or scalarised either, which matters especially here
- * because scalar replacement of the aggregate parameters would dissolve exactly
- * the classification the program is testing.  The mechanism is pure ISO C: a
+ * accident of a heuristic rather than a property of the test.  ISO C requires a
+ * volatile pointer to be re-read at each point of call and control to go to
+ * whatever function that load produced (C11 5.1.2.3p2 and p6, 6.7.3p7), so the
+ * designated function is opaque to the optimizer and the call is genuinely
+ * indirect.  It does NOT forbid a specialised clone, a scalarised copy of the
+ * body, or a guarded devirtualization, each of which could honour the loaded value
+ * and still dissolve exactly the classification this program is testing - so the
+ * absence of them is measured rather than assumed: with gcc 13.4.0 at -O2 on all
+ * four reference drivers no symbol carries .constprop, .isra or .part., and both
+ * variants reach the callee through a genuine indirect transfer, two per target.
+ * 001_many_integer_parameters.expected states the residual risk that leaves and
+ * what would close it.  The mechanism is pure ISO C: a
  * function attribute would have been shorter, but the documented attribute set
  * for the compiler under test is packed, aligned, section, unused, deprecated,
  * visibility and format (docs/technical-specifications.md line 506), so an
@@ -144,9 +150,10 @@ static const int *volatile vptr[5] = {
     &ptgt[0], &ptgt[1], &ptgt[2], &ptgt[3], &ptgt[4]
 };
 
-/* The enforced call boundary: a volatile-qualified pointer to the callee, so the
-   call is indirect at every optimization level and the aggregate parameters
-   cannot be scalarised away.  Both variants travel through it. */
+/* The call boundary: a volatile-qualified pointer to the callee, so the call is
+   indirect at every optimization level and the aggregate parameters are opaque to
+   scalar replacement.  Measured on the reference toolchain at -O2: no clone and no
+   scalarised copy appears.  Both variants travel through it. */
 static void (*volatile take_mixed26_p)(int, double, double, const int *,
                                        struct pair2,
                                        int, double, double, const int *,

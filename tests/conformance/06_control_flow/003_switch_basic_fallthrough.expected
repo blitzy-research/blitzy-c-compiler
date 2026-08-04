@@ -22,8 +22,12 @@ Every controlling value is a small literal, staged through the volatile int vin
 in the runtime variant, and every case label is an ordinary integer constant
 expression with no duplicates. The largest accumulated value anywhere is 1000
 and the largest label magnitude is 99, so no signed overflow is possible on any
-plain int. There is no shift, no division, no remainder and no pointer
-arithmetic. Every object is written before it is read: r is initialised in each
+plain int. There is no shift, no division and no remainder. The only pointer
+arithmetic is the arithmetic the language performs for a subscript: every index
+into the static const input tables and out is a literal or a loop counter
+provably inside its bound, and no pointer value is printed, converted to an
+integer or compared. Every object is written before it is read: r is initialised
+in each
 helper that accumulates and assigned on every reachable path in each helper that
 selects, the static const input tables have initialisers, vin is assigned before
 each read, and out[] elements are written before being printed. The statement

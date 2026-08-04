@@ -95,9 +95,9 @@ int main(void)
     /* Each volatile object is read exactly once, and each read is a statement of its
      * own.  An access to a volatile object is an observable side effect, and the
      * relative order of side effects within a single argument list is unspecified,
-     * so passing two volatile operands directly to one call -- as an earlier form of
-     * this program did -- made the sequence of observable accesses depend on
-     * unspecified evaluation order.  Snapshotting first separates every volatile
+     * so passing two volatile operands directly to one call would make the sequence of
+     * observable accesses depend on unspecified evaluation order.  Snapshotting first
+     * separates every volatile
      * access from the next by a sequence point.  It costs the test nothing: the
      * snapshots are still loaded from volatile storage, so the backend must emit
      * genuine loads and the asm operands still consume runtime values rather than

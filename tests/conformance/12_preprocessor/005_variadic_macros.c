@@ -35,14 +35,14 @@
  * rather than an expected divergence. No marker belongs in the sibling expectation
  * record, and the register admits none for this area.
  *
- * THE EMPTY VARIADIC LIST, AND WHY IT IS EXERCISED FIVE TIMES OVER FOUR SHAPES
+ * THE EMPTY VARIADIC LIST, AND WHY IT IS EXERCISED THREE TIMES OVER TWO SHAPES
  *
  * An empty variadic list is the case preprocessor implementations most often get
  * wrong, so it is not dropped - it is reached the way ISO C actually allows,
  * through a macro whose parameter list is nothing BUT an ellipsis. `#define
  * M(...)` invoked as `M()` supplies one empty argument to `__VA_ARGS__`, and the
  * standard imposes no minimum there because there is no named parameter for the
- * variadic part to follow. Four independent shapes appear in main, the last of
+ * variadic part to follow. Two shapes of empty list appear in main, the first of
  * them twice, so a divergence in one still leaves the others reporting, which
  * localises a defect instead of merely announcing it:
  *
@@ -52,16 +52,19 @@
  *   2. ADD_NONE(), a second, independent instance of that same shape, returning
  *      a different value so the two lines cannot be confused;
  *   3. VA_STR(), which stringizes the empty list and whose result must have
- *      length zero;
- *   4. LOG0("...\n") and, one level of expansion deeper, WRAP0("...\n"), where
- *      the WHOLE argument list is variadic and nothing follows it, so no comma is
- *      left dangling anywhere.
+ *      length zero.
  *
- * The fourth shape is the standard answer to the dangling-comma problem, and
- * it is what lets this program keep the capability - a log-style macro invoked
- * with no arguments beyond its format - while writing only ISO C. Constraint C3
- * forbids dropping a construct because it is difficult; the construct is kept and
- * only one non-standard SPELLING of it is set aside, with the reason recorded.
+ * A third shape sits beside them and is a different construct rather than a
+ * fourth empty-list case: LOG0("...\n") and, one level of expansion deeper,
+ * WRAP0("...\n"), where the WHOLE argument list is variadic and nothing follows
+ * it. Those lists are NOT empty - each carries the format string - but because
+ * the ellipsis has no named parameter in front of it, no comma is left dangling
+ * when nothing follows the format. That is the standard answer to the
+ * dangling-comma problem, and it is what lets this program keep the capability -
+ * a log-style macro invoked with no arguments beyond its format - while writing
+ * only ISO C. Constraint C3 forbids dropping a construct because it is difficult;
+ * the construct is kept and only one non-standard SPELLING of it is set aside,
+ * with the reason recorded.
  *
  * NESTED FORWARDING
  *
@@ -94,24 +97,28 @@
  *      feature and not the comma-deletion behaviour. A divergence would
  *      therefore have neither a documented basis to be an expected divergence
  *      nor a documented capability to be a finding against.
- *   2. Reaching it requires invoking a macro that HAS a named parameter with an
- *      empty variadic list, which ISO C forbids: measured with gcc 13.4.0,
- *      `-std=c17 -pedantic` reports "ISO C99 requires at least one argument for
- *      the \"...\" in a variadic macro", and clang 20.1.8 reports "token pasting
- *      of ',' and __VA_ARGS__ is a GNU extension". -pedantic is a member of this
- *      area's warning gate, from which area 12 sanctions no deviation, so the
- *      construct could not clear the suite's own undefined-behaviour gate.
+ *   2. Reaching its comma-deleting behaviour requires OMITTING the variadic
+ *      argument altogether from a macro that has a named parameter, and ISO C
+ *      before C23 forbids that: the reference compiler under `-std=c17 -pedantic`
+ *      reports "ISO C99 requires at least one argument for the \"...\" in a
+ *      variadic macro", and the alternate reference compiler reports the token
+ *      paste itself as a GNU extension. -pedantic is a member of this area's
+ *      warning gate, from which area 12 sanctions no deviation, so the construct
+ *      could not clear the suite's own undefined-behaviour gate.
  *
  * The exclusion is one spelling wide. The capability it spells is exercised above
- * through the wholly variadic form, the empty variadic list is exercised four
+ * through the wholly variadic form, the empty variadic list is exercised three
  * times, and no oracle, target or optimization level is switched off anywhere in
  * this program.
  *
- * An explicit empty trailing macro argument is not used either. The reference
- * compiler itself rejects that spelling with a syntax error, so it could not
- * form the basis of a comparison between two compilers in the first place.
- *
- * The GNU comma swallow is the third, for the reason set out above.
+ * An EXPLICITLY EMPTY trailing macro argument is the third avoided spelling, and
+ * the reason is not that the preprocessor refuses it. It does not: `LOG("x\n", )`
+ * supplies one empty argument and preprocesses without a diagnostic under the full
+ * gate. What it produces is `printf("x\n", )`, whose trailing comma is a syntax
+ * error in the CALL - the very dangling comma the GNU swallow exists to delete.
+ * The construct is therefore unusable for a comparison for a reason that has
+ * nothing to do with either compiler's variadic machinery, and the behaviour it
+ * would have reached is already covered by the wholly variadic form above.
  *
  * STRINGIZING A VARIADIC LIST
  *

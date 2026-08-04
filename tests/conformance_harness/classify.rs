@@ -40,10 +40,10 @@
 //! |---|---|
 //! | `compile_failure` | One compiler rejected a program the other accepted. Excusable by a marker citing a limitation the repository documents — including one documented by an inventory that enumerates what is implemented and **omits** the construct, which is the form the frozen contract mandates for GCC case ranges. Whether such a citation is strong enough is a reviewer's judgement recorded in the register, not a parse-time verdict. |
 //! | `link_failure` | The program translated but did not link. **Attributable to this machine** when a target's C runtime is absent, in which case it is `UNAVAILABLE` at environment scope and never a finding against the compiler. |
-//! | `run_crash` | The program died on a signal instead of exiting. Compared as a raw wait status, so it is never conflated with a numerically equal ordinary exit. |
+//! | `run_crash` | The program died on a signal instead of exiting — observed **after** an artifact was built and launched, so it is a status difference rather than a refusal. Compared as a raw wait status, so it is never conflated with a numerically equal ordinary exit. |
 //! | `exit_code_mismatch` | Two completed runs disagreed on status. |
 //! | `stdout_mismatch` | Two completed runs disagreed on bytes — the ordinary shape of a wrong answer. |
-//! | `timeout` | Execution outlived its per-cell budget: a first-class divergence, because a program that finishes promptly under one compiler and hangs under another is a defect worth surfacing. |
+//! | `timeout` | An invocation outlived its budget: a first-class divergence, because a program that finishes promptly under one compiler and hangs under another is a defect worth surfacing. The **one class reachable from both entry points** — a compile invocation that never returns produced no artifact, while a run that never finished did. |
 //!
 //! # The decision order
 //!
@@ -98,12 +98,25 @@
 //! is handed no means of preventing any of them.
 //!
 //! Classification happens at the **first terminal outcome or the completed comparison**, not
-//! after every phase has run. A compile failure, a link failure, a crash and a timeout are
-//! terminal outcomes reached before any comparison exists, and each is classified where it
-//! occurred: [`build_failure`] is the entry point for those, while [`classify`] is the entry
-//! point for a comparison that completed, and both reduce to the one policy in [`judge`].
-//! That is why a `compile_failure` marker is meaningful at all — the cell it excuses never
-//! reaches a comparison, so a rule that required one would make the class unreachable.
+//! after every phase has run, and the two entry points differ in exactly one respect: whether an
+//! artifact exists.
+//!
+//! - **A build refusal reaches [`build_failure`].** The build layer rejected the program
+//!   (`compile_failure`), translated it without linking it (`link_failure`), or outlived its budget
+//!   on the **compile invocation** (`timeout`). No artifact was produced, nothing was executed, and
+//!   the one root event denies all three oracle arms their subject at once — which is why
+//!   [`build_failure`] is the only entry point that takes a [`RefusalRoot`]. That is also why a
+//!   `compile_failure` marker is meaningful at all: the cell it excuses never reaches a comparison,
+//!   so a rule that required one would make the class unreachable.
+//! - **A crash or a run that never finished reaches [`classify`].** `run_crash` and a `timeout` on
+//!   the **run** are raised only after an artifact was built and launched, so they are status
+//!   differences between two completed attempts to run — assembled by `compare.rs` alongside any
+//!   byte difference and handed here as a comparison that happened, on the single arm that made it.
+//!   No arm lost its subject, so no refusal root is involved, and the artifact, the stdout captured
+//!   before the program died and the raw wait status all reach the finding.
+//!
+//! `timeout` is therefore the one class reachable from both entry points, and which one it arrived
+//! through is what says whether an artifact exists. Both reduce to the one policy in [`judge`].
 //!
 //! # A refusal is matched on every dimension, oracle included
 //!
@@ -122,14 +135,14 @@
 //! exactly the arms that held an authority and lost the comparison to a refusal, and naming an
 //! oracle in a scope narrows a real set rather than a notional one.
 //!
-//! What this does **not** ask of an author is that a refusal marker be widened to `all oracles`.
-//! An earlier form of this module required exactly that and reported a single-oracle marker as
-//! non-covering, which turned a gap in this module into a constraint on the author and contradicted
-//! the frozen contract, whose refusal marker is scoped `oracle_a` alone — rightly, because oracle
-//! (a) is the only arm on which *the reference compiler accepted this program and the compiler under
-//! test did not* is a statement about two compilers. Widening it would have oracles (b) and (c)
-//! claim an authority they never consulted, and that is the dangerous direction: a basis about the
-//! reference compiler says nothing whatever about the cross-backend or golden-record comparisons.
+//! What this does **not** ask of an author is that a refusal marker be widened to `all oracles`
+//! merely because a refusal blocks all three arms. Making every arm of one root event visible is
+//! this module's responsibility, not the author's. The frozen contract scopes its refusal marker
+//! `oracle_a` alone — rightly, because oracle (a) is the only arm on which *the reference compiler
+//! accepted this program and the compiler under test did not* is a statement about two compilers.
+//! Widening it would have oracles (b) and (c) claim an authority they never consulted, and that is
+//! the dangerous direction: a basis about the reference compiler says nothing whatever about the
+//! cross-backend or golden-record comparisons.
 //!
 //! Instead, the classifier — not the author — makes every arm of one refusal visible. The arm the
 //! scope names settles the refusal on the marker; every other arm is a **dependent blocked** XFAIL
@@ -394,14 +407,13 @@ impl fmt::Display for Attribution {
 ///
 /// # A refusal is one root event, and the classifier makes every arm of it visible
 ///
-/// An earlier form of this module concluded from the paragraph above that a marker intended to
-/// excuse a build refusal must scope **`all oracles`**, and reported a single-oracle marker as
-/// non-covering with that remedy spelled out in the detail. That conclusion turned a gap in this
-/// module into a constraint on an author, and it contradicted the frozen marker contract, whose
-/// refusal marker is scoped `oracle_a` alone — rightly, because oracle (a) is the only arm on which
-/// "the reference compiler accepted this program and the compiler under test did not" is a statement
-/// about two compilers. Widening the scope would have oracles (b) and (c) claim an authority they
-/// never consulted.
+/// The paragraph above does **not** imply that a marker excusing a build refusal must scope
+/// **`all oracles`** because the refusal blocks all three arms. That would turn a responsibility of
+/// this module into a constraint on an author, and it would contradict the frozen marker contract,
+/// whose refusal marker is scoped `oracle_a` alone — rightly, because oracle (a) is the only arm on
+/// which "the reference compiler accepted this program and the compiler under test did not" is a
+/// statement about two compilers. Widening the scope would have oracles (b) and (c) claim an
+/// authority they never consulted.
 ///
 /// What happens instead is **dependency-aware classification**, built from [`RefusalRoot`]:
 ///
@@ -1136,8 +1148,16 @@ fn scope_marker<'a>(
 ///
 /// Every dimension that fails to match is named, in a fixed order, so that two runs produce
 /// byte-identical text and a reader is told the whole reason rather than the first part of it. A
-/// maintainer reading this row can see immediately whether the honest fix is a second marker, a
-/// widened scope that the register also documents, or a finding.
+/// maintainer reading this row can see immediately whether the honest fix is a marker of its own on
+/// a separate minimized program, a widened scope that the register also documents, or a finding.
+///
+/// The remedy this text names is deliberately not "a second marker in this record". A record holds
+/// **at most one** marker block — the parser rejects a duplicated key outright — so advice to add
+/// another beside the existing one describes a record that cannot exist, and following it would take
+/// the program out of the run with a parse error instead of documenting anything. This function is
+/// only reached when the program already has a marker, so the one slot is always already taken, and
+/// the remedy is always a separate minimized program carrying its own record and its own register
+/// entry.
 ///
 /// The `shape` decides only whether the closing sentence names the `all oracles` remedy. Every
 /// dimension is matched for both shapes — see [`DivergenceShape`] — so every dimension that failed
@@ -1195,17 +1215,22 @@ fn marker_non_coverage(
              refusal some OTHER arm's marker covers is reported as a dependent expected divergence \
              rather than as a finding — so reaching this text means no arm of this cell is covered \
              at all, and the mismatch named above is the reason. The remedy is a marker that \
-             matches the observation, in this program's record and in the register both; widening \
-             an existing one is not, because the arms of a refusal are settled against different \
-             authorities and a basis written for one of them says nothing about the others."
+             matches the observation, carried by a minimized program of its own and registered \
+             there, because this record's single marker block is already taken; widening the \
+             existing one is not the remedy either, because the arms of a refusal are settled \
+             against different authorities and a basis written for one of them says nothing about \
+             the others."
         }
     };
     Some(format!(
         "Marker {} is present in this program's record but does not cover this observation: {}.\
          {dimensions} A marker is never widened to absorb a divergence it does not describe, \
          because that would launder a genuine second defect into an expected divergence while {} \
-         still documented only the first; if this divergence is also documented, it needs its own \
-         marker in both places.",
+         still documented only the first. If this divergence is also documented, it needs a marker \
+         of its own — and since a record holds at most one marker block, that means a minimized \
+         program of its own, with its own record carrying the marker and its own register entry. A \
+         second marker block beside the one above is not an option: the grammar admits one, and a \
+         duplicated key is a hard parse error that would remove this program from the run.",
         marker.id(),
         joined(&mismatches),
         EXPECTED_DIVERGENCE_REGISTER

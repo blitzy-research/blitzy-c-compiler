@@ -6,7 +6,7 @@
 
 program            = 004_small_and_large_struct_passing
 area               = 14_abi_calling_convention
-description        = Aggregates passed by value on both sides of every target's by-register versus by-memory threshold: an 8-byte struct passed ten times over, four different 16-byte layouts (all-int, mixed, all-double, all-float) passed five times each, a 24-byte struct and a 40-byte struct, in a folded and a volatile-runtime variant
+description        = Aggregates passed by value on both sides of every target's by-register versus by-memory threshold: an 8-byte struct passed ten times over, four threshold-sized layouts passed five times each -- four ints, an int with a double, two doubles and four floats, the first, third and fourth being 16 bytes on every target and the mixed one being 12 bytes on i686 and 16 elsewhere -- plus a 24-byte struct and a 40-byte struct, in a folded and a volatile-runtime variant
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -37,7 +37,7 @@ Free of undefined and unspecified behaviour by construction:
   that the difference still cannot reach stdout, is recorded in impl_defined_notes below,
   which is where this suite keeps its implementation-defined reasons.
 - Every array subscript lies inside its array's bounds, and there are exactly two forms of
-  subscript in the file. Counted mechanically on this branch, excluding declarator brackets:
+  subscript in the file. Counted mechanically, excluding declarator brackets:
   92 subscripts are COMPILE-TIME CONSTANTS -- 36 in the folded call statements and 36 in the
   runtime ones (ten elements of the eight-byte shape, five of each of the four sixteen-byte
   shapes, four of the twenty-four-byte shape, two of the forty-byte shape), plus 20 in the
@@ -55,7 +55,7 @@ Free of undefined and unspecified behaviour by construction:
   rather than argued. An access to a volatile object IS an observable side effect and the
   order in which a call's arguments are evaluated is unspecified, so every volatile datum
   is read exactly once, in a statement of its own, and only the resulting plain locals are
-  passed. Machine-checked on this branch: flattening the program into statements and
+  passed. Machine-checked: flattening the program into statements and
   counting references to its volatile objects finds NO statement with more than one. The
   snapshots cost nothing in coverage, because each is itself a load from volatile storage
   that the optimizer may neither fold nor elide, so every value the callee receives was
@@ -65,10 +65,11 @@ Free of undefined and unspecified behaviour by construction:
   opened, no socket is created, no environment variable and no program argument is read,
   and no storage is obtained from the heap.
 - main returns 0, inside the 0-125 range the suite requires.
-- Verified empirically on this branch: the default strict warning gate
+- Verified rather than asserted: the default strict warning gate
   (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
-  diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
-  -fno-sanitize-recover=all runs to completion with empty stderr and exit status 0.
+  diagnostics in the single native compile-only invocation the suite makes of it, and
+  -fsanitize=undefined,address -fno-sanitize-recover=all runs to completion with empty
+  stderr and exit status 0 in its one instrumented native build.
 END
 impl_defined_notes <<END
 PADDING AND AGGREGATE LAYOUT ARE UNOBSERVABLE BY CONSTRUCTION, and this is the paragraph
@@ -76,10 +77,9 @@ that lets this record keep all four targets. Aggregate size and internal padding
 implementation-defined, and one aggregate here genuinely differs: struct s16m, an int
 followed by a double, is 12 BYTES ON i686 -- where double carries four-byte alignment, so no
 padding is inserted after the int -- and 16 BYTES on x86_64, aarch64 and riscv64, where
-double is eight-byte aligned and four padding bytes separate the two members. Measured on
-this branch with gcc 13.4.0 and the three matching cross drivers: 16, 12, 16, 16. That
-difference never reaches stdout, because the program is written so that it cannot. sizeof is
-never printed, no aggregate is ever memcmp'd or otherwise inspected byte-wise, no
+double is eight-byte aligned and four padding bytes separate the two members. Measured across
+the four target drivers: 16, 12, 16, 16. That difference never reaches stdout, because the
+program is written so that it cannot. sizeof is never printed, no aggregate is ever memcmp'd or otherwise inspected byte-wise, no
 aggregate's address is taken or printed, and ONLY NAMED MEMBERS are read back -- so no
 padding byte is ever read and no layout fact is ever converted into output. The consequence
 is the one Area 14 requires: the targets list is NOT restricted and this record carries no
@@ -154,25 +154,23 @@ neither needs to support an extension for the barrier to hold. It also makes the
 function-pointer load the ONLY volatile access in each call expression, which is what
 keeps the one-side-effecting-argument rule satisfied.
 
-Measured BEFORE-STATE on this branch, reproduced by removing the pointer block and calling
-the seven helpers by name, then counting their labels in each driver's assembly. At -O0 all
-seven stood on all four targets. At -O1: five of seven on x86_64 and aarch64, ONE of seven
-on riscv64, and NONE AT ALL on i686. At -O2: one of seven on x86_64, aarch64 and riscv64 --
-only take_s8x10, which survived by exceeding the inliner's size budget -- and again NONE on
-i686. Six of the seven documented boundaries were therefore uncrossed at -O2 on three
-targets and all seven were uncrossed on i686 from -O1 upward, so an inlined call marshals
-nothing and the classification the row describes was never exercised. That is the
-measurement the indirection exists to answer, and it is recorded per target because the
-per-target reading is what makes the case: on i686 the loss was total, which a single
-blanket sentence would have hidden. Measured AFTER: all seven callees are emitted unmodified
-at -O0, -O1 and -O2 on all four targets, with no .constprop, no .isra and no .part clone
-anywhere -- twelve of twelve cells.
+MEASURED IN BOTH DIRECTIONS, by removing the pointer block, calling the seven helpers by name
+and counting their labels in each driver's assembly. WITHOUT the indirection: at -O0 all seven
+stand on all four targets; at -O1 five of seven survive on x86_64 and aarch64, ONE of seven on
+riscv64, and NONE AT ALL on i686; at -O2 one of seven survives on x86_64, aarch64 and riscv64
+-- only take_s8x10, by exceeding the inliner's size budget -- and again NONE on i686. Six of
+the seven documented boundaries would therefore be uncrossed at -O2 on three targets and all
+seven uncrossed on i686 from -O1 upward, and an inlined call marshals nothing, so the
+classification each row describes would never be exercised. The per-target reading is what
+makes the case: on i686 the loss is total, which a single blanket sentence would hide. WITH the
+indirection: all seven callees are emitted unmodified at -O0, -O1 and -O2 on all four targets,
+with no .constprop, no .isra and no .part clone anywhere -- twelve of twelve cells.
 
 WIDTH NORMALISATION, so that no type whose width differs by target can reach the output. The
 only member types in the file are int, an array of int, float and double -- each of which
 has the same width on all four targets -- and the only values printed are int and double;
 every float member is widened to double with an explicit cast at the point of print. Counted
-on this branch, the conversion specifications used are exactly three: %d 89 times for int,
+mechanically, the conversion specifications used are exactly three: %d 89 times for int,
 %.4f 35 times for double, and %s 36 times for the variant tag's const char *. %ld, %lu, %zu,
 %p and %Lf never appear, so no printed field's width or representation can vary by target.
 Every floating value is a dyadic rational with denominator at most 16, exactly representable
@@ -195,9 +193,8 @@ scoping that oracle.
 No target is dropped, no oracle is disabled and this record carries no expected-divergence
 marker: a cross-backend divergence here is a GENUINE FINDING rather than an
 implementation-defined difference, because nothing implementation-defined reaches the
-output. Measured on this branch with gcc 13.4.0 and the matching i686, aarch64 and riscv64
-cross drivers, executed natively and under QEMU user-mode 10.1.0: stdout is byte-identical
-and the exit status is 0 in all twelve target-and-optimization-level cells.
+output. Measured rather than assumed: stdout is byte-identical and the exit status is 0 in all
+twelve target-and-optimization-level cells.
 END
 expected_stdout    <<END
 s8_folded_p01 a=11 b=-12

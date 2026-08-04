@@ -59,12 +59,12 @@
  * argument list in this file.
  *
  * THE CALL BARRIER, AND WHY THESE RETURN BOUNDARIES WOULD OTHERWISE NOT EXIST.
- * A return boundary is only under test if the call actually happens.  Measured
- * with gcc 13.4.0 at -O2, with direct calls to these static producers the only
- * function left standing was make_sbig: every small, mixed and homogeneous-float
- * return, and both forwarding consumers, were inlined away, so six of the seven
- * documented return mechanisms and both forwarding paths were not exercised at
- * all at that level.  Every producer and every consumer below is therefore
+ * A return boundary is only under test if the call actually happens.  With direct
+ * calls to these static producers the reference compiler at -O2 leaves only
+ * make_sbig standing: every small, mixed and homogeneous-float return, and both
+ * forwarding consumers, are inlined away, so six of the seven documented return
+ * mechanisms and both forwarding paths would not be exercised at all at that
+ * level.  Every producer and every consumer below is therefore
  * reached through a FILE-SCOPE volatile FUNCTION POINTER.  A volatile lvalue
  * must be re-read on every access, so no conforming compiler may assume which
  * function the pointer designates: it can neither inline nor clone the callee,
@@ -103,13 +103,13 @@
  * real indirect call at every one of the twelve cells, which is the property the
  * boundary exists to guarantee.
  *
- * The measured BEFORE-state, recorded because it is the reason the boundary is
- * there: with direct calls to these static producers, gcc 13.4.0 at -O1 and above
- * left one helper standing out of nine and four calls out of forty, so six of the
- * seven return mechanisms and both forwarding paths were not exercised at all
- * above -O0.  That measurement describes the program as it was, not as it is.
- * The compiler under test may inline differently; no bcc binary is present on this
- * branch, so nothing here was measured of it.
+ * The same counting over DIRECT calls is what makes the boundary necessary rather
+ * than decorative: called by name, these static producers leave the reference
+ * compiler at -O1 and above with one helper standing out of nine and four calls out
+ * of forty, so six of the seven return mechanisms and both forwarding paths would
+ * not be exercised at all above -O0.  Any other compiler may inline differently
+ * again, which is why the boundary is expressed in the source rather than left to
+ * an implementation's judgement.
  *
  * Padding discipline: sizeof is never printed and no aggregate is ever memcmp'd.
  * Only named members are read back.
@@ -127,17 +127,22 @@
  * for an optimizer to inline, and an inlined maker returns nothing: the returned
  * aggregate is scalar-replaced into the caller's own locals and the return
  * convention - register pair, register plus floating register, or hidden pointer
- * - is never exercised at all.  Measured with gcc 13.4.0 at -O2 before the
- * indirection was added: of the twenty intended maker and consumer calls in each
- * variant only four survived in total, every other one having been inlined, so
- * six of the seven return shapes had no boundary left to test.  A volatile
+ * - is never exercised at all.  With direct calls the reference compiler at -O2
+ * leaves only four of the twenty intended maker and consumer calls per variant
+ * standing, every other one being inlined, so six of the seven return shapes would
+ * have no boundary left to test.  A volatile
  * pointer must be re-read on every access, so the value main snapshots out of it
- * cannot be established at translation time: the designated function is unknown
- * and every call through the snapshot is genuinely indirect.  And because the
- * address escapes into storage, the signature may not be cloned or the return
- * value scalarised either.  Both consequences follow from where the value CAME
- * FROM rather than from how often the pointer is fetched, which is why reading it
- * once per run costs the barrier nothing.  The mechanism is pure ISO C:
+ * cannot be established at translation time: the designated function is opaque to
+ * the optimizer and every call through the snapshot is genuinely indirect.  That
+ * opacity follows from where the value CAME FROM rather than from how often the
+ * pointer is fetched, which is why reading it once per run costs the barrier
+ * nothing.  What it is NOT is a language-level prohibition: ISO C does not forbid a
+ * specialised clone, a scalarised return value, or a guarded devirtualization, all
+ * of which could honour the loaded value and leave the observable behaviour
+ * unchanged.  Their absence is therefore measured rather than asserted - see the
+ * sibling record for the -O2 evidence on all four drivers, and
+ * 001_many_integer_parameters.expected for the residual risk it leaves.  The
+ * mechanism is pure ISO C:
  * a function attribute would have been shorter, but the documented attribute set
  * for the compiler under test is packed, aligned, section, unused, deprecated,
  * visibility and format (docs/technical-specifications.md line 506), so an
@@ -412,9 +417,11 @@ int main(void)
     /* The fourteen call boundaries, snapshotted out of the file-scope volatile pointers one
        read per full expression and used through these plain locals everywhere below.  The
        barrier is entirely preserved: each value ARRIVED through a volatile load, so no
-       conforming compiler can establish which function any of these designates, and every
-       call through them stays indirect, un-inlined and un-cloned at every optimization
-       level.  What the snapshot removes is the only unsound part of reading them at the call
+       compiler can establish at translation time which function any of these designates, and
+       every call through them is indirect at every optimization level.  Whether the callee is
+       additionally left un-inlined and un-cloned is an optimizer OUTCOME rather than a
+       language guarantee - measured at -O2 on the reference drivers, it is - and the sibling
+       record carries that evidence.  What the snapshot removes is the only unsound part of reading them at the call
        site - an access to a volatile object is an observable side effect, and the order of
        evaluation of a call's function designator and of its arguments is unspecified
        (C11 6.5.2.2p10), so a direct member probe reading one volatile pointer four times in

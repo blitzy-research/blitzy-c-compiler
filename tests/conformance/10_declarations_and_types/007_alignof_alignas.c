@@ -38,8 +38,22 @@ int printf(const char *, ...);
 /* The exact alignment, in bytes, that double, long long, long and every object
  * pointer must have on the target being compiled, and the exact size of a pointer
  * and of long.  On all four supported targets these five quantities are one and
- * the same number, so a single expectation pins all of them.  Each branch states
- * the number outright, which is what makes the predicates below exact. */
+ * the same number, so a single expectation pins all of them.  The architecture arms
+ * state the number outright, which is what makes the predicates below exact.
+ *
+ * The trailing arms degrade rather than refusing, and the effect is disclosed rather
+ * than hidden.  Neither C nor anything this repository documents obliges an
+ * implementation to predefine __x86_64__, __i386__, __aarch64__ or __riscv -- they
+ * are spellings of one compiler FAMILY -- so a conforming compiler that names its
+ * target some other way is not defective and its silence must not be turned into a
+ * compile failure charged to the compiler under test.  Where no architecture macro is
+ * recognized the expectation falls back to the compiler's own declared pointer width,
+ * and failing that to sizeof(void *) itself; every arm prints 1 for a self-consistent
+ * compiler, so no arm can manufacture a divergence out of a naming difference.  What
+ * varies is only how much the two lines below establish: an independent check of the
+ * width and alignment on the architecture arms, and a consistency check between the
+ * compiler's own declarations on the fallback arms.  The alignment RELATIONS printed
+ * alongside them do not depend on this chain at all. */
 #if defined(__x86_64__) || defined(__amd64__)
 #define EXPECTED_WIDE_ALIGN 8u
 #elif defined(__i386__) || defined(__i386)
@@ -48,8 +62,10 @@ int printf(const char *, ...);
 #define EXPECTED_WIDE_ALIGN 8u
 #elif defined(__riscv) || defined(__riscv__)
 #define EXPECTED_WIDE_ALIGN 8u
+#elif defined(__SIZEOF_POINTER__)
+#define EXPECTED_WIDE_ALIGN ((unsigned)__SIZEOF_POINTER__)
 #else
-#error "007_alignof_alignas: no alignment expectation selected; the target architecture predefined macro (__x86_64__ / __i386__ / __aarch64__ / __riscv) was not recognized"
+#define EXPECTED_WIDE_ALIGN ((unsigned)sizeof(void *))
 #endif
 
 struct padded { char c; _Alignas(8) int aligned_member; };

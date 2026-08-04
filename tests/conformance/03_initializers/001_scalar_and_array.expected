@@ -27,12 +27,24 @@ possible. The only arithmetic is the loop counter i, which runs 0..4 and 0..2 ov
 arrays of 5 and 3 elements respectively, so every subscript is strictly in bounds
 and no one-past-end pointer is ever formed, let alone dereferenced.
 
-No shifts. No pointer casts. No aliasing: each object is read only through its
-own declared type. No object is modified twice between sequence points; in fact no
-object is modified after initialization at all. Each printf call takes at most one
-argument with a side effect (none do). No padding byte is read or printed: only
-named members g_pt.x, g_pt.y, l_pt.x, l_pt.y are accessed, never the struct as a
-whole and never its representation.
+No shifts. No pointer casts, and no pointer value printed, compared or converted to an
+integer: the pointer arithmetic the language performs for a subscript, and the decay of
+each format-string literal at its printf call, are the only pointer operations present. No
+aliasing: each object is read only through its own declared type. No object is modified twice
+between sequence points
+initialized test data -- g_scalar, g_arr, g_u_arr, g_pt, l_scalar, l_arr and
+l_pt -- is never modified after its initializer at all, so every value the
+program prints is the value its initializer gave it. The one object that is
+modified is the loop counter i: it is assigned in the initial clause of each of
+the three for statements at 001_scalar_and_array.c lines 43, 46 and 53 and
+incremented in each of their controlling expressions, and every one of those
+assignments and increments is a full expression of its own, so each is separated
+from every other access to i by a sequence point. Its range is bounded by a
+literal in each case -- i < 5, i < 3 and i < 5 over arrays of 5, 3 and 5
+elements -- so it neither overflows nor leaves an array. Each printf call takes
+at most one argument with a side effect (none do). No padding byte is read or
+printed: only named members g_pt.x, g_pt.y, l_pt.x, l_pt.y are accessed, never
+the struct as a whole and never its representation.
 
 4294967295u is exactly UINT_MAX for a 32-bit unsigned int and is written with the
 u suffix, so it is representable without conversion on every target and no
@@ -45,8 +57,10 @@ size_t, ptrdiff_t, intptr_t, float, double or long double, so the measured width
 differences between i686 (4-byte long and pointer) and the other three targets
 (8-byte) cannot affect the output.
 
-No character data is used, so the measured plain-char signedness difference
-(signed on x86_64 and i686, unsigned on aarch64 and riscv64) cannot arise.
+The only character data is the format-string literals, whose bytes printf copies
+through unchanged. No plain-char value is read as a number, converted, compared or
+formatted numerically, so the measured plain-char signedness difference (signed on
+x86_64 and i686, unsigned on aarch64 and riscv64) cannot arise.
 
 No address or pointer value is printed. No struct is printed as a whole, so
 padding bytes -- whose contents are unspecified -- are never observed.

@@ -47,8 +47,10 @@
  * Freedom from undefined behaviour: no case label is duplicated in any switch, so
  * no constraint is violated; the sparse labels -1000000 through 1000000 are all
  * representable in int on every conforming target; the largest accumulated value
- * is the dense sweep total of 1720, far inside INT_MAX; every subscript is
- * strictly inside its array; no pointer is formed; nothing is shifted, divided or
+ * is the dense sweep total of 1720, far inside INT_MAX; every subscript is a literal or a
+ * loop counter strictly inside its array, so the pointer arithmetic the language performs
+ * for it stays inside the object and no pointer value is printed or converted to an
+ * integer; nothing is shifted, divided or
  * cast; each volatile store and the read that follows it are separate full
  * expressions, so no object is modified twice between sequence points and each
  * printf call receives arguments free of side effects. */

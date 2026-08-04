@@ -64,12 +64,25 @@ static const char   *g_ptr         = "lit";
  * attribute to a compiler defect.  The two numeric escapes in g_escapes need no assertion:
  * C11 6.4.4.4p7 fixes \\x41 and \\102 at 65 and 66 by their numeric value regardless of
  * charset, which is precisely why they are spelled numerically.  The simple escape \\n does
- * need one, because 6.4.4.4p4 gives it a charset-dependent value. */
+ * need one, because 6.4.4.4p4 gives it a charset-dependent value.
+ *
+ * The conjunction below is EXHAUSTIVE over the letters this program prints, and the count is
+ * spelled in its message so that the claim can be checked against the list rather than
+ * trusted.  Seventeen letters reach the output: a, b, c, d, e from g_exact_u, g_room_u,
+ * g_extra_u, g_braced, g_concat and g_desig; x, y, z from g_exact_s and g_room_s; h, i from
+ * g_plain; h, e, l, o, w, r, d from the two grids; l, i, t through g_ptr; d, e, f from
+ * l_exact_u; and g, h from l_room.  The last two are the ones an author is most likely to
+ * miss, because f and g occur ONLY in the two automatic-duration twins declared inside main
+ * -- f as l_exact_u[2] and g as l_room[0] -- and nowhere in the file-scope literals above.
+ * Neither is implied by a neighbour: C11 5.2.1 guarantees contiguous codes for the DIGITS
+ * only, so 'e' == 101 and 'h' == 104 pin nothing between them and f and g must be named
+ * explicitly.  Anyone adding a literal here must add its letters to this conjunction and
+ * update the count in its message in the same edit. */
 _Static_assert('a' == 97 && 'b' == 98 && 'c' == 99 && 'd' == 100 && 'e' == 101
-                   && 'h' == 104 && 'i' == 105 && 'l' == 108 && 'o' == 111
-                   && 'r' == 114 && 't' == 116 && 'w' == 119 && 'x' == 120
-                   && 'y' == 121 && 'z' == 122,
-               "every letter this program prints sits at its ASCII code");
+                   && 'f' == 102 && 'g' == 103 && 'h' == 104 && 'i' == 105
+                   && 'l' == 108 && 'o' == 111 && 'r' == 114 && 't' == 116
+                   && 'w' == 119 && 'x' == 120 && 'y' == 121 && 'z' == 122,
+               "all seventeen letters this program prints sit at their ASCII codes");
 _Static_assert('\n' == 10, "the simple escape \\n is the ASCII line feed");
 
 /* Each helper reads exactly n elements, and every call below passes the

@@ -33,8 +33,7 @@ non-standard GCC extensions by definition, and -pedantic exists precisely to rej
 them; retaining it would fail every program in the area for doing exactly what it is
 meant to do. This is the only area-wide deviation in the corpus. No other warning is
 relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0.
+retained, and this program is clean under them, which is measured rather than asserted.
 
 Nothing implementation-defined is observed, so no target restriction is needed and all
 four targets are compared. The four rank checks are deliberately expressed as
@@ -45,9 +44,11 @@ typeof produced against sizeof of the type it should have produced, so each is t
 8 on three targets and 4 on i686, and asserting sizeof(long) > sizeof(int) would be true
 on three targets and false on i686. Either would make oracle (b) report a divergence
 caused by the test rather than the compiler. The relational form is target-independent,
-including on i686 where long and int are the same width. Plain char is never used, so the
-measured char-signedness difference is not reached: char is signed on x86_64 and i686 but
-unsigned on aarch64 and riscv64. Only the pointed-to value is printed, never a pointer.
+including on i686 where long and int are the same width. No plain-char value the program
+computes is printed as a number or compared -- the only plain-char objects are the
+format-string literals, copied through printf unchanged -- so the measured char-signedness
+difference is not reached: char is signed on x86_64 and i686 but unsigned on aarch64 and
+riscv64. Only the pointed-to value is printed, never a pointer.
 Output is identical on all four targets at all three optimization levels.
 END
 expected_stdout    <<END

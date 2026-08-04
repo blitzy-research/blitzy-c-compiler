@@ -24,34 +24,50 @@
  * the static-image path and the run-time path are both exercised; form 3's twin
  * uses the combined [2].q spelling rather than [2] = { ... }.
  *
- * ONE SPELLING IS EXCLUDED, and it is stated here rather than left to be noticed.
+ * ONE SPELLING IS CARRIED BY A SIBLING PROGRAM RATHER THAN HERE, and it is stated
+ * here rather than left to be noticed.
  * An OVERLAPPING designator at depth -- an inner aggregate brace-initialized and
  * then one of its members named again, or the reverse of that order -- is
  * well-defined C11: 6.7.9p19 has initialization proceed in initializer-list
  * order, so the last initializer to name a subobject supplies its value and a
  * brace covering a whole subobject discards whatever earlier initializers had
- * placed inside it. It would be worth testing separately from the flat override,
+ * placed inside it. It is worth testing separately from the flat override,
  * because the override has to interact correctly with the "current object"
  * descent and an implementation that resolved designators against the wrong
  * nesting level would override a sibling, or the outer object, rather than the
- * subobject named. It is nevertheless not written here. -Wextra enables
- * -Woverride-init and the suite's authoring gate promotes every diagnostic to an
- * error, and fourteen override spellings -- the flat and the nested ones alike,
- * enumerated in 004_designated_array.c -- were measured against that gate with
- * the reference compiler and every one is rejected. An override carrying a side
- * effect is no escape either: -Woverride-init-side-effects is on by default and
- * C11 6.7.9 leaves the evaluation of an overridden initializer's side effects
- * unspecified, which requirement 1 forbids outright. No admissible deviation
- * exists: the gate's removable members are exactly -pedantic, for the
+ * subobject named. It IS tested, in both nesting directions, by this area's
+ * designated-array program: 004_designated_array.c carries g_over_row_elem, which
+ * braces a whole row and then names one element inside it, and g_over_elem_row,
+ * which names the same element and then braces the same whole row -- identical
+ * initializers in opposite order, so element [0][1] must read 20 in the first and
+ * 2 in the second, which separates "the last initializer wins" from "any
+ * explicitly named subobject survives". The flat, struct-member and
+ * automatic-duration overrides live there too.
+ * It is not duplicated here because the spelling cannot be written under the
+ * authoring gate untouched: -Wextra enables -Woverride-init and the gate's -Werror
+ * makes it fatal, every override spelling measured against that gate with the
+ * reference compiler -- the flat and the nested ones alike, enumerated in
+ * 004_designated_array.c -- is rejected, and no admissible gate deviation exists,
+ * because the gate's removable members are exactly -pedantic, for the
  * GCC-extensions area, and -Wconversion with -Wsign-conversion, for the
  * deliberate narrowing program, so -Wextra is not removable and area 03 is
- * granted no deviation at all. A source-level diagnostic-suppression directive is
- * not an alternative: it neutralizes a gate member from inside the translation
- * unit while the record still claims the unchanged gate, which makes the record's
- * own claim false rather than making the program clean. Constraint C3 asks for
- * exactly what is done instead -- the exclusion is narrow, it is scoped to one
- * spelling, and its reason is recorded here and in this program's expectation
- * record. What remains under test is the harder half of the same question: forms
+ * granted no deviation at all. 004_designated_array.c therefore brackets its
+ * overriding declarations with matched push/pop diagnostic-control directives that
+ * suppress -Woverride-init for those declarations alone, declares them in its own
+ * record, and keeps -Werror and -Woverride-init fatal everywhere else in its
+ * translation unit. Concentrating that mechanism in ONE program of the area is the
+ * point: THIS translation unit stays entirely free of diagnostic-control
+ * directives, so mixed positional and designated initializers are demonstrated on
+ * source that needs no suppression at all and a divergence here can never be
+ * confused with an artefact of a suppressed diagnostic.
+ * An override carrying a side effect is excluded from the area outright, and that
+ * exclusion is not about the gate: -Woverride-init-side-effects is on by default
+ * and C11 6.7.9p23 leaves the sequencing of an initializer list's side effects
+ * unspecified, which requirement 1 forbids. Every override the area carries is a
+ * constant expression, so it costs nothing. Constraint C3 is satisfied the way it
+ * asks to be -- what is narrowed is narrow, it is scoped to one spelling, and its
+ * reason is recorded here and in this program's expectation
+ * record. What remains under test HERE is the harder half of the same question: forms
  * 1 through 6 make the compiler descend into a brace, apply a designator there,
  * ascend and resume positionally, and form 6's `.o = { .in.p = 42 }` with
  * `.pr = { { 43, 44 }, [1].q = 46 }` reaches two levels down and combines an

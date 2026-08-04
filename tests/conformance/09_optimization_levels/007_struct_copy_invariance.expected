@@ -25,8 +25,11 @@ initializes checksum to zero, then writes all eight elements of v and sets flag,
 member is ever read uninitialized. Array indices run from 0 to 7 on an eight-element array,
 strictly in bounds. No padding byte is ever read, printed or compared: only named members
 are accessed, no struct is compared with memcmp, and no object representation is inspected.
-No shift, no division, no pointer arithmetic, no aliasing violation, and no struct is
-accessed through a pointer of a different type. The only floating-point arithmetic is
+No shift, no division, no aliasing violation, and no struct is accessed through a pointer
+of a different type. The only pointer arithmetic is the arithmetic the language performs
+for a subscript: every index into v is a literal or a loop counter provably inside the
+array's bound, so each access stays within the object, and no pointer value is printed,
+converted to an integer or compared. The only floating-point arithmetic is
 sum_mixed's (double)s.tag + s.value: 5 converts to double exactly, 6.75 is exactly
 representable, and their sum 11.75 is exact, so the conversion is value-preserving and no
 result is ever outside its destination type's range. No object is modified twice between

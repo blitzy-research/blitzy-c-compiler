@@ -36,10 +36,12 @@
  * the gate's removable members are exactly -pedantic, for the GCC-extensions
  * area, and -Wconversion with -Wsign-conversion, for the deliberate narrowing
  * program, so -Wextra is not removable and area 03 is granted no deviation at
- * all.  A source-level diagnostic-suppression directive is not an alternative: it
- * neutralizes a gate member from inside the translation unit while the record
- * still claims the unchanged gate, which makes the record's own claim false
- * rather than making the program clean.  Constraint C3 asks for exactly what is
+ * all.  A source-level diagnostic-suppression directive is not an alternative here: it
+ * would neutralize a gate member for a spelling this program does not need, and
+ * the area reserves that mechanism for the one construct it is required to carry
+ * and cannot otherwise obtain -- the overlapping designators in
+ * 004_designated_array.c, whose record declares its directives and their verified
+ * scope explicitly.  Constraint C3 asks for exactly what is
  * done instead -- the exclusion is narrow, it is scoped to one spelling, and its
  * reason is recorded here and in this program's expectation record.
  *

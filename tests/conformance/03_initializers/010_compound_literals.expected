@@ -6,7 +6,7 @@
 
 program            = 010_compound_literals
 area               = 03_initializers
-description        = Compound literals in expression, argument, subscript, member-access and sizeof position -- ten forms including a designated literal, a literal nested inside another, by-value and by-address argument passing, an array literal decaying to a pointer, direct subscripting and direct member selection with no intervening variable, and sizeof applied to a literal -- plus a fresh unnamed object per loop iteration, a block-scoped literal read only inside its own block, and the static-duration contrast of two file-scope literals
+description        = Compound literals in expression, argument, subscript, member-access and sizeof position -- ten forms including a designated literal, a literal nested inside another, by-value and by-address argument passing, an array literal decaying to a pointer, direct subscripting and direct member selection with no intervening variable, and sizeof applied to a literal -- plus a loop-body literal whose one unnamed object is reinitialized on each iteration, a block-scoped literal read only inside its own block, and the static-duration contrast of two file-scope literals
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -43,11 +43,13 @@ duration. Every use here respects that.
     tied to. Hoisting that declaration out of the braces would be a genuine use after the object's
     lifetime -- undefined behaviour that would invalidate the oracle rather than test it, and exactly
     what the sanitizer gate is watching for here.
-  - Inside the loop, the compound literal's enclosing block is the loop body, so each iteration
-    establishes the object afresh from the current value of the counter. Its value is copied
-    immediately into the named object `fresh` and NO ADDRESS IS TAKEN there, so the program observes
-    the VALUE and never object identity -- which is what keeps the assertion independent of whether
-    the implementation reuses one allocation for every iteration.
+  - Inside the loop, the compound literal's enclosing block is the loop body. The literal is one
+    source occurrence, so C11 6.5.2.5p5 gives it ONE unnamed object with that block's lifetime, and
+    each iteration REINITIALIZES that object from the current value of the counter rather than
+    creating a further one. Its value is copied immediately into the named object `fresh` and NO
+    ADDRESS IS TAKEN there, so the program observes the VALUE and never the object's identity --
+    which is what keeps the assertion independent of where the object lives and of how the
+    implementation materializes it on each trip round.
   - The two file-scope literals have STATIC storage duration, so keeping their addresses and reading
     them at the very end of main -- after every block-scope literal above has expired -- is well
     defined for the whole run.
@@ -100,10 +102,10 @@ compiler. This area is granted no header exception; the corpus has exactly two, 
 and the dedicated bundled-header probe in area 12.
 This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
 under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under the
-sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
-reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched.
+-Werror in the single native compile-only invocation the suite's warning gate makes, and it builds
+and runs clean under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both
+gates are reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag
+discipline is untouched.
 END
 impl_defined_notes <<END
 This record narrows nothing: all four targets, all three optimization levels and all three
@@ -120,12 +122,14 @@ NO ADDRESS IS EVER PRINTED. Every pointer in the program -- including the one fo
 address of a compound literal, the array literal that decays in argument position, the block-scoped
 pointer and the two file-scope pointers -- is dereferenced and its pointee reported instead, so where
 the implementation places an unnamed object is unobservable.
-PLAIN-CHAR SIGNEDNESS. No character data appears, so the MEASURED split -- signed on x86_64 and
-i686, unsigned on aarch64 and riscv64 -- cannot arise.
+PLAIN-CHAR SIGNEDNESS. The only character data is the format-string literals, whose bytes printf
+copies through unchanged; no plain-char value is read as a number, so the MEASURED split -- signed on
+x86_64 and i686, unsigned on aarch64 and riscv64 -- cannot arise.
 PADDING AND LAYOUT. Members are read individually by name and no object representation is inspected
 and no aggregate is printed whole, so padding, whose contents are unspecified, is never observed.
-EXECUTION CHARACTER SET. Nothing character-valued is printed, so C11 5.2.1 leaves nothing here to
-the implementation.
+EXECUTION CHARACTER SET. No character's numeric CODE is computed or printed, so C11 5.2.1 leaves
+nothing here to the implementation; the label bytes of each line are copied through printf from the
+same source on both sides of every comparison.
 THE TWO STORAGE DURATIONS ARE THIS PROGRAM'S VARIANT AXIS, AND THEY TRAVEL DIFFERENT PATHS THROUGH
 THE COMPILER FOR THE SAME SYNTAX. A file-scope compound literal has static storage duration and is
 resolved into the program's data image at translation time, whereas a block-scope one must be

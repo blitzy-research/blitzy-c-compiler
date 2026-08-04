@@ -33,10 +33,11 @@
  * -Wconversion with -Wsign-conversion, for the deliberate narrowing program, so
  * -Wall is not removable and area 03 is granted no deviation at all.  The
  * FLAT INTEGER spelling is accordingly not written here.  A source-level
- * diagnostic-suppression directive is not an alternative: it neutralizes a gate
- * member from inside the translation unit while the record still claims the
- * unchanged gate, which makes the record's own claim false rather than making the
- * program clean.  Constraint C3 asks for exactly what is done instead -- the
+ * diagnostic-suppression directive is not an alternative here: it would neutralize a
+ * gate member for a spelling this program does not need, and the area reserves that
+ * mechanism for the one construct it is required to carry and cannot otherwise
+ * obtain -- the overlapping designators in 004_designated_array.c, whose record
+ * declares its directives and their verified scope explicitly.  Constraint C3 asks for exactly what is done instead -- the
  * exclusion is narrow, it is scoped to one spelling, and its reason is recorded
  * here and in this program's expectation record.
  *
@@ -55,15 +56,19 @@
  * output line, 48 in total, rather than any checksum or summary value, so one
  * divergent line localizes the defect to one initializer form.
  *
- * Every object is a plain int printed with %d, and no character data appears, so
- * neither a target-varying width nor plain-char signedness can reach the output.
- * Only named members are ever read, never an object representation, so no padding
- * byte is observed.
+ * Every value this program computes and prints is a plain int printed with %d; the
+ * objects that hold them are ints, arrays of int and structs of those, and the only
+ * character data is the format-string literals, whose bytes printf copies through
+ * unchanged.  So neither a target-varying width nor plain-char signedness can reach the
+ * output.  Only named members are ever read, never an object representation, so no
+ * padding byte is observed.
  *
  * Freedom from undefined behaviour: no arithmetic is performed on the data, so no
- * overflow is reachable; every subscript stays strictly inside its array bound; no
- * one-past-end pointer is formed; and nothing is shifted, cast, aliased or modified
- * after its initializer.  No header is named and printf is declared by hand,
+ * overflow is reachable; every subscript is a literal or a loop counter strictly inside
+ * its array bound, so the pointer arithmetic the language performs for it never leaves
+ * the object; no one-past-end pointer is dereferenced and no pointer value is printed,
+ * compared or converted; and nothing is shifted, cast, aliased or modified after its
+ * initializer.  No header is named and printf is declared by hand,
  * because bcc ships no stdio.h -- its bundled set is the nine required freestanding
  * headers plus a bonus stdatomic.h, ten files in all (docs/project-guide.md line
  * 212). */

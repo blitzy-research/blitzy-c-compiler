@@ -18,20 +18,17 @@
    oracle end to end. A structural test cannot detect a wrong answer it was not written
    to anticipate; an independent oracle can.
 
-   Self-containment. No header is included. printf is hand-declared because bcc ships no
-   <stdio.h> - a grep for "stdio" across the repository documentation returns zero
-   matches - so an include of it would succeed under the reference compiler and fail
-   under bcc, manufacturing a divergence caused by the test rather than by the compiler.
+   Self-containment. No header is included. printf is hand-declared because <stdio.h> is
+   not among the freestanding headers bcc ships, so an include of it would succeed under
+   the reference compiler and fail under bcc, manufacturing a divergence caused by the
+   test rather than by the compiler.
    Keeping the program to a single file is what a reproducible-in-isolation program needs
    from its source half. The other half is the sibling record
    001_macro_expansion_stringize.expected, committed beside it, which supplies all four
    targets, all three optimization levels, all three oracles and a 13-line golden stdout
-   measured on this branch and byte-identical across all twelve cells. Reproducing this
-   program by hand needs only a C compiler and this one file; reproducing a harness cell of
-   it needs the record's three command templates and nothing else. What no cell has resolved
-   yet is a VERDICT, and the record is not what is missing: there is no compiler under test
-   on this branch, so the flag-capability probe is recorded UNPERFORMED and blocks every
-   area unconditionally.
+   byte-identical across all twelve cells. Reproducing this program by hand needs only a C
+   compiler and this one file; reproducing a harness cell of it needs the record's three
+   command templates and nothing else.
 
    Determinism. Output is a fixed 13-line sequence of key=value pairs, exactly one line
    per preprocessing property claimed, so a single divergent line localises the defect to
@@ -42,9 +39,9 @@
    8 on the other three targets, docs/technical-specifications.md lines 457-462) has no
    effect on the output. There is no timestamp, no randomness, no locale-dependent
    formatting and no uninitialised read; the translation-date, translation-time and
-   source-file predefined macros are never referenced, so a mechanical grep for them
-   over this file finds nothing at all - not even in prose, deliberately, so that the
-   audit stays a real check. main returns 0, inside the 0-125 range the suite requires.
+   source-file predefined macros are never referenced, so no printed value can vary with
+   when or where the program was translated. main returns 0, inside the 0-125 range the
+   suite requires.
 
    The two-variant rule. Lines funclike_folded and funclike_runtime apply the SAME
    function-like macro twice: once to a literal, where the constant folder answers, and

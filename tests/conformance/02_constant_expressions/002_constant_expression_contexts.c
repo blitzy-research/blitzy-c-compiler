@@ -1,17 +1,24 @@
 /* 02_constant_expressions/002_constant_expression_contexts.c
  *
- * The four syntactic contexts in which C *requires* an integer constant
- * expression, exercised end to end so that the value the compiler computed at
- * translation time becomes observable at run time:
+ * Four syntactic contexts that require an integer constant expression, exercised
+ * end to end so that the value the compiler computed at translation time becomes
+ * observable at run time:
  *
- *   1. array bounds            -- static int vec[(3 * 4) - 2];
+ *   1. file-scope array bounds -- static int vec[(3 * 4) - 2];
  *   2. case labels             -- case (2 * 3) - 1:
- *   3. bitfield widths         -- unsigned int u : (2 + 3);
- *   4. enumerator initializers -- enum { CTX_DERIVED = CTX_BASE * 4 };
+ *   3. bit-field widths        -- unsigned int u : (2 + 3);
+ *   4. enumerator values       -- enum { CTX_DERIVED = CTX_BASE * 4 };
  *
- * Two further required-constant-expression contexts come along at no cost and
- * are covered as well: the controlling expression of a _Static_assert, and the
- * initializer of an object with static storage duration.
+ * Those four are the contexts this program exercises, not an exhaustive list of
+ * the contexts C has.  Two further ones come along at no cost and are covered as
+ * well: the controlling expression of a _Static_assert, and the initializer of an
+ * object with static storage duration.  And the first entry is deliberately
+ * qualified as FILE SCOPE: an array whose size is not an integer constant
+ * expression is a variable-length array (C11 6.7.6.2p4), so a block-scope array
+ * bound need not be an integer constant expression at all.  Every array declared
+ * here is at file scope, where C11 6.7.6.2p2 forbids a variably modified type --
+ * an identifier with a variably modified type must have no linkage and either
+ * block or function prototype scope -- so at file scope the bound must be one.
  *
  * Every constant expression here is a genuine expression rather than a bare
  * literal, and every value it fixes is printed twice: once as folded, once from a
@@ -20,10 +27,11 @@
  * Each volatile object is read exactly once into a plain local and the arithmetic
  * is done on the locals, which keeps every full expression to a single side effect
  * and every printf argument free of them, so no printed value can depend on an
- * unspecified evaluation order.  The two switch dispatch lines are the exception
- * worth naming: each passes a constant-argument call and a volatile-argument call
- * to the same pure function, so exactly one argument has a side effect and the
- * other cannot be affected by it in either order.  A bound is twinned once more by
+ * unspecified evaluation order.  The fourteen switch dispatch lines -- seven dense
+ * and seven sparse -- are the exception worth naming: each passes a constant-argument
+ * call and a volatile-argument call to the same pure function, so exactly one of the
+ * two arguments has a side effect and the other cannot be affected by it in either
+ * order.  A bound is twinned once more by
  * a volatile counter incremented per iteration, giving a run-time count of the
  * elements the bound admitted by a route no optimizer can fold.
  *
@@ -60,9 +68,12 @@
  * selector is either matched by a label or deliberately routed to default; every
  * shift count is a small non-negative constant far inside the width of its
  * promoted operand; no signed computation approaches INT_MAX or the long long
- * maximum; no pointer is formed at all; no object is modified twice between
- * sequence points; and nothing depends on padding bytes or on the addresses of
- * unrelated objects.
+ * maximum; no pointer VALUE is printed, compared or converted to an integer, and the
+ * pointer arithmetic the language performs for a subscript never leaves its object,
+ * every subscript being a literal or a loop counter bounded by the same sizeof
+ * expression that declared the array; no object is modified twice between sequence
+ * points; and nothing depends on padding bytes or on the addresses of unrelated
+ * objects.
  */
 int printf(const char *, ...);
 

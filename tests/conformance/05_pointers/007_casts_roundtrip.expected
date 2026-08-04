@@ -90,8 +90,8 @@ only round trip through an INTEGER that the standard guarantees compares equal i
 through intptr_t or uintptr_t of C11 7.20.1.4, both optional types that require stdint.h,
 which this program may not include. Equality of the reconstructed pointer, and the validity
 of dereferencing it, therefore rest on the definition recorded below.
-WIDTH IS NECESSARY BUT NOT SUFFICIENT, and an earlier version of this record claimed
-otherwise. sizeof(void *) is 4 on i686 and 8 on x86-64, AArch64 and RISC-V 64. The carrier
+WIDTH IS NECESSARY BUT NOT SUFFICIENT, and treating it as sufficient would be an error:
+width alone establishes only that no value is lost. sizeof(void *) is 4 on i686 and 8 on x86-64, AArch64 and RISC-V 64. The carrier
 is unsigned long long, 8 bytes on all four targets and therefore always wide enough, and
 the conversion back to a pointer is bridged through unsigned long, exactly pointer width on
 all four targets (8 on x86-64, AArch64 and RISC-V 64; 4 on i686), so no direct cast between
@@ -103,11 +103,10 @@ converting back yields a pointer to the original object, so it cannot license an
 dereference. uintptr_t would be the natural carrier and is deliberately NOT used: it is an
 optional typedef and would require stdint.h, and no header may be named in this area, so
 built-in integer types carry the value instead.
-THE DEFINITION, PER TARGET AND PER TOOLCHAIN. All four reference toolchains are GCC 13.4.0,
-Ubuntu package 13.4.0-4ubuntu1, each identified by its own -dumpmachine: gcc-13 for
-x86_64-linux-gnu, i686-linux-gnu-gcc-13 for i686-linux-gnu, aarch64-linux-gnu-gcc-13 for
-aarch64-linux-gnu, riscv64-linux-gnu-gcc-13 for riscv64-linux-gnu. The three non-native
-targets execute under QEMU user-mode 10.1.0 on Linux 6.12.85+ x86_64. On each of the four
+THE DEFINITION, PER TARGET AND PER TOOLCHAIN. Each of the four targets is compiled by the
+reference driver this record names for it and each non-native target executes under that
+target's emulator; the toolchain of record is pinned in tests/conformance/README.md rather
+than restated here, so this field stays correct as that pinning moves. On each of the four
 the definition is the same one: converting a pointer to an integer type wide enough to
 represent it yields that pointer's address value unchanged, and converting such an integer
 back to a pointer yields the pointer designating that same address, correctly aligned for

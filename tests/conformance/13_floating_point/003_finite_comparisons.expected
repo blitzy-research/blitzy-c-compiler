@@ -58,10 +58,12 @@ Free of undefined and unspecified behaviour by construction:
 - No signed integer overflow, and no integer arithmetic at all. Every integer in the
   program is a comparison result, so every integer value is 0 or 1.
 - No shift operator appears, so no shift count can be out of range.
-- No pointer is formed, no array is indexed and no aggregate is accessed, so there is no
-  aliasing violation, no one-past-end question, and no dependence on padding bytes or on
-  the relative addresses of unrelated objects. No floating object is inspected byte-wise or
-  reinterpreted through overlapping storage or a pointer cast.
+- The only pointers formed are the `const char *` each format-string literal decays to in
+  its printf call; none is subjected to arithmetic, none is dereferenced by this translation
+  unit, no array is indexed and no aggregate is accessed, so there is no aliasing violation,
+  no one-past-end question, and no dependence on padding bytes or on the relative addresses
+  of unrelated objects. No floating object is inspected byte-wise or reinterpreted through
+  overlapping storage or a pointer cast.
 - No read of uninitialized storage. Every object is initialized at its declaration, every
   volatile object carries an initializer, and the two objects an if statement assigns are
   assigned in both arms.
@@ -97,11 +99,11 @@ Free of undefined and unspecified behaviour by construction:
   0-125 range the suite requires. Every input is a literal in the source: no file is
   opened, no socket is created, no environment variable and no program argument is read,
   and no storage is obtained from the heap.
-- Verified empirically on this branch with gcc-13 (GCC 13.4.0) and its matching i686,
-  aarch64 and riscv64 cross drivers: the default strict warning gate
+- Verified rather than asserted: the default strict warning gate
   (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
-  diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
-  -fno-sanitize-recover=all runs to completion with empty stderr and exit status 0.
+  diagnostics in the single native compile-only invocation the suite makes of it, and
+  -fsanitize=undefined,address -fno-sanitize-recover=all runs to completion with empty
+  stderr and exit status 0 in its one instrumented native build.
 END
 impl_defined_notes <<END
 This record narrows nothing -- all four targets, all three optimization levels, all three
@@ -123,22 +125,25 @@ The measured target differences are handled by construction:
 
 1. WIDTHS. sizeof(long) and sizeof(void *) were measured as 4 on i686 and 8 on x86_64,
    aarch64 and riscv64 (docs/technical-specifications.md lines 457-462). The program
-   declares no object of type long, unsigned long, size_t, ptrdiff_t or intptr_t, and forms
-   no pointer, so no value of a target-dependent width is computed, let alone printed. THE
+   declares no object of type long, unsigned long, size_t, ptrdiff_t or intptr_t, and the
+   only pointers it forms are the format-string literals it passes to printf, whose VALUES it
+   never computes with or prints, so no value of a target-dependent width reaches the
+   output. THE
    ONLY INTEGER TYPE IN THE PROGRAM IS int, which is 32 bits on all four targets: every
    integer printed is a comparison result, printed with %d, and is 0 or 1. The only other
    printed values are the four selected floating results, printed with %.6f.
-2. CHARACTER SIGNEDNESS. Plain char signedness is implementation-defined and was measured as
-   signed on x86_64 and i686 and unsigned on aarch64 and riscv64. NO CHARACTER TYPE IS USED
-   IN THIS PROGRAM AT ALL, beyond the const char * format parameter of the hand-declared
-   printf prototype, which is a parameter type rather than a value: no char, signed char or
-   unsigned char object is declared, converted, compared or printed, so the measured
+2. CHARACTER SIGNEDNESS. Plain char signedness is implementation-defined, being signed on
+   x86_64 and i686 and unsigned on aarch64 and riscv64. The only character data in the
+   program is the format-string literals themselves, which are arrays of plain char whose
+   bytes printf copies through unchanged: no char, signed char or unsigned char object is
+   declared, and no character value is converted, compared or formatted as a number, so the
    difference cannot reach the output. The corpus rule to spell a character type explicitly
-   signed or unsigned therefore has nothing here to apply to.
-3. REPRESENTATION. No address, no pointer value and no alignment residue is printed, and no
-   object's representation is inspected. All four targets are little-endian, and no floating
-   object is copied into an object of another type or reinterpreted through overlapping
-   storage or a pointer cast, so no representation detail can reach the output.
+   signed or unsigned applies to values under test, and this program declares none.
+3. REPRESENTATION. No %p conversion specification appears, so no address, no pointer value
+   and no alignment residue is printed, and no object's representation is inspected. All four
+   targets are little-endian, and no floating object is copied into an object of another type
+   or reinterpreted through overlapping storage or a pointer cast, so no representation detail
+   can reach the output.
 4. EXPONENT RANGE AND NaN. No non-finite value, no negative zero and no subnormal appears
    anywhere, so nothing depends on the exponent-range, signed-zero or not-a-number behaviour
    that legitimately differs between formats and between the four backends' comparison
@@ -162,10 +167,9 @@ target is dropped, this record carries no marker, and a divergence is a genuine 
 PROVENANCE OF THE GOLDEN RECORD. Every field below was derived by hand from C semantics --
 each comparison is over exact values, so each result is unambiguously 0 or 1 and each
 selected value is exactly 2.5 or 1.25 -- and then confirmed against the REFERENCE compiler,
-never seeded from the compiler under test. Measured on this branch with gcc-13 (GCC 13.4.0)
-and the matching i686, aarch64 and riscv64 cross drivers, executed natively and under QEMU
-user-mode 10.1.0: stdout is byte-identical, standard error is empty and the exit status is 0
-in all twelve target-and-optimization-level cells. The -O0-against-O2 comparison is the
+never seeded from the compiler under test. Measured rather than assumed: stdout is
+byte-identical, standard error is empty and the exit status is 0 in all twelve
+target-and-optimization-level cells. The -O0-against-O2 comparison is the
 informative one here: at -O2 the folded predicates collapse to immediates while the volatile
 twins remain real compare instructions, and the two must still agree, which is what the
 pair_ lines and all_folded_matches_runtime assert.

@@ -89,10 +89,11 @@ appear: the wide and Unicode forms belong to area 11, which is where their suppo
 The source is pure US-ASCII.
 THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
 is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
--Wconversion -Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers,
-and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
--fno-sanitize-recover=all run natively to completion. Both gates are reference-compiler-only and are
-never applied to bcc, so requirement 3's shared-flag discipline is untouched.
+-Wconversion -Wsign-conversion -Wshadow -Werror in the single native compile-only invocation the
+suite's warning gate makes, and it builds and runs clean under the sanitizer gate
+-fsanitize=undefined,address -fno-sanitize-recover=all run natively to completion. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
 END
 impl_defined_notes <<END
 This record narrows nothing. All four targets, all three optimization levels and all three
@@ -103,15 +104,13 @@ targets differ.
 THE TWO-VARIANT RULE AND WHY BOTH HALVES ARE NEEDED. Every property is printed twice: once
 from a constant expression, so the answer comes from the constant evaluator, and once from
 volatile-qualified operands, which no implementation may read at translation time, so that
-answer comes from the code generator. The mechanism was verified at instruction level rather than
-assumed, with gcc 13.4.0 for x86-64: volatile int x = 7; return x * 6; stores 7 to a stack slot,
-LOADS IT BACK and computes at run time under -O2 -- movl $7, -4(%rsp), then movl -4(%rsp), %eax,
-then leal (%rax,%rax,2), %eax and addl %eax, %eax, the multiply strength-reduced to shift-and-add
-rather than emitted as a mul -- where the non-volatile form folds away entirely to the single
-immediate move movl $42, %eax. Without the runtime half, optimization substitutes the folder's
-answer for the backend's and a code-generation defect escapes detection entirely while the suite
-still reports a pass. With it, a divergent fold_ line accuses the constant evaluator, a divergent
-runtime_ line accuses the backend, and a pair that disagrees with itself accuses one of the two.
+answer comes from the code generator. The mechanism rests on the language rather than on any
+compiler's habits: an access to a volatile object is an observable side effect, so no implementation
+may satisfy the runtime half by folding the value at translation time, and it must load the operand
+and compute. Without that half, optimization substitutes the folder's answer for the backend's and a
+code-generation defect escapes detection entirely while the suite still reports a pass. With it, a
+divergent fold_ line accuses the constant evaluator, a divergent runtime_ line accuses the backend,
+and a pair that disagrees with itself accuses one of the two.
 The one construct with no possible run-time counterpart is sizeof itself, which every conforming
 implementation evaluates at translation time for a non-variable type. Its twin is therefore the
 WALKED LENGTH: every fold_size_ line is matched by a fold_len_ / runtime_len_ / len_agree_
@@ -219,9 +218,18 @@ the same way, through the fold_escape_newline and fold_escape_return lines and t
 twins. Only the RENDERING of a control byte is dropped, no escape sequence is dropped from
 coverage by this arrangement, and rendering control bytes is not what this program is for. The
 same convention is followed by 11_literals_and_strings/001_character_escapes.c, which owns escape
-coverage in breadth and prints every escape it handles as a number and never as a byte. A sweep
-of every golden the corpus now holds -- all 108, one per program -- confirms this program was the
-only one ever affected and that no golden carries any control byte other than the line feed.
+coverage in breadth and prints every escape it handles as a number and never as a byte. A sweep of
+the goldens completed at this checkpoint -- 107 of the corpus's 108 programs, one golden each --
+confirms this program was the only one ever affected, and that no golden the sweep covered carries
+any control byte other than the line feed. The one record outside that sweep is named rather than
+quietly counted into it: 13_floating_point/004_long_double_target_restricted.expected was still
+being finalized when this note was written, so nothing is claimed here about its golden. The
+property does not rest on the sweep in any case, which is why the count above is stated as evidence
+rather than as the authority. require_report_safe_value in tests/conformance_harness/manifest.rs
+refuses, at parse time and in every field of every record the parser reads, any character that
+cannot appear literally in a report -- admitting the line feed alone, and only inside a heredoc,
+where it is the format's own line joiner. A control byte in any golden, including one written after
+this note, is therefore a hard parse error rather than a fact this paragraph has to keep up with.
 A NOTE ON POINTER-ARITHMETIC SPELLING, since it looks like an omission and is not. C11 6.5.2.1p2
 defines E1[E2] as identical to (*((E1)+(E2))), so subscripting a literal already exercises
 pointer arithmetic on it. The explicit *(p + n) form is exercised as well, but through a named
@@ -238,10 +246,10 @@ names the construct that produced it. No address or pointer value is printed, th
 randomness, no locale-dependent formatting and no data-dependent iteration order, and the
 program returns 0 -- well inside the 0-125 range the suite requires so that no exit status is
 truncated by the operating system.
-MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at
--O0, -O1 and -O2 -- twelve configurations -- and every one produced these 113 lines
-byte-identically with exit status 0, which is why cross-backend comparison is sound, oracle (b)
-is enabled with no narrowing, and oracle (c) can hold these bytes as the golden record.
+WHY ALL THREE ORACLES ARE ENABLED WITH NO NARROWING. Every line printed below is target-invariant
+by the normalization argued above, so the same bytes are the right answer on each of the four
+backends; that is what makes cross-backend comparison sound and lets oracle (c) hold these bytes as
+the golden record.
 END
 expected_stdout    <<END
 fold_size_empty=1

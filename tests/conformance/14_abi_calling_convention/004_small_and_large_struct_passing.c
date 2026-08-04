@@ -77,12 +77,12 @@
  *
  * THE CALL BARRIER, AND WHY THESE BOUNDARIES WOULD OTHERWISE NOT EXIST.  An
  * aggregate-passing boundary is only under test if the call actually happens.
- * Measured with gcc 13.4.0 at -O2, with direct calls to these static functions
- * the only one left standing was take_s8x10: the other six were inlined away and
- * six of the seven documented boundaries above were not crossed at all at that
- * level.  Every call below therefore goes through a FILE-SCOPE volatile FUNCTION
- * POINTER.  A volatile lvalue must be re-read on every access, so no conforming
- * compiler may assume which function the pointer designates -- it can neither
+ * With direct calls to these static functions the reference compiler at -O2 leaves
+ * only take_s8x10 standing: the other six are inlined away, so six of the seven
+ * documented boundaries above would not be crossed at all at that level.  Every
+ * call below therefore goes through a FILE-SCOPE volatile FUNCTION POINTER.  A
+ * volatile lvalue must be re-read on every access, so no conforming compiler may
+ * assume which function the pointer designates -- it can neither
  * inline nor clone the callee, and it must marshal each aggregate exactly as the
  * ABI prescribes because it cannot know what will receive it.  This is plain
  * standard C rather than a compiler attribute, so both sides of oracle (a)
@@ -126,24 +126,13 @@
  * and no .isra clone anywhere.  Every argument-marshalling path in the table is
  * therefore exercised as a real indirect call at every one of the twelve cells.
  *
- * The measured BEFORE-STATE, recorded because it is the reason the boundary is
- * there rather than as a description of the program as it now stands.  With
- * DIRECT calls to these static helpers, the same counting - over all eight of the
- * program's static functions then, the seven callees plus the element printer -
- * gave:
- *
- *   -O0  all 8 functions, 21 calls  on x86-64, i686, AArch64 and RISC-V 64 alike
- *   -O1  5 functions / 10 calls on x86-64 and AArch64, 1 / 2 on RISC-V 64,
- *        and 0 / 0 on i686 - every one inlined away
- *   -O2  1 function / 2 calls on x86-64, AArch64 and RISC-V 64, 0 / 0 on i686
- *
- * so the threshold calls were exercised at -O0 and only partly above it, and on
- * i686 not at all from -O1 upward.  Those three lines describe a program that no
- * longer exists; they are kept because they are the measurement that justified
- * introducing the indirection, and deleting the evidence for a design decision
- * makes the decision unreviewable.  The compiler under test may inline
- * differently again; its own behaviour is not measured on this branch, since no
- * bcc binary is present.
+ * The same counting over DIRECT calls is what makes the boundary necessary rather
+ * than decorative: with the seven callees reached by name, all of them are emitted
+ * at -O0 on every target, but from -O1 upward the reference compiler inlines most
+ * of them - on i686 all of them - so the threshold calls would be exercised at -O0
+ * and only partly, or not at all, above it.  Any other compiler may inline
+ * differently again, which is precisely why the boundary is expressed in the source
+ * instead of being left to an implementation's judgement.
  *
  * Padding discipline: sizeof is never printed and no aggregate is ever
  * memcmp'd.  Only named members are read back, so the fact that struct s16m is
@@ -165,15 +154,20 @@
  * callee marshals nothing at all: worse, the aggregates it takes by value
  * become candidates for scalar replacement, which dissolves exactly the
  * by-register versus by-memory classification this program exists to test.
- * Measured with gcc 13.4.0 at -O2 before the indirection was added: of the
- * fourteen intended aggregate-passing boundaries only two survived, the other
- * twelve having been inlined away, and the two survivors survived only by
- * exceeding the inliner's size budget.
+ * With direct calls the reference compiler at -O2 leaves only two of the fourteen
+ * intended aggregate-passing boundaries standing, the other twelve being inlined
+ * away, and those two survive only by exceeding the inliner's size budget.
  *
- * A volatile pointer must be re-read at the point of call, so the designated
- * function is unknown and the call is genuinely indirect; and because the
- * address escapes into storage, the signature may not be cloned or scalarised
- * either.  The mechanism is pure ISO C: a function attribute would have been
+ * ISO C requires a volatile pointer to be re-read at each point of call and
+ * control to go to whatever function that load produced (C11 5.1.2.3p2 and p6,
+ * 6.7.3p7), so the designated function is opaque to the optimizer and the call is
+ * genuinely indirect.  It does NOT forbid a specialised clone, a scalarised copy
+ * of the body, or a guarded devirtualization, so the absence of them is measured
+ * rather than asserted: with gcc 13.4.0 at -O2 on all four reference drivers no
+ * symbol carries .constprop, .isra or .part., and the fourteen aggregate-passing
+ * boundaries are reached through fourteen genuine indirect transfers per target.
+ * 001_many_integer_parameters.expected states the residual risk that leaves and
+ * what would close it.  The mechanism is pure ISO C: a function attribute would have been
  * shorter, but the documented attribute set for the compiler under test is
  * packed, aligned, section, unused, deprecated, visibility and format
  * (docs/technical-specifications.md line 506), so an inlining attribute would
@@ -323,13 +317,13 @@ static volatile struct sbig vbig[2] = {
 
 static volatile int vtag = 1;
 
-/* The enforced call boundary, one volatile-qualified pointer per aggregate
-   shape.
+/* The call boundary, one volatile-qualified pointer per aggregate shape.
    Each is re-read at its call site, so every call is indirect at every
-   optimization level, no callee body is inlined, and no by-value aggregate
-   parameter can be scalarised out of existence.  Both variants of every shape
-   travel through these pointers, so the folded and the runtime call cross the
-   same boundary. */
+   optimization level and every by-value aggregate parameter is opaque to scalar
+   replacement.  ISO C does not FORBID a clone or a scalarised copy; measured on
+   the reference toolchain at -O2 neither appears and no callee body is inlined.
+   Both variants of every shape travel through these pointers, so the folded and
+   the runtime call cross the same boundary. */
 static void (*volatile take_s8x10_p)(struct s8, struct s8, struct s8, struct s8,
                                      struct s8, struct s8, struct s8, struct s8,
                                      struct s8, struct s8, int) = take_s8x10;
@@ -441,9 +435,9 @@ static void take_s24x4(struct s24 p1, struct s24 p2, struct s24 p3,
  * A large aggregate is the one shape passed wholly through memory on all four targets, so
  * the copy the callee reads is produced by an explicit block copy the compiler emits.  A
  * defect in that copy - a wrong length, a wrong displacement, a partially overlapping
- * move - corrupts the MIDDLE of the object far more readily than its ends, and an earlier
- * form of this program observed only indices 0, 4 and 9.  Seven of the ten members per
- * value could therefore be arbitrary and every oracle still agreed, in all twelve cells.
+ * move - corrupts the MIDDLE of the object far more readily than its ends.  Observing only
+ * indices 0, 4 and 9 would leave seven of the ten members per value free to be arbitrary
+ * with every oracle still agreeing, in all twelve cells, so every member is printed.
  * The values are consecutive by construction, so a reader spots a break in the sequence at
  * a glance, and one line per struct value keeps the output bounded.
  */

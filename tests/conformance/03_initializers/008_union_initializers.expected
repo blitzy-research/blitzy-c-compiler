@@ -87,17 +87,16 @@ the operating system. Output is fully deterministic: fixed iteration order, no a
 timestamp, no randomness and no locale-dependent formatting, and nothing outside this file is read,
 so every cell is reproducible from this source and this record alone.
 No header is included anywhere and no preprocessor directive appears at all; printf is declared by
-hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
-bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so naming one
-would fail on the bcc side of oracle (a) while succeeding on the reference side -- a spurious
-divergence caused by the test rather than by a compiler. This area is granted no header exception;
-the corpus has exactly two, area 07's stdarg.h and the dedicated bundled-header probe in area 12.
+hand as `int printf(const char *, ...);` -- the corpus-wide rule stated in
+tests/conformance/README.md, whose two sanctioned exceptions are area 07's stdarg.h and area 12's
+bundled-header probe; area 03 takes neither.
 This record declares no warning-gate deviation, and area 03 sanctions none. The program was
 MEASURED clean under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion
--Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean
-under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all, emitting these
-same 38 lines with an empty standard error. Both gates are reference-compiler-only and are never
-applied to bcc, so requirement 3's shared-flag discipline is untouched.
+-Wshadow -Werror in the single native compile-only invocation the suite's warning gate makes, and it
+builds and runs clean under the sanitizer gate -fsanitize=undefined,address
+-fno-sanitize-recover=all, emitting these same 38 lines with an empty standard error. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
 END
 impl_defined_notes <<END
 This record narrows nothing: all four targets, all three optimization levels and all three oracles
@@ -126,9 +125,7 @@ WIDTHS ARE NORMALIZED. Every printed value is an int or an unsigned int, printed
 alone and with every unsigned char cast to int first. No pointer, no long and no size_t is ever
 measured or printed and no floating type is used anywhere, so nothing here depends on the MEASURED
 pointer-width difference on i686 -- four bytes there against eight on x86-64, AArch64 and RISC-V 64
--- and no address or pointer value is printed. The source comment deliberately avoids NAMING those
-excluded types so that a portability audit grep over this program reports a hit only for a genuine
-use; that convention is recorded here rather than repeated there.
+-- and no address or pointer value is printed.
 PLAIN-CHAR SIGNEDNESS CANNOT AFFECT THIS PROGRAM. The byte-array member b is declared explicitly as
 unsigned char, never as plain char, and its elements are promoted to int by an explicit cast before
 printing, so the MEASURED split -- signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64 --
@@ -151,10 +148,10 @@ layout-resolution error shifts one of them rather than only the union member, an
 g_uarr is read through the member its own initializer stored -- i, then u, then i again for the
 positional element -- so a wrong member selection surfaces as a wrong value rather than as an
 unobserved reinterpretation.
-MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
--O1 and -O2 -- twelve configurations -- and every one produced these 38 lines byte-identically with
-exit status 0, which is why oracle (b) compares this program's targets against each other without
-any narrowing and why oracle (c) can hold these bytes as the golden record. Every member and element
+WHY ALL THREE ORACLES ARE ENABLED WITH NO NARROWING. Every line printed below is target-invariant
+by the normalization argued above, so the same bytes are the right answer on each of the four
+backends; that is what makes cross-backend comparison sound and lets oracle (c) hold these bytes as
+the golden record. Every member and element
 is printed on its own line, including the elements an initializer leaves implicitly zero, so a single
 divergent line localizes the defect to one initializer form rather than to "one of them".
 What would legitimately break these bytes is a big-endian target, which would reverse the four

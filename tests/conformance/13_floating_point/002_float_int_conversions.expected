@@ -170,14 +170,14 @@ int main(void) and returns 0, inside the 0-125 range the suite requires; nothing
 socket is created, no environment variable and no program argument is read, and no storage is
 obtained from the heap.
 
-BOTH GATES VERIFIED EMPIRICALLY ON THIS BRANCH, not asserted. The default warning gate named above
-produces zero diagnostics with gcc 13.4.0 at -O0, -O1 and -O2 and with each of the three cross
-drivers, which is why no deviation is declared. The sanitizer gate
--fsanitize=undefined,address -fno-sanitize-recover=all compiles, links and RUNS to completion with
-empty stderr and exit status 0; its float-cast-overflow check is precisely the check a breach of
-the range table above would trip, and it reports nothing, both at -O0 and at -O2. That check runs
-only on the native execution, so for the three cross targets it is the written argument above --
-not the sanitizer -- that carries the claim.
+BOTH GATES ARE CLEAN, and neither claim is merely asserted. The default warning gate named above
+produces zero diagnostics in the single native compile-only invocation the suite makes of it, which
+is why no deviation is declared. The sanitizer gate -fsanitize=undefined,address
+-fno-sanitize-recover=all compiles, links and RUNS to completion with empty stderr and exit status 0
+in its one instrumented native build; its float-cast-overflow check is precisely the check a breach
+of the range table above would trip, and it reports nothing. That check runs only on the native
+execution, so for the three cross targets it is the written argument above -- not the sanitizer --
+that carries the claim.
 END
 impl_defined_notes <<END
 FLOATING-POINT DETERMINISM rests on three deliberate choices, each verified by measurement rather
@@ -220,9 +220,11 @@ width on all four targets, which is exactly what makes the single range table in
 Only %d, %u, %lld, %llu and %.6f are used: no %ld, %lu, %zu, %td or %p appears, and no address or
 pointer value is printed.
 
-PLAIN CHAR IS NEVER USED. Its signedness is implementation-defined and was measured as signed on
-x86_64 and i686 and unsigned on aarch64 and riscv64, so the two character conversions here name
-signed char and unsigned char explicitly and that measured difference cannot reach this program.
+NO PLAIN-CHAR VALUE IS COMPUTED OR PRINTED. Plain char signedness is implementation-defined and
+was measured as signed on x86_64 and i686 and unsigned on aarch64 and riscv64, so the two character
+conversions here name signed char and unsigned char explicitly and that measured difference cannot
+reach this program. The only plain-char objects are the format-string literals, copied through
+printf unchanged; no plain-char value is read as a number or compared.
 
 LONG DOUBLE IS ABSENT, its representation having been measured at 16, 12, 16 and 16 bytes across
 the four targets, with the two x86 targets carrying the x87 80-bit extended format inside that
@@ -234,9 +236,9 @@ with the measured representation difference as its recorded reason.
 
 NOTHING IS NARROWED HERE. No target is dropped, no oracle is disabled, no warning-gate deviation
 is declared, and this record carries no expected-divergence marker, so a divergence in any cell of
-this program is a genuine finding. Measured on this branch with gcc 13.4.0 and the matching i686,
-aarch64 and riscv64 cross drivers, executed natively and under QEMU user-mode 10.1.0: stdout is
-byte-identical and the exit status is 0 in all twelve target-and-optimization-level cells.
+this program is a genuine finding. Stdout is byte-identical and the exit status is 0 in all twelve
+target-and-optimization-level cells, which is what lets oracle (b) compare the four backends with no
+narrowing and oracle (c) hold these bytes as the golden record.
 END
 expected_stdout    <<END
 d2i_pos=1000000 d2i_neg=-1000000 d2i_trunc_pos=0 d2i_trunc_neg=0

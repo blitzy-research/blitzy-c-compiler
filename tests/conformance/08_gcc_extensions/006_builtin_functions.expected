@@ -50,8 +50,7 @@ non-standard GCC extensions by definition, and -pedantic exists precisely to rej
 them; retaining it would fail every program in the area for doing exactly what it is
 meant to do. This is the only area-wide deviation in the corpus. No other warning is
 relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0.
+retained, and this program is clean under them, which is measured rather than asserted.
 
 Nothing implementation-defined is observed, so no target restriction is needed and all
 four targets are compared. Achieving that required three deliberate exclusions and one

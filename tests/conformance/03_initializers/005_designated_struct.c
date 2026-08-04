@@ -20,19 +20,23 @@
  * diagnostic.  The program needs no deviation from the suite's default warning gate.
  *
  * Every member of every structure is an int and %d is the only conversion specifier in the
- * file, so nothing whose width varies by target is declared, computed or printed, and no
- * character data appears, so plain-char signedness is irrelevant here.  Members are read
- * individually by name and no object is ever printed, copied or reinterpreted as bytes, so
- * padding -- whose contents the standard leaves unspecified -- is never observed.
+ * file, so nothing whose width varies by target is declared, computed or printed.  The only
+ * character data is the format-string literals, whose bytes printf copies through unchanged, and
+ * no plain-char value is read as a number, so plain-char signedness is irrelevant here.  Members
+ * are read individually by name and no object is ever printed, copied or reinterpreted as
+ * bytes, so padding -- whose contents the standard leaves unspecified -- is never observed.
  *
  * FREEDOM FROM UNDEFINED BEHAVIOUR.  A member left unmentioned by a designated initializer
  * is initialized as an object of static storage duration would be, that is to zero, for
  * automatic and static duration alike (C11 6.7.9p19 and p21), so every member printed below
  * has a determinate value and no uninitialized storage is ever read.  The only arithmetic in
- * the file is the loop counter's increment over the range 0 through 4, so no overflow is
- * possible and every subscript is strictly inside its array of 4.  There is no shift, no
- * pointer cast, no pointer arithmetic and no aliasing: each object is read only through an
- * lvalue of its own declared type, and nothing is modified after its initialization.
+ * the file is the loop counter's increment over the range 0 through 3, so no overflow is
+ * possible and every subscript is strictly inside its array of 4.  There is no shift and no
+ * pointer cast; subscripting performs the pointer arithmetic the language defines for it, and
+ * with every subscript proven in bounds that arithmetic never leaves its object, no address of an
+ * object is taken and no pointer value is printed, compared or converted.  There is no aliasing:
+ * each object is read only through an lvalue of its own declared type, and nothing is modified
+ * after its initialization.
  *
  * No header is brought in and no preprocessor directive appears anywhere in this file: bcc
  * ships no stdio.h, its bundled set being the nine required freestanding headers plus a bonus

@@ -46,12 +46,17 @@ diagnostics fire on the feature itself rather than on a defect. Every other memb
 default gate is retained -- -Wall, -Wextra, -pedantic, -Wshadow and -Werror -- so the
 diagnostics those flags enable stay in force even though they are not gate members
 themselves: -Wsign-compare is enabled by the retained -Wextra, and the out-of-range
-constant-conversion overflow diagnostic by the retained -pedantic (both measured with gcc
-13.4.0 on this program's exact shape), while -Werror still makes either one fatal.
+constant-conversion overflow diagnostic by the retained -pedantic (both measured on this
+program's exact shape), while -Werror still makes either one fatal.
 
-Plain char is not used -- every narrow type here is explicitly signed or unsigned -- so the
-measured plain-char signedness difference between the targets cannot reach this program. All
-widths are fixed-width types or int. No pointer values are printed.
+Plain char is not used as an arithmetic type -- every narrow type here is explicitly signed or
+unsigned -- so the measured plain-char signedness difference between the targets cannot reach
+this program; the format strings are character data whose bytes printf copies through
+unchanged, and no plain-char value is read as a number. Every type that carries a value here is
+target-invariant ACROSS THIS MATRIX rather than fixed-width in the C sense: char is one byte by
+definition, and short, int, unsigned short and unsigned int were measured at 2, 4, 2 and 4 bytes
+on all four targets. long and unsigned long are excluded precisely because they are not, being 4
+bytes on i686 and 8 on the other three. No pointer values are printed.
 Target assumption for the two implementation-defined conversions of 200 to signed char: each
 of the four reference toolchains documents this conversion as reduction of the value modulo
 two to the power of the destination width, with NO signal raised, which yields -56. That

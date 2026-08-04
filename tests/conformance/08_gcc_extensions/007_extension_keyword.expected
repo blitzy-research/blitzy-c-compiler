@@ -38,14 +38,13 @@ non-standard GCC extensions by definition, and -pedantic exists precisely to rej
 them; retaining it would fail every program in the area for doing exactly what it is
 meant to do. This is the only area-wide deviation in the corpus. No other warning is
 relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0.
+retained, and this program is clean under them, which is measured rather than asserted.
 
 A NOTE SPECIFIC TO THIS PROGRAM. Because __extension__ exists precisely to suppress the
 pedantic diagnostics that the area-wide deviation also removes, this program was
 additionally validated WITH -pedantic added, and it is clean. That is the demonstration
-that the keyword genuinely suppresses. Measured control with gcc 13.3.0: the same braced
-group WITHOUT __extension__, compiled with -pedantic -Werror, produces "error: ISO C
+that the keyword genuinely suppresses. The measured control is the same braced group WITHOUT
+__extension__, compiled with -pedantic -Werror, which produces "error: ISO C
 forbids braced-groups within expressions [-Werror=pedantic]". Within the suite the
 observable assertion is that the wrapped constructs compile and behave correctly, which
 oracle a and oracle b both verify from the printed output.
@@ -59,8 +58,10 @@ long long is 64-bit on all four targets, whereas long was measured as 4 bytes on
 1000000000023, exceed 32 bits, so long would overflow on i686 and manufacture a divergence
 caused by the test rather than the compiler.
 
-Plain char is never used, so the measured char-signedness difference cannot be reached:
-char is signed on x86_64 and i686 but unsigned on aarch64 and riscv64. No address or
+No plain-char value the program computes is printed as a number or compared -- the only
+plain-char objects are the format-string literals, copied through printf unchanged -- so
+the measured char-signedness difference cannot be reached: char is signed on x86_64 and
+i686 but unsigned on aarch64 and riscv64. No address or
 pointer value is printed.
 
 __extension__ is exercised in three distinct grammatical positions: before a statement

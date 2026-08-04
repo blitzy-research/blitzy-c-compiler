@@ -6,7 +6,7 @@
 
 program            = 006_designated_mixed_nested
 area               = 03_initializers
-description        = Mixed positional and designated initializers inside nested aggregates -- positional outer with designated inner, designated outer with an unlabelled inner brace, array-of-struct positional then designated, two-dimensional positional row then element designator, and two three-level struct mixtures including a combined index-and-member designator -- for static and automatic storage duration, every member read back individually; the OVERLAPPING-designator-at-depth spelling is excluded, narrowly and with its reason recorded in impl_defined_notes, because the frozen warning gate rejects every spelling of it
+description        = Mixed positional and designated initializers inside nested aggregates -- positional outer with designated inner, designated outer with an unlabelled inner brace, array-of-struct positional then designated, two-dimensional positional row then element designator, and two three-level struct mixtures including a combined index-and-member designator -- for static and automatic storage duration, every member read back individually; the OVERLAPPING-designator spelling is deliberately concentrated in this area's designated-array program rather than duplicated here, so that this translation unit needs no diagnostic-control directive at all, as impl_defined_notes records
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -74,14 +74,25 @@ designates.
 No arithmetic is performed on any initialized value, so signed overflow is impossible. The only
 run-time arithmetic is on the loop counters i and j, each bounded strictly below its extent by a
 literal equal to the declared one: i < 3 over the [3] arrays, i < 2 over pr[2], and i < 3 with
-j < 3 over the [3][3] matrix. Every subscript is in bounds. No pointer is formed anywhere in the
-program apart from printf's format argument, so no one-past-end pointer exists to be dereferenced,
-no pointer arithmetic can leave an object, no address is taken and none is printed.
+j < 3 over the [3][3] matrix. Every subscript is in bounds. The only pointers in the program are
+therefore the ones subscripting derives: E[i] is defined as *(E + i), so each array subscript decays
+its array to a pointer to that array's first element and adds an index the loop has already bounded
+below the declared extent. Every such derived pointer consequently points at an element of the array
+it was derived from, and is dereferenced only there; no one-past-end pointer is ever dereferenced, no
+pointer arithmetic can leave the object it started in, no address is taken with the address-of
+operator, no pointer is stored in an object, and none is printed. The only other pointer value in the
+program is printf's format argument, which points into a string literal of static storage duration.
 
 No shifts, no division, no remainder, no pointer casts and no cast of any kind appear in the file.
 There is no aliasing violation: each object is read only through an lvalue of its own declared
-type, which is int in every case, reached by member selection and subscripting only. No object is
-modified after its initialization, so nothing is modified twice between two sequence points. Each
+type, which is int in every case, reached by member selection and subscripting only. Nothing is
+modified twice between two sequence points. The initialized aggregates are never modified after
+their initializers at all, so every value printed is the value its initializer gave it; the only
+objects that are modified are the loop counters i and j, each assigned in the initial clause of its
+own for statement and incremented in that statement's controlling expression, and each of those
+assignments and increments is a full expression of its own, so each is separated from every other
+access to the counter by a sequence point. Their bounds are the literals listed above, so neither
+counter overflows. Each
 printf call receives at most two loop counters and one int datum, none of which has a side effect,
 so the unspecified order in which a call's arguments are evaluated cannot be observed. %d is the
 only conversion specifier in the file and every corresponding argument has type int after the
@@ -122,13 +133,14 @@ INTO FAILURE BY A LATER CONTRIBUTOR:
 This record declares no warning-gate deviation, and area 03 sanctions none, so no ub_audit_flags
 override is used and both constraints above are satisfied by construction rather than by relaxing
 the gate. The program is clean under the full default gate -Wall -Wextra -pedantic -Wconversion
--Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers, with no
-diagnostic of any kind and no source-level diagnostic suppression anywhere in the translation
-unit, and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
--fno-sanitize-recover=all. Both gates are reference-compiler-only and are never applied to bcc, so
-requirement 3's shared-flag discipline is untouched. One initializer spelling is excluded to reach
-that clean audit rather than suppressed inside it, and the exclusion, its measured reason and which
-of the harder forms remain under test are recorded in impl_defined_notes below.
+-Wsign-conversion -Wshadow -Werror in the single native compile-only invocation the suite's warning
+gate makes, with no diagnostic of any kind and no source-level diagnostic suppression anywhere in
+the translation unit, and it builds and runs clean under the sanitizer gate
+-fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are reference-compiler-only and
+are never applied to bcc, so requirement 3's shared-flag discipline is untouched. One initializer
+spelling is excluded to reach that clean audit rather than suppressed inside it, and the exclusion,
+its measured reason and which of the harder forms remain under test are recorded in
+impl_defined_notes below.
 END
 impl_defined_notes <<END
 This record narrows nothing that the harness reads: all four targets, all three optimization
@@ -137,30 +149,44 @@ deviation is claimed under the ub_audit_flags key, and no implementation-defined
 this program's output. One initializer SPELLING is nevertheless excluded from the source, and the
 paragraph below states which, why, and which of the harder forms remain under test.
 
-CONSTRAINT-C3 EXCLUSION -- THE OVERLAPPING-DESIGNATOR-AT-DEPTH SPELLING. Overriding a designated
-initializer at DEPTH -- naming one nested subobject twice -- is well-defined C11 (6.7.9p19), and it
-would be worth testing separately from the flat override because the override has to interact
-correctly with the current-object descent: an implementation that resolved designators against the
-wrong nesting level would override a sibling, or the outer object, rather than the subobject named.
-GCC nevertheless reports it under -Woverride-init, which -Wextra enables and which the audit gate's
--Werror makes fatal. FOURTEEN override spellings were MEASURED against that gate with the reference
+WHERE THE OVERLAPPING-DESIGNATOR SPELLING LIVES, AND WHY NOT HERE. Overriding a designated
+initializer -- naming one subobject twice -- is well-defined C11 (6.7.9p19), and overriding at DEPTH
+is worth testing separately from the flat form because the override has to interact correctly with
+the current-object descent: an implementation that resolved designators against the wrong nesting
+level would override a sibling, or the outer object, rather than the subobject named. That spelling
+IS exercised in this area, in BOTH nesting directions, by the area's designated-array program:
+004_designated_array.c carries g_over_row_elem, which names a whole row and then one element inside
+it, and g_over_elem_row, which names the same element and then the same whole row. Those two contain
+the identical initializers in opposite order, so they separate "last writer wins" from "any explicit
+member survives" at depth -- element [0][1] must read 20 in the first and 2 in the second, and an
+implementation holding the weaker rule would print 20 for both. The flat form, a struct-member
+override and an automatic-duration override are carried there as well. So no coverage obligation is
+outstanding, and this paragraph records a division of labour rather than a gap.
+
+The reason it lives there rather than here is that the spelling cannot be written under the audit
+gate untouched. GCC reports it under -Woverride-init, which -Wextra enables and which the gate's
+-Werror makes fatal, and every override spelling MEASURED against that gate with the reference
 compiler -- the flat and the nested ones alike, enumerated in 004_designated_array.c and in
-004_designated_array.expected -- and every one is rejected, so no spelling of that route exists
-that the unmodified gate accepts. An override carrying a side effect is no escape either:
--Woverride-init-side-effects is on by default and is not a gate member at all, and C11 6.7.9p23
-leaves the sequencing of an initializer list's side effects unspecified, which requirement 1
-forbids outright. No admissible deviation exists: the gate's removable members are exactly
--pedantic, for the GCC-extensions area, and -Wconversion with -Wsign-conversion, for the deliberate
-narrowing program, so -Wextra is not removable and area 03 is granted no deviation at all. A
-source-level diagnostic-suppression directive is not an alternative to that: it neutralizes a gate
-member from inside the translation unit while this record still claims the unchanged gate, which
-would make this record's own claim false rather than making the program clean. The spelling is
-therefore dropped from the source, and constraint C3 is satisfied the way it asks to be -- the
-exclusion is narrow, it is scoped to one spelling, it changes no target, no optimization level and
-no oracle, and its reason is recorded here and in the program's own header comment. The specific
-loss is the two nested overriding forms the file used to carry, one in each direction, which
-together separated "last writer wins" from "any explicit member survives" at depth; that loss is
-stated rather than left to be inferred, and it is a gap in this area that no program closes.
+004_designated_array.expected -- is rejected. No admissible gate deviation exists either: the gate's
+removable members are exactly -pedantic, for the GCC-extensions area, and -Wconversion with
+-Wsign-conversion, for the deliberate narrowing program, so -Wextra is not removable and area 03 is
+granted no deviation at all. 004_designated_array therefore brackets its five overriding declarations
+with matched push/pop diagnostic-control directives that suppress -Woverride-init for those
+declarations alone, claims no gate deviation, and keeps -Werror and -Woverride-init fatal everywhere
+else in its translation unit -- verified by measurement, since an override written outside those
+regions is still rejected. Concentrating that mechanism in ONE program of the area is the point of
+the division: this program remains entirely free of diagnostic-control directives, so the interaction
+of mixed positional and designated initializers with brace elision, -Wmissing-braces and
+-Wmissing-field-initializers is demonstrated on source that needs no suppression at all, and a
+divergence here can never be confused with an artefact of a suppressed diagnostic.
+
+An override carrying a SIDE EFFECT is excluded from the area altogether, and that exclusion is not
+about the gate: -Woverride-init-side-effects is on by default and is not a gate member at all, and
+C11 6.7.9p23 leaves the sequencing of an initializer list's side effects unspecified, which
+requirement 1 forbids outright. Every override the area carries is a constant expression, so the
+exclusion costs it nothing. Constraint C3 is satisfied the way it asks to be: the exclusion is
+narrow, it is scoped to one spelling, it changes no target, no optimization level and no oracle, and
+its reason is recorded here and in the affected program's own header comment.
 
 THREE GATE FACTS GOVERN THE SHAPE OF THESE INITIALIZERS and must not be disturbed by anyone editing
 the program. First, -Wextra enables -Wmissing-field-initializers, which in C does not fire for a
@@ -169,17 +195,19 @@ member omits it via a designator and every fully positional struct initializer s
 members; removing a designator would trip the gate. Second, -Wall enables -Wmissing-braces, so
 every nested aggregate here is fully braced; eliding a brace would trip the gate as well. Third,
 -Wextra enables -Woverride-init, so no initializer here may name a subobject an earlier one already
-named -- which is the exclusion above. All three are honoured by writing gate-clean source rather
-than by suppressing a diagnostic, and this translation unit contains no diagnostic-suppression
-directive of any kind. Two neighbouring programs make the same choice for the same reason, so the
-three exclusions across this area form a coherent set rather than three accidents:
-003_partial_zero_fill.c excludes the positional partial STRUCT spelling, 002_nested_aggregate.c
-excludes the brace-elided spelling, and 004_designated_array.c excludes the flat
-overlapping-designator spelling. Each records its own reason in its own header and its own record.
+named -- which is why the overlapping spelling is carried by 004_designated_array instead, as set out
+above. All three are honoured in THIS program by writing gate-clean source rather than by suppressing
+a diagnostic, and this translation unit contains no diagnostic-suppression directive of any kind.
+Two neighbouring programs make the same choice for the first two, so the shape of these three
+constraints across the area is a coherent division rather than three accidents:
+003_partial_zero_fill.c excludes the positional partial STRUCT spelling and 002_nested_aggregate.c
+excludes the brace-elided spelling, each recording its own reason in its own header and its own
+record, while the overlapping-designator spelling is neither excluded nor spread across the area but
+concentrated in 004_designated_array.c, whose record states the mechanism and its verified scope.
 
 WHAT REMAINS UNDER TEST IS THE HARDER HALF OF THE SAME QUESTION -- tracking the current object
-through a descent -- which is why the exclusion is narrow rather than a retreat from the area's
-mandate. Form 1 lands a value positionally, descends into a brace where a designator sets q and
+through a descent -- which is why leaving the overlapping spelling to a sibling program costs this
+program nothing and is a division of labour rather than a retreat from the area's mandate. Form 1 lands a value positionally, descends into a brace where a designator sets q and
 leaves p zero, then resumes positionally on trailer. Form 2 designates tag, then an UNLABELLED
 brace that must bind to the following member, then a bare value that must continue past it. Form 3
 takes a positional element then a designated one, skipping the element between. Form 4 fills row 0
@@ -213,8 +241,10 @@ type. It contains no long, size_t, ptrdiff_t, intptr_t, float, double or long do
 _Alignof result is printed and no address is printed, so no layout choice the ABI is free to make
 is observable.
 
-PLAIN-CHAR SIGNEDNESS. No character data appears at all, so the MEASURED split -- signed on x86-64
-and i686, unsigned on AArch64 and RISC-V 64 -- cannot arise.
+PLAIN-CHAR SIGNEDNESS. The only character data is the format-string literals, whose bytes printf
+copies through unchanged; no plain-char value is read as a number, converted, compared or formatted
+numerically, so the MEASURED split -- signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64 --
+cannot arise.
 
 PADDING. Every member at every nesting level is read individually by name; no aggregate is printed
 whole and no representation is inspected, so no padding byte is ever observed.
@@ -225,9 +255,8 @@ the implementation.
 MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
 -O1 and -O2 -- twelve configurations -- and every one produced these 57 lines byte-identically with
 exit status 0, which is why oracle (b) compares this program's targets against each other without
-any narrowing and why oracle (c) can hold these bytes as the golden record. The same twelve
-configurations were re-measured after the excluded spelling was removed, so these 57 lines are the
-current source's output rather than a residue of an earlier one. Nothing is summarized, so one
+any narrowing and why oracle (c) can hold these bytes as the golden record. These 57 lines are the
+output of the source committed beside this record. Nothing is summarized, so one
 divergent line localizes the defect to one mixed form at one nesting level.
 END
 
@@ -290,4 +319,3 @@ l_deep_mixed.pr[0].q=76
 l_deep_mixed.pr[1].p=0
 l_deep_mixed.pr[1].q=0
 END
-

@@ -6,7 +6,7 @@
 
 program            = 001_many_integer_parameters
 area               = 14_abi_calling_convention
-description        = Integer parameter lists long enough to exhaust every target's argument registers and force stack spill: fifteen int parameters and fifteen long long parameters -- fourteen observed data values plus a trailing int variant tag in each list -- each list called in a folded and a volatile-runtime variant through a volatile function pointer, with every one of the fourteen data parameters printed individually
+description        = Integer parameter lists long enough to exhaust every target's argument registers and force stack spill: two lists of fifteen integer-class parameters each -- fifteen int values in the first, and fourteen long long values plus one trailing int variant tag in the second -- with the first list's fifteenth int likewise serving as its variant tag, so each list carries fourteen observed data values; each list is called in a folded and a volatile-runtime variant through a volatile function pointer, with every one of the fourteen data parameters printed individually
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -91,26 +91,53 @@ undefined behaviour cannot arise here rather than merely being avoided.
   optimizer, so every argument is still materialised at run time and marshalled through the
   ABI.
 
-- THE CALL BOUNDARY IS ENFORCED RATHER THAN HOPED FOR, which is what makes this an ABI test
-  at every optimization level and not only at -O0. Each callee is reached through a
-  volatile-qualified function pointer, so the pointer must be re-read at the point of call,
-  the compiler may not assume which function it designates, and the callee's signature may
-  not be cloned or scalarised. An ordinary static callee would be free to be inlined at -O1
-  and -O2, and a callee that is inlined marshals nothing, so the parameter passing this
-  program claims to exercise would simply not happen. The mechanism is deliberately pure ISO
-  C -- a volatile function pointer and nothing more -- rather than a function attribute,
-  because the documented attribute set of the compiler under test is packed, aligned,
-  section, unused, deprecated, visibility and format (docs/technical-specifications.md line
-  506), so an inlining attribute would risk a divergence caused by the test and would import
-  an extension into an area whose subject is the calling convention.
+- THE CALL BOUNDARY IS MADE HARD TO OPTIMIZE AWAY, WHICH IS NOT THE SAME AS BEING GUARANTEED
+  BY THE LANGUAGE, and the two are stated apart here because conflating them would overclaim
+  what this program proves. Each callee is reached through a volatile-qualified function
+  pointer. WHAT ISO C REQUIRES of that: an access to a volatile object is a side effect and
+  part of the observable behaviour an implementation must reproduce (C11 5.1.2.3p2 and p6),
+  and C11 6.7.3p7 requires an expression referring to a volatile-qualified object to be
+  evaluated strictly according to the abstract machine's rules -- so the pointer must be
+  RE-READ at each point of call and control must be transferred to whatever function that
+  particular load produced. WHAT ISO C DOES NOT REQUIRE: that the transfer reaches the
+  callee's original entry point. An implementation may legally introduce a specialised clone,
+  scalarise a copy of the body, or perform guarded devirtualization -- compare the loaded
+  pointer against a known function and call a specialised entry on the matching path -- and
+  still honour the loaded value, because the observable behaviour is unchanged. An earlier
+  form of this paragraph asserted that the signature "may not be cloned or scalarised", which
+  is stronger than anything the standard says and is withdrawn.
+- SO THE BOUNDARY IS AN OPTIMIZATION OBSTACLE, VERIFIED ON NAMED ARTIFACTS RATHER THAN
+  ASSERTED AS A LANGUAGE RULE. Measured on the committed source with gcc 13.4.0 at -O2 on all
+  four reference drivers: both callees are still emitted out of line under their own labels;
+  no specialised clone appears anywhere -- zero symbols carrying .constprop, .isra or .part.
+  -- and each variant reaches its callee through a genuine indirect transfer, four such sites
+  per target (call *%reg on x86_64 and i686, blr on aarch64, jalr on riscv64). Without the
+  indirection the obstacle is absent: an ordinary static callee is free to be inlined at -O1
+  and -O2, and a callee that is inlined marshals nothing at all, so the parameter passing this
+  program claims to exercise would not happen.
+- THE RESIDUAL RISK IS RECORDED RATHER THAN PAPERED OVER. Those measurements are evidence
+  about the reference compiler's artifacts, not a property every compiler under test must have.
+  A compiler that devirtualizes through a specialised entry could route a cell past the
+  register assignments argued above while still printing the same bytes, and this program would
+  not detect that. Closing it would take a per-cell STATIC check of the artifact the compiler
+  under test emitted -- an indirect transfer present, no specialised clone of either callee --
+  which is a harness capability this suite does not have and which no oracle here substitutes
+  for. Until it exists, the honest statement is that the indirection makes the boundary very
+  likely on any optimizing compiler and is verified for the reference toolchain.
+- THE MECHANISM IS DELIBERATELY PURE ISO C -- a volatile function pointer and nothing more --
+  rather than a function attribute, because the documented attribute set of the compiler under
+  test is packed, aligned, section, unused, deprecated, visibility and format
+  (docs/technical-specifications.md line 506), so an inlining attribute would risk a divergence
+  caused by the test and would import an extension into an area whose subject is the calling
+  convention.
 
-Verified empirically on this branch with gcc 13.4.0 and qemu-user 10.1.0: the default strict
-warning gate (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
-produces zero diagnostics on all four reference drivers at -O0, -O1 and -O2 -- twelve
-invocations; the sanitizer gate (-fsanitize=undefined,address -fno-sanitize-recover=all)
-runs to completion at all three levels with no diagnostic and exit status 0; and all twelve
-cells of the declared matrix produce byte-identical stdout of 1400 bytes over 56 lines with
-exit status 0 and an empty standard error.
+Verified rather than asserted: the default strict warning gate (-Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror) produces zero diagnostics in the single
+native compile-only invocation the suite makes of it; the sanitizer gate
+(-fsanitize=undefined,address -fno-sanitize-recover=all) runs to completion in its one
+instrumented native build with no diagnostic and exit status 0; and all twelve cells of the
+declared matrix produce byte-identical stdout of 1400 bytes over 56 lines with exit status 0
+and an empty standard error.
 END
 impl_defined_notes <<END
 This area exists because the four backends implement four different application binary
@@ -119,8 +146,9 @@ corpus. The parameter counts are sized against the WIDEST register file rather t
 narrowest - eight integer registers on AAPCS64 (x0-x7) and LP64D (a0-a7), six on System V
 AMD64 (rdi, rsi, rdx, rcx, r8, r9), and none on System V i386 cdecl, which marshals
 everything on the stack - so every target genuinely spills and no target is left exercising
-only its register path. Confirmed at instruction level with gcc 13.4.0 at -O2: x86_64 passes
-six arguments in registers and pushes the remaining nine, i686 pushes all fifteen, and
+only its register path. Confirmed at instruction level in the reference compiler's -O2
+assembly: x86_64 passes six arguments in registers and pushes the remaining nine, i686
+pushes all fifteen, and
 aarch64 and riscv64 each fill their eight argument registers and store the remaining seven
 to the outgoing argument area. The same inspection confirms the enforced call boundary
 holds on every target - four indirect calls per target, through `call *%rax` on x86_64,

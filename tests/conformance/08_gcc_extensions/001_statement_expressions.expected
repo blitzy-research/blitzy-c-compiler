@@ -33,16 +33,17 @@ non-standard GCC extensions by definition, and -pedantic exists precisely to rej
 them; retaining it would fail every program in the area for doing exactly what it is
 meant to do. This is the only area-wide deviation in the corpus. No other warning is
 relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0.
+retained, and this program is clean under them, which is measured rather than asserted.
 
 Nothing implementation-defined is observed, so no target restriction is needed and all
 four targets are compared. Only int-typed values are used, so the measured width
 differences cannot be reached: sizeof(long) and sizeof(void *) are 4 on i686 and 8 on
-x86_64, aarch64 and riscv64. Plain char is never used, so the measured char-signedness
-difference cannot be reached either: char is signed on x86_64 and i686 but unsigned on
-aarch64 and riscv64. No address or pointer value is printed. Output is therefore
-identical on all four targets at all three optimization levels.
+x86_64, aarch64 and riscv64. No plain-char value the program computes is printed as a
+number or compared -- the only plain-char objects are the format-string literals, copied
+through printf unchanged -- so the measured char-signedness difference cannot be reached
+either: char is signed on x86_64 and i686 but unsigned on aarch64 and riscv64. No address
+or pointer value is printed. Output is therefore identical on all four targets at all
+three optimization levels.
 END
 expected_stdout    <<END
 se_folded_max=12

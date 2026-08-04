@@ -47,8 +47,11 @@ Free of undefined and unspecified behaviour by construction:
 - The only division-like operator is the unsigned remainder in two of the alignment
   relations. Its divisor is the non-zero constant 8 and both operands are unsigned, so
   neither a division by zero nor a sign conversion can arise.
-- No pointer arithmetic and NO POINTER-TO-INTEGER CONVERSION of any kind. The null
-  pointer is only ever compared, never printed or converted.
+- NO POINTER-TO-INTEGER CONVERSION of any kind, and the only pointer arithmetic is the
+  arithmetic the language performs for a subscript: aligned_buf is subscripted at the
+  literal indices 0 and 15 of a sixteen-element array, so every access stays inside the
+  object. The null pointer is only ever compared, never printed or converted, and no
+  pointer value is printed at all.
 - No aliasing violation. The only object written after its declaration is the static
   alignas-qualified array aligned_buf, whose two unsigned char stores are separate
   statements and are read back in a later statement, never in the expression that wrote
@@ -81,13 +84,12 @@ Free of undefined and unspecified behaviour by construction:
   read, and no storage is obtained from the heap.
 - main returns 0, inside the 0-125 range the suite requires, so no exit status is
   truncated by the operating system.
-- No deviation from the default warning gate is requested, and none is needed. Verified
-  empirically on this branch: the seven-flag gate -Wall -Wextra -pedantic -Wconversion
-  -Wsign-conversion -Wshadow -Werror produces zero diagnostics at -O0, -O1 and -O2 under
-  every one of the four reference drivers, and the sanitizer gate
-  -fsanitize=undefined,address -fno-sanitize-recover=all compiles clean, runs to
-  completion with empty stderr and exit status 0, and prints the golden stdout byte for
-  byte.
+- No deviation from the default warning gate is requested, and none is needed. The
+  seven-flag gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+  produces zero diagnostics in the single native compile-only invocation the suite makes
+  of it, and the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all
+  compiles clean in its one instrumented native build, then runs to completion with empty
+  stderr and exit status 0 and prints the golden stdout byte for byte.
 END
 impl_defined_notes <<END
 WIDTH NORMALIZATION is the central constraint on this program, and it is what lets all
@@ -117,8 +119,8 @@ compiler.
 STRUCT MEMBER OFFSETS. The struct that offsetof is applied to carries only int8_t and
 int32_t members. That is deliberate and measured: the i386 System V ABI aligns int64_t to
 4 inside a struct while the other three targets align it to 8, so a struct containing an
-int64_t yields a member offset of 4 on i686 against 8 on each of the other three -- both
-measured on this branch -- and would turn a correct compiler into an apparent divergence.
+int64_t yields a member offset of 4 on i686 against 8 on each of the other three, and would
+turn a correct compiler into an apparent divergence.
 With int32_t members the offsets are 4 and 8 on every target, so offsetof_b and offsetof_c
 are asserted as exact values rather than hedged. alignof(int32_t) == 4 and
 alignof(int8_t) == 1 likewise hold on all four targets, which is why those two are exact
@@ -144,16 +146,15 @@ which is neither divisible by 8 nor consistent with a structure alignment of 8 -
 nothing is given up by declining to pin the padding this implementation happened to
 choose.
 
-An earlier form of this check converted the alignas-qualified object's address to uintptr_t
-and asserted that its residue modulo 8 was zero, justified by uintptr_t being pointer-width
-on every target so that the conversion crossed no width boundary. Equal width does not
-carry that conclusion: C11 7.20.1.4p1 and 6.3.2.3p6 guarantee only that a pointer converted
-to uintptr_t and back COMPARES EQUAL to the original, never that the integer's low bits are
-the address's low bits. Whether a residue reflects alignment is a property of the target ABI
-rather than of the header set this program tests, so the residue was removed rather than
-defended with an ABI citation, and the alignas-qualified OBJECT is exercised instead by a
-defined byte round trip through an unsigned char lvalue, which reads and writes storage
-without observing an address. Nothing is lost: alignas and alignof are both still
+THE ALIGNMENT CHECK OBSERVES NO ADDRESS RESIDUE, AND THE REASON IS THE STANDARD. Converting
+the alignas-qualified object's address to uintptr_t and asserting that its residue modulo 8
+is zero would not follow from equal width: C11 7.20.1.4p1 and 6.3.2.3p6 guarantee only that
+a pointer converted to uintptr_t and back COMPARES EQUAL to the original, never that the
+integer's low bits are the address's low bits. Whether a residue reflects alignment is a
+property of the target ABI rather than of the header set this program tests, so no residue
+is observed here, and the alignas-qualified OBJECT is exercised instead by a defined byte
+round trip through an unsigned char lvalue, which reads and writes storage without observing
+an address. Nothing is lost: alignas and alignof are both still
 exercised, the qualified storage is still written and read back, and address-residue
 observation is owned by 10_declarations_and_types/007_alignof_alignas.c, whose subject that
 is and which carries the two-step pointer-carrier discipline the observation needs.
@@ -187,9 +188,9 @@ NOTHING IS NARROWED. No target is dropped, no oracle is disabled, no warning-gat
 deviation is requested and no marker is carried, so this block records the properties that
 were normalized away rather than a coverage exclusion -- which is the point of recording
 them: it makes the set of comparisons deliberately not made as visible as the set that
-was. Measured on this branch with gcc 13.4.0 and the matching gnu17 cross drivers under
-QEMU user-mode 10.1.0: all twelve cells -- four targets by three optimization levels --
-produce byte-identical stdout and exit status 0.
+was. All twelve cells -- four targets by three optimization levels -- produce byte-identical
+stdout and exit status 0, which is what lets oracle (b) compare the four backends without
+narrowing and oracle (c) hold these bytes as the golden record.
 END
 expected_stdout    <<END
 char_bit=8

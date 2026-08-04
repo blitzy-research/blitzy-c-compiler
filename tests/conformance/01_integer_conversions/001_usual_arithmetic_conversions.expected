@@ -38,9 +38,12 @@ END
 impl_defined_notes <<END
 Plain char is never used as an arithmetic type and no object of plain char type is
 declared, because plain char signedness was measured signed on x86-64 and i686 but
-unsigned on AArch64 and RISC-V 64. The type appears only as the const char * of the
-returned type names and of printf's format parameter, where no character value is read,
-printed or converted, so that measured difference cannot reach this program.
+unsigned on AArch64 and RISC-V 64. Character data does appear -- the format strings and
+the type-name literals they interpolate with %s are arrays of char, reached through
+const char * -- but no plain-char value is ever read as a NUMBER: none is converted to
+an integer type, used as an arithmetic operand, compared, or formatted with %d or %u.
+printf copies those bytes through unchanged, and a byte copied unchanged carries no
+signedness, so the measured difference cannot reach this program's output.
 long and unsigned long are never used, because their width was measured as 4 bytes on i686
 and 8 bytes on the other three targets; only int, unsigned int, unsigned short, unsigned
 char, long long and unsigned long long appear as arithmetic types, and every one of them

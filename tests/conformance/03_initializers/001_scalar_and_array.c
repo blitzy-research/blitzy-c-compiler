@@ -12,13 +12,19 @@
  *
  * Every printed value has type int or unsigned int, both four bytes on all four
  * targets, so %d and %u are the only conversions needed; 4294967295u is exactly
- * UINT_MAX wherever unsigned int is 32 bits, which is all four.  No character data
- * appears, so plain-char signedness cannot reach the output.
+ * UINT_MAX wherever unsigned int is 32 bits, which is all four.  The only character
+ * data is the format-string literals, whose bytes printf copies through unchanged;
+ * no plain-char value is read as a number, so plain-char signedness cannot reach the
+ * output.
  *
  * The program only initializes and reads, which is why it is the area's baseline,
  * and that is also its freedom-from-undefined-behaviour argument: every object is
- * fully initialized before any part of it is read, no pointer is formed, no
- * arithmetic can overflow, and no object is modified anywhere.  Loop bounds are
+ * fully initialized before any part of it is read, no arithmetic can overflow, and no
+ * object is modified anywhere.  Subscripting an array performs the pointer arithmetic
+ * the language defines for it, and every subscript here is a literal or a loop counter
+ * bounded by its array's own element count, so that arithmetic never leaves the object;
+ * no address is taken, no pointer value is printed or compared, and nothing is
+ * dereferenced past an object's end.  Loop bounds are
  * literal, so iteration order is fixed.  No header is named -- bcc ships no
  * stdio.h, its bundled set being the nine required freestanding headers plus a
  * bonus stdatomic.h, ten files in all (docs/project-guide.md line 212) -- and

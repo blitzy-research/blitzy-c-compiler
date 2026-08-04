@@ -32,8 +32,11 @@ explicit conversion, or inside an unevaluated _Generic controlling expression. T
 is fully exercised; nothing is excluded and no warning-gate deviation is taken.
 END
 impl_defined_notes <<END
-Plain char is never used and no object is declared plain char, because plain char
-signedness was measured signed on x86-64 and i686 but unsigned on AArch64 and RISC-V 64.
+Plain char is never used as an arithmetic type and no object is declared plain char,
+because plain char signedness was measured signed on x86-64 and i686 but unsigned on
+AArch64 and RISC-V 64. The only character data is the format-string literals, whose bytes
+printf copies through unchanged; no plain-char value is read as a number, converted,
+compared or formatted numerically, so that difference cannot reach the output.
 long and unsigned long are never used, because their width is 4 bytes on i686 and 8 bytes
 on the other three targets. No pointer value is printed.
 int is 32 bits and long long is 64 bits on all four supported targets, so long long

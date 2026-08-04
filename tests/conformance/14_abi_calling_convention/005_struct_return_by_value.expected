@@ -56,24 +56,31 @@ Free of undefined and unspecified behaviour by construction:
   SNAPSHOT STATEMENT. Every volatile datum -- the sixteen ints, the six doubles, the eight
   floats, the twelve 24-byte-shape ints and all FOURTEEN call-boundary function pointers --
   is read exactly once, in a statement of its own, and only the resulting plain locals are
-  used thereafter. Machine-checked on this branch: flattening the program into statements
+  used thereafter. Machine-checked: flattening the program into statements
   and counting references to its volatile objects finds NO statement with more than one.
   The snapshots cost nothing in coverage. A staged value is still a value that arrived
   through a volatile load, so the optimizer may neither fold nor elide it and every callee
   still receives arguments genuinely materialised at run time; and a function pointer whose
-  value arrived through a volatile load still designates a function no conforming compiler
-  can identify, so every call through it is still indirect, still un-inlined and still
-  un-cloned. Verified in the generated assembly: at -O2 on x86_64 and aarch64 all seven
-  producers and all seven consumers are emitted unmodified, with no .constprop and no .isra
-  clone. What changed is only that the loads are now SEQUENCED rather than unordered.
+  value arrived through a volatile load still designates a function no compiler can identify
+  at translation time, so every call through it is still indirect. Whether the callee is
+  additionally left un-inlined and un-cloned is an optimizer OUTCOME rather than something ISO
+  C guarantees -- a conforming implementation may emit a specialised clone or guard-devirtualize
+  and still honour the loaded value -- so it is verified in the generated assembly rather than
+  asserted: at -O2 on all four reference drivers all seven producers and all seven consumers
+  are emitted unmodified, no symbol carries .constprop, .isra or .part., and the fourteen
+  boundaries are reached through genuine indirect transfers. What changed with the snapshots is
+  only that the loads are now SEQUENCED rather than unordered.
+  001_many_integer_parameters.expected states the residual risk this leaves for a compiler
+  under test whose optimizer behaves differently, and what would close it.
 - Hermetic, as constraint C4 requires: every input is a literal in the source. Nothing is
   opened, no socket is created, no environment variable and no program argument is read,
   and no storage is obtained from the heap.
 - main returns 0, inside the 0-125 range the suite requires.
-- Verified empirically on this branch: the default strict warning gate
+- Verified rather than asserted: the default strict warning gate
   (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
-  diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
-  -fno-sanitize-recover=all runs to completion with empty stderr and exit status 0.
+  diagnostics in the single native compile-only invocation the suite makes of it, and
+  -fsanitize=undefined,address -fno-sanitize-recover=all runs to completion with empty
+  stderr and exit status 0 in its one instrumented native build.
 END
 impl_defined_notes <<END
 WHY RETURN IS A SEPARATE MECHANISM FROM PASSING on every one of the four supported ABIs,
@@ -116,12 +123,12 @@ observable side effects inside an argument list whose evaluation order C11 6.5.2
 leaves unspecified. Reading it at the call site would buy nothing -- the barrier is a
 property of where the value CAME FROM, not of how often it is fetched -- and would cost the
 program its own defined behaviour, which is the precondition every oracle here rests on.
-Measured before-state on this branch: with direct calls, gcc 13.4.0 at
--O2 left just one of the fourteen helpers standing, make_sbig -- every small, mixed and
-homogeneous-float return and all seven forwarding consumers were inlined away, so six of the
-seven documented return mechanisms and every one of the seven forwarding paths were not
-exercised at that level. Measured after: all seven producers and all seven consumers are
-emitted unmodified at -O1 and -O2 on all four targets, with no .constprop and no .isra clone
+MEASURED IN BOTH DIRECTIONS. WITHOUT the barrier, called by name, the reference compiler at
+-O2 leaves just one of the fourteen helpers standing, make_sbig -- every small, mixed and
+homogeneous-float return and all seven forwarding consumers are inlined away, so six of the
+seven documented return mechanisms and every one of the seven forwarding paths would not be
+exercised at that level. WITH it, all seven producers and all seven consumers are emitted
+unmodified at -O1 and -O2 on all four targets, with no .constprop and no .isra clone
 anywhere.
 
 Plain char signedness is implementation-defined and was measured as signed on x86_64 and
@@ -139,9 +146,8 @@ marker XD-TYPE-LONGDOUBLE-001 scoping that oracle.
 No target is dropped, no oracle is disabled and this record carries no expected-divergence
 marker: a cross-backend divergence here is a GENUINE FINDING rather than an
 implementation-defined difference, because nothing implementation-defined reaches the
-output. Measured on this branch with gcc 13.4.0 and the matching i686, aarch64 and riscv64
-cross drivers, executed natively and under QEMU user-mode 10.1.0: stdout is byte-identical
-and the exit status is 0 in all twelve target-and-optimization-level cells.
+output. Measured rather than assumed: stdout is byte-identical and the exit status is 0 in all
+twelve target-and-optimization-level cells.
 END
 expected_stdout    <<END
 ret_s8_folded_1 a=11 b=-12

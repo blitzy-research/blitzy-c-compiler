@@ -117,13 +117,12 @@
 //! any caller passes here. The decision is stated in the pre-flight capability report and in every
 //! finding's environment fingerprint, so a declined net is visible rather than silent.
 //!
-//! The decision is **measured and not configurable**, which is deliberate. An earlier form of it read
-//! an environment variable that could force the net on or off — a variable the project plan's own
-//! environment-variable contract does not declare, whose malformed values silently read as the
-//! default, and which was absent from the fingerprint that is supposed to make a run's supervision
-//! auditable. A cost policy that no document declares and no artifact records is a hidden change to
-//! the command topology of every cell, so the variable was removed rather than documented: the
-//! measurement is the whole decision, and its result is recorded. Nothing about the *bound* changes
+//! The decision is **measured and not configurable**, which is deliberate. An environment variable
+//! able to force the net on or off would be a variable the project plan's own environment-variable
+//! contract does not declare, whose malformed values silently read as the default, and which is
+//! absent from the fingerprint that is supposed to make a run's supervision auditable. A cost policy
+//! that no document declares and no artifact records is a hidden change to the command topology of
+//! every cell, so there is none: the measurement is the whole decision, and its result is recorded. Nothing about the *bound* changes
 //! either way — the watchdog below is authoritative in both cases, which is precisely what makes the
 //! outer net's engagement a cost question rather than a correctness one, and it is why the project
 //! plan's own degradation table records the fallback as "no behavioural change".

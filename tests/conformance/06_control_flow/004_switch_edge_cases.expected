@@ -24,7 +24,10 @@ expression. The widest label magnitude is 1000000 and the widest input magnitude
 is 1000000, both far inside the range of a 32-bit int on all four targets, so no
 signed overflow is possible. The largest accumulated value is 1720, the sum of
 the sixteen dense results, which is likewise far inside range. There is no
-shift, no division, no remainder and no pointer arithmetic. Every object is
+shift, no division and no remainder. The only pointer arithmetic is the arithmetic the
+language performs for a subscript: every index into the input tables and the output array
+is a literal or a loop counter provably inside its bound, so each access stays within its
+object, and no pointer value is printed, converted to an integer or compared. Every object is
 written before it is read: r is assigned on every reachable path in each helper,
 and is pre-initialised in empty_body, default_absent and single_label where a
 non-matching value runs no arm at all; the static const input tables have

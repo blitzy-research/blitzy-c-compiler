@@ -36,10 +36,13 @@
  * in this feature area that observes an object representation, which makes it a
  * direct cross-backend check on union member layout.
  *
- * Only int, unsigned and unsigned char appear, printed with %d and %u alone and
- * every unsigned char cast to int first, so no target-varying width reaches the
- * output.  b is declared unsigned char explicitly rather than plain char, so
- * plain-char's implementation-defined signedness cannot reach any printed byte.
+ * Every value this program computes and prints is an int, an unsigned or an unsigned
+ * char, printed with %d and %u alone and every unsigned char cast to int first, so no
+ * target-varying width reaches the output; the remaining objects are the format-string
+ * literals and the const char * that designates each of them, whose bytes printf copies
+ * through unchanged and none of which is ever read as a number.  b is declared unsigned char
+ * explicitly rather than plain char, so plain-char's implementation-defined signedness cannot
+ * reach any printed byte.
  * The three printed sizes follow only from sizeof(int) == 4 with 4-byte alignment
  * and sizeof(unsigned char) == 1: sizeof(union mixed) is max(4, 8, 4) == 8 because
  * struct pair is two ints, and sizeof(union witharr) is max(4, 12) == 12.

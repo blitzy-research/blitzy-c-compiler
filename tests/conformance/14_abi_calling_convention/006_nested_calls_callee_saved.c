@@ -4,7 +4,9 @@
  * keeps ten INDEPENDENT values live across its nested call and prints them only
  * AFTER that call has returned.  That is what detects a clobbered callee-saved
  * register: if the callee fails to restore a register the caller was using, the
- * caller's printed value is wrong and the divergence localises to the exact frame.
+ * caller's printed value is wrong, and the report names each frame whose line
+ * differs -- one frame where a single register is clobbered, and every affected
+ * frame where the failure is systemic.
  *
  * The leaf is the ninth frame and is counted as one, but it is deliberately NOT a
  * pressure frame: it makes no call, so it has nothing to hold values across, and
@@ -37,8 +39,8 @@
  * target some of them must survive the call somewhere other than a preserved
  * register - but which values go where is the compiler's choice, and this program
  * does not assert it.  What it asserts is the OBSERVABLE consequence: if any of the
- * ten fails to survive the call, the printed line for that frame changes and the
- * divergence localises to the exact frame.
+ * ten fails to survive the call, the printed line for that frame changes, so the
+ * divergence is localised to the frames it actually reaches rather than summarised.
  *
  * WHY THE LIVE VALUES COME FROM VOLATILE STORAGE, WHICH IS THE WHOLE POINT.
  * Live-across-a-call is a property of the generated code, not of the source, and
@@ -67,10 +69,16 @@
  * there would be no call for a value to be live across.  Measured with gcc 13.4.0
  * at -O2 before the indirection was added: only level1 survived in each variant -
  * levels 2 through 8 and the leaf were all inlined, so a nine-frame chain was
- * testing a single frame.  A volatile pointer must be re-read at the point of
- * call, so the designated function is unknown and the call is genuinely indirect;
- * and because each address escapes into storage, no signature may be cloned and
- * no frame elided.  The mechanism is pure ISO C: a function attribute would have
+ * testing a single frame.  ISO C requires a volatile pointer to be re-read at each
+ * point of call and control to go to whatever function that load produced
+ * (C11 5.1.2.3p2 and p6, 6.7.3p7), so the designated function is opaque to the
+ * optimizer and the call is genuinely indirect.  It does NOT forbid a specialised
+ * clone or a guarded devirtualization that could still elide a frame, so the
+ * nine-frame chain is verified rather than assumed: with gcc 13.4.0 at -O2 on all
+ * four reference drivers no symbol carries .constprop, .isra or .part. and the ten
+ * boundaries are reached through ten genuine indirect transfers per target.
+ * 001_many_integer_parameters.expected states the residual risk that leaves and
+ * what would close it.  The mechanism is pure ISO C: a function attribute would have
  * been shorter, but the documented attribute set for the compiler under test is
  * packed, aligned, section, unused, deprecated, visibility and format
  * (docs/technical-specifications.md line 506), so an inlining attribute would
@@ -87,23 +95,16 @@
  * cannot tolerate, since it must be able to say that a divergence is a defect.
  *
  * AT WHICH OPTIMIZATION LEVEL THE CHAIN IS REALLY NINE FRAMES DEEP.  At the source
- * level it always is; as emitted code it depends on inlining, and that was
- * measured rather than assumed.  Counting this program's own static functions still
- * emitted in the reference compiler's assembly - `<driver> -O<n> -S -o -
- * 006_nested_calls_callee_saved.c`, then grepping for the function labels: with the
- * volatile call boundary in place, ALL NINE FRAMES ARE EMITTED at -O0, -O1 and -O2
- * on x86-64, i686, AArch64 and RISC-V 64 alike, with no .constprop and no .isra
- * clone anywhere.  So the eight-frame pressure and the save/restore discipline it is
- * designed to stress are exercised as real frames at every one of the twelve cells,
- * which is the property the boundary exists to guarantee.
- *
- * The measured BEFORE-state, recorded because it is the reason the boundary is
- * there: with direct calls, gcc 13.4.0 at -O1 and above left only level1 standing -
- * levels 2 through 8 and the leaf were inlined into it, two calls survived in total,
- * and a nine-frame chain was testing a single frame.  That measurement describes the
- * program as it was, not as it is.  The compiler under test may inline differently
- * again; no bcc binary is present on this branch, so nothing here was measured of
- * it.
+ * level it always is; as emitted code it depends on inlining, which is checked by
+ * counting this program's own static function labels in the reference compiler's
+ * assembly rather than assumed.  With the volatile call boundary in place, ALL NINE
+ * FRAMES ARE EMITTED at -O0, -O1 and -O2 on x86-64, i686, AArch64 and RISC-V 64
+ * alike, with no .constprop and no .isra clone anywhere.  So the eight-frame
+ * pressure and the save/restore discipline it is designed to stress are exercised as
+ * real frames at every one of the twelve cells, which is the property the boundary
+ * exists to guarantee.  A different compiler may inline differently, which is
+ * precisely why the boundary is expressed in the source rather than left to any
+ * implementation's judgement.
  *
  * Depth is bounded at nine nested frames plus main, and every call is a distinct
  * function, so there is no recursion and no unbounded growth.  Peak stack use for
@@ -117,9 +118,9 @@
  *   AArch64     eight 128-byte frames, one 64 and one 48      ~= 1.1 KiB
  *   RISC-V 64   eight 144-byte frames, one 64 and one 48      ~= 1.2 KiB
  * The C library's own printf frame is on top of that and is not counted here.  So
- * the honest figure is on the order of one to two kibibytes -- not "a few hundred
- * bytes", which the ten-scalar count alone would have suggested and which the
- * measurement contradicts.  It remains roughly three orders of magnitude below the
+ * the honest figure is on the order of one to two kibibytes, rather than the few
+ * hundred bytes the ten-scalar count alone would suggest.  It remains roughly three
+ * orders of magnitude below the
  * 8 MiB default stack these binaries run under, both natively (ulimit -s reports
  * 8192 KiB) and under QEMU user-mode emulation (QEMU_STACK_SIZE defaults to
  * 8388608 bytes).
@@ -198,11 +199,11 @@ static const int *volatile vlive_p[8] = {
 };
 
 /* THE CALL BARRIER, AND WHY THE NINE-FRAME CHAIN WOULD OTHERWISE NOT EXIST.  A
- * callee-saved obligation is only under test if a call actually happens.  Measured
- * with gcc 13.4.0 at -O2, with direct calls the only function left standing was
- * level1: levels 2 through 8 and leaf_mix were all inlined into it, so the nine
- * frames the program describes collapsed to one and the property under test did
- * not exist at that optimization level.  Each level therefore reaches the next
+ * callee-saved obligation is only under test if a call actually happens.  With
+ * direct calls the reference compiler at -O2 leaves only level1 standing: levels 2
+ * through 8 and leaf_mix are all inlined into it, so the nine frames the program
+ * describes would collapse to one and the property under test would not exist at
+ * that optimization level.  Each level therefore reaches the next
  * through a FILE-SCOPE volatile FUNCTION POINTER.  A volatile lvalue must be
  * re-read on every access, so no conforming compiler may assume which function
  * the pointer designates: it can neither inline nor clone the callee, and every

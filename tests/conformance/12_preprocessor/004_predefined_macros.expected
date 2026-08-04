@@ -7,7 +7,7 @@
 
 program            = 004_predefined_macros
 area               = 12_preprocessor
-description        = Predefined macros asserted only as normalized relations: the standard conformance and version macros, the source-position macros, architecture-macro presence and consistency, and the tie between the preprocessor's view of the target and the code generator's pointer width
+description        = Predefined macros asserted only as normalized relations: the standard conformance and version macros, the source-position macros, architecture-macro self-consistency, and the tie between the preprocessor's view of the target and the code generator's pointer width
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -53,12 +53,12 @@ architecture blocks carries an alternative arm that defines a zero fallback inst
 happens not to define the architecture macro spellings this program knows about fails to translate
 the program at all, converting an informative output difference into an uninformative compile
 failure on both oracles at once. With the zero fallback the program always compiles and always runs
-under both compilers, and any macro gap surfaces instead as a comparable difference with a precise
-diff -- report the difference, never work around it. The fallback and the `arch_id_defined` relation
-are two halves of one mechanism: the fallback makes the gap survive translation, and the relation is
-what makes it visible in the output rather than absorbed. No `#error` and no `#warning` appears on any
-path, so nothing is written to standard error, which this suite captures into finding artifacts but
-never compares.
+under both compilers, and a macro gap surfaces, where it surfaces at all, as a comparable difference
+with a precise diff rather than as a translation failure. What the fallback deliberately does NOT do
+is make the gap itself an assertion: the program asserts no lower bound on the number of architecture
+macros defined, for the reason set out in `impl_defined_notes`, so a compiler defining none of the
+four satisfies every line here. No `#error` and no `#warning` appears on any path, so nothing is
+written to standard error, which this suite captures into finding artifacts but never compares.
 
 DETERMINISM. Every printed value is an `int` printed with `%d`, so nothing target-varying,
 address-derived, time-derived, random or locale-dependent can reach standard output. No address and
@@ -74,7 +74,7 @@ cell to cell -- never reaches standard output; that was confirmed by building an
 program from two directories with different absolute paths and observing byte-identical output.
 `__LINE__` is likewise reduced to a positivity relation, so no literal line number is emitted and no
 later edit to the comments above can change a printed value. Iteration order is fixed by the
-terminator of a string literal. Output is a fixed nine-line sequence, one line per relation
+terminator of a string literal. Output is a fixed eight-line sequence, one line per relation
 claimed, so a single divergent line localizes a defect to one construct. `main` returns 0, inside
 the 0-125 range the operating system delivers intact.
 
@@ -89,12 +89,12 @@ no match -- so naming one would fail on the bcc side of oracle (a) while succeed
 side: a spurious divergence caused by the test rather than by a compiler.
 
 GATE. The default warning gate applies unmodified and no `ub_audit_flags` key appears, because none
-is needed: -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. The program was
-verified clean under that gate with all four reference drivers at all three optimization levels and
-with the alternate reference compiler this suite may select, and it builds and runs clean under
--fsanitize=undefined,address -fno-sanitize-recover=all with output identical to the golden record
-below. Both gates are reference-compiler-only and are never applied to bcc, so requirement 3's
-shared-flag discipline is untouched.
+is needed: -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. The program is
+clean under that gate in the single native compile-only invocation the suite makes of it, and it
+builds and runs clean in the one instrumented native build of -fsanitize=undefined,address
+-fno-sanitize-recover=all, with output identical to the golden record below. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
 END
 impl_defined_notes <<END
 THIS PROGRAM ASSERTS RELATIONS, NEVER LITERAL VALUES, AND THIS NOTE RECORDS WHY. It narrows nothing:
@@ -114,50 +114,61 @@ ARCHITECTURE MACROS DIFFER PER TARGET BY DESIGN, AND ARE NOT INVARIANTS. `__x86_
 `__aarch64__` and `__riscv` are spellings of a particular compiler family. Printing any of them, or
 printing a value derived directly from one, would guarantee a cross-backend difference that says
 nothing whatever about compiler correctness, so the program prints normalized derived results
-instead and never a macro name or a macro value. Three of them, and together they are everything
-that can be observed about the set without naming a spelling: that AT LEAST ONE of the four is
-defined (`arch_id_defined`), that NO MORE THAN ONE is (`arch_count_at_most_one`), and that whichever
-one IS defined agrees with the pointer width the code generator actually produced
-(`arch_id_agrees_with_pointer_width`, written as a two-sided implication so that it stays about
-agreement alone whatever the first two report). The first two are the exactly-one property, printed
-as two separate lines rather than one conjunction so that a divergence names which half failed.
+instead and never a macro name or a macro value. Two of them, and each is a property of a compiler's
+consistency with ITSELF rather than a claim about what it must predefine: that NO MORE THAN ONE of
+the four is defined (`arch_count_at_most_one`), because two simultaneous claims cannot both describe
+the machine the code generator is emitting for; and that whichever one IS defined agrees with the
+pointer width that generator actually produced (`arch_id_agrees_with_pointer_width`, written as a
+two-sided implication so that it stays about agreement alone). Both lines are satisfied by a compiler
+defining exactly one of the four, and both are satisfied by a compiler defining none. Only a compiler
+that contradicts itself fails either, which is what makes a difference on these lines evidence about
+the compiler rather than about a naming convention.
 
-WHY THE PRESENCE RELATION IS PRINTED, WHEN AN EARLIER FORM OF THIS PROGRAM OMITTED IT. That earlier
-form printed only the upper bound and the implication, on the reasoning that no clause obliges an
-implementation to define any of the four spellings and that this repository documents no per-target
-predefined-macro contract for the compiler under test -- so requiring one looked like accusing a
-correct compiler of a defect for spelling its architecture macro differently, or for leaving the
-choice to a target header. The reasoning was sound about what a 0 MEANS and wrong about whether it
-should be OBSERVABLE. With no presence line, a compiler predefining no architecture macro at all
-produced output byte-identical to one predefining exactly the right macro: the sum was zero, zero is
-no more than one, and the implication was vacuously satisfied, so all three oracles agreed and the
-one question this program exists to ask went unanswered. That was verified by measurement, not
-inferred: building the earlier form with the architecture macro suppressed produced a byte-identical
-stdout. A relation that cannot fail is not caution; it is a blind spot, and it covered precisely the
-case the documentation is silent about -- the case a maintainer would most want reported.
+PRESENCE IS DELIBERATELY NOT ASSERTED, AND THIS IS THE RECORD OF THE WITHDRAWAL AND ITS REASON. An
+earlier form of this program printed a third line, `arch_id_defined`, asserting that AT LEAST ONE of
+the four spellings is defined, and this record carried `arch_id_defined=1` as golden output. The
+observation that motivated it was correct: without such a line, a compiler predefining no
+architecture macro produces output byte-identical to one predefining exactly the right macro, since
+the sum is zero, zero is no more than one, and the implication is vacuously satisfied. The conclusion
+drawn from it was not. Those two compilers agree because both are CORRECT. No clause of the standard
+requires any of these four spellings; the search recorded in the next paragraph finds no repository
+document that requires them of the compiler under test either; and this record itself conceded as
+much while enforcing the opposite. An assertion no authority supports does not become sound by being
+labelled a report: every one of this program's twelve cells would have reported a compiler which
+spells its architecture macro otherwise, or which leaves the choice to a target header, as a
+difference under all three oracles at once, and each of those differences would have been filed as an
+undocumented FINDING. That is a false oracle, and a false oracle is worse than the blind spot it was
+introduced to close, because it spends a maintainer's attention on permitted behaviour and teaches a
+reader to distrust the finding set. Nor could such a difference have been reclassified as expected:
+requirement 5 makes a marker's documented basis mandatory, and silence is not a basis.
 
-A 0 ON THAT LINE IS A REPORT, NOT AN ACCUSATION, and that is what makes printing it safe. This suite
-never patches the compiler under test on the strength of a divergence: requirement 6 makes a
-divergence a deliverable -- minimized reproducer, exact commands, per-cell outputs, environment
-fingerprint -- for a maintainer to adjudicate. A differently spelled or absent macro set is therefore
-not condemned here; it is surfaced, as a one-line difference naming exactly which relation differs,
-which is what this suite's own rule -- report the difference, never work around it -- requires. And
-because no documented basis exists for an expected-divergence marker (see the next paragraph), such a
-difference is reported as a FINDING rather than dressed up as an expected one. The macros are still
-exercised rather than dropped, no target and no oracle is narrowed, and the `#else` zero-fallback arms
-in the source are what keep the report a comparable output difference instead of a compile failure.
+WHAT THE WITHDRAWAL DOES NOT GIVE UP, since C3 forbids dropping a feature. All four architecture
+macros are still read, all four conditional blocks are still exercised, both surviving relations are
+still printed and compared, and this program still sweeps all four targets, all three optimization
+levels and all three oracles: nothing is narrowed here, and no marker is attached. One unfounded
+equality was withdrawn, not one line of coverage. The narrow alternative the review offered --
+printing presence as capability metadata that no oracle compares -- is genuinely unavailable in this
+suite rather than merely unattractive: comparison is byte-exact over the whole of standard output,
+plus the raw wait status, so there is no uncompared channel a program can print into, and inventing
+one would weaken the comparison for all 108 programs in order to describe one. What remains
+observable about presence is observable where it belongs: the pre-flight capability report records
+what each compiler is, and a maintainer curious about a compiler's predefined-macro set can read it
+directly with that compiler's own dump-macros switch, which is a capability question rather than a
+conformance one.
 
 THE DOCUMENTATION GAP, AND WHY IT DECIDES THE DESIGN. The repository documentation nowhere enumerates
 the macros any compiler predefines. A search across `docs/` for `predefined`, `__STDC`, `__x86_64__`,
 `__i386__`, `__aarch64__`, `__riscv`, `__GNUC` and `__STDC_HOSTED` returns no match for any of the
 eight spellings, in any of the three documents the directory contains. There is consequently no
 documented authority stating which predefined macros bcc defines or what values they take. That is
-the direct reason this program asserts relations rather than literals, and it has a second
-consequence that matters more: an expected-divergence marker requires a documented basis, and a
-documented basis cannot be manufactured out of silence. No marker could legitimately be attached here
-even if a per-target difference were observed, so a difference is reported as a FINDING -- and
-because the relations are normalized, that finding is a precise, actionable one rather than a wall of
-per-target noise nobody can triage.
+the direct reason this program asserts relations rather than literals, and it is the same reason the
+presence assertion was withdrawn above: a relation is asserted here only where every correct compiler
+must satisfy it. The gap has one further consequence. An expected-divergence marker requires a
+documented basis, and a documented basis cannot be manufactured out of silence, so no marker could
+legitimately be attached to this program even if a per-target difference were observed -- which is
+precisely why the relations must be sound in the first place. A difference on a sound relation is
+reported as a FINDING, and because the relations are normalized that finding is a precise, actionable
+one rather than a wall of per-target noise nobody can triage.
 
 LANGUAGE MODE AND THE ABSENCE OF A -std FLAG. bcc's documented command line
 (docs/technical-specifications.md lines 21 and 81) is -c, -o, -I, -D, -U, -L, -l, -g, -O0, -O1, -O2,
@@ -165,14 +176,15 @@ LANGUAGE MODE AND THE ABSENCE OF A -std FLAG. bcc's documented command line
 no -std flag is ever passed in any differential invocation, on either side, and the reference
 compiler therefore runs in its own default mode. That mode was measured rather than assumed:
 `__STDC_VERSION__` is 201710L, `__STDC__` is 1, and `__STRICT_ANSI__` is absent -- gnu17, which
-already offers the GNU extensions the corpus exercises elsewhere. Two of this program's nine
+already offers the GNU extensions the corpus exercises elsewhere. Two of this program's eight
 assertions rest on that measurement, so it is recorded here.
 
 WHY THE STRICT-CONFORMANCE MACRO IS ASSERTED NOWHERE, IN EITHER DIRECTION. The measurement above
 records that `__STRICT_ANSI__` is absent under the reference compiler, and bcc, having no -std flag,
 can never be placed in a strict-ANSI mode either. It would therefore be tempting to assert its
-absence as a relation expected to hold on both sides, and an earlier form of this program did exactly
-that. It is still the wrong assertion. `__STRICT_ANSI__` is a compiler-family spelling that no clause
+absence as a relation expected to hold on both sides. That would be the wrong assertion, and for the
+same reason the presence of an architecture spelling is not asserted either. `__STRICT_ANSI__` is a
+compiler-family spelling that no clause
 obliges an implementation to define or to omit, so a correct compiler is free to define it for
 reasons of its own; requiring its absence would be a false oracle, and requiring its presence would
 be another. An observation about one compiler's default mode is not a conformance requirement on
@@ -231,7 +243,6 @@ expected_stdout    <<END
 stdc_is_one=1
 stdc_at_least_c99=1
 stdc_at_least_c11=1
-arch_id_defined=1
 arch_count_at_most_one=1
 arch_id_agrees_with_pointer_width=1
 pointer_width_eq_long_width=1

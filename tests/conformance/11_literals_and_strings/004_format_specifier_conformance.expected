@@ -37,10 +37,11 @@ Free of undefined and unspecified behaviour by construction:
   argued. An access to a volatile object IS an observable side effect, so the four
   volatile objects are each read exactly once, in a statement of its own, and only the
   resulting snapshots are passed to the conversions. No argument list in this program
-  contains more than one volatile access. This replaced two earlier forms that each
-  depended on unspecified order: one call read two different volatile objects in a
-  single argument list, and another read the same volatile object twice in one argument
-  list. The snapshots do not weaken the runtime coverage, because they are themselves
+  contains more than one volatile access. Two shapes are therefore ruled out by
+  construction rather than by argument: a call reading two different volatile objects in
+  one argument list, and a call reading the same volatile object twice in one argument
+  list, each of which would depend on unspecified order. The snapshots do not weaken the
+  runtime coverage, because they are themselves
   loads from volatile storage, so every conversion is still fed a value the optimizer
   may not fold.
 - Floating-point values are printed at fixed precision with margin, using only finite

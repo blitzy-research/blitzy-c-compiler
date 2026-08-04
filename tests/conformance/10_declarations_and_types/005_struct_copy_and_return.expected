@@ -52,7 +52,7 @@ aggregate on the stack and returns one through a hidden pointer whatever its siz
 sizes travel i686's single memory path. That is ABI context rather than something this program
 demonstrates: the compared bytes are member values, and the route an aggregate took is visible
 only in generated code. It is verifiable there rather than assumed -- disassembling an i686
-build (i686-linux-gnu-gcc 13.4.0, -O1) shows the hidden pointer arriving in the first stack
+build at -O1 shows the hidden pointer arriving in the first stack
 slot, returned in %eax, with the callee popping it via ret $0x4, while the same source built
 for x86_64 returns the 8-byte aggregate packed in %rax and never touches memory. Nothing is
 excluded on any target either way, because what the oracles compare is the member values that

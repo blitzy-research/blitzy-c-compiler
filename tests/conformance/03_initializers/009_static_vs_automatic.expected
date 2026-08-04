@@ -44,9 +44,11 @@ automatic objects are initialized on every entry to the block, so each is readab
 read onward in every round.
 Every subscript stays strictly inside its array bound, and each bound is a literal equal to the
 declared extent: s_arr and a_arr are int[3] read at 0 through 2, g_static_arr is int[4] read at 0
-through 3, and g_static_const and g_static_bss are int[3] read at 0 through 2. No pointer is formed
-anywhere in the program apart from printf's format argument, so no one-past-the-end pointer exists to
-be dereferenced, no pointer arithmetic can leave an object, no address is taken and none is printed.
+through 3, and g_static_const and g_static_bss are int[3] read at 0 through 2. With every subscript
+in bounds, the pointer arithmetic the language performs for it stays inside its object: no
+one-past-the-end pointer is dereferenced, no address of an object is taken, and no pointer value is
+printed, compared or converted to an integer. The only other pointers in the program are the
+format-string literals decaying at each printf call.
 There is no aliasing violation: every value is read and written through an lvalue of its own declared
 type, which is int in every case, reached by member selection and subscripting. g_static_const is
 declared const and is only ever READ -- never written, and never reached through a non-const lvalue
@@ -69,10 +71,10 @@ compiler. This area is granted no header exception; the corpus has exactly two, 
 and the dedicated bundled-header probe in area 12.
 This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
 under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under the
-sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
-reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched.
+-Werror in the single native compile-only invocation the suite's warning gate makes, and it builds
+and runs clean under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both
+gates are reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag
+discipline is untouched.
 END
 impl_defined_notes <<END
 This record narrows nothing: all four targets, all three optimization levels and all three
@@ -123,11 +125,13 @@ WIDTH NORMALIZATION. Only int and %d are used, so the MEASURED i686 differences 
 and pointer against eight bytes on x86-64, AArch64 and RISC-V 64
 (docs/technical-specifications.md target table, lines 457-462) -- cannot be observed. No sizeof or
 _Alignof result is printed and no floating value reaches a format string.
-PLAIN-CHAR SIGNEDNESS AND PADDING. No character data is printed, so the MEASURED plain-char
-signedness split -- signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64 -- is irrelevant,
-and no struct representation is printed, so padding does not matter.
-EXECUTION CHARACTER SET. Nothing character-valued is printed, so C11 5.2.1 leaves nothing here to
-the implementation.
+PLAIN-CHAR SIGNEDNESS AND PADDING. The only character data is the format-string literals, whose
+bytes printf copies through unchanged; no plain-char value is read as a number, so the MEASURED
+plain-char signedness split -- signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64 -- is
+irrelevant. No struct representation is printed, so padding does not matter.
+EXECUTION CHARACTER SET. No character's numeric CODE is computed or printed, so C11 5.2.1 leaves
+nothing here to the implementation; the label bytes of each line are copied through printf from the
+same source on both sides of every comparison.
 MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
 -O1 and -O2 -- twelve configurations -- and every one produced these 44 lines byte-identically with
 exit status 0, which is why oracle (b) compares this program's targets against each other without

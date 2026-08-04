@@ -6,7 +6,7 @@
 
 program            = 011_flexible_array_member
 area               = 03_initializers
-description        = Flexible array member declaration and sizing through allocated-equivalent storage at BOTH storage durations: a union pairing the incomplete-array struct with a same-prefix sized struct, instantiated once as a file-scope static image and once as an automatic twin inside main, with the shared count written through one arm and read back through the other and across a function boundary that knows only the incomplete type, and the element data carried by the sized arm where it is declared
+description        = Flexible array member declaration, sizing and ELEMENT ACCESS through the member itself: an object allocated as the header plus FAM_CAP elements, whose every live element is written and read as p->data[i] and summed across a function boundary that knows only the incomplete type, alongside allocated-equivalent storage at BOTH storage durations -- a union pairing the incomplete-array struct with a same-prefix sized struct, once as a file-scope static image and once as an automatic twin inside main, with the shared count written through one arm and read back through the other
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -22,12 +22,37 @@ This program contains no undefined and no unspecified behaviour, which is the pr
 differential oracles rest on: undefined behaviour would license either compiler to do anything at
 all, so a divergence between two compilers over it would prove nothing about either one. The storage
 technique below was chosen precisely to keep that true.
-THE USUAL HEAP IDIOM IS UNAVAILABLE, AND ITS ABSENCE COSTS NO COVERAGE. Populating a flexible array
-member is normally done with an allocation sized as the fixed header plus n elements; here no header
-may be included, so no allocator is even declared, and the suite is hermetic, so no dynamic
-allocation is performed at all. The storage is an allocated-equivalent object instead -- once with
-STATIC storage duration at file scope and once with AUTOMATIC storage duration inside main -- and
-both exercise the same access paths.
+THE STANDARD'S OWN IDIOM IS USED, WHICH IS WHAT MAKES THE ELEMENT ACCESS WELL DEFINED. C11
+6.7.2.1p18 sizes the replacement array against THE OBJECT BEING ACCESSED, and 6.7.2.1p20's EXAMPLE 2
+shows the construction that makes that object large enough: an allocation of sizeof(struct fam) plus
+room for n elements, after which the member behaves as if it had n elements. fam_alloc performs
+exactly that with n == FAM_CAP == 8, so `p->data[i]` for i below the object's own count is inside the
+replacement array by the standard's own account. Two allocated-EQUIVALENT objects are held beside it,
+at STATIC and AUTOMATIC storage duration, because a compiler can get a data-section image right and
+the emitted stores wrong; those two are unions and their elements are reached through the sized arm
+where they are declared, while only the member the two arms SHARE is reached through the flexible arm.
+THE ALLOCATOR IS DECLARED WITHOUT A HEADER AND WITHOUT LOSING A TARGET. The corpus rule is that a
+program includes no header and hand-declares its libc prototypes, and the obstacle was that malloc
+takes size_t, which is unsigned int on i686 and unsigned long on the other three targets, so no single
+spelling serves all four and an unprototyped declaration is refused by the gate. The size type is
+therefore selected by the architecture macro the compiler predefines -- __i386__/__i386 giving
+unsigned int, and __x86_64__/__amd64__/__aarch64__/__arm64__/__riscv/__riscv__ giving unsigned long --
+with an #error on the unrecognised branch so a fifth target fails to TRANSLATE rather than inheriting a
+wrong argument width. This is the same architecture-macro idiom 12_preprocessor/004_predefined_macros.c
+and 10_declarations_and_types/007_alignof_alignas.c already use. MEASURED: the declaration matches the
+built-in exactly on all four reference drivers, so the gate raises no
+-Werror=builtin-declaration-mismatch, at -O0, -O1 and -O2.
+HERMETICITY IS UNAFFECTED BY THE ALLOCATION. An allocation opens no file, no socket and no path; it
+reads nothing from the environment, the clock or the file system. The single block obtained is released
+with free before main returns, so the program owns no storage at exit and the address sanitizer's leak
+checker is satisfied -- MEASURED clean under -fsanitize=undefined,address -fno-sanitize-recover=all,
+which built, ran, exited 0 and printed nothing on standard error.
+ALLOCATION FAILURE IS HANDLED DETERMINISTICALLY RATHER THAN ASSUMED AWAY. The request is 36 bytes, and
+a refusal would make every subsequent element access a null dereference, so the result is checked. On
+refusal the program prints the single fixed line alloc_refused=1 and returns 3 -- inside the suite's
+0-125 range -- so even that path is byte-deterministic and would surface as an exit-code divergence
+rather than as a crash. The golden record below is the success path, which is what a 36-byte request
+takes on every target measured here.
 ALIASING IS THE HAZARD IN THIS CONSTRUCT, AND IT IS MADE LEGAL BY CONSTRUCTION RATHER THAN BY HOPE.
 A bare `static int backing[N]` cast to `struct fam *` WOULD be a strict-aliasing violation -- the
 storage would be written as an int array and read through an unrelated struct type -- so that
@@ -40,46 +65,58 @@ The flexible array member itself contributes nothing to sizeof the struct (C11 6
 asserted directly rather than relied on silently: sizeof_struct_fam is printed and must read 4, and
 fam_size_as_if_omitted asserts the inequality the standard actually states -- the size is as if the
 member were omitted, allowing only extra trailing padding -- against a header-only twin type.
-NO SUBSCRIPT IS EVER APPLIED TO THE FLEXIBLE MEMBER, AND THAT IS THE PROGRAM'S CENTRAL SAFETY
+WHICH SUBSCRIPT GOES THROUGH WHICH VIEW, STATED EXACTLY, BECAUSE THAT IS THE PROGRAM'S CENTRAL SAFETY
 PROPERTY. C11 6.7.2.1p18 replaces the member with the longest array that would not make the structure
 larger than THE OBJECT BEING ACCESSED, and states that if that array would have no elements, any
-attempt to access an element is undefined. A `struct fam *` aimed at the union's flexible arm
-designates an object of size sizeof(struct fam) -- four bytes, the header alone -- so the replacement
-array there has NO elements and subscripting it would be out of bounds on the read side and on the
-write side alike. The union makes the two arms alias legitimately; it does not enlarge either arm.
-Every element access in this program is therefore made through the SIZED arm, whose data member is
-declared with FAM_CAP == 8 elements, and the flexible arm is used only for the member the two share.
+attempt to access an element is undefined. Two consequences follow and both are honoured. A
+`struct fam *` aimed at a UNION arm designates an object of size sizeof(struct fam) -- four bytes, the
+header alone -- so the replacement array there has NO elements: the union's elements are therefore
+never subscripted through the flexible arm, only through the SIZED arm whose data member is declared
+with FAM_CAP == 8 elements, and the flexible arm of a union is used only for the member the two arms
+share. The ALLOCATED object is the opposite case by construction: fam_alloc obtained
+sizeof(struct fam) + FAM_CAP * sizeof(int) bytes, so its replacement array has FAM_CAP elements and
+`ap->data[i]` is in bounds for every i below FAM_CAP. Every subscript on `struct fam::data` in this
+program is on that object.
 EVERY SUBSCRIPT IS IN BOUNDS, AND EVERY BOUND IS DERIVED FROM THE OBJECT RATHER THAN ASSUMED.
 sum_prefix loops to u->flex.count -- the shared member, read through the flexible arm -- and indexes
-u->sized.data, so the bound comes from the object and the storage comes from the arm that declares it.
-The static object's count is only ever 5 then 6 and the highest index it touches is 5; the automatic
-object's count is only ever 4 then 5 and the highest index it touches is 4. All four counts are
-strictly below the capacity, so no access reaches past the backing array, no one-past-the-end pointer
-is formed or dereferenced, and no pointer arithmetic leaves its object. `p` designates the file-scope
-object, which lives for the whole run, and `lp` designates the automatic object, which is read only
-inside main where it is alive, so neither pointer is ever dangling.
-NO UNINITIALIZED STORAGE IS READ, at either storage duration. Both unions carry a designated
+u->sized.data, so the bound comes from the object and the storage comes from the arm that declares it;
+fam_sum and every read loop over the allocated object loop to p->count, likewise taken from the object.
+The static union's count is only ever 5 then 6 and the highest index it touches is 5; the automatic
+union's count is only ever 4 then 5 and the highest index it touches is 4; the allocated object's count
+is only ever 0, then 5, then FAM_LIVE_MAX == 6, and the highest index it touches is 5. Every one of
+those counts is strictly below the capacity of 8, so no access reaches past the storage, no
+one-past-the-end pointer is formed or dereferenced, and no pointer arithmetic leaves its object. `p`
+designates the file-scope object, which lives for the whole run; `lp` designates the automatic object,
+read only inside main where it is alive; `ap` designates the allocated object, which is created before
+its first use and freed after its last, so none of the three pointers is ever dangling and the freed
+pointer is never used again.
+NO UNINITIALIZED STORAGE IS READ, at any of the three storage classes. Both unions carry a designated
 initializer for their sized arm, so every element of that arm is determinate -- the live values plus
 the explicit trailing zeros -- and a member or element an initializer had omitted would be zeroed in
 any case, for automatic and static duration alike (C11 6.7.9p19 and p21). The static object is
 additionally covered by C11 6.7.9p10, which defines a static-duration object without an initializer as
 zero, but the automatic twin does not rely on any such pre-zeroing: its whole image is established by
-emitted stores on entry to the block, which is the very difference the twin exists to test. In each
-half, the one slot the mutation phase newly brings inside the count -- index 5 in the static object and
-index 4 in the automatic one -- is written before it is read.
-No signed overflow is possible: the largest printed value is 2133 and the largest element is 600,
-while INT_MAX is at least 2147483647 on every conforming target. There is no shift, no division, no
-remainder and no integer-to-pointer conversion anywhere in the program.
-No object is modified twice between two sequence points. Each mutation phase is three separate
-statements -- one element rewritten in place through the sized arm, the count grown by one through the
-flexible arm, one previously zero slot filled through the sized arm -- and the accumulation inside
-sum_prefix is a statement of its own. Every printf call receives
-at most one loop counter and one already-computed value, so the unspecified order in which a function
-call's arguments are evaluated cannot be observed.
+emitted stores on entry to the block, which is the very difference the twin exists to test. The
+ALLOCATED object receives no such guarantee from the standard -- malloc leaves its bytes indeterminate
+-- so fam_alloc writes all FAM_CAP elements to zero and the header before returning, and fam_fill then
+overwrites the live prefix; the one slot the mutation phase newly brings inside the count, index 5, is
+written before it is read. No element of that object is ever read before it has been written.
+No signed overflow is possible: the largest printed value is 2133, the largest element is 999, and the
+largest sum over the allocated object is 1187, while INT_MAX is at least 2147483647 on every conforming
+target. fam_fill computes first + i * step with first == 7, step == 11 and i below 5, so its largest
+product is 44. There is no shift, no division, no remainder and no integer-to-pointer conversion
+anywhere in the program.
+No object is modified twice between two sequence points. Each of the three mutation phases is three
+separate statements -- one element rewritten in place, the count grown, one previously zero slot filled
+-- and the accumulation inside sum_prefix, fam_sum and fam_fill is a statement of its own. Every printf
+call receives at most one loop counter and one already-computed value, so the unspecified order in which
+a function call's arguments are evaluated cannot be observed.
 No object representation is inspected and nothing is read byte by byte, so neither padding nor byte
-order can influence the output, and no address is printed -- the two views are reached only through
-int-typed lvalues at identical offsets. Nothing depends on the relative addresses of unrelated
-objects: no pointer difference is taken and no two addresses are compared.
+order can influence the output, and no address is printed -- neither the allocated block's, whose value
+would differ between runs and between targets, nor either union view's, which are reached only through
+int-typed lvalues at identical offsets. Nothing depends on the relative addresses of unrelated objects:
+no pointer difference is taken, no two addresses are compared, and the only pointer comparison anywhere
+is the allocation's own result against a null pointer constant.
 Every conversion specifier is %d and every corresponding argument has type int after the default
 argument promotions -- including both sizeof results, each cast to int before reaching the variadic
 call so that no wider type and no size_t is passed -- so no variadic argument is read at the wrong
@@ -96,36 +133,38 @@ compiler. This area is granted no header exception; the corpus has exactly two, 
 and the dedicated bundled-header probe in area 12.
 This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
 under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under the
-sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
-reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched.
+-Werror in the single native compile-only invocation the suite's warning gate makes, and it builds
+and runs clean under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both
+gates are reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag
+discipline is untouched.
 END
 impl_defined_notes <<END
-This record narrows two things and records the reason for each below, as the suite requires: one
-SPELLING of the initializer, and one unsound WAY OF REACHING the member's elements. It narrows no
-target, no optimization level and no oracle, it carries no expected-divergence marker, and no
-`ub_audit_flags` key appears because the program passes the suite's full default warning gate
-unmodified.
-ELEMENT ACCESS THROUGH THE FLEXIBLE MEMBER ITSELF IS EXCLUDED, AND THE REASON IS THE STANDARD RATHER
-THAN DIFFICULTY. An earlier form of this program subscripted the member through a `struct fam *`
-aimed at the union arm. Under C11 6.7.2.1p18 the replacement array for that access is sized against
-the object being accessed, which is the four-byte `struct fam` arm, so it has no elements and every
-such subscript was undefined -- exactly the kind of unsound input that would make any divergence it
-provoked unattributable. The construction the standard unambiguously supports is an allocated object
-genuinely larger than the header, and it is out of reach for this corpus: a portable declaration of an
-allocation function needs size_t, which is `unsigned int` on i686 and `unsigned long` on the other
-three targets, so no single spelling serves all four; the corpus forbids including the header that
-would define it; and a declaration without a prototype was MEASURED to be rejected by the reference
-compiler and by the alternate reference compiler alike under the mandatory gate
-(-Werror=builtin-declaration-mismatch and -Werror=strict-prototypes respectively). The exclusion is
-therefore narrow -- one way of reaching one member -- and it costs no coverage of the feature that can
-be observed soundly: the declaration is accepted, the sizeof contribution is measured twice over, the
-incomplete type crosses a function boundary, and the member the two arms share is written through one
-arm and read through the other, which is precisely the access C11 6.5.2.3p6 sanctions. The elements
-themselves are carried by the sized arm, where they are declared and where subscripting them is
-beyond argument. Per constraint C3 this is stated rather than left silent, in the program's own
-header comment as well as here.
+This record narrows ONE thing and records the reason below, as the suite requires: one SPELLING of the
+initializer. It narrows no target, no optimization level and no oracle, it carries no
+expected-divergence marker, and no `ub_audit_flags` key appears because the program passes the suite's
+full default warning gate unmodified.
+ELEMENT ACCESS THROUGH THE FLEXIBLE MEMBER IS NO LONGER EXCLUDED, AND THIS PARAGRAPH RECORDS WHAT
+CHANGED, BECAUSE AN EARLIER FORM OF THIS RECORD EXCLUDED IT. The exclusion rested on two claims. The
+first was sound and still is: a `struct fam *` aimed at a UNION arm designates a four-byte object, so
+under C11 6.7.2.1p18 its replacement array has no elements and subscripting it would be undefined --
+which is why the union's elements are still reached only through the sized arm. The second claim was
+that the construction the standard does support, an allocated object genuinely larger than the header,
+was out of reach for this corpus, because a declaration of an allocation function needs size_t, which
+is `unsigned int` on i686 and `unsigned long` on the other three targets, so no single spelling serves
+all four, and because an unprototyped declaration was MEASURED to be rejected by the reference compiler
+and the alternate reference compiler alike (-Werror=builtin-declaration-mismatch and
+-Werror=strict-prototypes respectively). That second claim is now superseded by measurement: the size
+type does not have to be one spelling. Selecting it with the architecture macro the compiler
+predefines -- the same idiom 12_preprocessor/004_predefined_macros.c and
+10_declarations_and_types/007_alignof_alignas.c already rely on, with an #error on the unrecognised
+branch -- yields a prototype that matches each target's own size_t exactly, and it was MEASURED clean
+under the full default gate with all four reference drivers at -O0, -O1 and -O2, with no
+built-in-declaration-mismatch diagnostic and with the sanitizer gate, leak check included, silent. So
+the program now performs the C11 6.7.2.1p20 EXAMPLE-2 construction and subscripts the flexible member
+on an object large enough for it, which is what the plan's entry for this program asks for when it
+prescribes "declaration, sizing, and access". Nothing was traded away to get it: the union pair is
+kept, at both storage durations, because it tests the common-initial-sequence access C11 6.5.2.3p6
+sanctions, which an allocated object cannot.
 ONE SPELLING OF THIS CONSTRUCT IS EXCLUDED, NARROWLY AND ON AN EXPLICIT PLAN BASIS RATHER THAN ON
 DIFFICULTY. Direct initialization -- `static struct fam d = { 3, {1,2,3} };` -- was probed against
 the mandatory strict gate in this environment and REJECTED with "error: initialization of a flexible
@@ -146,16 +185,19 @@ that does not test extensions, so the divergence surface would no longer be the 
 named for.
 THE EXCLUSION IS SCOPED TO ONE WAY OF FILLING THE MEMBER AND COSTS NO COVERAGE OF THE FEATURE, and
 it is recorded here rather than left to look like an oversight. Declaration of the incomplete last
-member, its zero contribution to sizeof, access through the incomplete type across a function
-boundary where the callee must take the element count from the object itself, and mutation through
-both union arms are all exercised -- and now at BOTH storage durations, since g_store is a
-data-section image and l_store is materialized by emitted stores on entry to main. A compiler can get
-the static image right and the run-time stores wrong, so both paths are held side by side. The union
-technique that appears instead was probed the same way and is gate-clean at -O0, -O1 and -O2 as well
-as sanitizer-clean, and it is the better answer on its own merits rather than merely the one that
-compiles, because it makes the aliasing legitimate by construction.
-WIDTH NORMALIZATION. Every value is an int printed with %d, and both printed sizes are cast to int
-before they reach the variadic call, so no size_t is ever passed. sizeof is never applied to a
+member, its zero contribution to sizeof, ELEMENT ACCESS through the member itself on an object large
+enough for it -- every live element written as ap->data[i], read back individually and summed across a
+function boundary that knows only the incomplete type -- and mutation through both union arms are all
+exercised. The initializer whose spelling is excluded would have written exactly the values fam_fill
+now writes by assignment, so the excluded spelling costs the FEATURE nothing at all; and the two union
+objects add the storage-duration axis, since g_store is a data-section image and l_store is
+materialized by emitted stores on entry to main. A compiler can get the static image right and the
+run-time stores wrong, so both paths are held side by side. Both techniques were probed the same way
+and are gate-clean at -O0, -O1 and -O2 as well as sanitizer-clean.
+WIDTH NORMALIZATION. Every value is an int printed with %d, and every printed size is cast to int
+before it reaches the variadic call, so no size_t is ever passed. The only size_t-width expression in
+the program is the argument of malloc, which is consumed by the allocator and never printed. sizeof is
+never applied to a
 pointer, and no long, ptrdiff_t, pointer, floating or character value appears anywhere, so neither
 the MEASURED pointer width -- four bytes on i686 and eight on x86_64, aarch64 and riscv64
 (docs/technical-specifications.md target table, lines 457-462) -- nor the MEASURED plain-char
@@ -167,23 +209,28 @@ sizeof(struct fam) is 4, because the flexible array member contributes nothing t
 struct (C11 6.7.2.1p18), and sizeof(union fam_storage) is 4 + 8 * 4 == 36, the size of its sized arm.
 PADDING, BYTE ORDER AND ADDRESSES. No object representation is inspected and nothing is read byte by
 byte, so neither padding nor endianness can influence the output, and no address is ever printed --
-the two views are reached only through int-typed lvalues at identical offsets.
+the union views are reached only through int-typed lvalues at identical offsets, and the allocated
+block's address, which would differ between runs and between targets, is never converted or printed.
+alloc_sizeof_header prints sizeof(struct fam), which is 4 by derivation on every target, not an
+address and not an allocation size.
 EXECUTION CHARACTER SET. No character data appears anywhere, so C11 5.2.1 leaves nothing here to the
 implementation.
-THE TWO STORAGE DURATIONS ARE THIS PROGRAM'S VARIANT AXIS. The file-scope union is a translation-time
-data-section image, while its automatic twin -- identical union, identical designated initializer --
-must be materialized by emitted stores on entry to the block, so the same syntax travels two
-different paths through the compiler. Both are compiled at all three optimization levels, and no
-volatile operand is added: qualifying one would suppress exactly the optimizer behaviour the pairing
-exists to survive.
+THE THREE STORAGE CLASSES ARE THIS PROGRAM'S VARIANT AXIS. The file-scope union is a translation-time
+data-section image; its automatic twin -- identical union, identical designated initializer -- must be
+materialized by emitted stores on entry to the block; and the allocated object is filled entirely by
+emitted stores through the flexible member, with no initializer involved at all. The same syntax
+therefore travels three different paths through the compiler. All three are compiled at all three
+optimization levels, and no volatile operand is added: qualifying one would suppress exactly the
+optimizer behaviour the pairing exists to survive.
 MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
--O1 and -O2 -- twelve configurations -- and every one produced these 35 lines byte-identically with
+-O1 and -O2 -- twelve configurations -- and every one produced these 53 lines byte-identically with
 exit status 0, which is why oracle (b) compares this program's targets against each other without any
 narrowing and why oracle (c) can hold these bytes as the golden record. Every live element is printed
-individually in both the read-back and the post-mutation phase of both halves, so a single wrong slot
-localizes to one initializer form at one storage duration rather than to the aggregate, and the four
-sum lines, together with count_arms_agree and the three count_via_boundary lines, confirm that the
-same storage is reached through both union arms rather than merely that each arm is self-consistent.
+individually in the read-back and post-mutation phase of all three objects, so a single wrong slot
+localizes to one storage class at one index rather than to the aggregate, and the six sum lines,
+together with count_arms_agree and the four count_via_boundary lines, confirm that the same storage is
+reached through both union arms and that the allocated object's flexible-member address arithmetic
+agrees with itself across a function boundary rather than merely being self-consistent inside main.
 END
 expected_stdout    <<END
 sizeof_struct_fam=4
@@ -221,4 +268,22 @@ l_after[2]=33
 l_after[3]=44
 l_after[4]=55
 l_after_sum=242
+alloc_sizeof_header=4
+alloc_initial_count=0
+alloc_count=5
+alloc_data[0]=7
+alloc_data[1]=18
+alloc_data[2]=29
+alloc_data[3]=40
+alloc_data[4]=51
+alloc_sum=145
+alloc_after_count=6
+alloc_after[0]=7
+alloc_after[1]=999
+alloc_after[2]=29
+alloc_after[3]=40
+alloc_after[4]=51
+alloc_after[5]=61
+alloc_after_sum=1187
+alloc_after_count_via_boundary=6
 END

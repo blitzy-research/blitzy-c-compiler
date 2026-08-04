@@ -27,7 +27,7 @@ members it has written and never examines the bytes between them. It also never 
 the addresses of unrelated objects.
 
 MEMBER OFFSETS COME EXCLUSIVELY FROM __builtin_offsetof, which is a compile-time constant
-and takes no address at run time. Measured with gcc 13.3.0: taking the address of a packed
+and takes no address at run time. Measured rather than assumed: taking the address of a packed
 member produces "error: taking address of packed member of 'struct p' may result in an
 unaligned pointer value [-Werror=address-of-packed-member]", because
 -Waddress-of-packed-member is on by default and -Werror makes it fatal. The program
@@ -49,8 +49,7 @@ non-standard GCC extensions by definition, and -pedantic exists precisely to rej
 them; retaining it would fail every program in the area for doing exactly what it is
 meant to do. This is the only area-wide deviation in the corpus. No other warning is
 relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0.
+retained, and this program is clean under them, which is measured rather than asserted.
 
 Nothing target-restricting is observed, so all four targets are compared. The printed
 layout values are identical on x86_64, i686, aarch64 and riscv64 because on all four int

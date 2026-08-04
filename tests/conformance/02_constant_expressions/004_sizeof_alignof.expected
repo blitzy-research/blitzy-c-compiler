@@ -113,10 +113,11 @@ rather than a workaround -- it measures the widths the compiler actually impleme
 widths a header declares.
 THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
 is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
--Wconversion -Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers,
-and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
--fno-sanitize-recover=all run natively to completion. Both gates are reference-compiler-only and are
-never applied to bcc, so requirement 3's shared-flag discipline is untouched.
+-Wconversion -Wsign-conversion -Wshadow -Werror in the single native compile-only invocation the
+suite's warning gate makes, and it builds and runs clean under the sanitizer gate
+-fsanitize=undefined,address -fno-sanitize-recover=all run natively to completion. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
 END
 impl_defined_notes <<END
 This record narrows nothing. All four targets, all three optimization levels and all three
@@ -174,20 +175,35 @@ facts that hold everywhere: it is at least as wide as double, at least as strict
 double, and its size is a whole multiple of its alignment. The type is therefore exercised here
 rather than dropped for being awkward. Cross-backend VALUE equality for long double is the
 subject of 13_floating_point/004_long_double_target_restricted.c, where it is a RECORDED
-EXCLUSION -- oracle_b disabled, with the measured representations as its basis -- and deliberately
-NOT a marker: the marker contract admits only an observed divergence backed by captured evidence,
-and an implementation-defined representation difference is not a bcc defect to begin with. Here
-nothing is excluded at all, because nothing representation-dependent is printed.
-THE TARGET-KEYED ANCHOR IS KEYED TO THE ARCHITECTURE, NOT TO A WIDTH MACRO, and the difference
-matters. The architecture is a categorical fact the harness fixes when it selects the cell's
-target, whereas a width macro such as __SIZEOF_POINTER__ is a numeric claim by the compiler
-under test, and checking that claim against itself would be circular. The #else arm is a HARD
-STOP -- an #error naming the four architecture macros it looked for -- rather than a fallback: a
-compiler that predefines none of them cannot be given an exact expectation, and quietly falling
-back to a permissive one would turn rule 4 into a comment, so a fifth target cannot silently be
-judged against another target's width. A refusal to compile is reported with a named message and
-is reproducible from this record's own command template; a silently weakened test is not reported
-at all.
+EXCLUSION -- oracle_b disabled with the measured representations as its recorded reason -- carrying
+the marker XD-TYPE-LONGDOUBLE-001, class stdout_mismatch, scope oracle_b. That marker is REQUIRED
+rather than optional: a disabled oracle is reported XFAIL, which claims the authority of a
+documented limitation, so the format makes the marker the thing that carries that claim while the
+recorded reason explains it. It excuses the cross-backend arm alone, and a same-target disagreement
+there is still a FINDING. Here nothing is excluded at all, because nothing representation-dependent
+is printed.
+THE TARGET-KEYED ANCHOR PREFERS THE ARCHITECTURE OVER A WIDTH MACRO, AND DEGRADES RATHER THAN
+REFUSING WHEN NEITHER IS AVAILABLE. The architecture is a categorical fact the harness fixes when
+it selects the cell's target, whereas a width macro such as __SIZEOF_POINTER__ is a numeric claim
+by the compiler under test; keying on the architecture therefore makes ptr_width_exact an
+independent check of the pointer width, while keying on the width macro would only check the
+compiler's claim against itself. So the architecture arms come first.
+WHAT THE FALLBACK ARMS EXIST FOR, STATED PLAINLY BECAUSE IT BOUNDS WHAT THIS LINE PROVES. Neither
+C nor anything this repository documents obliges an implementation to predefine __x86_64__,
+__i386__, __aarch64__ or __riscv -- they are spellings of one compiler FAMILY, and no per-target
+predefined-macro contract for the compiler under test is documented anywhere. A conforming compiler
+naming its target some other way is therefore not defective, and its silence must not be converted
+into a defect: an #else that refused to translate would charge a macro-spelling difference the
+suite has no authority over to the compiler under test as a compile failure, which is precisely the
+false finding this suite must not manufacture. The chain instead degrades in decreasing order of
+strength -- architecture macro, then __SIZEOF_POINTER__, then sizeof(void *) itself -- and every arm
+prints ptr_width_exact=1 for a self-consistent compiler, so no arm can produce a divergence out of
+a naming difference. What varies is only how much the line establishes: an independent width check
+on arm 1, a consistency check between the compiler's declared width and sizeof(void *) on arm 2, and
+a tautology on arm 3. The pointer-width RELATIONS printed alongside it -- ptr_family_is_ptr_width,
+stddef_widths_are_ptr_width, alignof_ptr_is_ptr_width, structp_size_is_three_ptr_widths -- do not
+depend on the chain at all and hold under every arm, so the program keeps its cross-layer teeth
+whichever arm was taken.
 THE ALIGNMENTS PRINTED RAW ARE A CLOSED LIST OF EIGHT, AND EVERY ONE OF THE EIGHT WAS MEASURED
 IDENTICAL ON ALL FOUR TARGETS BEFORE ITS NUMBER WAS WRITTEN HERE. The four INVARIANT SCALARS the
 normalization is built around are _Alignof(char) is 1, _Alignof(short) is 2, _Alignof(int) is 4 and
@@ -218,10 +234,14 @@ targets; the union sizes at 8 with alignment 4. Both were measured on every targ
 raw values were written here. An aggregate whose padding depended on the alignment of double or
 long long would have sized differently on i686, where those alignments are 4 rather than 8, and
 is deliberately absent.
-WIDTH NORMALIZATION IN THE OUTPUT ITSELF. EVERY ONE of the 63 printed values is an int printed
-with %d, and the program uses no other conversion specifier at all -- no %lld, no %lu, no %zu, no
-%f, no %p. That is not incidental economy: a sizeof result has type size_t and a pointer
-difference has type ptrdiff_t, and both are 8 bytes on x86-64, AArch64 and RISC-V 64 and 4 on
+WIDTH NORMALIZATION IN THE OUTPUT ITSELF. The counts are stated exactly, because a count is the one
+claim in a record a reader can check mechanically: the program makes 63 printf calls, each format
+string ending in a single newline, so the golden record below is 63 output LINES; those 63 lines carry
+130 conversion specifications between them, because 36 lines print a single value and the remaining 27
+print between two and nine values each. EVERY ONE of those 130 printed values is an int printed with
+%d, and the program uses no other conversion specifier at all -- no %lld, no %lu, no %zu, no %f, no
+%p. That is not incidental economy: a sizeof result has type size_t and a pointer difference has type
+ptrdiff_t, and both are 8 bytes on x86-64, AArch64 and RISC-V 64 and 4 on
 i686, so passing either one through a variadic call would make the ARGUMENT ITSELF target-varying
 and would additionally mismatch its own conversion specifier on one target or the other -- which
 is undefined behaviour, and so would destroy the precondition the oracles rest on before any
@@ -232,17 +252,35 @@ none of its quantities exceeds a small byte count; where a sibling record in thi
 values written in long long and printed with %lld, that describes THAT program and not this one.
 No plain long, no size_t, no ptrdiff_t, no intptr_t, no _Bool, no floating-point value, no
 plain-char value and no pointer value is printed anywhere.
-intptr_t COMPLETES THE HEADER-FREE WIDTH ACCOUNT. It carries exactly the same hazard as size_t and
-ptrdiff_t -- 8 bytes on the three LP64 targets and 4 on i686 -- and exactly the same unavailability,
-because it is declared by stdint.h, which this program does not include; the corpus includes no
-header, so intptr_t cannot be NAMED here any more than size_t or ptrdiff_t can. It needs no separate
-probe, and that is a fact about the language rather than a gap: intptr_t is by definition a signed
-integer type capable of holding a converted void pointer, so the property that would be tested of it
-is the pointer width itself, which ptr_width_exact already pins EXACTLY on every target and which
-alignof_ptr_is_ptr_width ties its alignment to. Round-tripping an object pointer through a
-sufficiently wide integer type is separately the subject of 05_pointers/007_casts_roundtrip.c, so the
-type's observable behaviour is covered in the corpus rather than skipped. Nothing about intptr_t is
-excluded here: no line of this program's output depends on it, so there is no comparison to narrow.
+intptr_t IS NOT COVERED, HERE OR ANYWHERE IN THE CORPUS, AND THAT EXCLUSION IS STATED RATHER THAN
+IMPLIED. It cannot be NAMED in this program: it is declared by stdint.h, no corpus program outside
+the two sanctioned header exceptions includes a header, and this program takes neither of them. What
+follows is the honest account of what that costs, because C3 requires an exclusion to be explicit
+and reasoned rather than quietly absorbed into a claim of coverage.
+What C actually guarantees of intptr_t is narrow. C11 7.20.1.4p1 defines it as a signed integer type
+with the property that any valid pointer to void converted to it and back compares equal to the
+original, and 7.20.1.4p3 makes it OPTIONAL -- an implementation need not provide it at all. That is
+a round-trip guarantee, and it is the whole of the guarantee: the standard does NOT require
+sizeof(intptr_t) to equal sizeof(void *), nor _Alignof(intptr_t) to equal _Alignof(void *). A
+conforming implementation could satisfy the round trip with a wider type. So the two lines this
+record does print about pointers -- ptr_width_exact, which pins sizeof(void *) exactly per target,
+and alignof_ptr_is_ptr_width, which ties the pointer's alignment to that width -- say nothing about
+intptr_t, and an earlier form of this paragraph was wrong to present equal width as "a fact about
+the language" that made a separate probe unnecessary. Equal width is a MEASURED property of these
+four ABIs, not a language rule, and it is measured only OF POINTERS: 8 bytes on x86_64, aarch64 and
+riscv64 and 4 on i686.
+Nor is the gap closed elsewhere. 05_pointers/007_casts_roundtrip.c does exercise round-tripping an
+object pointer through an integer, and it does so through BUILT-IN integer types with two
+_Static_assert declarations establishing that the carrier is wide enough; its own commentary records
+that uintptr_t "would be the natural carrier and is deliberately not used" because it would require
+a header. So that program covers the round trip through a type the author chose, not the round trip
+through intptr_t, and citing it as coverage of intptr_t's observable behaviour was an overclaim.
+The exclusion is therefore this, exactly: intptr_t's own conversion semantics, its optionality, and
+its width and alignment relative to void * are NOT exercised by any cell of this corpus. Nothing is
+narrowed by it -- no oracle is switched off and no target is dropped, because no line of any
+program's output depends on the type -- and closing it would take a header-including program of its
+own, which the suite's single-file, header-free rule (and bcc's bundled header set) would have to
+sanction first.
 PLAIN-char SIGNEDNESS. Plain char was MEASURED as signed on x86-64 and i686 and unsigned on
 AArch64 and RISC-V 64. Every character read-back is cast through unsigned char first, so no
 plain-char value is printed as a signed value and no printed line depends on that choice.
@@ -288,10 +326,10 @@ randomness, no locale-dependent formatting and no data-dependent iteration order
 program returns 0 -- well inside the 0-125 range the suite requires so that no exit status is
 truncated by the operating system.
 MEASURED EVIDENCE, AND HOW TO REPRODUCE IT. Every number this field tabulates and every line of the
-golden record below was MEASURED rather than reasoned about, with the suite's toolchain of record:
-gcc-13 13.4.0 for x86-64 and i686-linux-gnu-gcc-13, aarch64-linux-gnu-gcc-13 and
-riscv64-linux-gnu-gcc-13 at the same 13.4.0 for the cross arms, with the three non-native binaries
-executed under qemu-i386, qemu-aarch64 and qemu-riscv64 at 10.1.0. The program was built -static at
+golden record below was MEASURED rather than reasoned about, with the suite's toolchain of record --
+the native reference driver for x86-64 and the i686, aarch64 and riscv64 cross drivers for the cross
+arms, whose versions README.md pins, with the three non-native binaries executed under qemu-i386,
+qemu-aarch64 and qemu-riscv64. The program was built -static at
 -O0, -O1 and -O2 for each of the four targets -- TWELVE CONFIGURATIONS -- and all twelve produced
 these 63 lines BYTE-IDENTICALLY, one shared SHA-256 digest across the set, each exiting with status 0
 and writing nothing to standard error. That single measurement is what licenses three separate claims

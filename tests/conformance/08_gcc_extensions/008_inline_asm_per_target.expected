@@ -54,8 +54,7 @@ non-standard GCC extensions by definition, and -pedantic exists precisely to rej
 them; retaining it would fail every program in the area for doing exactly what it is
 meant to do. This is the only area-wide deviation in the corpus. No other warning is
 relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0.
+retained, and this program is clean under them, which is measured rather than asserted.
 
 PER-TARGET ASSEMBLY DESIGN. All four branches perform the SAME logical 32-bit integer
 operation and assign the result to int, so every printed value is identical on every
@@ -101,21 +100,23 @@ was selected, which the if/elif/else structure guarantees.
 
 Every operand and result is int, which is 4 bytes on all four targets. long is
 deliberately avoided: it was measured as 4 bytes on i686 and 8 bytes on x86_64, aarch64
-and riscv64. Plain char is never used, so the measured char-signedness difference cannot be
-reached: char is signed on x86_64 and i686 but unsigned on aarch64 and riscv64. No address
+and riscv64. No plain-char value the program computes is printed as a number or compared --
+the only plain-char objects are the format-string literals, copied through printf unchanged
+-- so the measured char-signedness difference cannot be reached: char is signed on x86_64
+and i686 but unsigned on aarch64 and riscv64. No address
 or pointer value is printed.
 
 THE ELSE BRANCH DELIBERATELY RAISES A LOUD #error AND MUST NEVER BECOME A PORTABLE-C
 FALLBACK. The repository documentation contains zero mentions of predefined architecture
-macros: a grep across docs/ for __x86_64__, __i386__, __aarch64__, __riscv, __STDC__ and
-_LP64 returns nothing, so whether bcc defines them is unverified from the documentation. A
+macros: the documentation nowhere requires or enumerates __x86_64__, __i386__, __aarch64__,
+__riscv, __STDC__ or _LP64, so whether bcc defines them is not established by it. A
 portable-C fallback would silently substitute plain C arithmetic for the assembly, every
 value would still be correct, every oracle would report PASS, and the program would have
 stopped testing inline assembly entirely, invisibly and permanently. The loud #error
 instead diagnoses PREDEFINED-MACRO SUPPORT, which is itself worth knowing, and it makes
-the failure impossible to miss. Verified with gcc 13.3.0: compiling with -U__x86_64__
--U__amd64__ fires the #error as intended. Each guard also accepts alternate spellings --
-__x86_64__ or __amd64__, __i386__ or __i386, __aarch64__ or __arm64__, __riscv or
+the failure impossible to miss, and that is verified rather than assumed: compiling with
+-U__x86_64__ -U__amd64__ fires the #error as intended. Each guard also accepts alternate
+spellings -- __x86_64__ or __amd64__, __i386__ or __i386, __aarch64__ or __arm64__, __riscv or
 __riscv__ -- as resilience against a compiler that defines only one spelling of a pair. A
 dedicated predefined-macro program belongs to area 12, so the suite already relies on
 these macros being defined; this guard is what turns that reliance into a diagnosable

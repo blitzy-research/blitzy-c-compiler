@@ -20,10 +20,13 @@ oracle_c           = enabled
 ub_notes           <<END
 Every computation is on plain int with operands drawn from small literal tables,
 so no signed overflow is possible: the largest magnitude anywhere is 500 and the
-largest result is 111. There is no shift, no division by a value that can be
-zero, and no pointer arithmetic. The only remainder operations are v % 2, v % 3
-and v % 5 on the strictly positive inputs 6, 9, 25, 7 and 30, so the divisor is
-never zero and the dividend is never negative. Every object is initialised
+largest result is 111. There is no shift and no division by a value that can be
+zero. The only pointer arithmetic is the arithmetic the language performs for a
+subscript: every index into the static const tables is a literal or a loop
+counter provably inside its bound, and no pointer value is printed, converted to
+an integer or compared. The only remainder operations are v % 2, v % 3 and v % 5
+on the strictly positive inputs 6, 9, 25, 7 and 30, so the divisor is never zero
+and the dividend is never negative. Every object is initialised
 before it is read: the static const tables have initialisers, the volatile
 staging object vin is written before each read, and out[] elements are written
 before being printed. No object is modified twice between sequence points; each

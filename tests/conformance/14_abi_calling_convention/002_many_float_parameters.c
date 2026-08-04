@@ -97,35 +97,53 @@
  * fail against bcc while succeeding against the reference compiler.
  * Area 14 takes neither of the suite's two sanctioned header exceptions.
  *
- * RECORD AND MARKER STATE ON THIS BRANCH.  The sibling record
- * 002_many_float_parameters.expected is committed beside this source and needs no target
- * restriction, no oracle exclusion, no warning-gate deviation and no marker: it names all
- * four targets and all three optimization levels, enables all three oracles, and holds a
- * single golden stdout measured on this branch and byte-identical across all twelve cells.
- * That is deliberate rather than incidental - the four calling conventions differ by design
- * and that difference is what is under test, while the OBSERVABLE RESULTS must agree, so a
- * cross-backend difference here is a genuine finding rather than an implementation-defined
- * one.  The register at tests/conformance/EXPECTED_DIVERGENCES.md holds NO active marker at
- * all, for this area or any other, so nothing anywhere excuses a divergence here.  What no
- * cell has resolved yet is a VERDICT, and the reason is the absent compiler under test: the
- * flag-capability probe is recorded UNPERFORMED and blocks every area unconditionally.
+ * RECORD AND MARKER STATE.  The sibling record 002_many_float_parameters.expected is
+ * committed beside this source and needs no target restriction, no oracle exclusion, no
+ * warning-gate deviation and no marker: it names all four targets and all three
+ * optimization levels, enables all three oracles, and holds a single golden stdout
+ * byte-identical across all twelve cells.  That is deliberate rather than incidental - the
+ * four calling conventions differ by design and that difference is what is under test,
+ * while the OBSERVABLE RESULTS must agree, so a cross-backend difference here is a genuine
+ * finding rather than an implementation-defined one.  The register at
+ * tests/conformance/EXPECTED_DIVERGENCES.md holds two active markers -
+ * XD-GCCEXT-CASE-RANGES-001, scoped to oracle (a) on one program in area 08, and
+ * XD-TYPE-LONGDOUBLE-001, scoped to oracle (b) on one program in area 13 - and NEITHER is
+ * scoped to this area, this program or any oracle it uses, so nothing anywhere excuses a
+ * divergence here.
  *
- * THE CALL BOUNDARY IS ENFORCED, NOT HOPED FOR.  Both callees are reached
- * through a volatile-qualified function pointer rather than by name.  A
- * fixed-arity static callee may legally be inlined at -O1 and -O2, and an
- * inlined callee marshals nothing at all: the floating-point argument path this
- * program exists to exercise would then never be crossed, and the register
- * assignments argued above would be assertions about code that was never
- * emitted.  Measured with gcc 13.4.0 at -O2 across this area before the
- * indirection was added: whole groups of callees vanished into their callers,
- * and the survivors survived only by exceeding the inliner's size budget - an
- * accident of a heuristic rather than a property of the test.
+ * THE CALL BOUNDARY IS MADE HARD TO OPTIMIZE AWAY, WHICH IS NOT THE SAME AS
+ * BEING GUARANTEED BY THE LANGUAGE.  Both callees are reached through a
+ * volatile-qualified function pointer rather than by name.  A fixed-arity static
+ * callee may legally be inlined at -O1 and -O2, and an inlined callee marshals
+ * nothing at all: the floating-point argument path this program exists to
+ * exercise would then never be crossed, and the register assignments argued
+ * above would be assertions about code that was never emitted.  Measured with
+ * gcc 13.4.0 at -O2 across this area before the indirection was added: whole
+ * groups of callees vanished into their callers, and the survivors survived only
+ * by exceeding the inliner's size budget - an accident of a heuristic rather
+ * than a property of the test.
  *
- * A volatile pointer must be re-read at the point of call, so the designated
- * function is unknown and the call is genuinely indirect; and because the
- * address escapes into storage, the signature may not be cloned or scalarised
- * either.  Verified at instruction level on all four targets at -O2.  The
- * mechanism is pure ISO C on purpose: a function attribute would have been
+ * What ISO C requires of the volatile pointer is that it be RE-READ at each
+ * point of call and that control go to whatever function that particular load
+ * produced: an access to a volatile object is a side effect belonging to the
+ * observable behaviour an implementation must reproduce (C11 5.1.2.3p2 and p6),
+ * and C11 6.7.3p7 requires an expression referring to such an object to be
+ * evaluated strictly according to the abstract machine's rules.  What ISO C does
+ * NOT require is that the transfer arrive at the callee's original entry: a
+ * conforming implementation may emit a specialised clone, scalarise a copy of the
+ * body, or guard-devirtualize - test the loaded pointer against a known function
+ * and take a specialised path when it matches - and still honour the loaded
+ * value, because the observable behaviour is unchanged.  So the indirection is an
+ * optimization OBSTACLE, not a prohibition, and what is verified is the artifact:
+ * measured with gcc 13.4.0 at -O2 on all four reference drivers, both callees are
+ * still emitted out of line under their own labels, no symbol carries .constprop,
+ * .isra or .part., and each of the four call sites per target is a genuine
+ * indirect transfer - call *%reg on x86_64 and i686, blr on aarch64, jalr on
+ * riscv64.  A compiler that devirtualized through a specialised entry could print
+ * the same bytes without crossing the boundary argued above; the sibling record
+ * states that residual risk and what would close it.
+ *
+ * The mechanism is pure ISO C on purpose: a function attribute would have been
  * shorter, but the documented attribute set for the compiler under test is
  * packed, aligned, section, unused, deprecated, visibility and format
  * (docs/technical-specifications.md line 506), so an inlining attribute would
@@ -158,9 +176,7 @@
  * compiler, manufacturing a divergence caused by the test rather than by the
  * compiler.  printf is therefore hand-declared, and float.h is not included
  * either, no macro from it being needed.  Area 14 takes neither of the suite's
- * two sanctioned header exceptions.  No member of the prohibited set is spelled
- * verbatim anywhere in this banner, so a mechanical audit of the file for a
- * forbidden header stays free of a comment that would otherwise read as a hit.
+ * two sanctioned header exceptions.
  *
  * Freedom from undefined behaviour, which is the precondition that makes the
  * differential oracle sound at all.  There is no arithmetic here beyond the one
@@ -171,11 +187,13 @@
  * into a parameter and then printed.  Each float is widened to double at the
  * printf call site, which is exact in every case because binary32 is a subset of
  * binary64.  Both loop counters run from 0 to 13 over arrays of fourteen
- * elements, so no index is ever out of range and no pointer past the end of an
- * object is formed at all.  No pointer arithmetic is performed; the only
- * pointers are the format strings and the const char * returned by variant_tag,
- * which points into a string literal with static storage duration and so stays
- * valid for the lifetime of the program.  No object is modified twice between
+ * elements, so the pointer arithmetic the language performs for each subscript
+ * stays inside its array, no index is ever out of range and no one-past-the-end
+ * pointer is dereferenced.  Beyond those subscripts no pointer arithmetic is
+ * performed, and the only pointer VALUES are the format strings and the
+ * const char * returned by variant_tag, which points into a string literal with
+ * static storage duration and so stays valid for the lifetime of the program;
+ * none of them is printed or converted to an integer.  No object is modified twice between
  * sequence points, and no argument to any call has a side effect.  Nothing
  * depends on padding bytes, on the relative addresses of unrelated objects, or
  * on any representation detail.
@@ -233,11 +251,15 @@ static volatile float vflt[14] = {
 
 static volatile int vtag = 1;
 
-/* The enforced call boundary.  Each pointer is volatile-qualified, so it is
-   re-read at every call site: the designated callee is unknown to the optimizer,
-   the call is indirect, the body is not inlined and the signature is not cloned.
-   Both variants of both groups travel through these, so the folded and the
-   runtime call cross the same boundary. */
+/* The call boundary.  Each pointer is volatile-qualified, so ISO C requires it to
+   be re-read at every call site and control to go to whatever function that load
+   produced.  That makes the call indirect and leaves the callee opaque to the
+   optimizer; it does not FORBID a specialised clone or a guarded devirtualization,
+   which a conforming implementation may still introduce.  Measured on the
+   reference toolchain at -O2, no clone appears and both bodies stay out of line -
+   see the sibling record for the evidence and the residual risk.  Both variants of
+   both groups travel through these, so the folded and the runtime call cross the
+   same boundary. */
 static void (*volatile take_double15_p)(double, double, double, double, double,
                                         double, double, double, double, double,
                                         double, double, double, double, int) =

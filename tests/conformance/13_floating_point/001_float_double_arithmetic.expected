@@ -62,9 +62,11 @@ The remaining rulebook items, each argued for this program:
   definition rather than by conversion. General conversion boundaries in both directions are
   the subject of 002_float_int_conversions.c in this area.
 - NO ALIASING VIOLATION AND NO DEPENDENCE ON REPRESENTATION. No floating object is read
-  through a pointer of another type, punned through a union, or inspected byte-wise; no
-  pointer is formed, no pointer arithmetic is performed and no array is indexed, so no
-  padding byte and no relative address of unrelated objects can be observed.
+  through a pointer of another type, punned through a union, or inspected byte-wise. The only
+  pointers in the program are the `const char *` that each format-string literal decays to in
+  its printf call; no pointer arithmetic is performed on one, no array is indexed, and no
+  pointer is dereferenced by this translation unit at all, so no padding byte and no relative
+  address of unrelated objects can be observed.
 - NO READ OF UNINITIALIZED STORAGE. Every volatile operand is initialized in its own
   declaration, and every result object is either initialized in its declaration or assigned
   before its only read.
@@ -116,10 +118,11 @@ no socket is created, no file is read or written, no environment variable and no
 is consulted, no heap storage is obtained, no clock is read and no randomness is drawn -- so a
 cell's stdout is a function of the program and the compiler alone.
 
-Verified rather than asserted, on this branch: the default seven-flag warning gate named above
-produces ZERO diagnostics at -O0, -O1 and -O2, and -fsanitize=undefined,address
--fno-sanitize-recover=all builds, RUNS TO COMPLETION with empty stderr and exit status 0, and
-prints stdout byte-identical to the golden record below. Both gates drive the REFERENCE COMPILER
+Verified rather than asserted: the default seven-flag warning gate named above produces ZERO
+diagnostics in the single native compile-only invocation the suite makes of it, and
+-fsanitize=undefined,address -fno-sanitize-recover=all builds and RUNS TO COMPLETION in its one
+instrumented native build, with empty stderr, exit status 0, and stdout byte-identical to the golden
+record below. Both gates drive the REFERENCE COMPILER
 alone and are never applied to the compiler under test, so the shared-flag discipline the
 differential oracle rests on is untouched by them.
 END
@@ -141,15 +144,23 @@ four targets rather than assumed:
   intptr_t and no pointer value is printed, and no length modifier appears in any conversion
   specification: the only integer destination anywhere is int, the same width on all four
   targets, and the only specifications used are %.6f and %d.
-- NO ADDRESS OR POINTER VALUE IS PRINTED, and none could be: the program forms no pointer at
-  all, so no address, no pointer difference and no alignment residue exists to print.
-- LONG DOUBLE IS ABSENT ENTIRELY. Its representation was measured at 16, 12, 16 and 16 bytes
-  across x86_64, i686, aarch64 and riscv64 -- x87 80-bit on i686 against IEEE binary128
-  elsewhere -- and that is the one property in this area which genuinely cannot be compared for
-  value across backends. The type is NOT dropped on that account, which constraint C3 would
-  forbid: it is the subject of 004_long_double_target_restricted.c in this area, the only record
-  in the corpus permitted to narrow a comparison because of it. None of it leaks in here, so
-  this program keeps the full four-way comparison.
+- NO ADDRESS OR POINTER VALUE IS PRINTED. The only pointers that exist are the format-string
+  literals passed to printf, and %p appears in no conversion specification, so no address, no
+  pointer difference and no alignment residue reaches standard output.
+- LONG DOUBLE IS ABSENT ENTIRELY. Its representation splits the four targets into two camps of
+  two, and the split is by FORMAT rather than by size: the x87 80-bit extended format on
+  x86_64 AND i686 alike, padded to 16 bytes on the first and 12 on the second, against IEEE
+  binary128 on aarch64 and riscv64. Measured with gcc 13.4.0: sizeof(long double) is 16, 12, 16
+  and 16 across x86_64, i686, aarch64 and riscv64, while __LDBL_MANT_DIG__ is 64, 64, 113 and
+  113 -- so the two x86 targets differ from each other only in storage padding and agree on the
+  significand, and it is the 64-against-113 difference that makes the value comparison
+  meaningless. (An earlier form of this bullet attributed x87 to i686 alone and binary128 to
+  everything else, which misdescribed x86_64.) That is the one property in this area which
+  genuinely cannot be compared for value across backends. The type is NOT dropped on that
+  account, which constraint C3 would forbid: it is the subject of
+  004_long_double_target_restricted.c in this area, the only record in the corpus permitted to
+  narrow a comparison because of it. None of it leaks in here, so this program keeps the full
+  four-way comparison.
 - FLOATING EVALUATION METHOD differs -- i686 evaluates in x87 extended precision,
   FLT_EVAL_METHOD 2, while the other three do not -- and is neutralized by exactness rather
   than avoided. The argument sits in ub_notes above, because it is what makes the program free
@@ -171,10 +182,9 @@ the folder or to the backend rather than to one of the two.
 
 WHY ORACLE (b) IS ENABLED HERE, the claim most worth checking. Because every printed digit is
 exact on every target, cross-backend value equality is meaningful for this program rather than a
-comparison of legitimately different numbers. That was measured, not assumed: gcc 13.4.0 with
-the matching i686, aarch64 and riscv64 cross drivers, executed natively and under QEMU user-mode
-10.1.0, produced stdout that is byte-identical -- all 946 bytes of it -- with exit status 0, in
-all twelve target-and-optimization-level cells.
+comparison of legitimately different numbers. That is measured, not assumed: stdout is
+byte-identical -- all 946 bytes of it -- with exit status 0, in all twelve
+target-and-optimization-level cells.
 
 PROVENANCE OF THE GOLDEN RECORD, which is what keeps oracle (c) independent. Every value below
 was derived BY HAND from the C semantics of the program -- exact dyadic arithmetic, so the

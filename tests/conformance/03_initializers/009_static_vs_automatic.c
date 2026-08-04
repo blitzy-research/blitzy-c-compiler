@@ -23,8 +23,11 @@
  *   - the post-mutation lines carry the same contrast one increment further: s_st advances
  *     {8, 9}, {9, 10}, {10, 11} while a_st reads {8, 9} in every round.  A compiler that re-ran a
  *     function-scope static initializer, or failed to re-run an automatic one, is therefore caught
- *     on the post-mutation line as well as on the pre-mutation one -- which matters, because the
- *     post-mutation line is the only place the RESULT of the mutation is observable.
+ *     on the post-mutation line as well as on the pre-mutation one.  The result of a mutation is
+ *     observable twice over, which is what makes the contrast hard to fake: on the post-mutation
+ *     line of the round that performed it, and again on the PRE-mutation line of the next round,
+ *     where the static half carries the previous round's increment forward while the automatic half
+ *     has been re-initialized back to its literal.
  *
  * Round 1 is where the halves legitimately coincide, which is itself the evidence that both
  * were initialized correctly; rounds 2 and 3 carry the diagnostic weight.  A compiler that
@@ -57,12 +60,16 @@
  * 1005.  Every automatic twin is re-initialized on entry, so a_counter ends each call at 110,
  * a_arr at 101, 102 and 103, and a_st at 8 and 9.  No signed overflow is possible on any
  * target (INT_MAX is at least 2147483647 everywhere).  Every
- * subscript is strictly in bounds, no one-past-end pointer is formed, there are no shifts,
- * casts or aliasing, no object is modified twice between sequence points (each += is its own
- * full expression, never embedded in a call), and every printf argument is a plain read.
- * Only int and %d are used, so the narrower pointer and wide-integer widths of i686 (see
- * docs/technical-specifications.md lines 457-462) cannot be observed; no character data and
- * no struct representation is printed, so neither char signedness nor padding matters. */
+ * subscript is a literal or a loop counter strictly in bounds, so the pointer arithmetic the
+ * language performs for it never leaves its object; no one-past-end pointer is dereferenced, no
+ * address of an object is taken, and no pointer value is printed, compared or converted -- the only
+ * pointers are the format-string literals decaying at each printf call.  There are no shifts, casts
+ * or aliasing, no object is modified twice between sequence points (each += is its own full
+ * expression, never embedded in a call), and every printf argument is a plain read.
+ * Every value computed and printed is an int printed with %d, so the narrower pointer and
+ * wide-integer widths of i686 (see docs/technical-specifications.md lines 457-462) cannot be
+ * observed; no plain-char value is read as a number and no struct representation is printed, so
+ * neither char signedness nor padding matters. */
 
 int printf(const char *, ...);
 

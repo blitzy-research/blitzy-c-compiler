@@ -49,10 +49,11 @@ int main(void)
 
     /* Each volatile object is read exactly once, in its own statement.  An access to
      * a volatile object is an observable side effect, and the relative order of side
-     * effects within one argument list is unspecified, so the earlier form of these
-     * calls depended on unspecified evaluation order in two distinct ways: the first
-     * call read two different volatile objects in one argument list, and the last read
-     * the SAME volatile object twice.  Snapshotting first separates every access from
+     * effects within one argument list is unspecified, so reading volatile objects
+     * directly in these argument lists would depend on unspecified evaluation order in
+     * two distinct ways: the first call would read two different volatile objects in one
+     * argument list, and the last would read the SAME volatile object twice.
+     * Snapshotting first separates every access from
      * the next by a sequence point, and costs the test nothing -- the snapshots are
      * loads from volatile storage, so each conversion is still fed a runtime value the
      * optimizer may not fold. */

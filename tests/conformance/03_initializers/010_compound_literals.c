@@ -32,11 +32,13 @@ int printf(const char *, ...);
  * because a checksum or an encoding can be reproduced by two compensating
  * errors, such as a swapped pair of members, whereas a per-slot line cannot.
  *
- * Two further cases sit beside them: a compound literal evaluated afresh on every
- * iteration of a loop body -- observed by VALUE and never by identity, since its
- * address is never taken, so nothing here depends on whether an implementation
- * reuses one object or creates a new one per iteration -- and two file-scope
- * literals, which have static rather than automatic storage duration.
+ * Two further cases sit beside them: a compound literal in a loop body, which by
+ * C11 6.5.2.5p5 denotes ONE unnamed object per source occurrence with the lifetime
+ * of its enclosing block, so each trip round the loop REINITIALIZES that same object
+ * from the current counter rather than creating a further one -- the program reads
+ * the reinitialized VALUE and never the object's identity, since its address is never
+ * taken -- and two file-scope literals, which have static rather than automatic
+ * storage duration.
  *
  * Only int is computed and only %d is printed, so nothing here depends on a
  * target-varying width, on plain-char signedness, or on padding bytes, whose
@@ -165,12 +167,13 @@ int main(void)
     printf("cl_desig_arr3=%d\n", (int[4]){ [3] = 64 }[3]);
     printf("cl_sizeof=%d\n", (int)sizeof(int[3]){ 1, 2, 3 });
 
-    /* Form 1 again inside a loop body.  The unnamed object has the lifetime of
-     * the enclosing block (C11 6.5.2.5p5), and repeated evaluation of the
-     * literal REINITIALIZES it from the current value of i; this program checks
-     * that value, not distinct object identity per iteration, and deliberately
-     * takes no address, so nothing here depends on whether an implementation
-     * reuses one object or provides a new one each time round.  The value is
+    /* Form 1 again inside a loop body.  The literal is one source occurrence, so it
+     * denotes ONE unnamed object with the lifetime of the enclosing block (C11
+     * 6.5.2.5p5); each evaluation REINITIALIZES that object from the current value of
+     * i rather than producing a further object.  This program reads that value and
+     * never the object's identity, and deliberately takes no address, so nothing here
+     * rests on where the object lives or on how the implementation materializes it
+     * each trip round.  The value is
      * copied into a named object.  The accumulation
      * across the three iterations forces real run-time work and reaches 9, and
      * the compound assignment is a statement of its own, so no object is

@@ -56,8 +56,10 @@ recursion has a reachable base case for every argument actually passed, and no
 negative argument is ever passed. The local array in frames is fully written by
 a loop before the early return and before any element is read, so no
 indeterminate storage is ever read; it is automatic storage, never dynamically
-allocated. There are no shifts, no pointer arithmetic and no type punning,
-therefore no aliasing violation and no dependence on padding bytes. No object is
+allocated. There are no shifts and no type punning, therefore no aliasing violation and no
+dependence on padding bytes. The only pointer arithmetic is the arithmetic the language
+performs for a subscript: every index into local is a loop counter provably inside its
+bound, and no pointer value is printed, converted to an integer or compared. No object is
 modified twice between sequence points. The multi-argument printf calls pass
 only calls to pure helper functions that read no mutable global, write no global
 and touch no volatile object, so although their relative evaluation order is

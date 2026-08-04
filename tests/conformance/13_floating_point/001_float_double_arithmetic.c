@@ -34,11 +34,9 @@
  * not anything runs.  The sibling record 001_float_double_arithmetic.expected acts on it:
  * because the printed digits are exact on every target, the record restricts no target,
  * disables no oracle and carries no expected-divergence marker - four targets, three
- * optimization levels, all three oracles - and its single golden stdout was measured on
- * this branch and is byte-identical across all twelve cells.  What none of those cells has
- * yet resolved is a VERDICT, and the record is not the reason: no compiler under test
- * exists on this branch, so the flag-capability probe is recorded UNPERFORMED and blocks
- * every area unconditionally.
+ * optimization levels, all three oracles - and its single golden stdout is byte-identical
+ * across all twelve cells, which is what lets oracle (b) compare the four backends with no
+ * narrowing and oracle (c) hold those bytes as the record.
  *
  * Every value is printed with an explicit .6 precision.  Each needs at most three
  * fractional digits, so the printed digits are exact with three digits to spare -
@@ -84,9 +82,8 @@
  * so the program is written to satisfy that gate in full - -Wall -Wextra -pedantic
  * -Wconversion -Wsign-conversion -Wshadow -Werror - and it does: the reference
  * compiler accepts it with no diagnostic under exactly those flags.  The gate the
- * harness applies is selected by the program's own record, and that record is not
- * committed on this branch, so today the claim rests on the same flags run by hand
- * rather than on a recorded ub_audit_flags field.
+ * harness applies is selected by the program's own record, which declares no
+ * ub_audit_flags deviation, so the flags above are precisely the ones the audit uses.
  *
  * No header is named.  bcc ships no stdio.h - its bundled set is the nine required
  * freestanding headers plus a bonus stdatomic.h (docs/technical-specifications.md

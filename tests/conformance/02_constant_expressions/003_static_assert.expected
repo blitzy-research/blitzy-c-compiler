@@ -84,10 +84,8 @@ truncated by the operating system. The program reads no clock, no environment va
 no socket -- every input is a literal in this source -- so every cell is reproducible from this
 program and this record alone.
 NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs is declared by hand as
-`int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a bonus
-stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so a directive naming
-that header would fail on the bcc side of oracle (a) while succeeding on the reference side -- a
-spurious divergence caused by the test rather than by the compiler under test. _Static_assert and
+`int printf(const char *, ...);`, which is the corpus-wide rule stated in tests/conformance/README.md.
+_Static_assert and
 _Alignof need no header either: both are C11 KEYWORDS, listed among the 44 the lexer recognises in
 docs/technical-specifications.md line 497, with line 502 recording the declaration parser that
 handles _Static_assert. stdalign.h is therefore deliberately not included; it would only add the
@@ -96,12 +94,7 @@ two-argument form WITH A MESSAGE, because the message-less one-argument form is 
 gate's -pedantic -Werror rejects it.
 THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
 is audited under the suite's full default gate, which is what area 02 requires of every one of its
-eight programs. It was MEASURED clean under -Wall -Wextra -pedantic -Wconversion -Wsign-conversion
--Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean
-under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all, whose run exits 0
-with an empty standard error and with stdout byte-identical to the golden record below. Both gates
-are reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline
-is untouched. Two details of the local-type probe are what keep the program gate-clean rather than
+eight programs. Two details of the local-type probe are what keep the program gate-clean rather than
 incidental, and the source file's own header names them for anyone editing it.
 END
 impl_defined_notes <<END

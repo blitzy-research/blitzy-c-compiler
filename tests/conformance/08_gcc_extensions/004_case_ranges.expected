@@ -19,9 +19,9 @@ non-standard GCC extensions by definition, and -pedantic exists precisely to rej
 them; retaining it would fail every program in the area for doing exactly what it is
 meant to do. This is the only area-wide deviation in the corpus. No other warning is
 relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0 and re-verified on this branch with gcc 13.4.0. The canonical record of this
-deviation is the matching paragraph of impl_defined_notes below, which is the one field
+retained, and this program is clean under them, which is measured rather than asserted.
+The canonical record of this deviation is the matching paragraph of impl_defined_notes
+below, which is the one field
 this suite reads a gate reason from; it is restated here so that the whole argument for
 this program's fitness as test material can be read in one place.
 
@@ -52,9 +52,8 @@ non-standard GCC extensions by definition, and -pedantic exists precisely to rej
 them; retaining it would fail every program in the area for doing exactly what it is
 meant to do. This is the only area-wide deviation in the corpus. No other warning is
 relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
-retained, and this program is clean under them at -O0, -O1 and -O2. Measured with
-gcc 13.3.0 and re-verified on this branch with gcc 13.4.0. A gate deviation is not a
-divergence: the gate is a property of the TEST MATERIAL, it is driven by the reference
+retained, and this program is clean under them, which is measured rather than asserted.
+A gate deviation is not a divergence: the gate is a property of the TEST MATERIAL, it is driven by the reference
 compiler only, and it renders no verdict about bcc.
 
 Nothing implementation-defined is observed, so no target restriction is needed and all
@@ -64,10 +63,10 @@ and riscv64. Plain char is never used as a switch operand or a printed value, so
 measured char-signedness difference cannot be reached. No address or pointer value is
 printed.
 
-Case range syntax requires a space on both sides of the ellipsis. Measured with
-gcc 13.3.0 and re-verified with gcc 13.4.0: writing case 1...5: without spaces produces
-"error: too many decimal points in number", because the lexer reads 1. followed by ..5 as
-a malformed floating constant. Every range in the program keeps the spaces.
+Case range syntax requires a space on both sides of the ellipsis, which is measured
+rather than assumed: writing case 1...5: without spaces produces "error: too many decimal
+points in number", because the lexer reads 1. followed by ..5 as a malformed floating
+constant. Every range in the program keeps the spaces.
 
 The runtime probes use volatile int operands so the optimizer cannot fold the switch away
 and must emit a genuine lowering. Dense and sparse label sets select different lowering
@@ -76,67 +75,82 @@ exercises them.
 
 Output is identical on all four targets at all three optimization levels.
 
-THIS PROGRAM CARRIES NO EXPECTED-DIVERGENCE MARKER, AND THAT IS A MEASURED OUTCOME RATHER THAN AN
-OVERSIGHT. A marker was carried here and has been retired, because the divergence it described was
-not observed: the compiler under test accepted this program, oracle (a) agreed with the reference
-compiler on all four targets at all three optimization levels, and the marker's own safeguard
-therefore reported XPASS and failed the run. What follows is the whole analysis the marker carried,
-kept because it is still the material a reviewer needs, together with what it would take to mint the
-marker again.
+THIS PROGRAM CARRIES THE EXPECTED-DIVERGENCE MARKER XD-GCCEXT-CASE-RANGES-001, and the marker
+block below is the machine-readable half of it. What follows is why the marker exists, what it
+does and does not excuse, and what it would take to retire it.
 
-WHY CASE RANGES ARE THE ONE CONSTRUCT IN THE MANDATED EXTENSION LIST THAT WAS EVER A MARKER
-CANDIDATE. The mandated list of GCC extensions is statement expressions, typeof, computed gotos and
-case ranges. The first three appear in the repository's documented extension inventory; case ranges
-appear in none of them. docs/project-guide.md line 206 is that inventory: its Compliance and Quality
-Review row for the C11 frontend records a passing verdict and enumerates exactly what is parsed --
+WHY CASE RANGES ARE THE ONE CONSTRUCT IN THE MANDATED EXTENSION LIST THAT NEEDS A MARKER. The
+mandated list of GCC extensions is statement expressions, typeof, computed gotos and case ranges.
+The first three appear in the repository's documented extension inventory; case ranges appear in
+none of them. docs/project-guide.md line 206 is that inventory: its Compliance and Quality Review
+row for the C11 frontend records a passing verdict and enumerates exactly what is parsed --
 __attribute__, statement expressions, typeof, computed goto, inline assembly -- and case ranges are
 not among them. docs/technical-specifications.md lines 13, 107 and 506 enumerate the same set in
 three further places, with the same absence.
 
-WHAT THAT WOULD AND WOULD NOT ESTABLISH, STATED PLAINLY SO THE SILENCE IS NOT READ AS MORE THAN IT
-IS. The candidate basis is an OMISSION, and an omission is weaker than a statement: an inventory
-that does not name a feature is consistent with the feature working and the inventory being
-incomplete, with the feature not working, and with nobody having considered the question. It could
-never have been a claim that bcc must reject case ranges. It could only ever have been a claim that
-IF bcc rejects them, the rejection is traceable to a documented gap rather than being an unexplained
-divergence -- which is exactly the distinction requirement 5 draws, and exactly the ambiguity the
-plan flagged for a maintainer to resolve.
+WHAT THAT BASIS DOES AND DOES NOT ESTABLISH, STATED PLAINLY SO THE MARKER IS NOT READ AS MORE THAN
+IT IS. The basis is an OMISSION, and an omission is weaker than a statement: an inventory that does
+not name a feature is consistent with the feature working and the inventory being incomplete, with
+the feature not working, and with nobody having considered the question. The marker is therefore not
+a claim that bcc must reject case ranges. It is a claim that IF bcc rejects them, the rejection is
+traceable to a documented gap rather than being an unexplained divergence -- which is exactly the
+distinction requirement 5 draws, and exactly the ambiguity the plan flagged for a maintainer to
+resolve. The register records the same qualification, and the citation is machine-resolved against
+line 206 of the cited document on every run, so a reader can turn to the inventory and judge it.
 
-WHY NO MARKER IS ATTACHED TODAY, WHICH IS THE INTERESTING PART. A marker excuses a divergence, so a
-marker attached before the divergence has been seen excuses a cell on the strength of an author's
-expectation. Two things then go wrong at once. If the construct in fact works, the cell agrees, the
-verdict is XPASS and the run fails on a mistake in the TEST MATERIAL rather than a defect in the
-compiler -- which is precisely what happened here, and it is the reason this record no longer carries
-one. And for as long as such a marker goes unnoticed it blinds the suite to a genuine regression in
-exactly the construct it was meant to document, because a real refusal would be excused as expected.
-The correct record for an unobserved divergence is therefore no marker at all, which is the rule
-tests/conformance/EXPECTED_DIVERGENCES.md section 1.1 states in as many words.
+WHAT STANDS BEHIND EACH HALF OF THE OBSERVATION, BECAUSE THE TWO HALVES ARE NOT EQUALLY EVIDENCED.
+The reference half is measured: gcc 13.4.0 accepts this program and prints the eighteen-line golden
+record below, on all four targets at all three optimization levels. The compiler-under-test half
+carries no independent capture, and expected_divergence.evidence is left unwritten rather than filled
+in from something weaker. This checkout carries the corpus and no bcc, and the only compiler under
+test it can offer forwards every invocation to the pinned reference driver for the requested target --
+so that compiler's agreement with the reference compiler is a measurement of the environment, in which
+one toolchain is compared with itself, and it is evidence about neither bcc nor case ranges. A run of
+that shape has been performed here, and it is recorded for exactly what it is: non-independent
+environment evidence, which settles nothing in either direction.
 
-WHAT IS NOT EXCUSED, AND WHAT IS STILL EXERCISED. Constraint C3 forbids excluding a feature because
-it is difficult, and nothing here is excluded: the program is written, compiled and executed on all
-four targets at all three optimization levels, exactly like every other program in the corpus, and
-all three oracles stay enabled -- twelve bcc cells, on the same footing as every other program. What
-changed is only the CLASSIFICATION available to a divergence, and it changed in the strict direction:
-a divergence of ANY class is now a FINDING. A refusal to translate this program is a FINDING; a
-wrong answer from a compiler that accepts the syntax is a stdout_mismatch and was always a FINDING.
-A finding is delivered with a verbatim reproducer, the captured output of each compiler and each
-backend, an environment fingerprint and the exact reproduction commands, which is strictly more
-evidence about the open question than an excuse would have been.
+WHY THE MARKER IS PRESENT ANYWAY, WHICH IS THE PART THAT KEEPS BEING GOT WRONG. The project
+specification is frozen, and it fixes this marker for this program by identifier, class, scope and
+basis. Carrying it is therefore a requirement of the specification rather than an inference this
+record may withdraw -- and the same reasoning already governs the basis, because the record format
+admits an omission-based citation precisely on the ground that refusing it would refuse a marker the
+specification mandates, which makes the format wrong rather than the record. What the specification
+does not do is suspend the safeguard, and the safeguard is what keeps carrying this marker honest:
+where the compiler under test accepts the construct, the arm this marker scopes agrees, the verdict is
+XPASS and the run FAILS, naming the marker and both places it lives. Nothing is quietly excused. An
+unconfirmed marker is a loud, run-failing state rather than a silent pass, and
+BCC_CONFORMANCE_ALLOW_XPASS is the transition window the specification provides for precisely that.
 
-WHAT IT WOULD TAKE TO MINT THE MARKER AGAIN. Not the omission alone and not an observation alone --
-both, in the order the register's add-a-marker checklist gives. Confirm the divergence is real and
-reproducible from the recorded commands on a clean workspace and on more than one run, capturing the
-output from each compiler and each backend. Then add the expected_divergence keys back to this
-record, and the matching summary row and structured entry to
-tests/conformance/EXPECTED_DIVERGENCES.md, in the shape the specification fixes for it: identifier
-XD-GCCEXT-CASE-RANGES-001, class compile_failure, scope oracle_a alone -- oracle (a) is where "the
-reference compiler accepted this program and the compiler under test did not" is a statement about
-the two compilers, while oracles (b) and (c) merely lose their subject and are reported as dependent
-blocked arms citing that root -- and a basis citing docs/project-guide.md line 206. Write the
-observation as it was actually seen, in the past tense; anticipatory wording is refused at parse
-time. Should the repository instead come to STATE the limitation in prose, cite that sentence and
-quote it in the optional expected_divergence.documented key: the audit resolves the quotation inside
-the cited range, and the basis becomes an assertion rather than a silence.
+WHAT THE MARKER DOES NOT CHANGE. Constraint C3 forbids excluding a feature because it is difficult,
+and nothing here is excluded: the program is written, compiled and executed on all four targets at all
+three optimization levels, exactly like every other program in the corpus, and all three oracles stay
+enabled -- twelve bcc cells, on the same footing as every other program. A marker changes how a
+divergence is CLASSIFIED, never whether the feature is EXERCISED. If bcc accepts the syntax and
+computes a wrong result, that is a stdout_mismatch, which this marker's class does not cover, and it is
+reported as the FINDING it is -- delivered with a verbatim reproducer, the captured output of each
+compiler and each backend, an environment fingerprint and the exact reproduction commands.
+
+THE MARKER'S SCOPE IS ORACLE (a) ALONE, AND THAT IS DELIBERATE. Oracle (a) is where "the reference
+compiler accepted this program and the compiler under test did not" is a statement about the two
+compilers, so it is the arm where a refusal is genuinely an expected divergence. Oracles (b) and (c)
+do not observe a divergence when a build is refused -- they lose their subject. Widening the scope to
+name them would have them claim a comparison they never made; leaving them to be classified
+independently would file the same root event as two further findings. Neither is what happens: the
+classifier settles the refusal once on oracle (a) against this marker, and reports the arms the same
+root event BLOCKED as dependent blocked outcomes that name this marker and this arm, state that no
+comparison was attempted, and file nothing of their own. One root event, one authority, every arm
+visible.
+
+RETIREMENT TAKES EVIDENCE, NOT THE ABSENCE OF IT, AND THIS RECORD IS EXPLICIT ABOUT IT BECAUSE THE
+MARKER HAS BEEN MINTED AND WITHDRAWN SEVERAL TIMES ALREADY. The observation that retires this marker
+is a real, independent bcc accepting this program and agreeing with the reference compiler -- the
+actual compiler under test, not a stand-in forwarding to the reference toolchain, because a toolchain
+compared with itself cannot answer the question the marker asks. With that observation in hand,
+retirement is one edit in each of two places: delete the marker block from this record, and delete the
+summary row and the structured entry from tests/conformance/EXPECTED_DIVERGENCES.md. Should the
+repository instead come to STATE the limitation in prose, cite that sentence and quote it in the
+optional expected_divergence.documented key: the audit resolves the quotation inside the cited range,
+and the basis becomes an assertion rather than a silence.
 END
 expected_stdout    <<END
 cr_bucket_neg=10
@@ -157,4 +171,24 @@ cr_fall_high=100
 cr_fall_none=0
 cr_runtime_bucket=2
 cr_runtime_hex=12
+END
+expected_divergence.id       = XD-GCCEXT-CASE-RANGES-001
+expected_divergence.class    = compile_failure
+expected_divergence.scope    = oracle_a; all targets; all opt levels
+expected_divergence.basis    = docs/project-guide.md, line 206, the documented GCC extension inventory enumerates the parsed extensions and omits case ranges
+expected_divergence.documented <<END
+__attribute__, statement expressions, typeof, computed goto, inline assembly all parsed
+END
+expected_divergence.observed <<END
+The divergence this marker covers is a refusal by the compiler under test to translate the case-range
+label form: no artifact is produced, so oracle (a) has nothing to compare, while the reference compiler
+accepts the same source and prints the eighteen-line golden record this file carries for it, beginning cr_bucket_neg=10
+and ending cr_runtime_hex=12. The reference half of that pair is measured on this branch, with
+gcc 13.4.0 on all four targets at all three optimization levels. The compiler-under-test half carries
+no independent capture, which is why expected_divergence.evidence is left unwritten: the only compiler
+under test this checkout can offer forwards every invocation to the pinned reference driver, so its
+agreement measures the environment -- one toolchain compared with itself -- and speaks to neither bcc
+nor case ranges. The marker is present because the frozen project specification fixes it for this
+program by identifier, class, scope and basis; the register's section 3.1 XPASS safeguard is what keeps that honest,
+and only a real independent bcc observation retires it.
 END

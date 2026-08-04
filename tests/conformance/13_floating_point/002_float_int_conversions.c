@@ -159,13 +159,22 @@
  * targets.  The widest floating type is likewise absent, its representation
  * having been measured to differ across the targets; it belongs to
  * 004_long_double_target_restricted.c, which handles it with a recorded
- * oracle-(b) exclusion and no marker -- that program's record disables the
- * cross-backend arm alone and carries the measurement as its recorded reason,
- * which is the mechanism EXPECTED_DIVERGENCES.md section 4.2 provisions for it.
- * Plain char never appears either, its signedness having been measured as signed on
- * x86-64 and i686 and unsigned on AArch64 and RISC-V 64, so the two character
- * conversions here name signed char and unsigned char explicitly.  No address
- * or pointer value is printed.
+ * oracle-(b) exclusion AND an active expected-divergence marker.  That program's
+ * record disables the cross-backend arm alone -- oracle (a) and oracle (c) stay
+ * enabled on all four targets at all three levels -- and carries the marker
+ * XD-TYPE-LONGDOUBLE-001, class stdout_mismatch, scoped to oracle_b across all
+ * targets and all optimization levels, whose basis is the target-parametric type
+ * representation documented at docs/technical-specifications.md line 511.  The
+ * marker is registered in EXPECTED_DIVERGENCES.md, which is the mechanism that
+ * keeps a disabled arm auditable rather than silent.
+ * Plain char never appears as a CONVERSION destination either, its signedness being
+ * signed on x86-64 and i686 and unsigned on AArch64 and RISC-V 64, so the two
+ * character conversions here name signed char and unsigned char explicitly; the
+ * only plain-char data in the file is the format-string literals, whose bytes printf
+ * copies through unchanged and none of which is read as a number.  No %p
+ * conversion specification appears anywhere, so no address and no pointer value
+ * reaches the output, and the only pointers the program forms at all are the
+ * `const char *` each format string decays to in its call.
  *
  * THE TWO-VARIANT RULE.  Every conversion is performed twice: once over
  * constants, which the folder evaluates at translation time, and once over

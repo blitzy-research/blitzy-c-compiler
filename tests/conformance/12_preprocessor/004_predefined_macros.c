@@ -14,7 +14,10 @@
  * per-target difference could be recorded as an expected divergence.  Relations sidestep the
  * gap while still exercising the feature - the feature is normalized, never dropped - and any
  * divergence they do produce is a precise, actionable report rather than a wall of expected
- * per-target differences.
+ * per-target differences.  The discipline has a second half, which the withdrawal recorded
+ * further down enforces: a relation is asserted here only when EVERY correct compiler must
+ * satisfy it, because the oracles treat a difference as evidence about the compiler, and a
+ * relation no authority imposes turns permitted behaviour into that evidence.
  *
  * WHICH MACROS MAY BE ASSERTED AS INVARIANTS, AND WHICH MAY NOT.  Only macros the C standard
  * itself requires are asserted as invariants here: __STDC__ (C11 6.10.8.1), __STDC_VERSION__
@@ -22,37 +25,45 @@
  * implementation must define, so a divergence in one is a real conformance gap and a legitimate
  * finding.
  *
- * The architecture macros are a different case, and they are handled as three relations rather
- * than as invariants.  __x86_64__, __i386__, __aarch64__ and __riscv are spellings of a
- * particular compiler FAMILY, not of the standard; no clause obliges any implementation to
- * define them and this repository documents no per-target predefined-macro contract for the
- * compiler under test.  Printing one, or a value derived directly from one, would therefore
- * diverge across the four backends on every run and say nothing about correctness.  What is
- * printed instead is the whole of what can be OBSERVED about the set: that AT LEAST ONE of the
- * four is defined, that NO MORE THAN ONE is, and that whichever one IS defined agrees with the
- * pointer width the code generator actually produced - the last written as an implication so it
- * stays meaningful whatever the first two report.  The first two together are the exactly-one
- * property, decomposed into two separately printed lines so that a divergence names which half
- * failed: a compiler claiming two architectures at once fails the second, and a compiler that
- * names its target in none of these four spellings fails the first.
+ * The architecture macros are a different case, and they are handled as two SELF-CONSISTENCY
+ * relations rather than as invariants.  __x86_64__, __i386__, __aarch64__ and __riscv are
+ * spellings of a particular compiler FAMILY, not of the standard; no clause obliges any
+ * implementation to define them and this repository documents no per-target predefined-macro
+ * contract for the compiler under test.  Printing one, or a value derived directly from one,
+ * would therefore diverge across the four backends on every run and say nothing about
+ * correctness.  What is printed instead is what can be asserted of ANY correct compiler whatever
+ * it chooses to predefine: that NO MORE THAN ONE of the four is defined, and that whichever one
+ * IS defined agrees with the pointer width the code generator actually produced - the second
+ * written as an implication so that it stays about agreement alone.  Both hold of a compiler
+ * that defines exactly one of the four, and both hold of a compiler that defines none; only a
+ * compiler that contradicts ITSELF fails them, by claiming two architectures at once or by
+ * claiming one its own back end does not implement.
  *
- * That first line is deliberate and it is what makes the set testable at all.  An earlier form
- * of this program printed only the upper bound, and a compiler predefining NO architecture
- * macro then produced output byte-identical to a compiler predefining exactly the right one:
- * the sum was zero, zero is no more than one, and the implication was vacuously satisfied, so
- * the one question this program exists to ask went unanswered under all three oracles at once.
- * A relation that cannot fail is not caution, it is a blind spot, and the blind spot covered
- * precisely the case the repository documents nothing about.  The presence line closes it.
+ * PRESENCE IS DELIBERATELY NOT ASSERTED, AND THIS PARAGRAPH IS THE RECORD OF WHY.  An earlier
+ * form of this program printed a third line, arch_id_defined, asserting that AT LEAST ONE of the
+ * four spellings is defined, on the reasoning that without it a compiler predefining no
+ * architecture macro produces output byte-identical to one predefining exactly the right macro.
+ * That observation is true and it is not a defect.  The two compilers agree because both are
+ * CORRECT: no clause of the standard requires any of these spellings, and a search of docs/ for
+ * "predefined", "__x86_64__", "__i386__", "__aarch64__" and "__riscv" finds no match in any of
+ * the three documents the directory holds, so the repository states no contract for the compiler
+ * under test either.  Asserting presence therefore made a compiler-family convention into a
+ * conformance requirement that no authority imposes, and every one of this program's twelve
+ * cells would have reported a compiler which spells its architecture macro otherwise - or leaves
+ * the choice to a target header - as a divergence under all three oracles at once.  A divergence
+ * this suite cannot trace to an obligation is not a finding worth delivering; it is a false
+ * oracle, and a false oracle costs more than a blind spot because it spends a maintainer's
+ * attention on permitted behaviour.  Nor could the difference have been dressed as an expected
+ * divergence: a marker requires a documented basis, and silence is not a basis.
  *
- * A 0 on that line is a REPORT, not an accusation, and the distinction is the reason the line is
- * safe to print.  This suite does not patch the compiler under test on the strength of a
- * divergence; it captures the divergence as a finding - minimized reproducer, exact commands,
- * per-cell outputs - and leaves the judgement to a maintainer.  So a compiler that spells its
- * architecture macro some other way, or leaves the choice to a target header, is not condemned
- * here: it is surfaced, with a one-line diff naming exactly which relation differs, which is the
- * outcome the suite's own rule - report the difference, never work around it - requires.  The
- * alternative, printing nothing that could differ, does not spare a correct compiler anything;
- * it only hides an incorrect one.  The zero-fallback arms below are what keep that report a
+ * The feature is not thereby dropped, which C3 forbids.  All four architecture macros are still
+ * read, all four conditional blocks are still exercised, and both surviving relations are still
+ * printed and compared on every one of the twelve cells; what was withdrawn is one unfounded
+ * equality, not the coverage.  The narrow, scoped alternative - printing presence as capability
+ * metadata that no oracle compares - is not available here: comparison in this suite is
+ * byte-exact over the whole of standard output, so there is no uncompared channel a program can
+ * print to, and inventing one would weaken the comparison for all 108 programs to describe one.
+ * The zero-fallback arms below are retained regardless, because they are what keep a macro gap a
  * comparable output difference rather than a compile failure.
  *
  * The strict-conformance macro is handled the same way, and for the same reason.  __STRICT_ANSI__
@@ -71,7 +82,7 @@
  * links and runs on its own.  The other half is the sibling expectation record
  * 004_predefined_macros.expected, which is committed beside it and supplies the rest: all four
  * targets, all three optimization levels, all three oracles enabled, and a golden stdout
- * measured on this branch and byte-identical across all twelve cells.  Rendering that record's
+ * that is byte-identical across all twelve cells.  Rendering that record's
  * three command templates is all an isolated reproduction takes - no harness, no Cargo and no
  * Rust toolchain.
  *
@@ -108,19 +119,21 @@ static int slen(const char *s)
     return n;
 }
 
-/* Architecture: exactly one branch is expected to be taken.  Each of the four macros below
-   contributes 0 or 1, and their sum is compared against 1 further down from BOTH sides - once as
-   >= 1 and once as <= 1, on two separate output lines - so the architecture machinery is
-   exercised, and any deviation is localized to one line, without any architecture macro name or
-   value ever reaching the output.
+/* Architecture: at most one branch may be taken, and whichever one is must agree with the code
+   generator.  Each of the four macros below contributes 0 or 1, and their sum is bounded above by
+   1 further down, while a separate implication ties the one that is defined - if any is - to the
+   pointer width actually produced.  The machinery is therefore fully exercised, and any deviation
+   is localized to one line, without any architecture macro name or value ever reaching the
+   output.  The sum is deliberately NOT bounded below: no authority requires any of these four
+   spellings, so requiring one would report a permitted choice as a divergence.  The withdrawal is
+   argued in full in the file comment above.
 
    Each block carries an alternative arm that defines a zero fallback rather than raising a
    preprocessor diagnostic.  That choice is deliberate: were a diagnostic raised instead, a
    compiler that happened not to define architecture macros would fail to compile this program,
-   turning an informative output difference into an uninformative compile failure.  With the
-   zero fallback the program always compiles under both compilers, and any macro gap surfaces
-   as a comparable difference with a precise diff - report the difference, never work around
-   it. */
+   turning a benign difference into an uninformative compile failure.  With the zero fallback the
+   program always compiles under both compilers, and the two relations below stay comparable
+   whichever spellings each side uses. */
 #if defined(__x86_64__)
 #  define ARCH_X86_64 1
 #else
@@ -173,26 +186,22 @@ int main(void)
     printf("stdc_is_one=%d\n", STDC_IS_ONE);
     printf("stdc_at_least_c99=%d\n", STDC_AT_LEAST_C99);
     printf("stdc_at_least_c11=%d\n", STDC_AT_LEAST_C11);
-    /* At least one architecture macro.  This is the lower half of the exactly-one property and
-       the only line in the program that can observe a compiler which names its target in none of
-       these four spellings; without it, that compiler's output is indistinguishable from one that
-       names its target correctly, and the question goes unanswered under every oracle.  A 0 here
-       is a comparable difference to be triaged - captured as a finding with its reproducer and
-       commands, never used to patch the compiler - not a verdict that the compiler is wrong. */
-    printf("arch_id_defined=%d\n", (int)(ARCH_COUNT >= 1));
-    /* At most one architecture macro: the upper half of the same property, kept on its own line
-       so a divergence names which half failed.  A compiler that claims two architectures at once
-       is inconsistent with itself, because the two claims cannot both describe the machine the
-       code generator is emitting for. */
+    /* At most one architecture macro.  This is a self-consistency property, not a presence
+       requirement: a compiler that claims two architectures at once is inconsistent with itself,
+       because the two claims cannot both describe the machine the code generator is emitting for,
+       while a compiler that claims none is merely spelling its target elsewhere and satisfies the
+       line.  There is deliberately no companion line asserting that at least one is defined - no
+       clause and no repository document obliges any of these four spellings, so such a line would
+       report permitted behaviour as a divergence.  See the file comment above. */
     printf("arch_count_at_most_one=%d\n", (int)(ARCH_COUNT <= 1));
     /* The strongest assertion in the program: it ties the preprocessor's view of the target to
        the code generator's.  Written as an implication - if the 32-bit macro is defined THEN
        pointers are four bytes wide, and if any of the other three is defined THEN they are not -
        so that a compiler defining no architecture macro satisfies it vacuously while one whose
-       preprocessor and back end disagree fails it.  That vacuous case is not thereby unobserved:
-       the presence line above is where it shows up, which is precisely what lets this line stay
-       about agreement alone.  The 32-bit target is the only one of the four whose pointers are
-       four bytes wide.  The width literal is written unsigned so that
+       preprocessor and back end disagree fails it.  The vacuous case is intended rather than
+       tolerated: defining none of the four is a permitted choice, so the line has nothing to
+       assert about such a compiler and says nothing.  The 32-bit target is the only one of the
+       four whose pointers are four bytes wide.  The width literal is written unsigned so that
        comparing it against the unsigned result of sizeof cannot trip a sign-comparison
        diagnostic. */
     printf("arch_id_agrees_with_pointer_width=%d\n",

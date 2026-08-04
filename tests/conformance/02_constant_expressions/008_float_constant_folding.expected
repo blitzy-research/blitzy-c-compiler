@@ -156,9 +156,13 @@ at 16, 12, 16 and 16 bytes across x86-64, i686, AArch64 and RISC-V 64 -- x87 80-
 binary128 -- so it is the one floating type whose value-level cross-backend comparison is not
 sound, and a printed value of that type could not be compared across backends at all. That
 comparison is owned by 13_floating_point/004_long_double_target_restricted.c, which carries a
-RECORDED EXCLUSION for it -- oracle_b disabled, with the measured representations as its basis,
-and no marker, because an implementation-defined representation difference is not a bcc defect --
-so nothing is lost by keeping the type out of a program whose subject is the constant folder. No
+RECORDED EXCLUSION for it -- oracle_b disabled, with the measured representations as its recorded
+reason -- together with the marker XD-TYPE-LONGDOUBLE-001, class stdout_mismatch, scope oracle_b,
+which the format REQUIRES beside such a narrowing: a disabled oracle is reported XFAIL, which claims
+the authority of a documented limitation, so the marker is what carries that claim while the recorded
+reason explains it. It excuses the cross-backend arm alone, and a same-target disagreement there is
+still a FINDING -- so nothing is lost by keeping the type out of a program whose subject is the
+constant folder. No
 feature is dropped here for being awkward: the type is tested where its awkwardness can be
 accounted for, and this paragraph is the explicit statement of why it is absent from this
 program. Also deliberately elsewhere, so this program does not duplicate them: general float

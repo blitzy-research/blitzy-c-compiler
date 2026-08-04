@@ -159,17 +159,35 @@
 //! marker covers and the oracle being judged, so the two can never be confused.
 //!
 //! What follows from a refusal being **one root event** is handled by dependency-aware
-//! classification rather than by widening anything. The corpus carries one active marker —
-//! `XD-TYPE-LONGDOUBLE-001`, a `stdout_mismatch` scoped `oracle_b` — so no refusal-class marker is
-//! live today and the path below is a mechanism with no live instance rather than a description of
-//! something a run currently exercises. `classify::refusal_root` names the arm whose marker documents
-//! a refusal; that arm settles it as an expected divergence, and every other arm of the same cell is
-//! reported as a **dependent blocked** expected divergence which cites the root marker, names the arm
-//! carrying it, and states that no comparison was attempted on it. No finding directory is written for
-//! the blocked arms, because one event has one explanation — but the propagation requires a marker
-//! that already covers this cell's target, level and observed class on some arm, so an *undocumented*
-//! refusal is still a finding on every applicable arm, delivered with the refusal's own artifacts.
-//! With no refusal marker in the corpus, that is what every refusal is today.
+//! classification rather than by widening anything. `classify::refusal_root` names the arm whose
+//! marker documents a refusal; that arm settles it as an expected divergence, and every other arm of
+//! the same cell is reported as a **dependent blocked** expected divergence which cites the root
+//! marker, names the arm carrying it, and states that no comparison was attempted on it. No finding
+//! directory is written for the blocked arms, because one event has one explanation — but the
+//! propagation requires a marker that already covers this cell's target, level and observed class on
+//! some arm, so an *undocumented* refusal is still a finding on every applicable arm, delivered with
+//! the refusal's own artifacts.
+//!
+//! **Which markers are live is deliberately not stated here.** An earlier form of this comment named
+//! the corpus's marker inventory outright and drew a conclusion from it — that no refusal-class marker
+//! was live, so the path above was a mechanism with no instance. That is the same defect as a stale
+//! measurement: a claim about the tree, maintained where it cannot observe the tree, in a corpus that
+//! is still being completed program by program. The inventory is therefore reported rather than
+//! asserted. [`infra_expected_divergence_register`] enumerates every marker it finds, prints each one
+//! with its class, scope, program and basis, and states how many expectation records it was able to
+//! read out of how many the plan calls for — so a reader learns what is live from the run that just
+//! examined the corpus, and this comment cannot be wrong about it.
+//!
+//! Neither marker is presented here as an adjudicated result, and the distinction matters because a
+//! marker is the one mechanism that turns a failure into a pass. What the run establishes is that each
+//! is registered in both directions, that every field agrees with its record character for character,
+//! and that every cited document, locator and quotation resolves. Whether a cited passage *supports*
+//! what its marker excuses is a reviewer's judgement made against
+//! `tests/conformance/EXPECTED_DIVERGENCES.md` §2.4.1 — and for `XD-GCCEXT-CASE-RANGES-001` the
+//! divergence itself has no independent capture, because the only compiler under test this checkout
+//! can offer forwards to the reference toolchain. That gap is disclosed in the marker rather than
+//! papered over, and it is not free: while the construct works, the marker's arm agrees, the verdict
+//! is `XPASS` and the run **fails** until somebody with a real `bcc` settles it.
 //!
 //! Only the standard library is used, every operation is safe, no lint is suppressed, and not one
 //! of the eighteen tests is marked ignored — the repository's ignored-test count is itself the most
@@ -445,19 +463,15 @@ fn infra_expected_divergence_register() {
     // a run consisting only of tests that write none is exactly the case in which a previous run's
     // summary would otherwise survive and be mistaken for this run's verdict.
     begin_report_session();
-    let markers = match manifest::all_markers() {
-        Ok(markers) => markers,
-        Err(error) => panic!(
-            "{}",
-            infrastructure_failure(
-                "infra_expected_divergence_register",
-                "the corpus expected-divergence markers could not be enumerated, so requirement \
-                 5's prohibition on silently excluding a feature cannot be enforced in either \
-                 direction",
-                &error,
-            )
-        ),
-    };
+    // The markers come from the corpus measurement rather than from a second pass of their own, and
+    // that is what makes the two halves of this audit describe one corpus. The earlier enumeration
+    // aborted on the first record it could not read, so on a corpus still being completed this test
+    // reported an infrastructure failure and nothing else — no inventory, no reconciliation, and no
+    // list of which records were outstanding. Now every record that parses contributes its marker,
+    // every record that does not is a named violation below, and the run states which of the two it
+    // is for every program. Fail-closed is preserved: an unreadable record still fails this test, but
+    // it fails it having said what it found and what it could not.
+    let markers: Vec<manifest::ExpectedDivergence> = corpus_inventory().markers().to_vec();
 
     let register_path = manifest_dir().join(classify::EXPECTED_DIVERGENCE_REGISTER);
     let register = match fs::read_to_string(&register_path) {
@@ -602,12 +616,42 @@ fn infra_expected_divergence_register() {
         );
     }
 
+    // The inventory, and then how much of the corpus it was drawn from. Both halves are needed and
+    // the second used to be missing: "1 marker(s) in the corpus" is a count of what was found, and a
+    // reader takes it for a description of the whole corpus unless the line says which records were
+    // actually read. On a corpus still being completed those are different numbers, and the
+    // difference is exactly one program's markers.
+    let inventory = corpus_inventory();
+    violations.extend(inventory.marker_defects().iter().cloned());
     println!(
-        "expected-divergence register — {} marker(s) in the corpus, {} identifier(s) in {}",
+        "expected-divergence register — {} marker(s) in the corpus, {} identifier(s) in {} — {}",
         markers.len(),
         registered.len(),
         classify::EXPECTED_DIVERGENCE_REGISTER,
+        inventory.coverage_sentence(),
     );
+    // Named, not merely counted, and pushed into the violation list rather than printed and forgotten:
+    // a record the audit could not read is a program whose marker — if it has one — is unregistered
+    // as far as this test can tell, which is the silent exclusion requirement 5 forbids. Requirement 5
+    // is enforced in both directions or not at all, so an audit that cannot see every record must say
+    // so and fail, never pass on the strength of the records it happened to read.
+    for entry in inventory.pending() {
+        violations.push(format!(
+            "the expectation record for {entry}. Until it parses, this audit cannot tell whether \
+             that program carries an expected-divergence marker, so requirement 5's bidirectional \
+             check does not hold over the whole corpus — a marker in an unreadable record would be \
+             neither registered nor noticed"
+        ));
+    }
+    if !inventory.is_complete() {
+        println!(
+            "corpus completeness — planned {}, records readable {}, pending {}. The marker \
+             inventory above describes the readable records only.",
+            inventory.planned(),
+            inventory.records(),
+            inventory.pending().len(),
+        );
+    }
     for marker in &markers {
         println!(
             "  {} [{}] {} — scope: {} — basis: {}",
@@ -655,11 +699,39 @@ fn infra_oracle_capability_report() {
 
     println!("{}", caps.render_report());
     println!("{}", matrix_statement(config));
+    // What the corpus actually holds, printed immediately beneath what the matrix declares, because
+    // the two are different claims and the pre-flight is where conflating them does the most damage:
+    // a maintainer reads this block to learn what the run is about to do, and a declared program
+    // count read as a description of the tree is how a summary comes to describe a matrix a sixth
+    // larger than the one that existed. `corpus_inventory` also re-derives the record-volume figures
+    // the parser's bounds are documented against, so a figure that has gone stale is visible here
+    // rather than discovered by a reviewer.
+    println!("{}", corpus_inventory().render());
     // The capability report redacts itself; the fingerprint does not, because its text is also an
     // input to the run identity digest and redacting it there would tie a provenance value to which
     // credential-bearing variables happened to be set. It is redacted at every sink instead, here and
     // in the two report artifacts that carry it.
     println!("{}", redact_secrets(&caps.render_fingerprint()));
+
+    // A volume figure the tree has outgrown fails the pre-flight rather than being noted in passing.
+    // The figures are documentation of what the corpus holds, not enforcement — the enforced bounds
+    // are separate constants and are untouched by this — so the correct response is a one-line edit
+    // to the declared figure, which the diagnostic names. Reporting it without failing would put the
+    // suite back where it was: a measurement maintained in a place that cannot observe the tree.
+    let stale = corpus_inventory().volume_violations();
+    assert!(
+        stale.is_empty(),
+        "the record-volume figures declared in conformance_harness/manifest.rs no longer describe \
+         the corpus — {} figure(s) have been outgrown:\n{}\n\nEach is documentation of the observed \
+         maximum, not a limit the parser enforces, so raise the named constant to the measured \
+         value. The pre-flight above prints the measurement it compared against.",
+        stale.len(),
+        stale
+            .iter()
+            .map(|violation| format!("  - {violation}"))
+            .collect::<Vec<String>>()
+            .join("\n"),
+    );
 
     let unavailable = caps.unavailable_oracle_arms();
     if unavailable.is_empty() {
@@ -2226,12 +2298,12 @@ fn run_area(area: &str) {
     //
     // Requirement 1 makes undefined-behaviour freedom the precondition that gives an oracle its
     // meaning: a program containing undefined behaviour permits both compilers to do anything, so a
-    // comparison over it is not evidence either way. An earlier form of this function ran the whole
-    // matrix and asserted afterwards, which was wrong in a way that mattered rather than merely
-    // untidy — a divergence over a program whose gate had failed was classified, and **filed as a
-    // FINDING with a full artifact directory**. A finding is a deliverable that says "the compiler
-    // did this"; producing one from a program not shown to be undefined-behaviour-free delivers a
-    // claim the suite has no standing to make.
+    // comparison over it is not evidence either way. Running the matrix first and asserting the gate
+    // afterwards would therefore be wrong in a way that matters rather than merely untidy: a
+    // divergence over a program whose gate had failed would be classified, and filed as a FINDING
+    // with a full artifact directory. A finding is a deliverable that says "the compiler did this";
+    // producing one from a program not shown to be undefined-behaviour-free delivers a claim the
+    // suite has no standing to make.
     //
     // So nothing is compiled, nothing is classified and nothing is published as evidence. What is
     // published is the area's report carrying the failing gate, the withholding stated in its own
@@ -2304,6 +2376,38 @@ fn oracle_capabilities() -> Capabilities {
             discovery::VAR_BCC_BIN,
         ),
     }
+}
+
+/// Measure the corpus once per process, and refuse to start if it cannot be enumerated at all.
+///
+/// # What this is, and what it deliberately is not
+///
+/// It is the answer to "how much of the planned corpus is present, and how large are its records",
+/// measured from the tree. It is **not** a filter, and nothing here excuses a program from being
+/// judged: a source whose record cannot be read is reported as pending, and every consumer treats
+/// pending as the corpus defect it is — the driver files a corpus-defect row for it, which fails the
+/// run, and the marker audit refuses to call its inventory complete. Requirement 5 forbids silently
+/// excluding a feature from testing, so an incomplete corpus is stated loudly rather than swept.
+///
+/// Memoized because two tests consume it and measuring parses every record in the corpus. A failure
+/// is fatal for the same reason [`oracle_capabilities`] is: discovery only fails when a feature area
+/// is absent or holds something that is not a program, and a run that could not enumerate the corpus
+/// has no basis on which to report anything about it.
+fn corpus_inventory() -> &'static manifest::CorpusInventory {
+    static INVENTORY: OnceLock<manifest::CorpusInventory> = OnceLock::new();
+    INVENTORY.get_or_init(|| match manifest::measure_corpus() {
+        Ok(inventory) => inventory,
+        Err(error) => panic!(
+            "{}",
+            infrastructure_failure(
+                "the corpus inventory",
+                "the corpus could not be enumerated, so neither the matrix this run will sweep nor \
+                 the completeness of the corpus it sweeps can be stated, and every count derived \
+                 from either would be a guess",
+                &error,
+            )
+        ),
+    })
 }
 
 /// The declared specification for an area name, which is also a guard against a typo.
@@ -3474,7 +3578,13 @@ fn matrix_statement(config: &RunConfig) -> String {
             .join(", "),
     ));
     text.push_str(&format!("  feature areas:     {AREA_COUNT}\n"));
-    text.push_str(&format!("  programs declared: {PROGRAM_COUNT}\n"));
+    // "planned", and the corpus inventory printed immediately after this block states how many
+    // programs and records are actually present. The two were previously one number in one place,
+    // which is how a declared count came to be read as a description of the tree.
+    text.push_str(&format!(
+        "  programs planned:  {PROGRAM_COUNT} (the plan; the corpus inventory below states what is \
+         present)\n"
+    ));
     text.push_str(&format!(
         "  per-cell timeout:  {} s\n",
         config.timeout_secs(),
@@ -3835,7 +3945,8 @@ fn register_entry_mismatches(
 /// repository, it is readable, and the section the marker names can be located inside it. They do not
 /// establish that the section supports the claim — that is a reviewer's judgement, and the frozen
 /// marker contract deliberately leaves it to one, because one of the two mandated markers rests on an
-/// inventory's silence, which no automated check can weigh. What the audit guarantees is that the
+/// inventory's silence, which no automated check can weigh. `XD-GCCEXT-CASE-RANGES-001` is that
+/// marker, and the register states its basis's weakness in prose where a reviewer will read it. What the audit guarantees is that the
 /// reviewer has somewhere concrete to look.
 ///
 /// The optional `expected_divergence.documented` key exists for an author who can do better than a
@@ -4328,8 +4439,8 @@ fn comma_list(items: &[impl AsRef<str>]) -> String {
 /// - [`classify::covering_marker`] answers `Some` exactly when the scope covers the arm **and** the
 ///   class matches — never for the other five classes, and never outside the scope;
 /// - [`Finding::new`] — the writer's own precondition, not a copy of it — refuses exactly the
-///   documented combination and admits every other, so a class the marker does not claim gets its
-///   artifact even on an arm the marker's scope names;
+///   documented combination and admits every other, so a class the marker does not claim is
+///   artifact-eligible even on an arm the marker's scope names;
 /// - the admitted finding's marker note states *which* dimension missed, and never claims a scope
 ///   miss on an arm the scope covers, because that note ships inside a committed artifact and a
 ///   maintainer acts on it.
@@ -4407,9 +4518,8 @@ fn marker_classification_violations(markers: &[manifest::ExpectedDivergence]) ->
     println!(
         "marker classification — {} marker(s) exercised over {} target(s) × {} level(s) × {} \
          oracle(s) × {} class(es): {} documented combination(s) refused by the finding writer as \
-         expected divergences, {} undocumented combination(s) admitted as findings with their \
-         artifacts. A class the marker does not claim is NOT excused by it, even on an arm its scope \
-         names",
+         expected divergences, {} undocumented combination(s) admitted as findings. A class the \
+         marker does not claim is NOT excused by it, even on an arm its scope names",
         markers.len(),
         Target::ALL.len(),
         OptLevel::ALL.len(),
@@ -4657,11 +4767,11 @@ fn synthetic_divergence(oracle: Oracle, class: DivergenceClass) -> Comparison {
 /// # Why this fails closed, and what the one tolerated absence is
 ///
 /// The curated set is an audit input, and an audit that reads "nothing to check" from an error has not
-/// established that there is nothing to check — it has established nothing at all. An earlier form of
-/// this function turned **every** listing failure into an empty set and discarded every per-entry
-/// error, which meant a permission change, a partially unreadable directory, or a `findings/` replaced
-/// by a symbolic link all read as "no findings committed" and the whole curated audit silently passed
-/// over the set it was meant to validate.
+/// established that there is nothing to check — it has established nothing at all. Turning **every**
+/// listing failure into an empty set, or discarding a per-entry error, would let a permission change, a
+/// partially unreadable directory, or a `findings/` replaced by a symbolic link all read as "no
+/// findings committed", and the whole curated audit would silently pass over the set it was meant to
+/// validate.
 ///
 /// So exactly one condition is tolerated, and it is the one that carries information: [`NotFound`] —
 /// the directory is not there, which is the true and complete answer for a branch that has never

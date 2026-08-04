@@ -1,66 +1,84 @@
 /* Area 12 / program 006 - pragma acceptance and the observable EFFECT of a line directive.
    Both subjects are chosen so that the standard, rather than any implementation's
-   documentation, fixes what must happen: an unrecognised pragma must be ignored, a
-   diagnostic-control pragma cannot change what a program prints, and a line directive
-   renumbers the line that follows it and may supply a virtual file name.  The file-name
-   macro is never printed raw: before the first line directive only a path-independent
-   relation is printed, and afterwards only the virtual name the directive itself supplied.
-   Self-contained: no header is included; printf is hand-declared because bcc ships no
-   <stdio.h>.
+   documentation, fixes what must happen: a pragma region that is pushed and then popped
+   must leave the state it found, the operator spelling of a pragma must behave as the
+   directive spelling does, and a line directive renumbers the line that follows it and may
+   supply a virtual file name.  The file-name macro is never printed raw: before the first
+   line directive only a path-independent relation is printed, and afterwards only the
+   virtual name the directive itself supplied.  Self-contained: no header is included; printf
+   is hand-declared because bcc ships no <stdio.h>.
 
    A note on this comment's spelling.  The two directive names are written throughout this
    prose WITHOUT their leading hash, and the two macro names are spelled out in words, so
    that a grep for a directive or a macro returns exactly the lines of code that use it and
-   nothing from this commentary.  The directives themselves appear in full, at column one,
-   in the five places that matter: three for the deliberately unrecognisable pragma and the
-   diagnostic-control pair that brackets it, and two for the line numbering - the first
-   renumbering alone, the second supplying a virtual file name as well.
+   nothing from this commentary.  The directives themselves appear in full, at column one, in
+   the four places that matter: two for the packing region's push and pop, and two for the
+   line numbering - the first renumbering alone, the second supplying a virtual file name as
+   well.  The operator spelling appears twice more, in the two places that matter for it.
 
-   WHY THIS PROGRAM DOES NOT ASSERT A PACKING PRAGMA'S EFFECT, recorded here because an
-   earlier form of it did.  That form declared four structures under pack(push, 1), a nested
-   pack(push, 2) and two pops, and printed each one's exact size, alignment and member
-   offsets.  It is unsound as a differential oracle on two independent counts, either
-   sufficient on its own:
+   NOTHING IN THIS TRANSLATION UNIT SUPPRESSES A DIAGNOSTIC, AND THAT IS A PROPERTY TO
+   PRESERVE.  An earlier form of this program asserted the one pragma property C11 states
+   NORMATIVELY - 6.10.6p1's closing sentence, "Any such pragma that is not recognized by the
+   implementation is ignored" - by placing a pragma whose name was reserved to the program by
+   construction between two identical declarations.  That assertion cannot be made inside the
+   mandatory audit gate, and the earlier form got around it by writing a diagnostic-control
+   pragma into the source to switch off the very diagnostic the gate raises.  That is worse
+   than not making the assertion at all: the gate is what establishes this program's freedom
+   from undefined behaviour, and a source that neutralises one of its members around the exact
+   construct under test is a source the gate no longer inspects there.  The suppression is
+   gone, and no replacement for it is written anywhere in this file.
 
-     - The behaviour of a pragma the implementation DOES recognise is implementation-defined
-       (C11 6.10.6p1), and the standard goes further than merely permitting a different
-       layout: a recognised pragma is allowed to make translation fail outright.  A compiler
-       that recognises the packing pragma and declines this particular request is therefore
-       within its rights, and printing its layout as an exact number would report that
-       conformance as a defect.
-     - No document in this repository describes a packing pragma for the compiler under test.
-       The documented inventory names the directive but not one pragma it honours, so a
-       divergence arising from the push/pop lifecycle could not be attributed to a documented
-       limitation either - leaving it neither a sound comparison nor a recordable expected
-       divergence.
+   WHY THE NORMATIVE ASSERTION CANNOT BE MADE HERE, stated explicitly rather than left as a
+   silent omission, because constraint C3 requires the reason for anything not tested.  The
+   gate is -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror.  -Wall
+   enables the unknown-pragma diagnostic and -Werror makes it fatal, so an unrecognisable
+   pragma - by construction the only kind whose treatment the standard REQUIRES - stops
+   translation.  MEASURED with all four reference drivers and with the alternate reference
+   compiler: an invented pragma, a pragma with no tokens at all, and the standard STDC pragma
+   forms are each rejected as an unknown pragma.  The suite's gate-deviation contract cannot
+   express the removal either: a deviation may only drop a member of the gate, and the
+   diagnostic in question is implied by -Wall, so silencing it would mean dropping -Wall
+   entire - dozens of unrelated checks - and the contract sanctions only two reductions in any
+   case, neither of them this one.  What is excluded is therefore ONE ASSERTION SHAPE, not the
+   feature: pragmas are still exercised on every cell, in both of their spellings, and the
+   properties asserted instead are the ones a conforming implementation cannot fail whichever
+   choice it makes.
 
-   The layout effect of PACKING ITSELF is not lost, and is not tested here because it is
-   tested where its authority is stronger: 08_gcc_extensions/005_attribute_packed_aligned.c
-   exercises the packed and aligned attributes, which the repository's own extension
-   inventory does name as supported.  What this program keeps is the one pragma property
-   C11 states NORMATIVELY, in the closing sentence of 6.10.6p1 - "Any such pragma that is
-   not recognized by the implementation is ignored" - which is a requirement rather than a
-   permission and is directly observable.
+   WHAT IS ASSERTED INSTEAD, AND WHY EVERY RELATION IS SOUND WHETHER THE PRAGMA IS HONOURED OR
+   IGNORED.  The subject is the packing region's push/pop LIFECYCLE, which is the property the
+   standard's own rules make checkable without naming a layout.  Three structures are declared
+   identically: one before the region, one inside it, one after the pop.
 
-   How that requirement is made observable.  A pragma whose name is reserved to this program
-   by construction sits between two structure declarations that are identical in every
-   respect.  An implementation obeying the requirement leaves their layout indistinguishable;
-   one that acted on a request it was required to discard changes one of them, and the size
-   and alignment equalities below fall to 0.  The equalities are printed rather than the
-   sizes themselves, so no implementation-defined layout value can reach the output: what is
-   asserted is that the two declarations agree, which every conforming implementation
-   guarantees whatever layout it chooses for them.
+     - If the implementation RECOGNISES the request, the inner structure may be laid out
+       differently, and the pop must restore the state the push saved, so the first and third
+       agree again.
+     - If the implementation IGNORES the request - which 6.10.6p1 permits for a pragma it does
+       not recognise - all three are laid out alike, so the first and third agree trivially.
 
-   The second pragma property, and why it needs no separate assertion of its own.  The
-   diagnostic-control pragma that brackets the unrecognisable one changes only which messages
-   the translator emits.  Standard error is captured into finding artifacts but never
-   compared, so recognising or ignoring it leaves every printed byte identical - which the
-   whole of this program's output attests, rather than one line of it.  It is present because
-   the audit gate is -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror,
-   under which an unknown pragma is an error rather than a note: suppressing that one
-   diagnostic FROM INSIDE, on the one line it applies to, and restoring the previous state
-   immediately afterwards is strictly better than asking this program's record for a relaxed
-   gate, because the gate then stays at full strength for this program as for every other.
+   Either way pack_size_restored and pack_align_restored are 1, and they fall to 0 only for an
+   implementation that honoured a push and failed to undo it at the pop, which is a real defect
+   under both readings.  pack_size_not_larger and pack_align_not_larger are 1 for the same
+   reason from the other side: packing may shrink a structure or leave it alone, and an
+   implementation that GREW one under a packing request is wrong however it read the request.
+   No size and no alignment is ever printed as an absolute value, so no implementation-defined
+   layout choice reaches the output.
+
+   THE OPERATOR SPELLING IS THE SECOND SUBJECT AND IS STANDARD C RATHER THAN AN EXTENSION.
+   C11 6.10.9 defines the _Pragma operator: it destringizes its argument and the result "is
+   then processed as if it were a #pragma directive".  The same push/pop region is therefore
+   written a second time with the operator, giving pragma_op_size_restored and
+   pragma_op_align_restored, and pragma_op_matches_directive asserts that the structure inside
+   the operator's region is laid out exactly as the one inside the directive's.  That last
+   relation is the one the operator uniquely buys: it holds under both readings above - both
+   regions honoured alike, or both ignored alike - and it fails only for an implementation
+   whose two spellings disagree, which no conforming implementation may do.  Destringization
+   is exercised as a side effect, since the operator's argument reaches the pragma handler
+   only after the string literal is taken apart.
+
+   The layout effect of PACKING ITSELF is still not asserted here, and is tested where its
+   authority is stronger: 08_gcc_extensions/005_attribute_packed_aligned.c exercises the packed
+   and aligned attributes, which the repository's own extension inventory does name as
+   supported.  This program asserts only relations, never a layout.
 
    Why the file-name macro needs the virtual-name technique.  The harness copies each
    program into its own per-cell workspace, so the real source path differs between cells
@@ -71,12 +89,12 @@
    FULL, byte for byte.  virtual_unit.c names no file, is never opened, and must never be
    created.
 
-   Why the whole virtual name is printed and not merely described.  An earlier form of this
-   program printed only the name's length and its first and last characters, and that is
-   exactly the shape of assertion that cannot fail usefully: any wrong spelling of the same
-   length beginning with v and ending with c - "virtual_uNit.c", "virtuaX_unit.c" - passed
-   every oracle in all twelve cells, so a defect in how the line directive's string literal
-   reaches the file-name macro was invisible.  The full name is safe to print precisely
+   Why the whole virtual name is printed and not merely described.  Printing only the name's
+   length and its first and last characters would be exactly the shape of assertion that
+   cannot fail usefully: any wrong spelling of the same length beginning with v and ending
+   with c - "virtual_uNit.c", "virtuaX_unit.c" - satisfies all three of those relations, so a
+   defect in how the line directive's string literal reaches the file-name macro would be
+   invisible in every cell.  The full name is safe to print precisely
    because it is a literal written above rather than a path the harness chose, so printing
    it whole costs nothing in determinism and closes the gap.  The length and endpoint
    relations are kept beside it: they are cheap, and each one localises a different kind of
@@ -91,7 +109,7 @@
    Determinism and hermeticity.  Every printed value is an int printed with %d or a string
    constant written in this source, so nothing target-varying, address-derived, time-derived,
    random or locale-dependent can reach stdout.  No structure size, alignment or member
-   offset is printed as an absolute value - only the equality of two of them - so an
+   offset is printed as an absolute value - only a relation between two of them - so an
    implementation's layout choices cannot be observed.  No plain-char value and no
    width-dependent value is printed.  No translation-date or translation-time macro is used,
    no library routine other than printf is called, no storage is allocated, and nothing
@@ -119,22 +137,46 @@ static int slen(const char *s)
     return n;
 }
 
-/* The two subjects of the unrecognised-pragma requirement: identical declarations that
-   straddle a pragma no implementation can recognise, because its name is reserved to this
-   program by construction.  C11 6.10.6p1 requires such a pragma to be ignored, so the two
-   must agree on size and on alignment whatever layout the implementation chooses for them. */
+/* The five subjects of the pragma assertions, all declared identically so that no absolute
+   layout value is needed to compare them.  LayoutBefore is declared outside every pragma
+   region and is the reference every relation below is stated against.  LayoutPacked is
+   declared inside a packing region opened with the DIRECTIVE spelling, LayoutAfterPop after
+   that region is closed, and LayoutPackedOp and LayoutAfterPopOp are the same pair for the
+   OPERATOR spelling.  Each structure holds one unsigned int between two unsigned char
+   members, which is the shape whose layout a packing request would visibly change. */
 struct LayoutBefore {
     unsigned char a;
     unsigned int b;
     unsigned char c;
 };
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunknown-pragmas"
-#pragma BCC_CONFORMANCE_UNRECOGNISED_PRAGMA_006 layout probe
-#pragma GCC diagnostic pop
+#pragma pack(push, 1)
+struct LayoutPacked {
+    unsigned char a;
+    unsigned int b;
+    unsigned char c;
+};
+#pragma pack(pop)
 
-struct LayoutAfter {
+struct LayoutAfterPop {
+    unsigned char a;
+    unsigned int b;
+    unsigned char c;
+};
+
+/* The same region, opened and closed with the C11 6.10.9 _Pragma operator instead of the
+   directive.  The operator destringizes its argument and the result "is then processed as if
+   it were a #pragma directive", so whatever an implementation does with the directive form it
+   must do with this one -- which is what pragma_op_matches_directive below asserts. */
+_Pragma("pack(push, 1)")
+struct LayoutPackedOp {
+    unsigned char a;
+    unsigned int b;
+    unsigned char c;
+};
+_Pragma("pack(pop)")
+
+struct LayoutAfterPopOp {
     unsigned char a;
     unsigned int b;
     unsigned char c;
@@ -147,15 +189,25 @@ int main(void)
 
     printf("line_delta=%d\n", second - first);
 
-    /* The unrecognised-pragma requirement, stated as two equalities so that no
-       implementation-defined layout value reaches the output.  Both are 1 under every
-       conforming implementation and each falls to 0 for its own failure: a discarded
-       pragma that nevertheless changed the following declaration's size, and one that
-       changed its alignment. */
-    printf("ignored_pragma_size_unchanged=%d\n",
-           (int)(sizeof(struct LayoutBefore) == sizeof(struct LayoutAfter)));
-    printf("ignored_pragma_align_unchanged=%d\n",
-           (int)(_Alignof(struct LayoutBefore) == _Alignof(struct LayoutAfter)));
+    /* Pragma acceptance and the push/pop lifecycle, stated as seven relations so that no
+       implementation-defined layout value reaches the output.  Every one is 1 whether the
+       implementation honours the packing request or discards it, and each falls to 0 for its
+       own distinct failure -- see the header comment for the case analysis. */
+    printf("pack_size_restored=%d\n",
+           (int)(sizeof(struct LayoutBefore) == sizeof(struct LayoutAfterPop)));
+    printf("pack_align_restored=%d\n",
+           (int)(_Alignof(struct LayoutBefore) == _Alignof(struct LayoutAfterPop)));
+    printf("pack_size_not_larger=%d\n",
+           (int)(sizeof(struct LayoutPacked) <= sizeof(struct LayoutBefore)));
+    printf("pack_align_not_larger=%d\n",
+           (int)(_Alignof(struct LayoutPacked) <= _Alignof(struct LayoutBefore)));
+    printf("pragma_op_size_restored=%d\n",
+           (int)(sizeof(struct LayoutBefore) == sizeof(struct LayoutAfterPopOp)));
+    printf("pragma_op_align_restored=%d\n",
+           (int)(_Alignof(struct LayoutBefore) == _Alignof(struct LayoutAfterPopOp)));
+    printf("pragma_op_matches_directive=%d\n",
+           (int)(sizeof(struct LayoutPacked) == sizeof(struct LayoutPackedOp)
+                 && _Alignof(struct LayoutPacked) == _Alignof(struct LayoutPackedOp)));
     printf("real_file_nonempty=%d\n", (int)(slen(__FILE__) > 0));
 #line 700
     printf("line_after_directive=%d\n", __LINE__);

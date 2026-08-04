@@ -109,9 +109,9 @@ use super::{
     stable_digest, ub_audit_gate_required, AreaSpec, CellKey, CompilerSide, DivergenceClass,
     HarnessError, HarnessResult, OptLevel, Oracle, Target, AREAS, BCC_TARGET_FLAG,
     BCC_TARGET_SELECTORS, CURATED_FINDINGS_DIR_NAME, DIFFERENTIAL_FLAGS_MINIMAL, DIGEST_HEX_DIGITS,
-    EXTENSION_AREA, MAX_INSPECTED_FILE_BYTES, SHARED_FLAGS_VERIFIED, UB_AUDIT_GATE_DEFAULT,
-    UB_AUDIT_GATE_MANDATORY, UB_AUDIT_GATE_REMOVABLE, UB_GATE_DEFAULT, UB_GATE_WITHOUT_CONVERSION,
-    UB_GATE_WITHOUT_PEDANTIC,
+    EXTENSION_AREA, MAX_INSPECTED_FILE_BYTES, PROGRAM_COUNT, SHARED_FLAGS_VERIFIED,
+    UB_AUDIT_GATE_DEFAULT, UB_AUDIT_GATE_MANDATORY, UB_AUDIT_GATE_REMOVABLE, UB_GATE_DEFAULT,
+    UB_GATE_WITHOUT_CONVERSION, UB_GATE_WITHOUT_PEDANTIC,
 };
 
 const HEREDOC_OPENER: &str = "<<";
@@ -269,19 +269,124 @@ const FLAGS_WITHOUT_EXECUTABLE: &[&str] = &["-c", "-S", "-E"];
 
 /// Largest expectation record the parser will read, in bytes.
 ///
-/// A record holds a small set of scalar fields, its written notes, and a golden stdout. Measured
-/// across all 108 records committed on this branch: the largest golden stdout is 2,974 bytes over
-/// 72 lines, in `14_abi_calling_convention/004_small_and_large_struct_passing.expected`; the largest
-/// heredoc of any field is 11,918 bytes over 135 lines — an `impl_defined_notes` block — and the
-/// largest whole record is 22,494 bytes, both in
-/// `02_constant_expressions/007_string_literal_constants.expected`. The largest of them is an order
-/// of magnitude below this bound, so the limit costs the corpus nothing while denying an adversarial
-/// or corrupt file the ability to exhaust memory. Every figure here is exact and dated to the
-/// committed corpus rather than given as an order of magnitude, which means it can go stale as prose
-/// is edited; re-measure with a pass over `tests/conformance/*/*.expected` before relying on one. The bound itself is deliberately far enough above them that a stale figure cannot make it
-/// wrong. The size is checked against the file's metadata *before* it is opened and enforced again on
-/// the reader, because a file can grow between the two.
+/// A record holds a small set of scalar fields, its written notes, and a golden stdout. The figures
+/// below are the observed maxima across the records committed on this branch, and the bound is set
+/// so far above them that the limit costs the corpus nothing while denying an adversarial or corrupt
+/// file the ability to exhaust memory. The size is checked against the file's metadata *before* it is
+/// opened and enforced again on the reader, because a file can grow between the two.
+///
+/// # The figures are measured on every run rather than maintained by hand
+///
+/// An earlier form of this comment stated its measurements as exact prose figures dated to the
+/// corpus, with a note asking the next reader to re-measure. They went stale exactly as that note
+/// predicted: expanding one `impl_defined_notes` block moved the largest record and the largest
+/// heredoc to a different file, and nothing noticed, because a comment cannot observe the tree it
+/// describes. So the numbers now live in [`RECORD_BYTES_OBSERVED_MAX`],
+/// [`FIELD_BYTES_OBSERVED_MAX`] and [`GOLDEN_BYTES_OBSERVED_MAX`], [`measure_corpus`] re-derives
+/// them from the tree on every run, and the pre-flight prints what it found beside what is declared
+/// here. A figure that drifts is therefore visible in the output of the next run rather than
+/// discovered by a reviewer, and the headroom claim above is asserted at compile time rather than
+/// asserted in prose.
 const RECORD_BYTES_MAX: u64 = 256 * 1024;
+
+/// Largest whole expectation record observed in the committed corpus, in bytes.
+///
+/// Measured across all 108 records, in `02_constant_expressions/004_sizeof_alignof.expected`. That
+/// record holds the largest whole file and the largest single field alike, and it is where the
+/// figure moves, because it is the record whose `impl_defined_notes` carries the most reasoning:
+/// what a `sizeof`/`_Alignof` program may assert about type widths is target-dependent, so the
+/// argument for every assertion it makes has to be written out per target.
+///
+/// Declared rather than merely written down: [`measure_corpus`] compares the tree against it, and
+/// [`CorpusInventory::volume_violations`] reports a record that has outgrown it. The value is
+/// **not** the enforced limit — [`RECORD_BYTES_MAX`] is — so a corpus that legitimately grows past
+/// this figure is a one-line edit here, not a defect.
+///
+/// The headroom this figure leaves against the compile-time assertion below is now the smallest of
+/// the three, at a few hundred bytes of `RECORD_BYTES_MAX / RECORD_HEADROOM_DIVISOR`. That is
+/// deliberate rather than overlooked: the next substantial addition to this record's notes will
+/// fail the build instead of silently eroding the headroom the comment on [`RECORD_BYTES_MAX`]
+/// claims, and the correct response then is to raise the bound and the divisor together, as a
+/// decision about the format rather than an accident of one record's prose.
+const RECORD_BYTES_OBSERVED_MAX: u64 = 32_240;
+
+/// Largest single heredoc field observed in the committed corpus, in bytes, and its line count.
+///
+/// An `impl_defined_notes` block of 20,093 bytes over 221 lines, in the same record as
+/// [`RECORD_BYTES_OBSERVED_MAX`]. Notes are the field that grows, because a note is where a program
+/// records why a comparison is sound — which is why this figure, and not the golden's, is the one
+/// that went stale first.
+const FIELD_BYTES_OBSERVED_MAX: usize = 20_093;
+
+/// Lines in the largest observed heredoc field, stated beside its byte count.
+const FIELD_LINES_OBSERVED_MAX: usize = 221;
+
+/// Largest golden stdout observed in the committed corpus, in bytes, and its line count.
+///
+/// 2,974 bytes over 72 lines, in
+/// `14_abi_calling_convention/004_small_and_large_struct_passing.expected`. Goldens are bounded by
+/// what a program prints, so this figure moves only when a program does.
+const GOLDEN_BYTES_OBSERVED_MAX: usize = 2_974;
+
+/// Lines in the largest observed golden stdout, stated beside its byte count.
+const GOLDEN_LINES_OBSERVED_MAX: usize = 72;
+
+/// Headroom the whole-record bound keeps over the largest observed record, as a divisor.
+///
+/// The comment on [`RECORD_BYTES_MAX`] claims the corpus sits an order of magnitude below the bound.
+/// This is that claim made checkable: the assertion below refuses to compile if the observed maximum
+/// rises past the bound divided by this factor, so the day the corpus grows enough to make the claim
+/// false is the day the build says so, rather than the day a reviewer notices the prose is wrong.
+/// Eight rather than ten because the factor has to divide cleanly into a power-of-two limit to mean
+/// anything precise, and eight is the nearest one that does.
+const RECORD_HEADROOM_DIVISOR: u64 = 8;
+
+/// Headroom the per-field bound keeps over the largest observed heredoc field, as a divisor.
+///
+/// Deliberately smaller than [`RECORD_HEADROOM_DIVISOR`], and the asymmetry is a fact about the
+/// format rather than a concession. One `impl_defined_notes` block is most of a record — the largest
+/// observed field is well over half the largest observed record — so a per-field bound cannot sit an
+/// order of magnitude above the observed value without also sitting above the whole-file bound, which
+/// would make it decorative. Two is what the format admits, and it is the whole-file bound that
+/// governs memory in any case: this one exists for the single shape the whole-file bound does not
+/// cover, a heredoc of individually acceptable lines accumulating into one enormous value.
+///
+/// Writing the factor down is the point. The relation between these numbers used to live only in a
+/// comment claiming "an order of magnitude" for all of them, which was true of the record bound and
+/// false of this one, and nothing could tell the difference.
+const FIELD_HEADROOM_DIVISOR: usize = 2;
+
+// The headroom claims, asserted at compile time. A `const` block rather than a runtime check because
+// nothing here depends on the tree: these are declared numbers, and the relations between them must
+// hold before a single record is read.
+const _: () = {
+    assert!(
+        RECORD_BYTES_OBSERVED_MAX <= RECORD_BYTES_MAX / RECORD_HEADROOM_DIVISOR,
+        "the largest observed record no longer sits an order of magnitude below RECORD_BYTES_MAX; \
+         raise the bound deliberately, or reduce the record, but do not leave the comment claiming \
+         headroom the numbers no longer have",
+    );
+    assert!(
+        FIELD_BYTES_OBSERVED_MAX <= FIELD_BYTES_MAX / FIELD_HEADROOM_DIVISOR,
+        "the largest observed heredoc field has grown past half of FIELD_BYTES_MAX, so the per-field \
+         bound no longer has room for a record the corpus could legitimately contain",
+    );
+    assert!(
+        RECORD_BYTES_OBSERVED_MAX >= FIELD_BYTES_OBSERVED_MAX as u64,
+        "a heredoc field larger than the largest whole record means one of the two figures was \
+         measured against a different corpus from the other",
+    );
+    assert!(
+        GOLDEN_BYTES_OBSERVED_MAX <= FIELD_BYTES_OBSERVED_MAX,
+        "a golden stdout larger than the largest observed heredoc field means one of the two \
+         figures was measured against a different corpus from the other",
+    );
+    assert!(
+        FIELD_LINES_OBSERVED_MAX <= HEREDOC_LINES_MAX / 2
+            && GOLDEN_LINES_OBSERVED_MAX <= HEREDOC_LINES_MAX / 2,
+        "an observed heredoc line count has approached HEREDOC_LINES_MAX",
+    );
+};
 
 /// Longest single line the parser accepts, in bytes.
 ///
@@ -355,6 +460,22 @@ const PLACEHOLDER_OUTPUT: &str = "<out>";
 /// Placeholder for the execution runner, which is empty on a natively executing target and the
 /// target's emulator otherwise.
 const PLACEHOLDER_RUNNER: &str = "<runner>";
+
+/// The only non-flag tokens a **build** template may carry after its driver.
+///
+/// A build line names four things the harness substitutes — the cell's target, its optimization
+/// level, the program source and the artifact path — and nothing else. The list is closed, and
+/// closing it is what makes [`build_template_literal_defect`] able to refuse a literal outright
+/// instead of guessing whether one is benign.
+///
+/// [`PLACEHOLDER_RUNNER`] is deliberately absent: a runner belongs to the run line, and a build
+/// line carrying one would describe a compiler invoked through an emulator.
+const BUILD_TEMPLATE_PLACEHOLDERS: &[&str] = &[
+    PLACEHOLDER_TRIPLE,
+    PLACEHOLDER_OPT,
+    PLACEHOLDER_SOURCE,
+    PLACEHOLDER_OUTPUT,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FieldKind {
@@ -458,9 +579,8 @@ const MARKER_KEYS: &[&str] = &[
 /// authority against the document's own bytes, and a captured observation records that somebody
 /// actually reproduced the divergence — and both are validated for shape whenever they are written.
 /// Neither is an ACCEPTANCE CONDITION, and that distinction is the whole point of separating the two
-/// lists: an earlier form of this module required both, and the consequence was that the two markers
-/// the project specification mandates could not be expressed at all. Optional enrichment that
-/// invalidates the frozen format is not enrichment.
+/// lists: requiring both would make the two markers the project specification mandates inexpressible.
+/// Optional enrichment that invalidates the frozen format is not enrichment.
 const OPTIONAL_MARKER_KEYS: &[&str] = &[KEY_MARKER_DOCUMENTED, KEY_MARKER_EVIDENCE];
 
 /// The sub-fields a captured observation must carry, each as a `name: value` line.
@@ -478,10 +598,10 @@ const EVIDENCE_FIELDS: &[&str] = &["command", "exit", "output", "toolchain", "ca
 
 // A NOTE ON OMISSION-BASED BASES, kept because the question recurs and the answer is settled.
 //
-// An earlier form of this module refused any basis whose wording rested on what a document does NOT
-// say — "the extension inventory omits case ranges" and anything shaped like it — on the reasoning
-// that an omission is compatible with the feature working, with it not working, and with nobody
-// having considered the question, so it authorises nothing while reading like authority.
+// A basis whose wording rests on what a document does NOT say — "the extension inventory omits case
+// ranges" and anything shaped like it — could be refused on the reasoning that an omission is
+// compatible with the feature working, with it not working, and with nobody having considered the
+// question, so it authorises nothing while reading like authority.
 //
 // That reasoning is sound as far as it goes, and it is nevertheless not this module's decision to
 // make. The project specification fixes the marker contract, and one of the two markers it mandates
@@ -792,9 +912,10 @@ fn require_field_within_size(origin: &Path, field: &RawField, key: &str) -> Harn
         key,
         format!(
             "the value is {} bytes, above the {FIELD_BYTES_MAX}-byte limit for a single field; \
-             the largest field in the committed corpus is an impl_defined_notes block of 11,918 \
-             bytes and the largest golden stdout is 2,589 bytes, so a value this large is a \
-             corrupt or adversarial record rather than one the corpus could contain",
+             the largest field observed in the committed corpus is an impl_defined_notes block of \
+             {FIELD_BYTES_OBSERVED_MAX} bytes and the largest golden stdout is \
+             {GOLDEN_BYTES_OBSERVED_MAX} bytes, so a value this large is a corrupt or adversarial \
+             record rather than one the corpus could contain",
             field.value.len()
         ),
     ))
@@ -3385,9 +3506,9 @@ fn require_marker_for_narrowed_oracle(
 ///
 /// # Why the ORACLE dimension is deliberately not checked the same way
 ///
-/// An earlier form of this function also refused a scope naming an oracle the record disables, on the
-/// reasoning that such a marker could never be consulted and so would be unfalsifiable. That
-/// reasoning had two defects, and together they inverted the requirement it was meant to serve.
+/// A scope naming an oracle the record disables could be refused too, on the reasoning that such a
+/// marker could never be consulted and so would be unfalsifiable. That reasoning has two defects, and
+/// together they invert the requirement it is meant to serve.
 ///
 /// It contradicted the frozen marker contract. One of the two markers the project specification
 /// mandates documents a type whose representation was measured to differ across the four backends,
@@ -3395,11 +3516,11 @@ fn require_marker_for_narrowed_oracle(
 /// the marker and the narrowing are two halves of one statement, and refusing their combination made
 /// the mandated marker inexpressible.
 ///
-/// And what replaced it was worse than what it refused. With the marker rejected, the narrowing was
-/// reported as an expected divergence justified by the record's own prose alone, so the register's
-/// bidirectional audit — every marker identifier resolved against a live marker and every live marker
-/// against a register entry — never saw it. A reasoned exclusion with a marker is auditable in one
-/// place; the same exclusion with no marker is auditable nowhere.
+/// And what refusing it leaves behind is worse than what it refuses. With the marker rejected, the
+/// narrowing would be reported as an expected divergence justified by the record's own prose alone, so
+/// the register's bidirectional audit — every marker identifier resolved against a live marker and
+/// every live marker against a register entry — would never see it. A reasoned exclusion with a marker
+/// is auditable in one place; the same exclusion with no marker is auditable nowhere.
 ///
 /// So a scope naming a disabled oracle is admitted, as a **narrowing marker**: it can never reach
 /// `XPASS`, because nothing is compared on that arm, and that is precisely why it is safe. What it
@@ -3573,8 +3694,8 @@ fn parse_basis(origin: &Path, raw: &RawField) -> HarnessResult<(String, PathBuf,
 /// seeing is what was marked.
 ///
 /// [`OPTIONAL_MARKER_KEYS`] may accompany them and are validated for shape whenever they appear.
-/// Neither gates a marker, deliberately: an earlier form of this module required both, and the
-/// consequence was that the two markers the specification mandates could not be expressed at all.
+/// Neither gates a marker, deliberately: requiring both would make the two markers the specification
+/// mandates inexpressible.
 ///
 /// # What this function refuses, and why refusing it here is the point
 ///
@@ -3734,8 +3855,8 @@ fn parse_marker(
     }))
 }
 
-// WHY A REFUSAL-CLASS MARKER IS NOT REQUIRED TO SCOPE EVERY ORACLE, recorded because an earlier form
-// of this module required exactly that and it was wrong.
+// WHY A REFUSAL-CLASS MARKER IS NOT REQUIRED TO SCOPE EVERY ORACLE, recorded because the opposite
+// rule is the tempting one and it is wrong.
 //
 // A compile or link failure produces no artifact, so there is nothing for ANY oracle to compare: the
 // reference comparison, the cross-backend comparison and the golden record are all denied their
@@ -4038,6 +4159,15 @@ fn validate_build_template(
             ));
         }
         if !token.starts_with('-') {
+            // Everything that is not a flag must be one of the four things a build line
+            // substitutes. Falling through here instead — which an earlier form of this function
+            // did — accepted any literal that merely avoided the shell characters and the leading
+            // dash, so a record could append a response-file reference, an absolute path, or a
+            // second translation unit to an otherwise canonical line. See
+            // [`build_template_literal_defect`] for why that mattered and for the diagnostic.
+            if let Some(defect) = build_template_literal_defect(token) {
+                return Err(key_error(origin, raw.line, key, defect));
+            }
             continue;
         }
         if extra_allowed_flags.contains(&token)
@@ -4082,6 +4212,85 @@ fn validate_build_template(
         }
     }
     Ok(())
+}
+
+/// Why one non-flag token of a build template is not something a build line may carry, if it is not.
+///
+/// `None` for each of the four spellings in [`BUILD_TEMPLATE_PLACEHOLDERS`], and `Some(diagnostic)`
+/// for every other non-flag token. The caller supplies the record and the line; this returns the
+/// explanation.
+///
+/// # The hole this closes, stated because the shape of it is easy to miss
+///
+/// [`require_shell_free_template`] refuses shell grammar, and the flag rules that follow it refuse an
+/// undeclared flag. Between them sat a token that is neither: a literal with no shell character in it
+/// that does not begin with `-`. `@/tmp/somewhere.rsp` is the sharpest example, because a compiler
+/// driver reads it as a **response file** and takes further arguments from a path the record chose;
+/// `/etc/passwd` and `extra.c` are the duller ones, a second input the line was never meant to carry.
+/// None of them was refused, so a record could append one to an otherwise canonical build line and
+/// still load.
+///
+/// Loading was the whole of the damage, and it was enough. The assembled invocation is
+/// cross-checked against the template before anything is spawned, so no such token is ever executed
+/// — but a record that loads is a record the suite **publishes**: it is copied verbatim into a
+/// finding directory as `reproducer.expected` and presented as the reproduction recipe, and its
+/// templates are what requirement 4 promises a maintainer can render by hand with no harness at all.
+/// A recipe a maintainer is invited to paste is exactly the wrong place to rely on a later check that
+/// only the harness performs. So the token is refused where the record is admitted, and
+/// [`Finding::new`] asks this same function again immediately before it publishes a record, so the
+/// admission rule and the publication rule cannot drift apart.
+///
+/// # Why an allow-list rather than a list of dangerous spellings
+///
+/// A build line substitutes exactly four things and needs no fifth, so the set of acceptable literals
+/// is closed and can be stated. A deny-list would have to anticipate every driver's own argument
+/// grammar — response files, `--` handling, per-driver prefixes — and would be wrong the first time a
+/// driver grew one.
+fn build_template_literal_defect(token: &str) -> Option<String> {
+    if BUILD_TEMPLATE_PLACEHOLDERS.contains(&token) {
+        return None;
+    }
+    let role = if token.starts_with('@') {
+        "a compiler driver reads a leading `@` as a response file and takes further arguments from \
+         the path after it, so this token would let the record choose arguments that appear in no \
+         template"
+    } else if token.contains('/') {
+        "this token is a path, and a build line takes its source and its output from the \
+         placeholders alone"
+    } else {
+        "this token is a bare literal, and a build line carries nothing besides its driver, its \
+         flags and the four placeholders"
+    };
+    Some(format!(
+        "the template carries the literal token {token:?}, which is not one of the four \
+         substitutions a build line may name: {role}. A build line is `<driver> [flags] {} {} {} \
+         {}` and nothing else — the assembled invocation is cross-checked against this template \
+         before anything is spawned, so an extra token could not be executed, but a record that \
+         loads is a record this suite publishes verbatim as a finding's reproduction recipe, and a \
+         recipe a maintainer is invited to paste must not carry an argument the run never made. \
+         Write only: {}",
+        PLACEHOLDER_TRIPLE,
+        PLACEHOLDER_OPT,
+        PLACEHOLDER_SOURCE,
+        PLACEHOLDER_OUTPUT,
+        comma_separated(BUILD_TEMPLATE_PLACEHOLDERS)
+    ))
+}
+
+/// Every reason a build template could not be published as a reproduction recipe, in template order.
+///
+/// The publication-time half of [`build_template_literal_defect`]. It re-asks the admission question
+/// of a record that is already loaded, at the moment the record is about to be copied into a finding
+/// directory and offered to a maintainer as an exact command. Asking the same function rather than
+/// restating its rule is deliberate: a parser rule and a publication rule that are two pieces of code
+/// are two rules, and the moment they disagree one of them is not enforced.
+pub fn build_template_publication_defects(template: &str) -> Vec<String> {
+    whitespace_items(template)
+        .into_iter()
+        .skip(1)
+        .filter(|token| !token.starts_with('-'))
+        .filter_map(build_template_literal_defect)
+        .collect()
 }
 
 /// True when a token selects the reference-compiler driver for the cell's own target.
@@ -5003,9 +5212,9 @@ fn read_record_text(path: &Path) -> HarnessResult<String> {
             context,
             format!(
                 "the record is {} bytes, above the {RECORD_BYTES_MAX}-byte limit; the largest \
-                 record in the committed corpus is 22,494 bytes, so a file this large is corrupt \
-                 or adversarial rather than one the corpus could contain, and reading it would \
-                 let a data file decide how much memory the suite uses",
+                 record observed in the committed corpus is {RECORD_BYTES_OBSERVED_MAX} bytes, so a \
+                 file this large is corrupt or adversarial rather than one the corpus could \
+                 contain, and reading it would let a data file decide how much memory the suite uses",
                 metadata.len()
             ),
         ));
@@ -5481,45 +5690,365 @@ fn corpus_relative_name(path: &Path) -> String {
     }
 }
 
-/// Every expected-divergence marker in the corpus, in area order and then file order.
+/// What the corpus holds **right now**, measured from the tree rather than declared in prose.
 ///
-/// This is the corpus side of the register consistency loop. The infrastructure test that audits
-/// the register consumes this enumeration to assert, in both directions, that every marker
-/// identifier appears in the committed register and that every register entry corresponds to a
-/// real marker, and to assert that every cited basis names a document that actually exists —
-/// which is what stops the marker set from decaying into stale documentation. The assertions are
-/// the driver's; the enumeration and the resolvable basis path are this module's.
+/// # Why a measurement and not a constant
 ///
-/// A duplicate identifier is a hard error. Two markers sharing a name would make the register
-/// cross-check ambiguous in one direction and satisfiable by the wrong program in the other, so
-/// the duplicate is reported with both owning programs named.
+/// [`PROGRAM_COUNT`] is the corpus the plan calls for. It is not evidence that the corpus is
+/// complete, and the two were being conflated: a pre-flight that printed only the declared count
+/// read as a statement about the tree, while the tree was one record short of it, and a comment that
+/// named the largest record by path went stale the first time a different record outgrew it. Both
+/// failures have the same shape — a number that describes the corpus, maintained somewhere that
+/// cannot observe the corpus.
+///
+/// So this type carries four counts that are deliberately kept apart, because they answer four
+/// different questions and only the last two are evidence about anything:
+///
+/// - **planned** — [`PROGRAM_COUNT`], the corpus the plan calls for.
+/// - **sources** — the `.c` programs discovery actually found.
+/// - **records** — how many of those sources have a sibling record that *parses*. This is the
+///   completed corpus: a program without a readable record cannot be built, run, compared, or
+///   audited, so counting it as present would overstate the matrix by twelve cells and its oracle
+///   rows.
+/// - **pending** — the sources whose record is absent or unreadable, named individually with the
+///   reason. This is never a skip: every consumer treats a pending record as the defect it is, and
+///   naming them here is what keeps a shortfall visible instead of arriving as a smaller total that
+///   looks like a clean run.
+///
+/// The three volume figures are the same idea applied to the parser's bounds: they are re-derived
+/// here on every run so that [`RECORD_BYTES_OBSERVED_MAX`], [`FIELD_BYTES_OBSERVED_MAX`] and
+/// [`GOLDEN_BYTES_OBSERVED_MAX`] can be checked against the tree rather than trusted.
+#[derive(Debug)]
+pub struct CorpusInventory {
+    sources: usize,
+    records: usize,
+    pending: Vec<String>,
+    markers: Vec<ExpectedDivergence>,
+    marker_defects: Vec<String>,
+    largest_record: Option<(String, u64)>,
+    largest_field: Option<(String, &'static str, usize, usize)>,
+    largest_golden: Option<(String, usize, usize)>,
+}
+
+impl CorpusInventory {
+    /// The corpus the plan calls for, which is [`PROGRAM_COUNT`] and never a measurement.
+    pub fn planned(&self) -> usize {
+        PROGRAM_COUNT
+    }
+
+    /// The programs whose sibling record parses — the completed corpus, and the only count an audit
+    /// over records may describe itself as covering.
+    pub fn records(&self) -> usize {
+        self.records
+    }
+
+    /// The programs whose record is absent or unreadable, each named with its reason.
+    pub fn pending(&self) -> &[String] {
+        &self.pending
+    }
+
+    /// Every expected-divergence marker found in a record that parsed, in area then file order.
+    ///
+    /// This is the corpus side of the register consistency loop requirement 5 rests on: the audit
+    /// asserts in both directions that every identifier here appears in the committed register and
+    /// that every register entry corresponds to one of these, and that every cited basis names a
+    /// document that exists. The enumeration deliberately covers the records that PARSE rather than
+    /// the programs that exist, which is why [`CorpusInventory::pending`] must be consulted beside
+    /// it — a marker in a record nobody can read is invisible here, and an audit that did not say so
+    /// would report a complete check it had not performed.
+    pub fn markers(&self) -> &[ExpectedDivergence] {
+        &self.markers
+    }
+
+    /// Defects in the marker set itself, independent of the register: today, duplicate identifiers.
+    pub fn marker_defects(&self) -> &[String] {
+        &self.marker_defects
+    }
+
+    /// Whether every planned program is present and carries a readable record.
+    ///
+    /// The predicate an audit uses to decide whether it may call its own coverage complete. It is
+    /// three conditions rather than one because each fails differently: a source missing from the
+    /// tree, a record that will not parse, and a corpus larger than the plan all mean something
+    /// different to a maintainer, and the renderer names whichever applies.
+    pub fn is_complete(&self) -> bool {
+        self.pending.is_empty() && self.sources == PROGRAM_COUNT && self.records == PROGRAM_COUNT
+    }
+
+    /// One sentence stating how much of the corpus a record-reading audit actually covered.
+    ///
+    /// Written for an audit to append to its own summary line, so that "N markers in the corpus" can
+    /// never again be read as "N markers in the corpus of 108 programs" when fewer than 108 records
+    /// could be read. The complete case says so explicitly rather than saying nothing, because
+    /// silence there would leave a reader unable to tell a complete audit from one that forgot to
+    /// mention its own limits.
+    pub fn coverage_sentence(&self) -> String {
+        if self.is_complete() {
+            return format!(
+                "read from all {} expectation record(s) of the {PROGRAM_COUNT} the plan calls for, \
+                 so this inventory covers the whole corpus",
+                self.records,
+            );
+        }
+        format!(
+            "read from the {} expectation record(s) that parse, out of {} source(s) discovered and \
+             {PROGRAM_COUNT} program(s) planned — {} record(s) could not be read, so a marker \
+             carried by one of them is NOT in this inventory and this audit does not claim to cover \
+             the whole corpus",
+            self.records,
+            self.sources,
+            self.pending.len(),
+        )
+    }
+
+    /// The reconciliation, rendered for a pre-flight or an audit to print verbatim.
+    ///
+    /// Every line states a count and what the count is *of*, because the failure this replaces was
+    /// not a wrong number — it was a right number read as an answer to a different question.
+    pub fn render(&self) -> String {
+        let mut text = String::from("corpus inventory — measured from the tree on this run\n");
+        text.push_str(&format!(
+            "  programs planned:  {} (the corpus the plan calls for; a constant, not a measurement)\n",
+            PROGRAM_COUNT,
+        ));
+        text.push_str(&format!(
+            "  sources found:     {} `.c` program(s) discovered across {} feature area(s)\n",
+            self.sources,
+            AREAS.len(),
+        ));
+        text.push_str(&format!(
+            "  records readable:  {} — the completed corpus, since a program is runnable only once \
+             its own `.expected` record parses\n",
+            self.records,
+        ));
+        text.push_str(&format!(
+            "  records pending:   {}{}\n",
+            self.pending.len(),
+            if self.pending.is_empty() {
+                " — every discovered program carries a readable record"
+            } else {
+                " — each named below; a pending record is a corpus defect, never a skip"
+            },
+        ));
+        for entry in &self.pending {
+            text.push_str(&format!("    - {entry}\n"));
+        }
+        if self.sources != PROGRAM_COUNT {
+            text.push_str(&format!(
+                "  NOTE:              {} source(s) found against {PROGRAM_COUNT} planned; the \
+                 matrix this run can sweep is smaller than the declared one and every total below \
+                 is bounded by what was found\n",
+                self.sources,
+            ));
+        }
+        text.push_str(
+            "  record volume, re-derived here so the declared figures cannot go stale:\n",
+        );
+        match &self.largest_record {
+            Some((program, bytes)) => text.push_str(&format!(
+                "    largest record:  {bytes} byte(s) in {program} (declared \
+                 {RECORD_BYTES_OBSERVED_MAX}, enforced limit {RECORD_BYTES_MAX})\n"
+            )),
+            None => text.push_str("    largest record:  none measured, because no record parsed\n"),
+        }
+        match &self.largest_field {
+            Some((program, key, bytes, lines)) => text.push_str(&format!(
+                "    largest field:   {bytes} byte(s) over {lines} line(s), `{key}` in {program} \
+                 (declared {FIELD_BYTES_OBSERVED_MAX} over {FIELD_LINES_OBSERVED_MAX}, enforced \
+                 limit {FIELD_BYTES_MAX})\n"
+            )),
+            None => text.push_str("    largest field:   none measured, because no record parsed\n"),
+        }
+        match &self.largest_golden {
+            Some((program, bytes, lines)) => text.push_str(&format!(
+                "    largest golden:  {bytes} byte(s) over {lines} line(s) in {program} (declared \
+                 {GOLDEN_BYTES_OBSERVED_MAX} over {GOLDEN_LINES_OBSERVED_MAX})\n"
+            )),
+            None => text.push_str("    largest golden:  none measured, because no record parsed\n"),
+        }
+        text
+    }
+
+    /// Where the tree has outgrown the volume figures declared in this module.
+    ///
+    /// Returned rather than asserted, so a caller decides whether an outgrown figure fails the run
+    /// or is merely reported. Each violation names the constant to raise and says plainly that the
+    /// enforced limit is a different number, because the correct response to legitimate corpus
+    /// growth is a one-line edit here and not a weakened bound.
+    pub fn volume_violations(&self) -> Vec<String> {
+        let mut violations: Vec<String> = Vec::new();
+        if let Some((program, bytes)) = &self.largest_record {
+            if *bytes > RECORD_BYTES_OBSERVED_MAX {
+                violations.push(format!(
+                    "the largest record is now {bytes} bytes, in {program}, above the declared \
+                     observed maximum of {RECORD_BYTES_OBSERVED_MAX}. Raise \
+                     RECORD_BYTES_OBSERVED_MAX in manifest.rs to the measured value: it documents \
+                     what the corpus holds, and the enforced limit is RECORD_BYTES_MAX \
+                     ({RECORD_BYTES_MAX}), which is unaffected"
+                ));
+            }
+        }
+        if let Some((program, key, bytes, lines)) = &self.largest_field {
+            if *bytes > FIELD_BYTES_OBSERVED_MAX || *lines > FIELD_LINES_OBSERVED_MAX {
+                violations.push(format!(
+                    "the largest heredoc field is now {bytes} bytes over {lines} lines, `{key}` in \
+                     {program}, above the declared observed maximum of \
+                     {FIELD_BYTES_OBSERVED_MAX} bytes over {FIELD_LINES_OBSERVED_MAX} lines. Raise \
+                     FIELD_BYTES_OBSERVED_MAX and FIELD_LINES_OBSERVED_MAX in manifest.rs; the \
+                     enforced limit is FIELD_BYTES_MAX ({FIELD_BYTES_MAX}), which is unaffected"
+                ));
+            }
+        }
+        if let Some((program, bytes, lines)) = &self.largest_golden {
+            if *bytes > GOLDEN_BYTES_OBSERVED_MAX || *lines > GOLDEN_LINES_OBSERVED_MAX {
+                violations.push(format!(
+                    "the largest golden stdout is now {bytes} bytes over {lines} lines, in \
+                     {program}, above the declared observed maximum of \
+                     {GOLDEN_BYTES_OBSERVED_MAX} bytes over {GOLDEN_LINES_OBSERVED_MAX} lines. \
+                     Raise GOLDEN_BYTES_OBSERVED_MAX and GOLDEN_LINES_OBSERVED_MAX in manifest.rs"
+                ));
+            }
+        }
+        violations
+    }
+}
+
+/// Measure the corpus: how much of the plan is present, and how large its records actually are.
+///
+/// Discovery itself still fails hard, because an absent or empty feature area is a corpus defect no
+/// count can describe. What this function tolerates — and reports rather than swallows — is the one
+/// shape a partially completed corpus takes: a program whose sibling record is missing or does not
+/// parse. Those are collected into [`CorpusInventory::pending`] with their reasons instead of
+/// aborting on the first, so a caller can state how much of the corpus it actually read before
+/// deciding anything, and so a maintainer completing the corpus sees every outstanding record in one
+/// pass rather than one per run.
 ///
 /// # Errors
 ///
-/// Fails on a duplicate marker identifier, and on every rejection [`discover_all`] and
-/// [`load_for_source`] document — because enumerating the markers means loading every record in
-/// the corpus, a defect in any one of them surfaces here rather than being stepped over.
-pub fn all_markers() -> HarnessResult<Vec<ExpectedDivergence>> {
-    let mut markers: Vec<ExpectedDivergence> = Vec::new();
-    for program in discover_all()? {
-        let manifest = load_for_source(&program)?;
-        if let Some(marker) = manifest.marker() {
-            if let Some(previous) = markers.iter().find(|known| known.id == marker.id) {
-                return Err(HarnessError::new(
-                    "enumerating the corpus expected-divergence markers",
-                    format!(
-                        "the identifier {:?} is used by both {} and {}; identifiers are unique \
-                         across the corpus, because the register cross-check matches markers by \
-                         identifier in both directions and a duplicate would make one direction \
-                         ambiguous and the other satisfiable by the wrong program",
-                        marker.id,
-                        previous.program_label(),
-                        marker.program_label()
-                    ),
-                ));
+/// Every rejection [`discover_all`] documents, for whichever feature area fails first.
+pub fn measure_corpus() -> HarnessResult<CorpusInventory> {
+    let sources = discover_all()?;
+    let mut inventory = CorpusInventory {
+        sources: sources.len(),
+        records: 0,
+        pending: Vec::new(),
+        markers: Vec::new(),
+        marker_defects: Vec::new(),
+        largest_record: None,
+        largest_field: None,
+        largest_golden: None,
+    };
+    for source in &sources {
+        let manifest = match load_for_source(source) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                inventory
+                    .pending
+                    .push(format!("{} — {error}", source_label(source)));
+                continue;
             }
-            markers.push(marker.clone());
+        };
+        inventory.records += 1;
+        let label = format!("{}/{}", manifest.area(), manifest.program());
+
+        // The corpus side of requirement 5's bidirectional register check, collected here because
+        // this pass already holds every parsed record and a second pass over the corpus could only
+        // disagree with this one. A duplicate identifier is recorded as a defect rather than aborting
+        // the measurement: two markers sharing a name make the register cross-check ambiguous in one
+        // direction and satisfiable by the wrong program in the other, which is a violation the audit
+        // must report alongside everything else it found, not a reason to stop looking.
+        if let Some(marker) = manifest.marker() {
+            match inventory
+                .markers
+                .iter()
+                .find(|known| known.id() == marker.id())
+            {
+                Some(previous) => inventory.marker_defects.push(format!(
+                    "the marker identifier {:?} is used by both {} and {}; identifiers are unique \
+                     across the corpus, because the register cross-check matches markers by \
+                     identifier in both directions and a duplicate would make one direction \
+                     ambiguous and the other satisfiable by the wrong program",
+                    marker.id(),
+                    previous.program_label(),
+                    marker.program_label(),
+                )),
+                None => inventory.markers.push(marker.clone()),
+            }
+        }
+
+        // The record's own size on disk, which is what `RECORD_BYTES_MAX` is checked against. Read
+        // from metadata rather than from the parsed fields, because the two differ by the comments,
+        // the keys and the heredoc delimiters, and it is the file the bound governs.
+        if let Ok(metadata) = fs::metadata(manifest.path()) {
+            let bytes = metadata.len();
+            let exceeds = match &inventory.largest_record {
+                Some((_, known)) => bytes > *known,
+                None => true,
+            };
+            if exceeds {
+                inventory.largest_record = Some((label.clone(), bytes));
+            }
+        }
+
+        // Every field that can arrive as a heredoc, which is where the volume is. A scalar cannot
+        // exceed one line by construction, so measuring them would add noise and no information.
+        let mut fields: Vec<(&'static str, &str)> = vec![
+            ("ub_notes", manifest.ub_notes()),
+            ("expected_stdout", manifest.expected_stdout()),
+        ];
+        if let Some(notes) = manifest.impl_defined_notes() {
+            fields.push(("impl_defined_notes", notes));
+        }
+        if let Some(marker) = manifest.marker() {
+            fields.push((KEY_MARKER_DOCUMENTED, marker.documented()));
+            fields.push((KEY_MARKER_EVIDENCE, marker.evidence()));
+            fields.push((KEY_MARKER_OBSERVED, marker.observed()));
+        }
+        for (key, value) in fields {
+            let bytes = value.len();
+            let exceeds = match &inventory.largest_field {
+                Some((_, _, known, _)) => bytes > *known,
+                None => true,
+            };
+            if exceeds {
+                inventory.largest_field = Some((label.clone(), key, bytes, value_lines(value)));
+            }
+        }
+
+        let golden = manifest.expected_stdout();
+        let bytes = golden.len();
+        let exceeds = match &inventory.largest_golden {
+            Some((_, known, _)) => bytes > *known,
+            None => true,
+        };
+        if exceeds {
+            inventory.largest_golden = Some((label.clone(), bytes, value_lines(golden)));
         }
     }
-    Ok(markers)
+    Ok(inventory)
+}
+
+/// Lines in a parsed heredoc value.
+///
+/// Counted as newlines rather than by splitting, because the format appends a newline to every body
+/// line, so the two are the same number and counting is the cheaper of the two ways to say it.
+fn value_lines(value: &str) -> usize {
+    value.bytes().filter(|byte| *byte == b'\n').count()
+}
+
+/// `<area>/<program>` for a corpus source, derived from its path.
+///
+/// Used only where the record could **not** be parsed, so the label cannot come from the record's own
+/// declared identity. Falls back to the whole shown path rather than to an empty string, because a
+/// diagnostic about an unreadable record has to name something a maintainer can open.
+fn source_label(source: &Path) -> String {
+    let stem = source.file_stem().and_then(|stem| stem.to_str());
+    let area = source
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str());
+    match (area, stem) {
+        (Some(area), Some(stem)) => format!("{area}/{stem}"),
+        _ => shown_path(source),
+    }
 }

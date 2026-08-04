@@ -15,9 +15,9 @@
  * a genuine FINDING and no expected-divergence marker belongs to this program.
  *
  * Self-containment: no header is included at all.  bcc bundles only the nine required
- * freestanding headers and ships no <stdio.h> - a grep for "stdio" across docs/ returns
- * zero matches - so including <stdio.h> would succeed under the reference compiler and
- * fail under bcc, a spurious divergence caused by the test rather than by the compiler.
+ * freestanding headers and ships no <stdio.h>, so including <stdio.h> would succeed under
+ * the reference compiler and fail under bcc, a spurious divergence caused by the test
+ * rather than by the compiler.
  * printf is hand-declared instead.  The one sanctioned header exception in this area is
  * program 003, the dedicated bundled-header probe, and this is not it.
  *
@@ -56,10 +56,9 @@
  *     for.  The sibling record 002_conditional_compilation.expected acts on exactly that
  *     reasoning: it narrows no target and disables no oracle - all four targets, all three
  *     optimization levels and all three oracles - and this comment is the reason why.  Its
- *     golden stdout was measured on this branch and is byte-identical across all twelve
- *     cells.  What no cell of this program has yet done is resolve a VERDICT, and the
- *     reason is not the record: there is no compiler under test on this branch, so the
- *     flag-capability probe is recorded UNPERFORMED and blocks every area unconditionally.
+ *     golden stdout is byte-identical across all twelve cells, which is what lets oracle (b)
+ *     compare the four backends against each other with no narrowing and lets oracle (c)
+ *     hold those bytes as the record.
  */
 
 int printf(const char *, ...);

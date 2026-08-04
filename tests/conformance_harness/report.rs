@@ -1399,8 +1399,10 @@ fn md_code(raw: &str) -> String {
 /// continuous-integration workspace or an agent clone in every row disclosed the run's own location
 /// without telling a reader anything they could act on.
 ///
-/// [`reproduce_command`] is the deliberate exception and states its own reason: a line a reader is
-/// told to paste has to name the directory exactly.
+/// There is no exception left. [`reproduce_command`] was one, on the reasoning that a line a reader is
+/// told to paste has to name the directory exactly; it renders through this same elision now, because
+/// a report is uploaded and one substitution by its reader is a smaller cost than disclosing where the
+/// run happened. Its own documentation carries the argument.
 fn md_path(path: &Path) -> String {
     md_code(&shown_path(path))
 }
@@ -3588,10 +3590,10 @@ fn finding_artifact_defect(directory: &Path) -> Option<String> {
 /// # Why the whole rendered state goes through [`table_cell`]
 ///
 /// Those words are not this module's. A defect sentence quotes what was found on disk — an entry name,
-/// a manifest line, an operating-system error — and an earlier form of this function formatted it
-/// straight into a Markdown table cell. Any vertical bar in it would then have ended the cell early
-/// and shifted every value after it into the wrong column, which is the table equivalent of forging a
-/// field; a bracket or an angle bracket could restructure the document around it. The bound
+/// a manifest line, an operating-system error — and formatting it straight into a Markdown table cell
+/// would let any vertical bar in it end the cell early and shift every value after it into the wrong
+/// column, which is the table equivalent of forging a field; a bracket or an angle bracket could
+/// restructure the document around it. The bound
 /// [`table_cell`] applies matters as much: a defect that enumerated a large directory would otherwise
 /// widen one row past anything a reader can scan.
 ///
@@ -3654,24 +3656,36 @@ fn finding_artifact_shortfalls(rows: &[Row]) -> Vec<String> {
 
 /// The command that reproduces a finding with no harness, no Cargo and no Rust toolchain.
 ///
-/// The one path rendering in this module that is **not** [`shown_path`], and deliberately so: this
-/// string is a command line a reader is expected to paste into a shell, so it has to name the
-/// directory exactly. [`posix_quote`] wraps it in single quotes, under which every byte — including
-/// one [`shown_path`] would have replaced by a visible escape — is passed through literally and no
-/// character is special to the shell. The result is only ever rendered through [`md_code`], which is
-/// what makes it inert in the document, so the safety of the report does not depend on this
-/// function's output being safe on a line.
+/// Rendered through [`shown_path`] like every other path in this module, so the build root appears as
+/// its token rather than as an absolute location. A reader substitutes their own build directory for
+/// the token — which they know, because it is theirs — and the line then runs verbatim.
 ///
-/// This is therefore also the one place an area report still states an absolute location, and the
-/// trade is made knowingly: a per-run report lives beneath the build directory and is not committed,
-/// while a command that has been elided is a command that does not run. The committed side of the same
-/// question is answered the other way — `findings::curated_finding_defects` refuses to let a curated
-/// artifact carry an absolute checkout path at all, and `commands.sh` parameterizes every tool path as
-/// a shell variable for exactly that reason.
+/// # Why this is elided rather than exact, having once been the other way round
+///
+/// An earlier form of this function was the module's one deliberate exception: it emitted the
+/// absolute path on the reasoning that a command a reader pastes has to name the directory exactly,
+/// and that a per-run report under the build directory is never committed. The second half of that is
+/// true and the first half does not follow from it. A per-run report is **uploaded** — the continuous
+/// integration job publishes the whole report tree as a build artifact, which is the point of writing
+/// it — so this line travelled to wherever those artifacts are read, carrying the absolute location of
+/// a package root that names the machine and the account that built it: a continuous-integration
+/// workspace identifier, an agent clone directory, a maintainer's home. That is the disclosure
+/// [`shown_path`] exists to prevent, and the sibling column of the very same table was already
+/// eliding it, so the row disclosed through one cell what it withheld in another.
+///
+/// What is given up is one substitution by the reader, and nothing else: the directory beneath the
+/// token, the script's name and every argument are unchanged. Exactness where it cannot be
+/// substituted for is preserved elsewhere and deliberately — `commands.sh` itself carries the true,
+/// unelided values for everything it executes, and `findings::curated_finding_defects` refuses to let
+/// a **committed** artifact carry an absolute checkout path at all.
+///
+/// [`posix_quote`] still wraps the result, so the whole path is one shell word and no character in it
+/// is special, and it is only ever rendered through [`md_code`], which is what makes it inert in the
+/// document. Neither of those depends on which spelling of the path is used.
 fn reproduce_command(directory: &Path) -> String {
     format!(
         "sh {}",
-        posix_quote(&directory.join(COMMANDS_NAME).display().to_string())
+        posix_quote(&shown_path(&directory.join(COMMANDS_NAME)))
     )
 }
 
@@ -3929,13 +3943,13 @@ fn render_coverage_reasons(coverage: &Coverage) -> Vec<String> {
 /// has no builder that produces an `XFail` with no identifier — a narrowing no marker names is
 /// [`Verdict::Fail`] there, and the record parser refuses to load such a record in the first place.
 ///
-/// An earlier form of this report separated marker-less `XFail` rows into a "documented by the
-/// record's own recorded reason" group and presented them as legitimate expected divergences. That
-/// was the reporting half of the same defect: a reasoned exclusion is worth reporting, but it was
-/// being *counted as an expected divergence* while carrying no identifier a row could cite, no
-/// entry the bidirectional register audit could find, and no basis resolved against any document.
+/// Separating marker-less `XFail` rows into a "documented by the record's own recorded reason" group
+/// and presenting them as legitimate expected divergences would be the reporting half of the same
+/// defect: a reasoned exclusion is worth reporting, but it would then be *counted as an expected
+/// divergence* while carrying no identifier a row could cite, no entry the bidirectional register
+/// audit could find, and no basis resolved against any document.
 ///
-/// So a marker-less `XFail` is now reported for what it is: an outcome claiming the authority of a
+/// So a marker-less `XFail` is reported for what it is: an outcome claiming the authority of a
 /// documented limitation while naming none. It is listed with a warning naming the remedy, and it
 /// is never presented as an expected divergence. Nothing about the *reporting* of reasoned
 /// narrowings is lost — the recorded-exclusions table later in the summary lists every one of them

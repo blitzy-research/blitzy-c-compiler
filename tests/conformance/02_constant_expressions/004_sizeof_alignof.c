@@ -73,9 +73,13 @@
  * ten files in all (docs/project-guide.md line 212).  _Alignof is a C11 keyword and
  * needs none; stdalign.h would only supply the lowercase alignof macro.  stddef.h
  * and stdint.h are absent too, so size_t, ptrdiff_t and intptr_t cannot be named
- * here at all -- their widths are probed without naming them, since sizeof yields a
- * size_t (making sizeof(sizeof(int)) size_t's own width) and a pointer difference
- * yields a ptrdiff_t.
+ * here at all.  The first two are still probed WITHOUT being named, because the
+ * language hands them over anonymously: sizeof yields a size_t, making
+ * sizeof(sizeof(int)) size_t's own width, and a pointer difference yields a
+ * ptrdiff_t.  intptr_t has no such anonymous route -- there is no operator that
+ * produces one -- so it is NOT probed and NOT covered, here or anywhere in the
+ * corpus.  That exclusion, and why the pointer-width lines below do not stand in
+ * for it, is stated in this program's expectation record.
  *
  * Nothing implementation-defined reaches stdout: no address, no pointer value, no
  * plain long and no plain-char signedness-dependent value is printed, every
@@ -97,15 +101,37 @@
 
 int printf(const char *, ...);
 
-/* The single target-keyed number this program needs, keyed to the ARCHITECTURE
- * rather than to a width macro such as __SIZEOF_POINTER__ on purpose: the
+/* The single target-keyed number this program needs.  The preferred key is the
+ * ARCHITECTURE rather than a width macro such as __SIZEOF_POINTER__, because the
  * architecture is a categorical fact the harness fixes when it selects the cell's
- * target, whereas a width macro is a numeric claim by the compiler under test, and
- * checking that claim against itself would be circular.
+ * target, whereas a width macro is a numeric claim by the compiler under test --
+ * so keying on the architecture makes ptr_width_exact an INDEPENDENT check, while
+ * keying on the width macro would only check the compiler's claim against itself.
  *
- * The #else is a hard stop rather than a fallback: a compiler predefining none of
- * these macros cannot be given an exact expectation, and quietly falling back to a
- * permissive one would turn rule 4 above into a comment. */
+ * THE FALLBACK ARMS ARE DELIBERATE AND THEIR EFFECT IS DISCLOSED RATHER THAN
+ * HIDDEN.  Neither C nor anything this repository documents obliges an
+ * implementation to predefine __x86_64__, __i386__, __aarch64__ or __riscv: they
+ * are spellings of a particular compiler FAMILY.  A conforming compiler that names
+ * its target some other way is not defective, so its silence must not be turned
+ * into a defect -- and an #else that refused to translate would do exactly that,
+ * converting a naming difference the suite has no authority over into a compile
+ * failure reported against the compiler under test.  The chain therefore degrades
+ * instead of stopping, in decreasing order of strength:
+ *
+ *   1. an architecture macro is recognized -- the expectation is a literal, and the
+ *      line is an independent check of the pointer width;
+ *   2. otherwise __SIZEOF_POINTER__ is available -- the expectation is the
+ *      compiler's own declared width, and the line degrades to a consistency check
+ *      between that declaration and sizeof(void *);
+ *   3. otherwise the expectation is sizeof(void *) itself -- the line degrades
+ *      further, to a tautology that still prints 1.
+ *
+ * Every arm prints ptr_width_exact=1 for a self-consistent compiler, so no arm can
+ * manufacture a divergence out of a macro-spelling difference; what varies is only
+ * how much the line establishes, and that is what this comment records.  The
+ * pointer-width RELATIONS printed further down -- the pointer family agreeing with
+ * itself, the stddef-derived widths agreeing with it, the alignment relations -- do
+ * not depend on this chain at all and hold under every arm. */
 #if defined(__x86_64__) || defined(__amd64__)
 #define EXPECTED_PTR_WIDTH 8u
 #elif defined(__i386__) || defined(__i386)
@@ -114,8 +140,10 @@ int printf(const char *, ...);
 #define EXPECTED_PTR_WIDTH 8u
 #elif defined(__riscv) || defined(__riscv__)
 #define EXPECTED_PTR_WIDTH 8u
+#elif defined(__SIZEOF_POINTER__)
+#define EXPECTED_PTR_WIDTH ((unsigned)__SIZEOF_POINTER__)
 #else
-#error "004_sizeof_alignof: no pointer-width expectation selected; none of __x86_64__ / __i386__ / __aarch64__ / __riscv was predefined"
+#define EXPECTED_PTR_WIDTH ((unsigned)sizeof(void *))
 #endif
 
 /* Element counts, spelled once so the same number drives the declaration, the

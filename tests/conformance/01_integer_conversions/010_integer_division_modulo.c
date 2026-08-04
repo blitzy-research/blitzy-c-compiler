@@ -28,17 +28,62 @@ int main(void)
            (int)((-7 / 2) * 2 + (-7 % 2) == -7 && (7 / -2) * -2 + (7 % -2) == 7));
 
     /* Runtime variant: the operands are volatile, so each quotient and remainder
-     * is computed from values read at run time rather than folded. */
-    printf("run_pos_pos=%d %d\n", a_pos / b_pos, a_pos % b_pos);
-    printf("run_neg_pos=%d %d\n", a_neg / b_pos, a_neg % b_pos);
-    printf("run_pos_neg=%d %d\n", a_pos / b_neg, a_pos % b_neg);
-    printf("run_neg_neg=%d %d\n", a_neg / b_neg, a_neg % b_neg);
-    printf("run_exact=%d %d\n", (a_neg - 1) / b_pos, (a_neg - 1) % b_pos);
-    printf("run_large=%d %d\n", big_neg / three, big_neg % three);
-    printf("run_unsigned=%u %u\n", u_seven / u_two, u_seven % u_two);
-    printf("run_llong=%lld %lld\n", l_neg7 / l_two, l_neg7 % l_two);
-    printf("run_identity=%d\n",
-           (int)((a_neg / b_pos) * b_pos + (a_neg % b_pos) == a_neg
-                 && (a_pos / b_neg) * b_neg + (a_pos % b_neg) == a_pos));
+     * is computed from values read at run time rather than folded.
+     *
+     * STAGING, AND WHY EVERY VOLATILE READ GETS A STATEMENT OF ITS OWN.  An
+     * access to a volatile object is an observable side effect, and C11
+     * 6.5.2.2p10 leaves the order of evaluation of a call's arguments
+     * unspecified, so a call that divided one volatile object by another twice
+     * over would sequence four side effects in an order the standard does not
+     * fix.  Each operand is therefore read once, in its own full expression,
+     * into a plain object; the quotients, the remainders and the identity
+     * results are then computed from those plain objects in statements of their
+     * own, and the calls below pass plain objects only and contain no side
+     * effect at all.  The suite's authoring rule is at most one side-effecting
+     * argument per call, and this satisfies it structurally.  It costs the test
+     * nothing: a value that arrived through a volatile load stays opaque to the
+     * optimizer, so every division and every remainder below is still emitted
+     * as a run-time operation rather than folded. */
+    int r_a_pos = a_pos;
+    int r_a_neg = a_neg;
+    int r_b_pos = b_pos;
+    int r_b_neg = b_neg;
+    int r_big_neg = big_neg;
+    int r_three = three;
+    unsigned int r_u_seven = u_seven;
+    unsigned int r_u_two = u_two;
+    long long r_l_neg7 = l_neg7;
+    long long r_l_two = l_two;
+
+    int q_pos_pos = r_a_pos / r_b_pos;
+    int m_pos_pos = r_a_pos % r_b_pos;
+    int q_neg_pos = r_a_neg / r_b_pos;
+    int m_neg_pos = r_a_neg % r_b_pos;
+    int q_pos_neg = r_a_pos / r_b_neg;
+    int m_pos_neg = r_a_pos % r_b_neg;
+    int q_neg_neg = r_a_neg / r_b_neg;
+    int m_neg_neg = r_a_neg % r_b_neg;
+    int r_exact_dividend = r_a_neg - 1;
+    int q_exact = r_exact_dividend / r_b_pos;
+    int m_exact = r_exact_dividend % r_b_pos;
+    int q_large = r_big_neg / r_three;
+    int m_large = r_big_neg % r_three;
+    unsigned int q_unsigned = r_u_seven / r_u_two;
+    unsigned int m_unsigned = r_u_seven % r_u_two;
+    long long q_llong = r_l_neg7 / r_l_two;
+    long long m_llong = r_l_neg7 % r_l_two;
+    int identity_neg_pos = q_neg_pos * r_b_pos + m_neg_pos == r_a_neg;
+    int identity_pos_neg = q_pos_neg * r_b_neg + m_pos_neg == r_a_pos;
+    int run_identity = identity_neg_pos && identity_pos_neg;
+
+    printf("run_pos_pos=%d %d\n", q_pos_pos, m_pos_pos);
+    printf("run_neg_pos=%d %d\n", q_neg_pos, m_neg_pos);
+    printf("run_pos_neg=%d %d\n", q_pos_neg, m_pos_neg);
+    printf("run_neg_neg=%d %d\n", q_neg_neg, m_neg_neg);
+    printf("run_exact=%d %d\n", q_exact, m_exact);
+    printf("run_large=%d %d\n", q_large, m_large);
+    printf("run_unsigned=%u %u\n", q_unsigned, m_unsigned);
+    printf("run_llong=%lld %lld\n", q_llong, m_llong);
+    printf("run_identity=%d\n", run_identity);
     return 0;
 }

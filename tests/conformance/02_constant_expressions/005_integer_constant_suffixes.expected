@@ -102,10 +102,11 @@ needed; the corpus has exactly two header exceptions, area 07's stdarg.h and the
 bundled-header probe in area 12.
 THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
 is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
--Wconversion -Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers,
-and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
--fno-sanitize-recover=all run natively to completion. Both gates are reference-compiler-only and are
-never applied to bcc, so requirement 3's shared-flag discipline is untouched.
+-Wconversion -Wsign-conversion -Wshadow -Werror in the single native compile-only invocation the
+suite's warning gate makes, and it builds and runs clean under the sanitizer gate
+-fsanitize=undefined,address -fno-sanitize-recover=all run natively to completion. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
 END
 impl_defined_notes <<END
 This record narrows nothing. All four targets, all three optimization levels and all three
@@ -149,8 +150,11 @@ i686, AArch64 and RISC-V 64 -- x87 80-bit against IEEE binary128 -- cannot reach
 the suffix's type-selection behaviour is fully cross-comparable. The type is therefore covered
 here rather than dropped for being awkward, and cross-backend value comparison for it is owned by
 13_floating_point/004_long_double_target_restricted.c as a RECORDED EXCLUSION -- oracle_b
-disabled, with the measured representations as its basis -- and not as a marker, because an
-implementation-defined representation difference is not a divergence attributable to bcc.
+disabled, with the measured representations as its recorded reason -- beside which that record
+carries the marker XD-TYPE-LONGDOUBLE-001, class stdout_mismatch, scope oracle_b. The marker is
+REQUIRED rather than optional there: a disabled oracle is reported XFAIL, which claims the authority
+of a documented limitation, so the format makes the marker carry that claim while the recorded reason
+explains it. It excuses the cross-backend arm alone; a same-target disagreement is still a FINDING.
 WIDTH NORMALIZATION IN THE OUTPUT ITSELF. Every printed value is an int printed with %d -- a
 _Generic result or a comparison result, cast where needed -- except the two long long products
 printed with %lld, and long long is 64 bits on all four targets. No plain long, no size_t, no
@@ -159,8 +163,10 @@ format string, so the measured i686 difference in sizeof(long) and sizeof(void *
 against 8 on the other three -- cannot be observed even though this program deliberately reasons
 about it.
 PLAIN-char SIGNEDNESS. Plain char was MEASURED as signed on x86-64 and i686 and unsigned on
-AArch64 and RISC-V 64. No plain-char value is printed, no character data appears, and no printed
-line depends on that choice.
+AArch64 and RISC-V 64. Character data does appear -- the format strings are arrays of char, reached
+through const char * -- but no plain-char value is read as a NUMBER: none is converted, compared,
+used as an arithmetic operand or formatted numerically. printf copies those bytes through unchanged,
+so no printed line depends on that choice.
 _Generic IS RESOLVED ENTIRELY AT TRANSLATION TIME AND THEREFORE HAS NO RUNTIME TWIN BY
 CONSTRUCTION, which is correct rather than an omission: there is no run-time object whose type
 could be re-examined, so a twin would only re-print the same translation-time answer. The
