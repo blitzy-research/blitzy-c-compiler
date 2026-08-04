@@ -23,7 +23,11 @@ makes both differential oracles sound: undefined behaviour would license either 
 anything at all, so a divergence over it would prove nothing about either one.
 Every accumulated value is tiny, and that is what keeps the one arithmetic-carrying program in this
 area free of signed overflow: s_counter peaks at 130, the s_arr elements at 301, 302 and 303, the
-s_st members at 10 and 11, and g_static_scalar at 1005. INT_MAX is at least 2147483647 on every
+s_st members at 10 and 11, and g_static_scalar at 1005. The automatic twins are bounded lower still,
+because each is re-initialized on entry and then mutated exactly once per call, so each ends every
+call at the same value: a_counter at 110, the a_arr elements at 101, 102 and 103, and the a_st
+members at 8 and 9. Every object this program mutates is therefore bounded by name, which is what
+makes the argument checkable rather than merely reassuring. INT_MAX is at least 2147483647 on every
 conforming target, so no sum here can approach it. The loop counters are bounded by the literals 3,
 4 and 3, and the round counter by 3, and per_call is invoked a fixed three times with literal round
 numbers. There is no shift, no division, no remainder and no cast anywhere in the program.

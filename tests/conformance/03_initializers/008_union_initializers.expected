@@ -1,12 +1,15 @@
 # Expectation record for 03_initializers/008_union_initializers.c
 #
+# Union initialization and designated union members, including one deliberate and
+# fully justified union type-pun that observes an object representation.
+#
 # Reproduce one cell by hand with no harness: render the three command templates
 # below, substituting the target triple, the optimization level, the source path,
 # the output path, and the target's runner (empty on the natively executing target).
 
 program            = 008_union_initializers
 area               = 03_initializers
-description        = Union initialization and designated union members: a positional initializer selecting the first member, designators naming scalar, aggregate and array members completely and partially, one deliberate legal reinterpretation of an object representation through a second member, a union nested inside a struct between two scalars, and an array of unions mixing designated and positional elements -- nine forms at static duration with three repeated at automatic duration
+description        = Union initialization and designated union members -- unlabelled initialization of the first member, designated scalar aggregate and array members, a partially initialized array member, a union with an array member using a nested designator, a designator descending through a struct into a union member, an array of unions mixing designated and positional element initializers, and one justified union type-pun -- for static and automatic storage duration, every member read back individually
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -21,86 +24,115 @@ ub_notes           <<END
 This program contains no undefined and no unspecified behaviour, which is the precondition that
 makes both differential oracles sound: undefined behaviour would license either compiler to do
 anything at all, so a divergence over it would prove nothing about either one.
-The one construct that has to be justified rather than merely inspected is g_pun, where a union
-member other than the one last stored is read. That is LEGAL, not undefined: C11 6.5.2.3 and its
-footnote 95 sanction reading a different union member in order to reinterpret an object
-representation. Three further facts make the reinterpretation complete and target-invariant here.
-sizeof(int) is 4 and b is exactly unsigned char[4], so the four bytes read are precisely the four
-bytes of the int and no padding byte is among them -- which matters, because the contents of padding
-are unspecified. unsigned char has no trap representations, so each of the four bytes has a
-well-defined value. And all four supported targets are little-endian, independently MEASURED, so
-0x01020304 reads back as 4, 3, 2, 1 on every backend. The value is read immediately, with nothing
-modified in between. Every other union in the program is read through exactly the member its
-initializer stored, so no other padding byte is observed and no other object representation is
-relied upon.
-No uninitialized storage is read anywhere, which is what makes the zero lines assertions rather than
-accidents. A positional initializer selects the FIRST member of a union, which C11 6.7.9p17 fixes,
-and every designator names a member that exists. Every member or element an initializer does not
-name is implicitly zero by C11 6.7.9p19 and p21 -- for automatic duration exactly as for static,
-because an object with any initializer is fully initialized -- so g_desig_b_pt.b[1..3],
-g_arr_desig.a[0..1] and l_arr_desig.a[0] and a[2] all have determinate values of zero.
-No arithmetic is performed beyond the loop counters' increments, bounded by the literals 4 and 3, so
-there is no signed overflow. There is no shift of any kind, no division and no remainder. Nothing is
-modified after its initialization, so no object is modified twice between two sequence points.
-Every subscript is strictly in bounds: i < 4 indexes b[4] and i < 3 indexes a[3], so no
-one-past-the-end pointer is even formed, let alone dereferenced. No pointer is cast anywhere -- the
-reinterpretation in g_pun goes through a union member access, which is the sanctioned mechanism, and
-not through a cast, which would be an aliasing violation. Beyond that access every value is read
-through an lvalue of its own declared type: int through int, unsigned through unsigned, and unsigned
-char through unsigned char. No address is taken and none is printed, and nothing depends on the
-relative addresses of unrelated objects.
-Every initializer value is representable in the type it initializes without an implicit conversion
-changing it: the signed values are small or -7, the unsigned values are 4000000000u and 52u, both
-within the range of a 32-bit unsigned int, and 0x01020304 is within int on every supported target.
-Each printf call passes at most one loop counter and one already-narrowed value, neither with a side
-effect, so the unspecified order in which a function call's arguments are evaluated cannot be
+AN UNLABELLED UNION INITIALIZER INITIALIZES THE FIRST MEMBER of the union, which C11 6.7.9p17
+fixes. g_first = { 5 }, g_uarr[2] = { 53 } and l_first = { 61 } rely on that rule and read back .i
+accordingly, so a front end that selected some other member surfaces here as a wrong value rather
+than as an unobserved reinterpretation.
+EVERY UNION EXCEPT g_pun IS READ THROUGH EXACTLY THE MEMBER ITS INITIALIZER SET. g_first,
+g_desig_i, g_uarr[0], g_uarr[2], g_holder.u and l_first set and read .i; g_desig_u and g_uarr[1]
+set and read .u; g_desig_s and l_desig_s set and read .s; g_desig_b and g_desig_b_pt set and read
+.b; g_arr_whole, g_arr_desig and l_arr_desig set and read .a. No other member of any of those
+unions is inspected, so no padding byte is observed and no object representation is relied upon.
+THE ONE DELIBERATE TYPE-PUN IS FULLY JUSTIFIED. g_pun is initialized { .i = 0x01020304 } and read
+back through the unsigned char array member b as 4, 3, 2, 1. Four separate facts make this well
+defined and target-invariant:
+  - Reading a union member other than the one last stored is permitted in C. C11 6.5.2.3 and its
+    footnote 95 explicitly sanction using a union to reinterpret an object representation. This is
+    not the undefined case that a cast between unrelated struct pointer types would be, and no
+    pointer cast is used -- the reinterpretation is performed solely by union member access, which
+    is the sanctioned mechanism.
+  - No padding byte is observed. sizeof(int) is 4 and b is exactly unsigned char[4], so the four
+    bytes read are precisely the four bytes of the int. Padding contents are unspecified, which is
+    why this matters.
+  - unsigned char has no trap representations, so each of the four bytes has a well-defined value.
+  - All four supported targets are little-endian and have a 4-byte int, so the byte order 4, 3, 2,
+    1 is the result on every backend. See impl_defined_notes.
+The value is read immediately, with nothing modified in between.
+NO READ OF UNINITIALIZED STORAGE, which is what makes the zero lines assertions rather than
+accidents. Where an initializer names only some elements of an array member --
+g_desig_b_pt = { .b = { 9 } }, g_arr_desig = { .a = { [2] = 33 } } and
+l_arr_desig = { .a = { [1] = 82 } } -- the unnamed elements are implicitly initialized to zero
+under C11 6.7.9p19 and p21, for automatic duration exactly as for static, because an object with
+any initializer at all is fully initialized. So g_desig_b_pt.b[1..3], g_arr_desig.a[0..1] and
+l_arr_desig.a[0] and a[2] each hold a determinate value of zero.
+NO MEMBER RECEIVES TWO INITIALIZERS. Each union in this program is initialized through exactly one
+member, and g_holder's designators .tag, .u.i and .trailer address three distinct members of the
+enclosing struct. There is therefore no overlapping or overriding initializer anywhere. An
+overlapping union member designator such as { .i = 1, .u = 2 } is deliberately absent: measurement
+established that -Woverride-init, enabled by -Wextra and promoted to a hard error by -Werror,
+rejects every value-overriding designator spelling, that union pairing among them. That exclusion
+and its full reasoning are recorded in 004_designated_array.expected, which is the program whose
+subject is designator precedence. Area 03 sanctions no deviation from the default gate, so no
+`ub_audit_flags` override is used here, and none is needed.
+ANONYMOUS UNIONS ARE DELIBERATELY NOT EXERCISED HERE; they are the subject of area 10, program
+010_anonymous_struct_union. Naming where the construct is covered is what keeps its absence from
+this program a division of labour rather than a gap in the corpus.
+No arithmetic is performed on any initialized value, so signed overflow is impossible. The only
+run-time arithmetic is on the loop counter i, bounded i < 4 over b[4] and i < 3 over a[3], so every
+subscript is strictly in bounds; no one-past-the-end pointer is even formed, let alone
+dereferenced. There is no shift of any kind, no division and no remainder. No object is modified
+after its initialization, so nothing is modified twice between two sequence points. No pointer is
+cast anywhere, so there is no aliasing violation, and beyond the one sanctioned union access every
+value is read through an lvalue of its own declared type: int through int, unsigned through
+unsigned, and unsigned char through unsigned char. No address is taken and none is printed, and
+nothing depends on the relative addresses of unrelated objects.
+Each printf call passes at most one loop counter and one already-narrowed value, neither with a
+side effect, so the unspecified order in which a function call's arguments are evaluated cannot be
 observed. %d takes int -- including every (int)-cast unsigned char and every (int)sizeof -- and %u
 takes unsigned int, matching after the default argument promotions, so no variadic argument is read
-at the wrong width.
-main returns 0, inside the 0-125 range the suite requires so that no exit status is truncated by the
-operating system. Output is fully deterministic: fixed iteration order, no address, no timestamp, no
-randomness and no locale-dependent formatting, and nothing outside this file is read, so every cell
-is reproducible from this source and this record alone.
+at the wrong width. 0x01020304 is representable in a 32-bit int, and 4000000000u and 52u in a
+32-bit unsigned int, on every supported target, so no implementation-defined conversion occurs.
+main returns 0, inside the 0-125 range the suite requires so that no exit status is truncated by
+the operating system. Output is fully deterministic: fixed iteration order, no address, no
+timestamp, no randomness and no locale-dependent formatting, and nothing outside this file is read,
+so every cell is reproducible from this source and this record alone.
 No header is included anywhere and no preprocessor directive appears at all; printf is declared by
 hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
 bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md line 212), so naming one
 would fail on the bcc side of oracle (a) while succeeding on the reference side -- a spurious
 divergence caused by the test rather than by a compiler. This area is granted no header exception;
 the corpus has exactly two, area 07's stdarg.h and the dedicated bundled-header probe in area 12.
-This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
-under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under the
-sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
-reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched.
+This record declares no warning-gate deviation, and area 03 sanctions none. The program was
+MEASURED clean under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion
+-Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean
+under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all, emitting these
+same 38 lines with an empty standard error. Both gates are reference-compiler-only and are never
+applied to bcc, so requirement 3's shared-flag discipline is untouched.
 END
 impl_defined_notes <<END
-This record narrows nothing: all four targets, all three optimization levels and all three
-oracles are enabled, no expected-divergence marker is carried, and no `ub_audit_flags` key appears
-because the program passes the suite's full default warning gate unmodified.
+This record narrows nothing: all four targets, all three optimization levels and all three oracles
+are enabled, no expected-divergence marker is carried, and no `ub_audit_flags` key appears because
+the program passes the suite's full default warning gate unmodified. The field is present anyway,
+because this program observes an object representation, and what makes that safe belongs somewhere
+a reader will find it rather than nowhere at all.
 ENDIANNESS IS OBSERVED HERE, DELIBERATELY AND EXACTLY ONCE. g_pun reinterprets a four-byte int
 through an unsigned char[4], so the printed byte order depends on the target's byte order. All
-four supported targets are little-endian -- recorded in the target table
-(docs/technical-specifications.md lines 457-462) and independently MEASURED on each of them -- so
-0x01020304 reads back as 4, 3, 2, 1 on every backend. This is the only place in this feature area
-that observes an object representation, which makes it a direct cross-backend check on union member
-layout rather than an accident. A big-endian target would print the reverse row and would require a
-narrowed target list rather than a defect charge; none of the four supported targets is big-endian.
-WIDTHS ARE NORMALIZED. Only int, unsigned and unsigned char appear; they are printed with %d and
-%u alone, and every unsigned char is cast to int first. No wider integer type, no type whose width
-varies by target and no floating type is used anywhere, and no address or pointer value is printed,
-so nothing here depends on the MEASURED pointer-width difference on i686 -- four bytes there
-against eight on x86-64, AArch64 and RISC-V 64. The source comment deliberately avoids NAMING those
+four supported targets are little-endian -- recorded in the authoritative target table
+(docs/technical-specifications.md lines 457-462, whose four target rows each read "Little") and
+independently MEASURED on each of them -- and int is 4 bytes on all four, so 0x01020304 reads back
+as 4, 3, 2, 1 on every backend. This is the only place in this feature area that observes an
+object representation, which makes it a direct cross-backend check on union member placement
+rather than an accident, and it is why oracle (b) stays ENABLED for this program despite the pun:
+byte order is uniform across the four targets, so a divergence in that line group would be a
+genuine finding about union member layout rather than an implementation-defined difference, and it
+is deliberately not a marker candidate.
+ALL sizeof VALUES ARE TARGET-INVARIANT. sizeof_simple is 4, sizeof_mixed is 8 and sizeof_witharr
+is 12. Each follows solely from int being 4 bytes with 4-byte alignment and unsigned char being 1
+byte, which holds on all four targets: union mixed is the maximum of int at 4, struct pair at 8 and
+unsigned char[4] at 4, and union witharr is the maximum of int at 4 and int[3] at 12. Each of the
+three sizes was MEASURED on each of the four targets. The shapes were chosen so that no padding
+depends on the alignment of a type whose alignment is 4 on i686 and 8 elsewhere.
+WIDTHS ARE NORMALIZED. Every printed value is an int or an unsigned int, printed with %d or %u
+alone and with every unsigned char cast to int first. No pointer, no long and no size_t is ever
+measured or printed and no floating type is used anywhere, so nothing here depends on the MEASURED
+pointer-width difference on i686 -- four bytes there against eight on x86-64, AArch64 and RISC-V 64
+-- and no address or pointer value is printed. The source comment deliberately avoids NAMING those
 excluded types so that a portability audit grep over this program reports a hit only for a genuine
 use; that convention is recorded here rather than repeated there.
-PLAIN-CHAR SIGNEDNESS. b is declared unsigned char explicitly rather than plain char, so the
-MEASURED split -- signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64 -- cannot reach any
-printed byte.
-SIZES. The three printed sizes follow only from sizeof(int) == 4 with 4-byte alignment and
-sizeof(unsigned char) == 1: sizeof(union simple) is 4, sizeof(union mixed) is max(4, 8, 4) == 8
-because struct pair is two ints, and sizeof(union witharr) is max(4, 12) == 12. All of that holds on
-all four targets, and each of the three sizes was MEASURED on each of them. The shapes were chosen
-so that no padding depends on the alignment of a type whose alignment is 4 on i686 and 8 elsewhere.
+PLAIN-CHAR SIGNEDNESS CANNOT AFFECT THIS PROGRAM. The byte-array member b is declared explicitly as
+unsigned char, never as plain char, and its elements are promoted to int by an explicit cast before
+printing, so the MEASURED split -- signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64 --
+has no way to influence any printed value.
 EXECUTION CHARACTER SET. No character literal value is printed; the unsigned char bytes printed are
 the object representation of an integer, not characters.
 THE STATIC/AUTOMATIC PAIRING IS THIS PROGRAM'S DISCRIMINATING VARIANT, and it was verified at
@@ -129,9 +161,10 @@ What would legitimately break these bytes is a big-endian target, which would re
 g_pun.b lines without being defective, or a target where sizeof(int) were not 4, which would change
 both the reinterpretation and the three printed sizes. Either would be an implementation-defined
 divergence rather than a compiler defect, and must then be recorded as an expected divergence with
-this record's target list narrowed and the reason stated in this field -- never left to surface as a
-finding against a backend that did nothing wrong, and never resolved by deleting the
-reinterpretation or dropping the union coverage this program exists to provide.
+this record's target list narrowed and the reason stated in this field -- never left to surface as
+a finding against a backend that did nothing wrong, and never resolved by deleting the
+reinterpretation or dropping the union coverage this program exists to provide. None of the four
+supported targets is big-endian, so no such narrowing is carried today.
 END
 expected_stdout    <<END
 g_first.i=5

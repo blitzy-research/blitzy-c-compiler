@@ -1,12 +1,9 @@
-# Expectation record for 03_initializers/001_scalar_and_array.c
-#
-# Reproduce one cell by hand with no harness: render the three command templates
-# below, substituting the target triple, the optimization level, the source path,
-# the output path, and the target's runner (empty on the natively executing target).
+# Expectation record for tests/conformance/03_initializers/001_scalar_and_array.c
+# Area 03 baseline: scalar and array initialization, every element read back individually.
 
 program            = 001_scalar_and_array
 area               = 03_initializers
-description        = Baseline scalar, array and struct initialization, each form declared once with static and once with automatic storage duration, every element and member read back on its own line
+description        = Baseline scalar and array initialization for static and automatic storage duration, with every array element and every struct member read back and printed individually
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,99 +15,44 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-This program contains no undefined and no unspecified behaviour, which is the precondition that
-makes both differential oracles sound: undefined behaviour would license either compiler to do
-anything at all, so a divergence over it would prove nothing about either one.
-A member or element left unmentioned by a brace-enclosed initializer is initialized as an object
-of static storage duration would be, that is to zero, for automatic and static duration alike
-(C11 6.7.9p19 and p21), so every value printed has a determinate value and no uninitialized
-storage is ever read. The file-scope objects additionally have static storage duration and are
-zero-initialized before their initializers apply. Every object here is FULLY initialized by its
-initializer list before any part of it is read, so the zero guarantee is not even relied upon:
-every one of g_scalar, g_arr, g_u_arr, g_pt, l_scalar, l_arr and l_pt is completely covered by
-its own initializer. Nothing is modified after initialization, so no object is modified twice
-between two sequence points and no modification races a read of the same object.
-No arithmetic is performed on any initialized value at all. The only arithmetic in the program is
-the three loop counters' increments, bounded by the literals 5, 3 and 5, so signed overflow is
-unreachable. Nothing is shifted, so no shift-count question arises. Nothing is divided, so no
-division by zero and no remainder question arises.
-Every subscript is in bounds and provably so, because every bound is a literal that matches the
-array's declared extent: g_arr and l_arr are int[5] read at 0 through 4, and g_u_arr is
-unsigned int[3] read at 0 through 2. No pointer is formed anywhere in the program -- not even a
-one-past-the-end pointer, which would be legal to form but is not needed here -- so no pointer
-arithmetic is performed, no address is taken and none is printed.
-There is no aliasing violation, because every object is read through an lvalue of its own
-declared type: the int arrays and members through int, the unsigned int array through
-unsigned int. No object representation is inspected, no union is present, and no cast of any kind
-appears in the program, so no effective-type rule is approached, no padding byte is observed and
-nothing depends on the relative addresses of unrelated objects.
-The widest initializer is 4294967295u, which is exactly UINT_MAX wherever unsigned int is 32 bits
--- all four supported targets -- so it is representable in the type it initializes and no
-implicit conversion changes its value. -9 initializes an int member and is representable in int
-on every target the suite supports.
-Each printf call receives arguments that are a loop counter and one array element or struct
-member; none of them has a side effect, so the unspecified order in which a function call's
-arguments are evaluated cannot be observed. Every conversion specifier matches its argument's
-type after the default argument promotions: %d takes int, %u takes unsigned int, and both are
-four bytes on all four targets, so no variadic argument is read at the wrong width.
-main returns 0, inside the 0-125 range the suite requires so that no exit status is truncated by
-the operating system. Nothing outside this file is read: every input is a literal here, no file,
-socket, environment variable, clock, random source or locale is consulted, and iteration order is
-fixed by literal loop bounds, so every cell is reproducible from this source and this record
-alone.
-No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
-bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no standard
-I/O header (docs/project-guide.md line 212), so naming one would fail on the bcc side of
-oracle (a) while succeeding on the reference side -- a spurious divergence caused by the test
-rather than by a compiler. This area is granted no header exception; the corpus has exactly two,
-area 07's stdarg.h and the dedicated bundled-header probe in area 12.
-This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
-under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, and it builds and runs clean under
-the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
-reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline
-is untouched.
+This program contains no undefined and no unspecified behaviour.
+
+Every object is fully initialized by its initializer before any read: g_scalar,
+g_arr, g_u_arr and g_pt have static storage duration with explicit initializers;
+l_scalar, l_arr and l_pt are automatic with explicit initializers. There is no
+read of uninitialized storage anywhere.
+
+No arithmetic is performed on any initialized value, so no signed overflow is
+possible. The only arithmetic is the loop counter i, which runs 0..4 and 0..2 over
+arrays of 5 and 3 elements respectively, so every subscript is strictly in bounds
+and no one-past-end pointer is ever formed, let alone dereferenced.
+
+No shifts. No pointer casts. No aliasing: each object is read only through its
+own declared type. No object is modified twice between sequence points; in fact no
+object is modified after initialization at all. Each printf call takes at most one
+argument with a side effect (none do). No padding byte is read or printed: only
+named members g_pt.x, g_pt.y, l_pt.x, l_pt.y are accessed, never the struct as a
+whole and never its representation.
+
+4294967295u is exactly UINT_MAX for a 32-bit unsigned int and is written with the
+u suffix, so it is representable without conversion on every target and no
+implementation-defined narrowing occurs.
 END
 impl_defined_notes <<END
-This record narrows nothing: all four targets, all three optimization levels and all three
-oracles are enabled, no expected-divergence marker is carried, and no implementation-defined
-value reaches this program's output.
-WIDTH NORMALIZATION. Every printed value has type int or unsigned int, both four bytes on all
-four targets, and %d and %u are the only conversion specifiers in the file. No type whose width
-varies by target -- long, size_t, ptrdiff_t, intptr_t, any pointer, any floating type -- is
-declared, computed or printed, and no length modifier for a wide type appears. That is what keeps
-the i686 cell comparable with the other three: i686 is ELF32 with a four-byte long and a
-four-byte pointer while x86-64, AArch64 and RISC-V 64 are ELF64 with eight bytes for both
-(docs/technical-specifications.md target table, lines 457-462), a difference also MEASURED on all
-four targets in this environment. 4294967295u is exactly UINT_MAX wherever unsigned int is 32
-bits, which is all four targets, so the widest initializer in the file is representable with no
-conversion.
-PLAIN-CHAR SIGNEDNESS. No character data appears at all, so the MEASURED split -- plain char
-signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64 -- cannot reach the output.
-PADDING AND LAYOUT. Members are read individually by name; no object is printed, copied or
-reinterpreted as bytes, so padding, whose contents the standard leaves unspecified, is never
-observed, and these all-int aggregates carry no internal padding on any of the four targets in any
-case. No sizeof, no _Alignof and no address is printed, so no layout decision the ABI is free to
-make is observable here. Only the values the initializers supply are.
-EXECUTION CHARACTER SET. No character or string literal value is printed, so C11 5.2.1 leaves
-nothing here to the implementation.
-THE DISCRIMINATING VARIANT. Every form is initialized twice, once at file scope and once inside a
-block, so the pair isolates storage duration rather than also varying the type: a single struct
-definition serves both. A static-duration initializer is a translation-time constant placed in the
-program's data image, while the same initializer at automatic duration must be materialized by
-code emitted on entry to the block, and both paths are compiled at all three optimization levels.
-Nineteen lines are printed and nothing is summarized, because one wrong slot must produce exactly
-one divergent line -- that is what localizes a defect to a single initializer and keeps
-minimization tractable.
-MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at
--O0, -O1 and -O2 -- twelve configurations -- and every one produced these 19 lines byte-identically
-with exit status 0, which is why oracle (b) compares this program's targets against each other
-without any narrowing and why oracle (c) can hold these bytes as the golden record.
-The one property that would legitimately change these bytes is an unsigned int narrower or wider
-than 32 bits, which would change what 4294967295u denotes. That would be an implementation-defined
-divergence rather than a compiler defect, and must then be recorded as an expected divergence with
-this record's target list narrowed and the reason stated in this field -- never left to surface as
-a finding against a backend that did nothing wrong.
+All values are int or unsigned int, which are 4 bytes on all four supported
+targets, and are printed with %d and %u only. The program contains no long,
+size_t, ptrdiff_t, intptr_t, float, double or long double, so the measured width
+differences between i686 (4-byte long and pointer) and the other three targets
+(8-byte) cannot affect the output.
+
+No character data is used, so the measured plain-char signedness difference
+(signed on x86_64 and i686, unsigned on aarch64 and riscv64) cannot arise.
+
+No address or pointer value is printed. No struct is printed as a whole, so
+padding bytes -- whose contents are unspecified -- are never observed.
+
+Output is therefore byte-identical on all four targets at all three optimization
+levels, which was verified by measurement.
 END
 expected_stdout    <<END
 g_scalar=42

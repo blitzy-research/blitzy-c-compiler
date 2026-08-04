@@ -6,7 +6,7 @@
 
 program            = 006_designated_mixed_nested
 area               = 03_initializers
-description        = Mixed positional and designated initializers inside nested aggregates -- six forms that force the C11 current object to be tracked correctly as the initializer descends into a brace, applies a designator, ascends and resumes positionally, three of them repeated at automatic storage duration; the OVERLAPPING-designator-at-depth spelling is excluded, narrowly and with its reason recorded in impl_defined_notes, because the frozen warning gate rejects every spelling of it
+description        = Mixed positional and designated initializers inside nested aggregates -- positional outer with designated inner, designated outer with an unlabelled inner brace, array-of-struct positional then designated, two-dimensional positional row then element designator, and two three-level struct mixtures including a combined index-and-member designator -- for static and automatic storage duration, every member read back individually; the OVERLAPPING-designator-at-depth spelling is excluded, narrowly and with its reason recorded in impl_defined_notes, because the frozen warning gate rejects every spelling of it
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -21,71 +21,114 @@ ub_notes           <<END
 This program contains no undefined and no unspecified behaviour, which is the precondition that
 makes both differential oracles sound: undefined behaviour would license either compiler to do
 anything at all, so a divergence over it would prove nothing about either one.
-No uninitialized storage is read, which needs stating first because most of the values this program
-prints are ones its initializers never mention. Every member or element left unmentioned by an
-initializer is initialized as an object of static storage duration would be -- that is, to zero --
-by C11 6.7.9p19 and p21, and that holds for automatic duration exactly as for static, because an
-aggregate with ANY initializer is fully initialized. So g_pos_desig_in.in.p, the whole of
-g_arr_pos_then_desig[1], all of row 1 and five of row 2 in g_m_pos_then_desig, g_deep_mixed.pr[0],
-g_deep_desig.o.tag, o.in.q, o.trailer and pr[1].p, and the corresponding members of the automatic
-twins all have determinate values of zero rather than indeterminate ones. That guarantee is the
-feature under test, not an assumption of the test's.
-Every designator names an existing member or an index strictly inside the declared bounds of the
-aggregate it designates, and every positional initializer that follows a designator initializes the
-subobject that follows the designated one, which C11 6.7.9p17 fixes. NO subobject in this program is
-designated twice, so no initializer's answer turns on which of two writes to one slot happens last.
-Order still matters, and C11 6.7.9p19 fixes it by initializing in initializer-list order: form 2's
-unlabelled brace has to bind to the member following the designated one and its bare trailing value
-has to continue on past it, and form 6's `.pr = { { 43, 44 }, [1].q = 46 }` mixes a positional
-element with a combined index-and-member designator. That is a separate rule from
-the sequencing of side effects, which C11 6.7.9p23 leaves indeterminate: a subobject initialized
-twice by expressions WITH side effects would have an unspecified value, and mixing positional and
-designated forms is exactly the shape in which that hazard is easiest to write by accident. Every
-initializer expression in this program is an integer constant expression with no side effect at all,
-so there is nothing for 6.7.9p23 to make unspecified and the program's meaning does not depend on
-the order in which the list's side effects are sequenced. GCC's -Woverride-init-side-effects, which
-is on by default and is not a gate member, is a second reason side-effecting initializers are
-avoided here rather than suppressed.
-No arithmetic is performed on any initialized value, so no signed overflow is reachable. The only
-arithmetic is the loop counters' increments, bounded by the literals 3, 3 and 2. Nothing is shifted,
-divided or remaindered. Nothing is modified after its initialization, so no object is modified twice
-between two sequence points.
-Every subscript stays strictly inside its bound, and each loop bound is a literal equal to the
-declared extent: g_arr_pos_then_desig and l_arr_mixed are struct inner[3] read at 0 through 2,
-g_m_pos_then_desig is int[3][3] read at [0..2][0..2], and every pr member is struct inner[2] read at
-0 and 1. No pointer is formed anywhere in the program apart from printf's format argument, so no
-one-past-the-end pointer exists to be dereferenced, no pointer arithmetic can leave an object, no
-address is taken and none is printed.
-There is no aliasing violation: every value is read through an lvalue of its own declared type,
-which is int in every case, reached by member selection and subscripting only. No aggregate is
-printed whole, no object representation is inspected, no union appears and no cast of any kind is
-present in the file, so no padding byte is observed and nothing depends on the relative addresses of
-unrelated objects.
-Every initializer value is a small positive int, the largest being 76, so each is representable in
-int on every target the suite supports and no implicit conversion changes a value.
-Each printf call receives at most two loop counters and one int datum, none of which has a side
-effect, so the unspecified order in which a function call's arguments are evaluated cannot be
-observed. %d is the only conversion specifier in the file and every corresponding argument has type
-int after the default argument promotions, so no variadic argument is read at the wrong width.
+
+THERE IS NO READ OF UNINITIALIZED STORAGE, which needs stating first because most of the values
+this program prints are ones its initializers never mention. Every object here has an initializer,
+and C11 6.7.9p19 and p21 require members and elements not explicitly initialized to be initialized
+implicitly as an object with static storage duration would be -- that is, to zero for the int
+members used throughout. That holds for automatic duration exactly as for static, because an
+aggregate with ANY initializer is fully initialized. This covers every zero printed by this
+program, including g_pos_desig_in.in.p, the whole of g_arr_pos_then_desig[1], all of row 1 and
+five of the six neighbours in row 2 of g_m_pos_then_desig, g_deep_mixed.pr[0], g_deep_desig.o.tag,
+o.in.q and o.trailer, g_deep_desig.pr[1].p, and the corresponding members of the automatic twins.
+Every one of those values is determinate rather than indeterminate, and that guarantee is the
+feature under test rather than an assumption of the test's.
+
+NO MEMBER OR ELEMENT RECEIVES TWO INITIALIZERS. Every designator in this program addresses a
+member or element that no earlier initializer has set, and every positional initializer following
+a designator lands on the NEXT subobject rather than on one already initialized, which C11
+6.7.9p17 fixes. The result of each initializer is therefore fully determined by C11 6.7.9 and
+there is no overriding initializer anywhere. The individual cases are:
+
+  - g_pos_desig_in = { 1, { .q = 3 }, 4 }: positional 1 initializes tag; the braced block binds to
+    the next member in and uses a designator inside it so only in.q is set and in.p remains
+    implicitly zero; positional 4 then initializes trailer.
+  - g_desig_pos_in = { .tag = 11, { .p = 12, .q = 13 }, 14 }: the designator sets tag, after which
+    the current object advances so the unlabelled brace binds to in, and the trailing 14
+    initializes trailer.
+  - g_arr_pos_then_desig = { { 21, 22 }, [2] = { 25, 26 } }: element 0 positional, element 2
+    designated, element 1 never named and therefore implicitly zero.
+  - g_m_pos_then_desig = { { 1, 2, 3 }, [2][1] = 8 }: row 0 positional, then a designator naming a
+    single element of row 2; row 1 and the remaining elements of row 2 are implicitly zero.
+  - g_deep_mixed = { { 31, { .q = 33 }, 34 }, { [1] = { 37, 38 } } } and its automatic twin
+    l_deep_mixed nest the first form inside a struct deep and add a designated element of the
+    sibling array member, leaving the unnamed element of that array implicitly zero.
+  - g_deep_desig = { .o = { .in.p = 42 }, .pr = { { 43, 44 }, [1].q = 46 } }: an outer member
+    designator, a nested submember designator, a positional array element, and a combined
+    index-and-member designator [1].q, none of which collide.
+  - l_arr_mixed = { { 61, 62 }, [2].q = 66 }: a positional element followed by a combined
+    index-and-member designator, so element 2's p stays zero while its q is set.
+
+Order still matters even with no override present, and C11 6.7.9p19 fixes it by initializing in
+initializer-list order: form 2's unlabelled brace has to bind to the member FOLLOWING the
+designated one and its bare trailing value has to continue on past it. That is a separate rule
+from the sequencing of an initializer list's side effects, which C11 6.7.9p23 leaves indeterminate.
+Every initializer expression in this program is an integer constant expression with no side effect
+at all, so there is nothing for 6.7.9p23 to make unspecified and the program's meaning does not
+depend on the order in which side effects are sequenced.
+
+EVERY DESIGNATOR INDEX IS IN RANGE: [2] within the [3] array of struct, [2][1] within the [3][3]
+matrix, and [0] and [1] within the pr[2] array member. Every named member exists in the struct it
+designates.
+
+No arithmetic is performed on any initialized value, so signed overflow is impossible. The only
+run-time arithmetic is on the loop counters i and j, each bounded strictly below its extent by a
+literal equal to the declared one: i < 3 over the [3] arrays, i < 2 over pr[2], and i < 3 with
+j < 3 over the [3][3] matrix. Every subscript is in bounds. No pointer is formed anywhere in the
+program apart from printf's format argument, so no one-past-end pointer exists to be dereferenced,
+no pointer arithmetic can leave an object, no address is taken and none is printed.
+
+No shifts, no division, no remainder, no pointer casts and no cast of any kind appear in the file.
+There is no aliasing violation: each object is read only through an lvalue of its own declared
+type, which is int in every case, reached by member selection and subscripting only. No object is
+modified after its initialization, so nothing is modified twice between two sequence points. Each
+printf call receives at most two loop counters and one int datum, none of which has a side effect,
+so the unspecified order in which a call's arguments are evaluated cannot be observed. %d is the
+only conversion specifier in the file and every corresponding argument has type int after the
+default argument promotions, so no variadic argument is read at the wrong width. Every initializer
+value is a small positive int, the largest being 76, so each is representable in int on every
+supported target and no implicit conversion changes a value.
+
+NO PADDING BYTE IS READ OR COMPARED. Only named members are accessed; no struct is printed as a
+whole and no object representation is inspected. Padding contents are unspecified, so this is
+essential to the soundness of the byte-exact comparison. All three struct types are composed
+exclusively of int members and int-typed aggregates, so on every supported target they have no
+internal padding in any case.
+
 main returns a constant 0, inside the 0-125 range the suite requires so that no exit status is
 truncated by the operating system. Every input is a literal in this file: nothing is read from the
 environment, the clock, the file system or the network, and iteration order is fixed by literal
 bounds, so every cell is reproducible from this source and this record alone.
+
 No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
 bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no standard
-I/O header (docs/project-guide.md line 212), so naming one would fail on the bcc side of oracle (a)
-while succeeding on the reference side -- a spurious divergence caused by the test rather than by a
-compiler. This area is granted no header exception; the corpus has exactly two, area 07's stdarg.h
-and the dedicated bundled-header probe in area 12.
-This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
-under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, with no diagnostic of any kind and no
-source-level diagnostic suppression anywhere in the translation unit, and it builds and runs clean
-under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
-reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched. One initializer spelling is excluded to reach that clean audit rather than suppressed
-inside it, and the exclusion, its measured reason and which of the harder forms remain under test
-are recorded in impl_defined_notes below.
+I/O header, so naming one would fail on the bcc side of oracle (a) while succeeding on the
+reference side -- a spurious divergence caused by the test rather than by a compiler. This area is
+granted no header exception; the corpus has exactly two, area 07's stdarg.h and the dedicated
+bundled-header probe in area 12.
+
+TWO AUTHORING CONSTRAINTS FROM THE MANDATED GATE, RECORDED SO THIS PROGRAM IS NOT "SIMPLIFIED"
+INTO FAILURE BY A LATER CONTRIBUTOR:
+
+  - Every nested aggregate is FULLY BRACED. The gate includes -Wall, which enables
+    -Wmissing-braces, and -Werror promotes it to a hard error, so no brace may be elided from any
+    initializer in this program.
+  - Every struct initializer that omits a member does so through a DESIGNATOR, and every fully
+    positional struct initializer supplies all of its members. Measurement with the reference
+    compiler established that -Wmissing-field-initializers, enabled by -Wextra, does not fire for
+    designated initializers in C but does fire for a positional partial struct such as
+    `struct outer v = { 1 };`. No designator may therefore be removed from any initializer here.
+
+This record declares no warning-gate deviation, and area 03 sanctions none, so no ub_audit_flags
+override is used and both constraints above are satisfied by construction rather than by relaxing
+the gate. The program is clean under the full default gate -Wall -Wextra -pedantic -Wconversion
+-Wsign-conversion -Wshadow -Werror at -O0, -O1 and -O2 with all four reference drivers, with no
+diagnostic of any kind and no source-level diagnostic suppression anywhere in the translation
+unit, and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
+-fno-sanitize-recover=all. Both gates are reference-compiler-only and are never applied to bcc, so
+requirement 3's shared-flag discipline is untouched. One initializer spelling is excluded to reach
+that clean audit rather than suppressed inside it, and the exclusion, its measured reason and which
+of the harder forms remain under test are recorded in impl_defined_notes below.
 END
 impl_defined_notes <<END
 This record narrows nothing that the harness reads: all four targets, all three optimization
@@ -93,30 +136,32 @@ levels and all three oracles are enabled, no expected-divergence marker is carri
 deviation is claimed under the ub_audit_flags key, and no implementation-defined value reaches
 this program's output. One initializer SPELLING is nevertheless excluded from the source, and the
 paragraph below states which, why, and which of the harder forms remain under test.
-CONSTRAINT-C3 EXCLUSION -- THE OVERLAPPING-DESIGNATOR-AT-DEPTH SPELLING. Overriding a
-designated initializer at DEPTH -- naming one nested subobject twice -- is well-defined C11
-(6.7.9p19), and it would be worth testing separately from the flat override because the override
-has to interact correctly with the current-object descent: an implementation that resolved
-designators against the wrong nesting level would override a sibling, or the outer object, rather
-than the subobject named. GCC nevertheless reports it under -Woverride-init, which -Wextra enables
-and which the audit gate's -Werror makes fatal. FOURTEEN override spellings were MEASURED against
-that gate with the reference compiler -- the flat and the nested ones alike, enumerated in
-004_designated_array.c and in 004_designated_array.expected -- and every one is rejected, so no
-spelling of that route exists that the unmodified gate accepts. An override carrying a side effect
-is no escape either: -Woverride-init-side-effects is on by default and is not a gate member at all,
-and C11 6.7.9p23 leaves the sequencing of an initializer list's side effects unspecified, which
-requirement 1 forbids outright. No admissible deviation exists: the gate's removable members are
-exactly -pedantic, for the GCC-extensions area, and -Wconversion with -Wsign-conversion, for the
-deliberate narrowing program, so -Wextra is not removable and area 03 is granted no deviation at
-all. A source-level diagnostic-suppression directive is not an alternative to that: it neutralizes
-a gate member from inside the translation unit while this record still claims the unchanged gate,
-which would make this record's own claim false rather than making the program clean. The spelling
-is therefore dropped from the source, and constraint C3 is satisfied the way it asks to be -- the
+
+CONSTRAINT-C3 EXCLUSION -- THE OVERLAPPING-DESIGNATOR-AT-DEPTH SPELLING. Overriding a designated
+initializer at DEPTH -- naming one nested subobject twice -- is well-defined C11 (6.7.9p19), and it
+would be worth testing separately from the flat override because the override has to interact
+correctly with the current-object descent: an implementation that resolved designators against the
+wrong nesting level would override a sibling, or the outer object, rather than the subobject named.
+GCC nevertheless reports it under -Woverride-init, which -Wextra enables and which the audit gate's
+-Werror makes fatal. FOURTEEN override spellings were MEASURED against that gate with the reference
+compiler -- the flat and the nested ones alike, enumerated in 004_designated_array.c and in
+004_designated_array.expected -- and every one is rejected, so no spelling of that route exists
+that the unmodified gate accepts. An override carrying a side effect is no escape either:
+-Woverride-init-side-effects is on by default and is not a gate member at all, and C11 6.7.9p23
+leaves the sequencing of an initializer list's side effects unspecified, which requirement 1
+forbids outright. No admissible deviation exists: the gate's removable members are exactly
+-pedantic, for the GCC-extensions area, and -Wconversion with -Wsign-conversion, for the deliberate
+narrowing program, so -Wextra is not removable and area 03 is granted no deviation at all. A
+source-level diagnostic-suppression directive is not an alternative to that: it neutralizes a gate
+member from inside the translation unit while this record still claims the unchanged gate, which
+would make this record's own claim false rather than making the program clean. The spelling is
+therefore dropped from the source, and constraint C3 is satisfied the way it asks to be -- the
 exclusion is narrow, it is scoped to one spelling, it changes no target, no optimization level and
 no oracle, and its reason is recorded here and in the program's own header comment. The specific
 loss is the two nested overriding forms the file used to carry, one in each direction, which
 together separated "last writer wins" from "any explicit member survives" at depth; that loss is
 stated rather than left to be inferred, and it is a gap in this area that no program closes.
+
 THREE GATE FACTS GOVERN THE SHAPE OF THESE INITIALIZERS and must not be disturbed by anyone editing
 the program. First, -Wextra enables -Wmissing-field-initializers, which in C does not fire for a
 designated initializer but does for a positional partial one, so every struct here that omits a
@@ -131,18 +176,19 @@ three exclusions across this area form a coherent set rather than three accident
 003_partial_zero_fill.c excludes the positional partial STRUCT spelling, 002_nested_aggregate.c
 excludes the brace-elided spelling, and 004_designated_array.c excludes the flat
 overlapping-designator spelling. Each records its own reason in its own header and its own record.
+
 WHAT REMAINS UNDER TEST IS THE HARDER HALF OF THE SAME QUESTION -- tracking the current object
 through a descent -- which is why the exclusion is narrow rather than a retreat from the area's
 mandate. Form 1 lands a value positionally, descends into a brace where a designator sets q and
 leaves p zero, then resumes positionally on trailer. Form 2 designates tag, then an UNLABELLED
 brace that must bind to the following member, then a bare value that must continue past it. Form 3
 takes a positional element then a designated one, skipping the element between. Form 4 fills row 0
-positionally and then jumps straight to [2][1], leaving five elements zero, so a designator landing
-in the wrong row or column is immediately visible. Form 5 nests form 1 one level deeper beside a
-designated sibling array. Form 6, the most demanding initializer in this area, spells
-`.o = { .in.p = 42 }` -- two levels down, leaving o.tag, o.in.q and o.trailer zero -- alongside
-`.pr = { { 43, 44 }, [1].q = 46 }`, a positional element followed by a combined index-and-member
-designator. None of them names a slot twice, which is exactly why all six are gate-clean.
+positionally and then jumps straight to [2][1], leaving five elements zero. Form 5 nests form 1 one
+level deeper beside a designated sibling array. Form 6 spells `.o = { .in.p = 42 }` -- two levels
+down, leaving o.tag, o.in.q and o.trailer zero -- alongside `.pr = { { 43, 44 }, [1].q = 46 }`, a
+positional element followed by a combined index-and-member designator. None of them names a slot
+twice, which is exactly why all six are gate-clean.
+
 Forms 1, 3 and 5 are repeated at automatic storage duration, so the static-image path and the
 run-time path are both exercised; form 3's twin uses the combined [2].q spelling rather than
 [2] = { ... }. That pairing is the discriminating variant in this area and is why all three
@@ -150,26 +196,41 @@ optimization levels matter: with optimization off the statics appear as data-sec
 the twins appear as a run of stores into the frame, and at a higher level either path may be folded
 into immediate operands. A volatile operand would add nothing, because the subject here is what an
 initializer produces rather than what an operator computes.
+
+TWO LINE GROUPS CARRY DISPROPORTIONATE DIAGNOSTIC VALUE, and a reviewer reading a divergence should
+look at them first. g_deep_desig is the most demanding initializer in area 03: it requires the
+compiler to descend two nesting levels through .o.in.p, zero everything else in o, and then handle
+a positional array element followed by a combined index-and-member designator [1].q in the sibling
+array member; nearly every plausible current-object defect surfaces in its eight lines.
+g_m_pos_then_desig is the clearest single-line detector: after a positional row 0, the designator
+[2][1] = 8 must place a single 8 while row 1 and five of row 2's six elements stay zero, so a
+designator landing in the wrong row or column is immediately visible.
+
 WIDTH NORMALIZATION. Every member is an int and %d is the only conversion specifier, so no target's
 pointer or long width can be observed: i686 is ELF32 with a four-byte long and pointer while
-x86-64, AArch64 and RISC-V 64 are ELF64 with eight bytes for both
-(docs/technical-specifications.md target table, lines 457-462), and this program touches neither
-type. No sizeof or _Alignof result is printed and no address is printed, so no layout choice the
-ABI is free to make is observable.
+x86-64, AArch64 and RISC-V 64 are ELF64 with eight bytes for both, and this program touches neither
+type. It contains no long, size_t, ptrdiff_t, intptr_t, float, double or long double. No sizeof or
+_Alignof result is printed and no address is printed, so no layout choice the ABI is free to make
+is observable.
+
 PLAIN-CHAR SIGNEDNESS. No character data appears at all, so the MEASURED split -- signed on x86-64
 and i686, unsigned on AArch64 and RISC-V 64 -- cannot arise.
+
 PADDING. Every member at every nesting level is read individually by name; no aggregate is printed
 whole and no representation is inspected, so no padding byte is ever observed.
+
 EXECUTION CHARACTER SET. Nothing character-valued is printed, so C11 5.2.1 leaves nothing here to
 the implementation.
+
 MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
 -O1 and -O2 -- twelve configurations -- and every one produced these 57 lines byte-identically with
 exit status 0, which is why oracle (b) compares this program's targets against each other without
 any narrowing and why oracle (c) can hold these bytes as the golden record. The same twelve
 configurations were re-measured after the excluded spelling was removed, so these 57 lines are the
-current source's output rather than a residue of an earlier one. Nothing is summarized,
-so one divergent line localizes the defect to one mixed form at one nesting level.
+current source's output rather than a residue of an earlier one. Nothing is summarized, so one
+divergent line localizes the defect to one mixed form at one nesting level.
 END
+
 expected_stdout    <<END
 g_pos_desig_in.tag=1
 g_pos_desig_in.in.p=0
@@ -229,3 +290,4 @@ l_deep_mixed.pr[0].q=76
 l_deep_mixed.pr[1].p=0
 l_deep_mixed.pr[1].q=0
 END
+

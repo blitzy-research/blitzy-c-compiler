@@ -1,12 +1,16 @@
 # Expectation record for 03_initializers/004_designated_array.c
 #
+# Designated array initializers: sparse and out-of-order designators, the C11
+# current-object repositioning rule, implied array size, constant-expression
+# indices, two-dimensional designators, and array-of-struct designators.
+#
 # Reproduce one cell by hand with no harness: render the three command templates
 # below, substituting the target triple, the optimization level, the source path,
 # the output path, and the target's runner (empty on the natively executing target).
 
 program            = 004_designated_array
 area               = 03_initializers
-description        = Designated array initializers -- sparse, out-of-order, designator-then-positional continuation, implied length, constant-expression designators, row and element designators for a two-dimensional array in both orders, and member and element designators through an array of struct, every slot read back individually at both storage durations; the OVERLAPPING-designator spelling is excluded, narrowly and with its reason recorded in impl_defined_notes, because the frozen warning gate rejects every spelling of it
+description        = Designated array initializers -- sparse and out-of-order designators, designated-then-positional continuation exercising the C11 current-object rule, array size implied by the largest designator, constant-expression indices, two-dimensional row and element designators, and array-of-struct designators -- for static and automatic storage duration, every element read back individually
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -18,159 +22,192 @@ oracle_a           = enabled
 oracle_b           = enabled
 oracle_c           = enabled
 ub_notes           <<END
-This program contains no undefined and no unspecified behaviour, which is the precondition that
+This program contains no undefined and no unspecified behaviour. That is the precondition which
 makes both differential oracles sound: undefined behaviour would license either compiler to do
 anything at all, so a divergence over it would prove nothing about either one.
-The rule this program has to satisfy that an ordinary initializer program does not is C11 6.7.9p23:
-the evaluations of an initializer list's expressions are indeterminately sequenced with respect to
-one another, so the order in which their SIDE EFFECTS occur is unspecified. Every initializer
-expression here is an integer constant expression -- 1, 10 through 13, 30, 50, 70, 101, 110 through
-113, 130, 170, and the small constants in the two-dimensional and struct cases -- and a
-constant expression has no side effects at all, so that unspecified order is unobservable. This
-matters because several of these forms depend on initializer-list ORDER for their answer:
-g_continue resumes positionally after a designator and is then repositioned backwards,
-g_row_then_elem and g_elem_then_row spell one aggregate in two orders, and g_st_brace lists its
-element braces [2] before [0]. Which slot each initializer lands in is fixed by C11 6.7.9p19,
-which initializes in initializer-list order, and that is a separate rule from the sequencing of
-side effects that 6.7.9p23 leaves open. Because no initializer expression has a side
-effect, there is nothing left for 6.7.9p23 to make unspecified, and no initializer here names a
-subobject an earlier one already named, so the one form whose answer would turn on that
-distinction is the form this record excludes.
-Every designator is in range for its array, and each is a constant expression the compiler resolves
-before the program runs: g_sparse is int[8] designated at 7, 3 and 0; g_continue is int[6]
-designated at 1 and 0 with the unnamed run 12, 13 continuing at indices 2 and 3, which C11 6.7.9p17
-fixes to resume at the element following the designated one; g_constexpr is int[6] designated at
-2 + 1, 1 * 2 and 0, which are 3, 2 and 0; the three two-dimensional arrays are int[2][3] designated
-within [0..1][0..2]; and the two struct arrays are struct pair[3] designated at 0 and 2.
-g_implied has no declared bound, so C11 6.7.9p22 sizes it from its largest designator: its one
-designator is [4], making it int[5], and the program reads exactly the length it computes with
-sizeof rather than a literal, so a mis-sized array shows up as a wrong g_implied_len line instead of
-an out-of-bounds read.
-Every subscript in every read loop stays strictly inside its array bound, and each loop bound is
-either a literal equal to the declared extent or, for g_implied, the sizeof-derived element count.
-No pointer is formed anywhere in the program, so no one-past-the-end pointer exists to be
-dereferenced, no pointer arithmetic can leave an object, no address is taken and none is printed.
-Every element and member left unmentioned by a designated initializer is initialized to zero by C11
-6.7.9p19 and 6.7.9p21 -- a definite value rather than an indeterminate one -- so nothing here reads
-uninitialized storage. That applies to the automatic-duration objects exactly as to the static ones,
-because an object with any initializer is fully initialized.
-No arithmetic is performed on the data, so no signed overflow is reachable. The only arithmetic is
-the loop counters' increments, bounded by 8, 6, 5, 4, 2 and 3, and the sizeof quotients, whose
-operands are compile-time constants and whose divisor is a sizeof of a complete object type and is
-therefore non-zero by the standard's own guarantee. Nothing is shifted and nothing is remaindered.
-Nothing is modified after its initialization, so no object is modified twice between two sequence
-points.
-There is no aliasing violation: every value is read through an lvalue of its own declared type,
-which is int in every case, reached by subscripting and member selection only. No object
-representation is examined, no union appears in a read, and no cast to a pointer type is present.
-The casts in the program are (int) applied to a sizeof quotient whose value is 5 -- a value
-conversion that cannot change the number. No padding byte is observed and nothing depends on the
-relative addresses of unrelated objects.
-Each printf call receives at most two loop counters and one int datum, none of which has a side
-effect, so the unspecified order in which a function call's arguments are evaluated cannot be
-observed. Every conversion specifier is %d with an argument of type int after the default argument
-promotions, so no variadic argument is read at the wrong width.
-main returns 0, inside the 0-125 range the suite requires so that no exit status is truncated by the
-operating system. Nothing outside this file is read: every input is a literal here, no file, socket,
-environment variable, clock, random source or locale is consulted, and iteration order is fixed, so
-every cell is reproducible from this source and this record alone.
+
+The one rule this program has to satisfy that an ordinary initializer program does not is C11
+6.7.9p23: the evaluations of an initializer list's expressions are indeterminately sequenced with
+respect to one another, so the order in which their SIDE EFFECTS occur is unspecified. Every
+initializer expression here is an integer constant expression -- 1, 10 through 13, 30, 50, 70, 101,
+110 through 113, 130, 170, and the small constants in the two-dimensional and struct cases -- and a
+constant expression has no side effects at all, so that unspecified order is unobservable. Which
+SLOT each initializer lands in is a separate rule, fixed by C11 6.7.9p19, which initializes in
+initializer-list order; that is what several of these forms depend on for their answer, and it is
+not what 6.7.9p23 leaves open.
+
+Every object is fully initialized before any read. Elements not named by a designator are implicitly
+initialized to zero under C11 6.7.9p19 and p21, so every gap between sparse designators holds a
+definite zero rather than an indeterminate value. There is no read of uninitialized storage. That
+applies to the two automatic-duration objects exactly as it does to the nine static ones, because an
+object with any initializer at all is fully initialized.
+
+EVERY DESIGNATOR INDEX IS IN RANGE. g_sparse and l_sparse are declared [8] and use
+indices 0, 3 and 7. g_continue, l_continue and g_constexpr are declared [6] and use
+indices 0, 1, 2 and 3, with the positional initializers following [1] landing at
+[2] and [3]. g_implied is declared with an unspecified bound, and C11 6.7.9p22
+makes its size the largest designated index plus one, so its length is exactly 5
+and index 4 is its last element. The two-dimensional objects are declared [2][3]
+and use row indices 0 and 1 and element indices 0, 1 and 2. g_st_memb and
+g_st_brace are declared [3] and use indices 0 and 2.
+
+The two constant-expression indices [2 + 1] and [1 * 2] are integer constant
+expressions evaluated at translation time to 3 and 2, both within the declared
+bound of 6. No signed overflow is possible in either.
+
+No arithmetic is performed on any initialized value. The only run-time arithmetic
+is on the loop counters i and j, each bounded strictly below its extent. Every
+subscript is in bounds; no one-past-end pointer is formed and none is
+dereferenced.
+
+No shifts, no pointer casts, no aliasing -- each object is read only through its
+own declared type. No object is modified after initialization, so nothing is
+modified twice between sequence points. Each printf call has at most one argument
+with a side effect, and none has one. No padding byte is read: only named members
+are accessed, no struct is printed as a whole, and no object representation is
+inspected.
+
+g_implied_len is computed as (int)(sizeof g_implied / sizeof g_implied[0]). The two
+sizeof operands cancel, so this is an ELEMENT COUNT rather than a byte size and is
+5 on every target irrespective of pointer or long width. The read loop over g_implied uses that
+same computed count rather than a literal 5, so an array the compiler sized wrongly shows up as a
+wrong g_implied_len line rather than as a read past the end of the object.
+
+Every conversion specifier is %d with an argument of type int after the default argument promotions,
+so no variadic argument is read at the wrong width. main returns 0, inside the 0-125 range the suite
+requires so that no exit status is truncated by the operating system. Nothing outside the source file
+is consulted: every input is a literal here, no file, socket, environment variable, clock, random
+source or locale is read, and iteration order is fixed, so every cell is reproducible from this
+program and this record alone.
+
 No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
 bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no standard
 I/O header (docs/project-guide.md line 212), so naming one would fail on the bcc side of oracle (a)
 while succeeding on the reference side -- a spurious divergence caused by the test rather than by a
 compiler. This area is granted no header exception; the corpus has exactly two, area 07's stdarg.h
 and the dedicated bundled-header probe in area 12.
+
 This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
-under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
--Werror at -O0, -O1 and -O2 with all four reference drivers, with no diagnostic of any kind and no
+under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+at -O0, -O1 and -O2 with all four reference drivers, with no diagnostic of any kind and no
 source-level diagnostic suppression anywhere in the translation unit, and it builds and runs clean
 under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both gates are
 reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
-untouched. One initializer spelling is excluded to reach that clean audit rather than suppressed
-inside it, and the exclusion, its measured reason and which order-dependent forms remain under test
-are recorded in impl_defined_notes below.
+untouched.
+
+REASONING ON OVERLAPPING DESIGNATORS, AS THE AREA REQUIREMENTS DIRECT:
+
+The area requirements permit overlapping designators "only where the later
+initializer's precedence is well defined". Two distinct situations must be
+separated here.
+
+First, the situation this program DOES exercise. In g_continue the initializer
+{ [1] = 11, 12, 13, [0] = 10 } contains no two initializers for the same element.
+The designator [1] repositions the current object; the following positional
+initializers 12 and 13 therefore initialize [2] and [3] under C11 6.7.9p17 and
+p18; the trailing designator [0] then repositions again and initializes [0]
+without disturbing anything already set. Elements [4] and [5] are implicitly zero.
+The resulting order 10, 11, 12, 13, 0, 0 is fully determined by the standard, so
+this is a well-defined use of interleaved designated and positional initializers
+and it is included. The same reasoning applies to the two-dimensional objects
+g_row_then_elem and g_elem_then_row, whose designators address disjoint elements
+and which therefore produce identical results from opposite initializer orders.
+Four further forms turn on the same rule without naming a slot twice: g_elem_only supplies three
+element designators out of row order, g_st_brace lists its element braces [2] before [0], g_st_memb
+interleaves member designators across two elements, and g_sparse and l_sparse designate descending
+indices 7, 3, 0. Each is gate-clean precisely because no initializer in it revisits a slot an
+earlier one already named.
+
+Second, the situation this program DELIBERATELY EXCLUDES, with its reason, per
+constraint C3's requirement to "state so explicitly and explain why". A duplicate
+designator that supplies a SECOND initializer for an element already initialized,
+for example { [0] = 1, [1] = 2, [1] = 20, [2] = 3 }, is well defined in C11 -- the
+later initializer takes precedence -- but it cannot be compiled under this suite's
+mandated authoring gate. The gate includes -Wextra, which enables
+-Woverride-init, and -Werror, which promotes it to a hard error. Fourteen
+spellings of a value-overriding designator were probed with the reference
+compiler and every one is rejected with "initialized field overwritten
+[-Werror=override-init]": a duplicate element designator; an override carrying the SAME value; a
+zero-then-value override; a whole-row brace then one element of that row; that pair reversed, an
+element then the whole-row brace; the reversed pair again with a later initializer for a different
+row; positional continuation running back over an earlier designator; a struct-element brace then
+one member of it; two member designators then a whole-struct brace over them; a duplicate struct
+member designator; two union member designators; a nested whole-member brace then one member of it;
+the reverse of that nesting; and an override inside a compound literal.
+There is therefore no gate-clean formulation of this spelling, and area 03
+sanctions no deviation from the default gate, so no ub_audit_flags override is
+used. An override carrying a side effect is not an escape from the diagnostic either:
+-Woverride-init-side-effects is enabled by DEFAULT and is not a gate member at all, and the
+sequencing that C11 6.7.9p23 leaves unspecified would then become observable, which requirement 1
+forbids outright. Nor is a source-level diagnostic-suppression directive an alternative: it
+neutralizes a gate member from inside the translation unit while this record still claims the
+unchanged gate, which would make this record's own claim false rather than making the program clean.
+
+A range designator such as { [0 ... 3] = 7 } would express a related idea, but it
+is a GCC extension rather than C11, it is rejected by -pedantic which the gate also
+enables -- measured, as "ISO C forbids specifying range of elements to initialize
+[-Werror=pedantic]" -- and GCC extensions are the subject of area 08 rather than area 03.
+
+The exclusion is limited to that one SPELLING. The FEATURE under test -- designated
+array initializers -- remains fully covered by the six gate-clean forms this
+program exercises: sparse and out-of-order designators, designated-then-positional
+continuation, array size implied by the largest designator,
+constant-expression indices, two-dimensional row-then-element and
+element-then-row and element-only designators, and array-of-struct designators in
+both member and brace form. Nothing is dropped for difficulty. What the exclusion does cost is
+stated rather than left to be inferred: no program in this area distinguishes "the last initializer
+to name a subobject wins" from "any explicitly named subobject survives", and that remains a gap
+which no program in the corpus closes.
+
+This is a diagnostic policy of the reference compiler's authoring gate, not a
+limitation of the compiler under test, so it is recorded here rather than as an
+expected-divergence marker.
 END
 impl_defined_notes <<END
-This record narrows nothing that the harness reads: all four targets, all three optimization
-levels and all three oracles are enabled, no expected-divergence marker is carried, no gate
-deviation is claimed under the ub_audit_flags key, and no implementation-defined value reaches
-this program's output. One initializer SPELLING is nevertheless excluded from the source, and the
-paragraph below states which, why, and which order-dependent forms remain under test.
-CONSTRAINT-C3 EXCLUSION -- THE OVERLAPPING-DESIGNATOR SPELLING. Overriding a
-designated initializer -- naming one subobject twice, so that the LATER initializer supplies
-its value -- is well-defined C11 (6.7.9p19, which fixes initialization in initializer-list
-order), and getting the order wrong is a realistic compiler defect that stays invisible unless
-a program actually overrides something: a front end that folded designators into a map keyed by
-index would keep whichever value it happened to insert last, which need not be the one the source
-ordered last. GCC nevertheless reports it under -Woverride-init, which -Wextra enables and which
-the audit gate's -Werror makes fatal; in this environment `{ [0] = 1, [1] = 2, [0] = 9 }` is
-rejected with "initialized field overwritten [-Werror=override-init]". FOURTEEN spellings of an
-override were MEASURED against that gate with the reference compiler -- duplicate element
-designator, identical-value override, zero-then-value, whole-row brace then element, element then
-whole-row brace, that reverse nesting with a later initializer for a different row, positional
-continuation running back over an earlier designator, struct-element brace then one member of it,
-two member designators then a whole-struct brace, duplicate struct member, two union members, a
-nested whole-member brace then one of its members, the reverse of that, and an override inside a
-compound literal -- and every one is rejected, so no spelling of that particular route exists that
-the unmodified gate accepts. An override carrying a side effect is not an escape either:
--Woverride-init-side-effects is on by DEFAULT and is not a gate member at all, and C11 6.7.9p23
-leaves the sequencing of an initializer list's side effects unspecified, which requirement 1
-forbids outright -- so the one construction that would have slipped past the diagnostic is barred
-by the soundness precondition instead. No admissible deviation exists: the gate's removable
-members are exactly -pedantic, for the GCC-extensions area, and -Wconversion with
--Wsign-conversion, for the deliberate narrowing program, so -Wextra is not removable and area 03
-is granted no deviation at all. A source-level diagnostic-suppression directive is not an
-alternative to that: it neutralizes a gate member from inside the translation unit while this
-record still claims the unchanged gate, which would make this record's own claim false rather
-than making the program clean. The spelling is therefore dropped from the source, and constraint
-C3 is satisfied the way it asks to be -- the exclusion is narrow, it is scoped to one spelling, it
-changes no target, no optimization level and no oracle, and its reason is recorded here and in
-the program's own header comment. The specific loss is the seven overriding families the file used
-to carry, of which the discriminating one was the reverse nesting that separates "the last
-initializer to name a subobject wins" from "any explicitly named member survives"; that loss is
-stated rather than left to be inferred, and it is a gap in this area that no program closes.
-THE ORDERING RULE ITSELF REMAINS UNDER TEST IN THIS PROGRAM, which is what keeps the exclusion
-narrow rather than a wholesale retreat from order-dependence. g_continue is
-`{ [1] = 11, 12, 13, [0] = 10 }`: a designator, two positional initializers that C11 6.7.9p17
-requires to resume at indices 2 and 3, and then a designator that moves the cursor BACKWARDS, so
-an implementation that resumed from the wrong place or refused to reposition is caught without any
-slot being named twice. g_row_then_elem and g_elem_then_row spell one int[2][3] with a row brace
-and an element designator in both orders and must agree. g_elem_only supplies three element
-designators out of row order. g_st_brace lists its element braces [2] before [0], and g_st_memb
-interleaves member designators across two elements. g_sparse and l_sparse designate descending
-indices 7, 3, 0. Every one of those is gate-clean precisely because no initializer in it revisits
-a slot an earlier one already named. The bracketed-range designator `[0 ... 3] = 7`, which would
-express a repeated fill without an override, is a GCC extension rejected by -Werror=pedantic and
-belongs to area 08 rather than here.
-WIDTH NORMALIZATION. Every printed datum is a plain int printed with %d, and the one derived
-quantity, g_implied_len, is an element COUNT rather than a size in bytes, so it is 5 on every
-target regardless of how wide an int is. No type whose width differs between the ILP32 target and
-the three LP64 targets ever reaches a format string: i686 is ELF32 with a four-byte long and
-pointer while x86-64, AArch64 and RISC-V 64 are ELF64 with eight bytes for both
-(docs/technical-specifications.md target table, lines 457-462), a difference also MEASURED on all
-four targets in this environment, and this program touches neither type. No sizeof result is
-printed as a byte count and no _Alignof result is printed at all.
-PLAIN-CHAR SIGNEDNESS. No character data appears at all, so the MEASURED split -- plain char signed
-on x86-64 and i686, unsigned on AArch64 and RISC-V 64 -- cannot arise.
-PADDING AND LAYOUT. Only named members and elements are read, never an object representation, so no
-padding byte is observed; these all-int aggregates carry no internal padding on any of the four
-targets in any case. No address is printed, so no layout choice the ABI is free to make is
-observable: only the values the initializers supply are.
-EXECUTION CHARACTER SET. Nothing character-valued is printed, so C11 5.2.1 leaves nothing here to
-the implementation.
-THE DISCRIMINATING VARIANT is the pairing of storage durations, which is why all three optimization
-levels matter: a static designated initializer is resolved before program startup and emitted into
-the data image, whereas the automatic twin's placement is a run-time act the backend performs on
-entry to the block, and at a higher level either path may be folded into immediate operands. Every
-element of every object is read back individually, so a value landing in the wrong slot, a
-disturbed neighbour or a lost zero fill is each its own line, and nothing is summarized.
-MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
--O1 and -O2 -- twelve configurations -- and every one produced these 70 lines byte-identically
-with exit status 0, which is why oracle (b) compares this program's targets against each other
-without any narrowing and why oracle (c) can hold these bytes as the golden record. The count is
-the mechanically measured length of the golden block below rather than a hand-written figure, and
-the same twelve configurations were re-measured after the excluded spelling was removed, so these
-70 lines are the current source's output rather than a residue of an earlier one.
+This record narrows nothing that the harness reads: all four targets, all three optimization levels
+and all three oracles are enabled, no expected-divergence marker is carried, no gate deviation is
+claimed under the ub_audit_flags key, and no implementation-defined value reaches this program's
+output. One initializer SPELLING is nevertheless excluded from the source, and because that
+exclusion is an undefined-and-unspecified-behaviour matter rather than an implementation-defined
+one, it is stated where the area requirements direct: in ub_notes above, under REASONING ON
+OVERLAPPING DESIGNATORS.
+
+All printed values are int and are printed with %d only. The program contains no
+long, size_t, ptrdiff_t, intptr_t, float, double or long double. The single sizeof
+use is the cancelling element-count division for g_implied_len, which yields 5 on
+every target, so the measured width difference between i686 (4-byte long and
+pointer) and the other three targets (8-byte) cannot affect the output. That difference is
+documented as well as measured: i686 is ELF32 with a four-byte long and pointer while x86_64,
+aarch64 and riscv64 are ELF64 with eight bytes for both (docs/technical-specifications.md target
+table, lines 457-462). No sizeof result is printed as a byte count and no _Alignof result is printed
+at all.
+
+No character data is used, so the measured plain-char signedness difference
+(signed on x86_64 and i686, unsigned on aarch64 and riscv64) cannot arise. Nothing
+character-valued is printed either, so C11 5.2.1 leaves nothing here to the execution character
+set.
+
+No address or pointer value is printed, and no struct is printed as a whole, so
+padding bytes -- whose contents are unspecified -- are never observed. These all-int aggregates
+carry no internal padding on any of the four targets in any case, and because no address is printed
+no layout choice the ABI is free to make is observable: only the values the initializers supply are.
+
+g_row_then_elem and g_elem_then_row are constructed to produce IDENTICAL output
+from OPPOSITE initializer orders. Any asymmetry between those two line groups is
+an unambiguous defect signal rather than an implementation-defined difference.
+
+The discriminating variant here is the pairing of storage durations, which is also why all three
+optimization levels matter: a static designated initializer is resolved before program startup and
+emitted into the data image, whereas its automatic twin's placement is a run-time act the backend
+performs on entry to the block, and at a higher level either path may be folded into immediate
+operands. Every element of every object is read back individually, so a value landing in the wrong
+slot, a disturbed neighbour or a lost zero fill is each its own line, and nothing is summarized.
+
+Output is byte-identical on all four targets at all three optimization levels,
+verified by measurement. The program was compiled with the reference driver for each target at -O0,
+-O1 and -O2 -- twelve configurations -- and every one produced these 70 lines byte-identically with
+exit status 0, which is why oracle (b) compares this program's targets against each other with no
+narrowing and why oracle (c) can hold these bytes as the golden record.
 END
 expected_stdout    <<END
 g_sparse[0]=1

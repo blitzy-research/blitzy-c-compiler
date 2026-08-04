@@ -40,8 +40,8 @@ Every subscript stays strictly inside its array bound, and each bound is a liter
 declared extent: g_arr is struct inner[3] read at 0 through 2, l_arr is struct inner[2] read at 0
 and 1, both pair members are struct inner[2] read at 0 and 1, g_matrix is int[2][3] read at
 [0..1][0..2], and g_cube is int[2][2][2] read at [0..1][0..1][0..1]. No pointer is formed anywhere
-in the program, so no one-past-the-end pointer exists to be dereferenced, no pointer arithmetic is
-performed, no address is taken and none is printed.
+in the program apart from printf's format argument, so no one-past-the-end pointer exists to be
+dereferenced, no pointer arithmetic is performed, no address is taken and none is printed.
 There is no aliasing violation: every value is read through an lvalue of its own declared type,
 which is int in every case, reached by member selection and subscripting only. No object
 representation is examined, no union appears, and no cast of any kind is present, so no
@@ -53,10 +53,11 @@ representable in int on every target the suite supports and no implicit conversi
 value. Each object owns a disjoint value range -- 1 to 4, 10 to 31, 60 to 67, 71 to 74, 81 to 84
 and 90 to 97 -- so a value that surfaces in the wrong place names the aggregate it escaped from
 rather than merely reporting that something disagreed.
-Each printf call receives at most one loop counter and one int member, neither of which has a side
-effect, so the unspecified order in which a function call's arguments are evaluated cannot be
-observed. Every conversion specifier is %d and every corresponding argument has type int after the
-default argument promotions, so no variadic argument is read at the wrong width.
+Every printf argument is a plain read of a loop counter or of an int member, and no argument of any
+call modifies an object, so the unspecified order in which a function call's arguments are evaluated
+cannot be observed even though up to four arguments are read per call. Every conversion specifier is
+%d and every corresponding argument has type int after the default argument promotions, so no
+variadic argument is read at the wrong width.
 main returns 0, inside the 0-125 range the suite requires so that no exit status is truncated by
 the operating system. Nothing outside this file is read: every input is a literal here, no file,
 socket, environment variable, clock, random source or locale is consulted, and iteration order is

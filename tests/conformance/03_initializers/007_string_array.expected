@@ -24,14 +24,19 @@ anything at all, so a divergence over it would prove nothing about either one.
 The construct that looks most dangerous here is defined, and it is the point of the program: an
 array whose declared width is exactly the length of its string literal receives the literal's bytes
 and the terminating null is simply NOT copied. C11 6.7.9p14 states that explicitly, so g_exact_u[3]
-from "abc", g_exact_s[3] from "xyz", g_escapes[4] from a three-escape literal, and each row of
-g_grid_exact[2][5] from "hello" and "world" are well defined rather than overflowing. Nothing in the
-program ever reads the terminator those arrays do not have: the exact-width arrays are never printed
-with %s and never walked for a terminator, every read goes through a helper that is given the
-array's DECLARED element count -- 3, 4, 6, 5, 7 -- and loops strictly below it, and the two grids
-are read with literal bounds equal to their declared row widths. No read therefore passes the last
-element of any object, no subscript is ever out of bounds and no one-past-the-end pointer is formed
-or dereferenced.
+from "abc", g_exact_s[3] from "xyz" and each row of g_grid_exact[2][5] from "hello" and "world" are
+well defined rather than overflowing -- those, and only those, are the exact-width objects.
+g_escapes[4] is deliberately NOT one of them, and saying so is worth a sentence because its literal
+LOOKS longer than it is: "\x41\102\n" is three characters, measured as sizeof - 1 == 3, so the array
+has a fourth element and the terminator IS copied into it, which the golden line g_escapes[3]=0
+records. It is the minimal with-room case rather than an exact-width one, and mistaking it for one
+would invite a maintainer to "correct" its width to 3 and delete a line of the golden record.
+Nothing in the program ever reads the terminator the exact-width arrays do not have: they are never
+printed with %s and never walked for a terminator, every read goes through a helper that is given
+the array's DECLARED element count -- 3, 4, 5, 6 or 7 -- and loops strictly below it, and the two
+grids are read with literal bounds equal to their declared row widths. No read therefore passes the
+last element of any object, no subscript is ever out of bounds and no one-past-the-end pointer is
+formed or dereferenced.
 The `sizeof_g_exact_u=3` and `sizeof_g_grid_exact=10` lines exist to detect the failure mode that
 would otherwise be silent: a compiler that helpfully reserved a byte for a terminator would either
 store one past the end of the object -- an out-of-bounds write, which the sanitizer gate catches --
@@ -95,15 +100,32 @@ implementation-defined properties live -- so both are handled explicitly rather 
 EXECUTION CHARACTER SET, PINNED AT TRANSLATION TIME. This program prints the numeric codes of the
 characters in its literals, and C11 5.2.1 leaves those values to the implementation -- nothing in
 the standard says 'a' is 97. All four supported targets were measured to use ASCII, and the source
-pins exactly the characters it depends on with two _Static_assert declarations: one conjunctive
-assertion covering every letter it prints (a, b, c, d, e, h, i, l, o, r, t, w, x, y and z at their
-ASCII codes) and one for the simple escape '\n' == 10. An implementation with a different
-execution character set therefore fails to TRANSLATE rather than printing different numbers that
-an oracle would have to attribute to a compiler defect. Verified by negative test: changing an
-asserted value makes translation fail. The two NUMERIC escapes in g_escapes need no assertion --
-C11 6.4.4.4p7 fixes \x41 and \102 at 65 and 66 by their numeric value regardless of charset,
-which is precisely why they are spelled numerically -- whereas the simple escape \n does need one,
-because 6.4.4.4p4 gives it a charset-dependent value.
+pins the characters it prints with two _Static_assert declarations: one conjunctive assertion naming
+fifteen letters (a, b, c, d, e, h, i, l, o, r, t, w, x, y and z at their ASCII codes) and one for the
+simple escape '\n' == 10. An implementation with a different execution character set therefore fails
+to TRANSLATE rather than printing different numbers that an oracle would have to attribute to a
+compiler defect. Verified by negative test: perturbing one asserted value makes translation stop with
+the assertion's own message.
+THE PINNING COVERS FIFTEEN OF THE SEVENTEEN LETTERS THIS PROGRAM PRINTS, NOT ALL SEVENTEEN, and the
+gap is stated here rather than rounded up, because a guarantee claimed wider than it is costs a
+reader more than one described exactly. 'f' (102) and 'g' (103) are printed and are not named by the
+conjunction; they occur only in the two automatic-duration twins, l_exact_u from "def" at index 2 and
+l_room from "gh" at index 0, which is why they are easy to miss. Neither is implied by its
+neighbours: C11 5.2.1 guarantees contiguity only for the digits, so 'e' == 101 and 'h' == 104 pin
+nothing between them. The residual is bounded and reaches no oracle in this environment -- all
+four targets were measured ASCII and all twelve configurations printed 102 and 103 -- but on a
+hypothetical non-ASCII target this program would translate and then print two byte values that
+differed for a conforming reason, and l_exact_u[2] and l_room[0] are exactly the two golden lines
+where that would surface. Note also that the assertion's own message says "every letter this program
+prints", which claims more than the conjunction delivers; this field is the accurate statement of the
+two. Closing the gap belongs in the program, by adding 'f' == 102 && 'g' == 103 to the conjunction --
+a change that alters no output at all, because a _Static_assert emits none -- and it must revise this
+paragraph and that message in the same change. It is recorded rather than performed here because
+the program is not this record's to edit and the residual blocks nothing.
+The two NUMERIC escapes in g_escapes need no assertion -- C11 6.4.4.4p7 fixes \x41 and \102 at 65
+and 66 by their numeric value regardless of charset, which is precisely why they are spelled
+numerically -- whereas the simple escape \n does need one, because 6.4.4.4p4 gives it a
+charset-dependent value.
 PLAIN-CHAR SIGNEDNESS. Plain char is never printed as itself. Its signedness is
 implementation-defined and was MEASURED signed on x86-64 and i686 but unsigned on AArch64 and
 RISC-V 64, so a plain-char value printed as itself would diverge across backends for a reason that
@@ -156,8 +178,8 @@ break that is a target whose execution character set is not ASCII, such as one u
 would print different byte values without being defective, and that would be an
 implementation-defined divergence to record as an expected divergence with this record's target list
 narrowed and the reason stated in this field -- never left to surface as a finding against a backend
-that did nothing wrong, and never resolved by dropping the string-literal initializer coverage this
-program exists to provide.
+that did nothing wrong, and never resolved by dropping the string-literal initializer coverage
+this program exists to provide.
 END
 expected_stdout    <<END
 g_exact_u[0]=97

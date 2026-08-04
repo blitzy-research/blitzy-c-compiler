@@ -101,20 +101,18 @@ nevertheless reports it under -Wmissing-field-initializers, which -Wextra enable
 audit gate's -Werror makes fatal -- the diagnostic reports the very guarantee under test.
 Sixteen spellings were MEASURED against that gate with the reference compiler, and the positional
 partial STRUCT is the only shape it rejects; it rejects every variant of that shape, so no
-spelling of that particular route exists that the unmodified gate accepts. No admissible
-deviation exists either: the gate's removable members are exactly -pedantic, for the
-GCC-extensions area, and -Wconversion with -Wsign-conversion, for the deliberate
-narrowing program, so -Wextra is not removable and area 03 is granted no deviation at all. A
-source-level
-diagnostic-suppression directive is not an alternative to that: it neutralizes a gate member from
-inside the translation unit while this record still claims the unchanged gate, which would make
-this record's own claim false rather than making the program clean. The spelling is therefore
-dropped from the source, and constraint C3 is satisfied the way it asks to be -- the exclusion is
-narrow, it is scoped to one spelling, it changes no target, no optimization level and no oracle,
-and its reason is recorded here and in the program's own header comment. The specific loss is the
-positional-cursor route through a STRUCT, at the three descent depths and in the
-array-of-struct-element form the excluded objects used to cover; that loss is stated rather than
-left to be inferred.
+spelling of that particular route exists that the unmodified gate accepts. No admissible deviation
+exists either: the gate's removable members are exactly -pedantic, for the GCC-extensions area, and
+-Wconversion with -Wsign-conversion, for the deliberate narrowing program, so -Wextra is not
+removable and area 03 is granted no deviation at all. A source-level diagnostic-suppression
+directive is not an alternative to that: it neutralizes a gate member from inside the translation
+unit while this record still claims the unchanged gate, which would make this record's own claim
+false rather than making the program clean. The spelling is therefore dropped from the source, and
+constraint C3 is satisfied the way it asks to be -- the exclusion is narrow, it is scoped to one
+spelling, it changes no target, no optimization level and no oracle, and its reason is recorded here
+and in the program's own header comment. The specific loss is the positional-cursor route through a
+STRUCT, at the three descent depths and in the array-of-struct-element form the excluded objects
+used to cover; that loss is stated rather than left to be inferred.
 THE ZERO GUARANTEE ITSELF LOSES NOTHING, which is what keeps the exclusion narrow. The same
 measurement established that -Wmissing-field-initializers does NOT fire for a designated
 initializer, nor for the `= { 0 }` idiom, nor for a partial ARRAY, nor for a partial
@@ -152,11 +150,18 @@ THE DISCRIMINATING VARIANT. Nine distinct zero-fill situations are read back slo
 automatic-duration twins carry the most weight in this program, which is why all three optimization
 levels matter. A static object's zeros come from the image the linker emits -- the wholly zero
 objects g_all_zero, g_zero_struct and g_noinit reach BSS while the partially initialized ones carry
-literal zero bytes in the data section, both placements confirmed on all four targets -- whereas an
-automatic object's zeros must be produced by instructions the backend emits on entry to the block.
-A compiler can implement one correctly and the other incorrectly, and only holding both forms side
-by side distinguishes the two. At a higher optimization level the compiler may instead propagate
-contents it already knows, which is why the sweep covers -O0, -O1 and -O2 rather than one level.
+literal zero bytes in the data section, both placements confirmed at -O0 on all four targets --
+whereas an automatic object's zeros must be produced by instructions the backend emits on entry to
+the block. A compiler can implement one correctly and the other incorrectly, and only holding both
+forms side by side distinguishes the two. The level is named because the placement is a property of
+that one level rather than of all three: at -O1 and -O2, on all four targets, the reference compiler
+was measured to prove that nothing writes any of these objects and to act on it -- only g_arr and
+g_arr_st survive, moved to READ-ONLY data and still read from there through their loops, while every
+other one of them is eliminated outright with its reads folded to immediates. A reader who
+reproduces the section placement at -O2 therefore will not find the -O0 answer, and that is the
+implementation's freedom rather than this record being wrong. It is also exactly why the sweep covers
+-O0, -O1 and -O2 rather than one level: the VALUES read back may not change however the
+initialization is realized, and those values are the only thing the three oracles compare.
 MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
 -O1 and -O2 -- twelve configurations -- and every one produced these 75 lines byte-identically
 with exit status 0, which is why oracle (b) compares this program's targets against each other
