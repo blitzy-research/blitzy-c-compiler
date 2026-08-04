@@ -7,7 +7,7 @@
 
 program            = 004_predefined_macros
 area               = 12_preprocessor
-description        = Predefined macros asserted only as normalized relations: the standard conformance and version macros, the source-position macros, architecture-macro consistency, and the tie between the preprocessor's view of the target and the code generator's pointer width
+description        = Predefined macros asserted only as normalized relations: the standard conformance and version macros, the source-position macros, architecture-macro presence and consistency, and the tie between the preprocessor's view of the target and the code generator's pointer width
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -54,7 +54,9 @@ happens not to define the architecture macro spellings this program knows about 
 the program at all, converting an informative output difference into an uninformative compile
 failure on both oracles at once. With the zero fallback the program always compiles and always runs
 under both compilers, and any macro gap surfaces instead as a comparable difference with a precise
-diff -- report the difference, never work around it. No `#error` and no `#warning` appears on any
+diff -- report the difference, never work around it. The fallback and the `arch_id_defined` relation
+are two halves of one mechanism: the fallback makes the gap survive translation, and the relation is
+what makes it visible in the output rather than absorbed. No `#error` and no `#warning` appears on any
 path, so nothing is written to standard error, which this suite captures into finding artifacts but
 never compares.
 
@@ -72,7 +74,7 @@ cell to cell -- never reaches standard output; that was confirmed by building an
 program from two directories with different absolute paths and observing byte-identical output.
 `__LINE__` is likewise reduced to a positivity relation, so no literal line number is emitted and no
 later edit to the comments above can change a printed value. Iteration order is fixed by the
-terminator of a string literal. Output is a fixed eight-line sequence, one line per relation
+terminator of a string literal. Output is a fixed nine-line sequence, one line per relation
 claimed, so a single divergent line localizes a defect to one construct. `main` returns 0, inside
 the 0-125 range the operating system delivers intact.
 
@@ -111,19 +113,39 @@ and a legitimate finding.
 ARCHITECTURE MACROS DIFFER PER TARGET BY DESIGN, AND ARE NOT INVARIANTS. `__x86_64__`, `__i386__`,
 `__aarch64__` and `__riscv` are spellings of a particular compiler family. Printing any of them, or
 printing a value derived directly from one, would guarantee a cross-backend difference that says
-nothing whatever about compiler correctness, so the program prints a normalized derived result
-instead and never a macro name or a macro value. An earlier form of this program went one step too
-far in the other direction and asserted that EXACTLY ONE of the four is defined. No clause obliges
-any implementation to define them, and this repository documents no per-target predefined-macro
-contract for the compiler under test, so that assertion would have accused a correct compiler of a
-defect merely for spelling its architecture macro differently, or for leaving the choice to a target
-header. The macros are still exercised -- dropping them would be excluding a feature for being
-awkward -- but only through assertions no correct compiler can fail: that NO MORE THAN ONE of the
-four is defined, which is a consistency property rather than a naming one, and that ANY macro that IS
-defined agrees with the pointer width the code generator actually produced, written as a two-sided
-implication so that an undefined macro satisfies it vacuously. Together those two still catch the
-defect worth catching -- a preprocessor that disagrees with its own back end, or one that claims two
-architectures at once -- while a differently spelled or absent macro set passes.
+nothing whatever about compiler correctness, so the program prints normalized derived results
+instead and never a macro name or a macro value. Three of them, and together they are everything
+that can be observed about the set without naming a spelling: that AT LEAST ONE of the four is
+defined (`arch_id_defined`), that NO MORE THAN ONE is (`arch_count_at_most_one`), and that whichever
+one IS defined agrees with the pointer width the code generator actually produced
+(`arch_id_agrees_with_pointer_width`, written as a two-sided implication so that it stays about
+agreement alone whatever the first two report). The first two are the exactly-one property, printed
+as two separate lines rather than one conjunction so that a divergence names which half failed.
+
+WHY THE PRESENCE RELATION IS PRINTED, WHEN AN EARLIER FORM OF THIS PROGRAM OMITTED IT. That earlier
+form printed only the upper bound and the implication, on the reasoning that no clause obliges an
+implementation to define any of the four spellings and that this repository documents no per-target
+predefined-macro contract for the compiler under test -- so requiring one looked like accusing a
+correct compiler of a defect for spelling its architecture macro differently, or for leaving the
+choice to a target header. The reasoning was sound about what a 0 MEANS and wrong about whether it
+should be OBSERVABLE. With no presence line, a compiler predefining no architecture macro at all
+produced output byte-identical to one predefining exactly the right macro: the sum was zero, zero is
+no more than one, and the implication was vacuously satisfied, so all three oracles agreed and the
+one question this program exists to ask went unanswered. That was verified by measurement, not
+inferred: building the earlier form with the architecture macro suppressed produced a byte-identical
+stdout. A relation that cannot fail is not caution; it is a blind spot, and it covered precisely the
+case the documentation is silent about -- the case a maintainer would most want reported.
+
+A 0 ON THAT LINE IS A REPORT, NOT AN ACCUSATION, and that is what makes printing it safe. This suite
+never patches the compiler under test on the strength of a divergence: requirement 6 makes a
+divergence a deliverable -- minimized reproducer, exact commands, per-cell outputs, environment
+fingerprint -- for a maintainer to adjudicate. A differently spelled or absent macro set is therefore
+not condemned here; it is surfaced, as a one-line difference naming exactly which relation differs,
+which is what this suite's own rule -- report the difference, never work around it -- requires. And
+because no documented basis exists for an expected-divergence marker (see the next paragraph), such a
+difference is reported as a FINDING rather than dressed up as an expected one. The macros are still
+exercised rather than dropped, no target and no oracle is narrowed, and the `#else` zero-fallback arms
+in the source are what keep the report a comparable output difference instead of a compile failure.
 
 THE DOCUMENTATION GAP, AND WHY IT DECIDES THE DESIGN. The repository documentation nowhere enumerates
 the macros any compiler predefines. A search across `docs/` for `predefined`, `__STDC`, `__x86_64__`,
@@ -143,7 +165,7 @@ LANGUAGE MODE AND THE ABSENCE OF A -std FLAG. bcc's documented command line
 no -std flag is ever passed in any differential invocation, on either side, and the reference
 compiler therefore runs in its own default mode. That mode was measured rather than assumed:
 `__STDC_VERSION__` is 201710L, `__STDC__` is 1, and `__STRICT_ANSI__` is absent -- gnu17, which
-already offers the GNU extensions the corpus exercises elsewhere. Two of this program's eight
+already offers the GNU extensions the corpus exercises elsewhere. Two of this program's nine
 assertions rest on that measurement, so it is recorded here.
 
 WHY THE STRICT-CONFORMANCE MACRO IS ASSERTED NOWHERE, IN EITHER DIRECTION. The measurement above
@@ -209,6 +231,7 @@ expected_stdout    <<END
 stdc_is_one=1
 stdc_at_least_c99=1
 stdc_at_least_c11=1
+arch_id_defined=1
 arch_count_at_most_one=1
 arch_id_agrees_with_pointer_width=1
 pointer_width_eq_long_width=1

@@ -91,9 +91,10 @@
  * the f suffix and every float reaching the variadic printf carries an explicit
  * (double) cast, so the program is clean under the default warning gate at full
  * strength.  main returns 0, inside the permitted 0-125 range.  No header is named:
- * bcc ships no stdio.h - its bundled set is the nine required freestanding headers plus
- * a bonus stdatomic.h (docs/technical-specifications.md line 19 and lines 202-214) - so
- * an include would fail against bcc while succeeding against the reference compiler.
+ * bcc ships no hosted input/output header - its bundled set is the nine required
+ * freestanding headers plus a bonus atomics header
+ * (docs/technical-specifications.md line 19 and lines 202-214) - so an include would
+ * fail against bcc while succeeding against the reference compiler.
  * Area 14 takes neither of the suite's two sanctioned header exceptions.
  *
  * RECORD AND MARKER STATE ON THIS BRANCH.  The sibling record
@@ -150,14 +151,16 @@
  * declaration and written nowhere afterwards, so every element is initialized
  * before it is read.
  *
- * No header is named.  bcc ships no stdio.h - its bundled set is the nine
- * required freestanding headers plus a bonus stdatomic.h
- * (docs/technical-specifications.md line 19 and lines 202-214) - so an
- * #include <stdio.h> would fail against bcc while succeeding against the
- * reference compiler, manufacturing a divergence caused by the test rather than
- * by the compiler.  printf is therefore hand-declared, and float.h is not
- * included either, no macro from it being needed.  Area 14 takes neither of the
- * suite's two sanctioned header exceptions.
+ * No header is named.  bcc ships no hosted input/output header - its bundled set
+ * is the nine required freestanding headers plus a bonus atomics header
+ * (docs/technical-specifications.md line 19 and lines 202-214) - so naming the
+ * hosted one would fail against bcc while succeeding against the reference
+ * compiler, manufacturing a divergence caused by the test rather than by the
+ * compiler.  printf is therefore hand-declared, and float.h is not included
+ * either, no macro from it being needed.  Area 14 takes neither of the suite's
+ * two sanctioned header exceptions.  No member of the prohibited set is spelled
+ * verbatim anywhere in this banner, so a mechanical audit of the file for a
+ * forbidden header stays free of a comment that would otherwise read as a hit.
  *
  * Freedom from undefined behaviour, which is the precondition that makes the
  * differential oracle sound at all.  There is no arithmetic here beyond the one

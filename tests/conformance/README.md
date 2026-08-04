@@ -1795,6 +1795,19 @@ harness **proves** each reference driver's default language mode during discover
 driver whose mode is wrong, rather than trusting a name or an environment variable — see
 [The language-mode contract, enforced rather than documented](#the-language-mode-contract-enforced-rather-than-documented).
 
+**A refused driver is reported, not replaced, so a multi-name default is a search order rather than a
+list of spares.** The first name in the order that exists becomes the candidate and is the only one
+vetted; if it is refused, the arm is recorded `UNAVAILABLE` — loudly, in the pre-flight report and the
+run summary, and a failure under `BCC_CONFORMANCE_STRICT` — instead of the next name being substituted
+silently. That is deliberate: the next name is usually a different compiler, and swapping it in would
+change the dialect the corpus is judged against, the diagnostics the warning gate is calibrated on and
+the sanitizer runtime that gate's second half needs, all without saying so. The pre-flight report
+states this on the refused tool itself, and the remedy is always the same — name the intended driver
+through its `BCC_REF_CC*` variable. Practical consequence on the host recorded under
+[Toolchain of record](#toolchain-of-record): **export the four pins in the job itself** rather than
+relying on a login shell to have sourced them, because an unpinned run there resolves `gcc` 15.2.0,
+refuses it for language mode, and loses oracle (a) on all four arms while oracles (b) and (c) continue.
+
 **Locating the compiler under test.** By default the suite resolves `bcc` through the Cargo-provided
 `CARGO_BIN_EXE_bcc` path, which points at the **freshly built** binary. That is what guarantees the
 suite never silently validates a **stale build**. `BCC_BIN` overrides it when the subject is an

@@ -232,8 +232,31 @@ pub const VAR_KEEP_WORK: &str = "BCC_CONFORMANCE_KEEP_WORK";
 /// candidate reports is captured into the pre-flight report and every finding's fingerprint so the
 /// mode actually used is auditable rather than assumed.
 ///
-/// `clang` is probed last so that a second, genuinely independent oracle is available wherever it is
-/// installed without a single line of code changing.
+/// `clang` is the last name in the order so that an environment which installs it *instead of* a
+/// GCC driver still has a native reference compiler, and so that naming it through [`VAR_REF_CC`]
+/// — a second, genuinely independent oracle — takes no code change.
+///
+/// # What "probed in order" does and does not mean
+///
+/// The order decides which name is *looked for* first. The first candidate that **exists** becomes
+/// the candidate, and that one candidate is then vetted; a candidate that vetting **refuses** is
+/// reported as a refusal and the order is **not** continued past it. So on a host where `gcc` is
+/// present but its default language mode is wrong, this arm is unavailable — loudly, in the
+/// pre-flight report and in the run summary — even though a later name in the list might have been
+/// acceptable. [`VAR_REF_CC`] is the remedy, and it is the *only* remedy by design.
+///
+/// That is deliberate rather than an oversight, because the two candidates in a probe list are not
+/// interchangeable spares. A refused driver and the next name after it are typically different
+/// compilers, and substituting one for the other silently would change three things at once that
+/// every verdict in the run depends on: the language dialect the corpus is judged against, the
+/// diagnostics the undefined-behaviour warning gate is calibrated on, and the sanitizer runtime that
+/// gate's second half needs. Measured on the reference host, that last one is not hypothetical —
+/// `clang` is installed and would satisfy the language-mode check, but its sanitizer runtime
+/// archives are not, so `-fsanitize=undefined,address` cannot link. Falling through to it would turn
+/// a correctly reported *missing oracle* into 108 false reports that the **corpus** is defective,
+/// because `ubaudit.rs` attributes a sanitizer-gate failure to the test program. A missing arm that
+/// says so is strictly better than an arm quietly backed by something else, which is the same
+/// principle that keeps an explicit override single-candidate.
 pub const DEFAULT_REF_CC: &[&str] = &["gcc", "cc", "clang"];
 
 /// i686 reference cross drivers, probed in order.
@@ -2778,7 +2801,14 @@ impl ToolRecord {
     ///
     /// When the override is set, it is the only candidate: a maintainer who names a tool
     /// explicitly must be told that that tool is missing, not silently given a different one
-    /// that happened to be on `PATH`. When it is unset, the defaults are tried in order.
+    /// that happened to be on `PATH`. When it is unset, the catalogued defaults supply the search
+    /// order, and the **first of them that exists** becomes the candidate.
+    ///
+    /// Exactly one candidate is vetted, and a refusal ends the search rather than advancing it. The
+    /// asymmetry with the sentence above is only apparent: in both cases the record reports the
+    /// candidate it actually had, and in neither case is a tool the suite declined to trust replaced
+    /// by a different implementation behind the reader's back. [`DEFAULT_REF_CC`] carries the full
+    /// argument, including the measurement that decided it.
     ///
     /// Infallible by construction. A tool that simply could not be found is **not** an error: it
     /// produces an unresolved record carrying its own diagnosis, which is what lets the environment
@@ -2979,16 +3009,24 @@ impl ToolRecord {
                 "  override {variable} is set and selected {}",
                 join_quoted(self.candidates())
             )),
+            Some(variable) if self.defaults().is_empty() => lines.push(format!(
+                "  override {variable} is unset and this tool has no name to probe; its path came \
+                 from the build system"
+            )),
+            // The list is a *probe order*, and saying only that it was "probed in order" would imply
+            // every name in it was tried. One was: the first that exists on PATH becomes the
+            // candidate, and it is the only one vetted. Stating that here is what keeps this block
+            // an account of what happened rather than of what the catalogue contains — the REFUSED
+            // line below, when there is one, then reads as the fate of a named candidate rather than
+            // of the whole list.
             Some(variable) => lines.push(format!(
-                "  override {variable} is unset; probed {} in order",
-                if self.defaults().is_empty() {
-                    String::from("no default")
-                } else {
-                    join_quoted_static(self.defaults())
-                }
+                "  override {variable} is unset; probe order {}, of which the first found on PATH is \
+                 the candidate vetted",
+                join_quoted_static(self.defaults())
             )),
             None => lines.push(format!(
-                "  no override variable; probed {} in order",
+                "  no override variable; probe order {}, of which the first found on PATH is the \
+                 candidate vetted",
                 join_quoted_static(self.defaults())
             )),
         }
@@ -3010,6 +3048,23 @@ impl ToolRecord {
         }
         if let Some(reason) = self.rejection() {
             lines.push(format!("  REFUSED {reason}"));
+            // Said only for a *probed* candidate, and only when one was refused, because this is
+            // exactly where a reader would otherwise assume the remaining names were tried next. The
+            // order deliberately stops: the next name is usually a different compiler, and swapping
+            // one in silently would change the dialect the corpus is judged against, the diagnostics
+            // the warning gate is calibrated on, and the sanitizer runtime its second half needs. So
+            // the arm is reported unavailable and the override is the way to name the right tool.
+            // A record whose path came from the build system has no probe list at all, so the note
+            // is withheld there: it would describe an order that was never consulted.
+            let probed = !self.overridden() && !self.defaults().is_empty();
+            if let (true, Some(variable)) = (probed, self.override_variable()) {
+                lines.push(format!(
+                    "  the probe order stopped at that candidate: a refused tool is reported rather \
+                     than replaced by the next name in the list, because the next name is a \
+                     different implementation and substituting it would change what every \
+                     comparison on this arm is judged against — set {variable} to the intended tool"
+                ));
+            }
         }
         lines
     }

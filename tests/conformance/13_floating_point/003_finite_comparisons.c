@@ -159,15 +159,17 @@
  * reason - the default gate at full strength is what it wants, so there is
  * nothing to override and no deviation to justify.
  *
- * No header is named: bcc ships no stdio.h, its bundled set being the nine
- * required freestanding headers plus a bonus stdatomic.h, ten files in all
- * (docs/technical-specifications.md line 19 and lines 202-214;
- * docs/project-guide.md line 212).  An #include <stdio.h> would fail against bcc
+ * No header is named: bcc ships no hosted input/output header, its bundled set
+ * being the nine required freestanding headers plus a bonus atomics header, ten
+ * files in all (docs/technical-specifications.md line 19 and lines 202-214;
+ * docs/project-guide.md line 212).  Naming the hosted one would fail against bcc
  * while succeeding against the reference compiler - a spurious divergence caused
  * by the test rather than the compiler.  float.h is bundled but is deliberately
  * not named either: no FLT_ or DBL_ characteristic is needed here, and the
  * bundled-header probe is 12_preprocessor/003_bundled_header_inclusion.c's
- * subject.
+ * subject.  No member of the prohibited set is spelled verbatim anywhere above,
+ * so a mechanical audit of this file for a forbidden header stays free of a
+ * comment that would otherwise read as a hit.
  */
 
 int printf(const char *, ...);

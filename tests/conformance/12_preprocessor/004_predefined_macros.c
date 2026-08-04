@@ -22,20 +22,38 @@
  * implementation must define, so a divergence in one is a real conformance gap and a legitimate
  * finding.
  *
- * The architecture macros are a different case, and an earlier form of this program got it
- * wrong.  __x86_64__, __i386__, __aarch64__ and __riscv are spellings of a particular compiler
- * FAMILY, not of the standard; no clause obliges any implementation to define them and this
- * repository documents no per-target predefined-macro contract for the compiler under test.
- * Asserting that exactly one of them is defined therefore accuses a correct compiler of a
- * defect merely for spelling its architecture macro differently, or for leaving the choice to a
- * target header - a false report manufactured by the test.  They are still exercised, because
- * dropping them would be excluding a feature for being awkward, but only through assertions no
- * correct compiler can fail: that NO MORE THAN ONE of the four is defined, which is a
- * consistency property rather than a naming one, and that ANY macro that IS defined agrees with
- * the pointer width the code generator actually produced, written as an implication so that an
- * undefined macro satisfies it vacuously.  Those two together still catch the defect worth
- * catching - a preprocessor that disagrees with its own back end, or that claims two
- * architectures at once - while a differently spelled or absent macro set passes.
+ * The architecture macros are a different case, and they are handled as three relations rather
+ * than as invariants.  __x86_64__, __i386__, __aarch64__ and __riscv are spellings of a
+ * particular compiler FAMILY, not of the standard; no clause obliges any implementation to
+ * define them and this repository documents no per-target predefined-macro contract for the
+ * compiler under test.  Printing one, or a value derived directly from one, would therefore
+ * diverge across the four backends on every run and say nothing about correctness.  What is
+ * printed instead is the whole of what can be OBSERVED about the set: that AT LEAST ONE of the
+ * four is defined, that NO MORE THAN ONE is, and that whichever one IS defined agrees with the
+ * pointer width the code generator actually produced - the last written as an implication so it
+ * stays meaningful whatever the first two report.  The first two together are the exactly-one
+ * property, decomposed into two separately printed lines so that a divergence names which half
+ * failed: a compiler claiming two architectures at once fails the second, and a compiler that
+ * names its target in none of these four spellings fails the first.
+ *
+ * That first line is deliberate and it is what makes the set testable at all.  An earlier form
+ * of this program printed only the upper bound, and a compiler predefining NO architecture
+ * macro then produced output byte-identical to a compiler predefining exactly the right one:
+ * the sum was zero, zero is no more than one, and the implication was vacuously satisfied, so
+ * the one question this program exists to ask went unanswered under all three oracles at once.
+ * A relation that cannot fail is not caution, it is a blind spot, and the blind spot covered
+ * precisely the case the repository documents nothing about.  The presence line closes it.
+ *
+ * A 0 on that line is a REPORT, not an accusation, and the distinction is the reason the line is
+ * safe to print.  This suite does not patch the compiler under test on the strength of a
+ * divergence; it captures the divergence as a finding - minimized reproducer, exact commands,
+ * per-cell outputs - and leaves the judgement to a maintainer.  So a compiler that spells its
+ * architecture macro some other way, or leaves the choice to a target header, is not condemned
+ * here: it is surfaced, with a one-line diff naming exactly which relation differs, which is the
+ * outcome the suite's own rule - report the difference, never work around it - requires.  The
+ * alternative, printing nothing that could differ, does not spare a correct compiler anything;
+ * it only hides an incorrect one.  The zero-fallback arms below are what keep that report a
+ * comparable output difference rather than a compile failure.
  *
  * The strict-conformance macro is handled the same way, and for the same reason.  __STRICT_ANSI__
  * is a compiler-family spelling with no standard mandate; whether an implementation defines it
@@ -90,10 +108,11 @@ static int slen(const char *s)
     return n;
 }
 
-/* Architecture: at most one branch may be taken.  Each of the four macros below contributes 0
-   or 1 and their sum is compared against 1 further down as an INEQUALITY, so the architecture
-   machinery is exercised without any architecture macro name or value ever reaching the output
-   and without requiring any particular spelling to exist.
+/* Architecture: exactly one branch is expected to be taken.  Each of the four macros below
+   contributes 0 or 1, and their sum is compared against 1 further down from BOTH sides - once as
+   >= 1 and once as <= 1, on two separate output lines - so the architecture machinery is
+   exercised, and any deviation is localized to one line, without any architecture macro name or
+   value ever reaching the output.
 
    Each block carries an alternative arm that defines a zero fallback rather than raising a
    preprocessor diagnostic.  That choice is deliberate: were a diagnostic raised instead, a
@@ -154,17 +173,26 @@ int main(void)
     printf("stdc_is_one=%d\n", STDC_IS_ONE);
     printf("stdc_at_least_c99=%d\n", STDC_AT_LEAST_C99);
     printf("stdc_at_least_c11=%d\n", STDC_AT_LEAST_C11);
-    /* At most one architecture macro, never exactly one.  A compiler that defines none of the
-       four spellings this program knows about is not thereby defective, but a compiler that
-       claims two architectures at once is: the two claims cannot both describe the machine the
+    /* At least one architecture macro.  This is the lower half of the exactly-one property and
+       the only line in the program that can observe a compiler which names its target in none of
+       these four spellings; without it, that compiler's output is indistinguishable from one that
+       names its target correctly, and the question goes unanswered under every oracle.  A 0 here
+       is a comparable difference to be triaged - captured as a finding with its reproducer and
+       commands, never used to patch the compiler - not a verdict that the compiler is wrong. */
+    printf("arch_id_defined=%d\n", (int)(ARCH_COUNT >= 1));
+    /* At most one architecture macro: the upper half of the same property, kept on its own line
+       so a divergence names which half failed.  A compiler that claims two architectures at once
+       is inconsistent with itself, because the two claims cannot both describe the machine the
        code generator is emitting for. */
     printf("arch_count_at_most_one=%d\n", (int)(ARCH_COUNT <= 1));
     /* The strongest assertion in the program: it ties the preprocessor's view of the target to
        the code generator's.  Written as an implication - if the 32-bit macro is defined THEN
        pointers are four bytes wide, and if any of the other three is defined THEN they are not -
        so that a compiler defining no architecture macro satisfies it vacuously while one whose
-       preprocessor and back end disagree fails it.  The 32-bit target is the only one of the
-       four whose pointers are four bytes wide.  The width literal is written unsigned so that
+       preprocessor and back end disagree fails it.  That vacuous case is not thereby unobserved:
+       the presence line above is where it shows up, which is precisely what lets this line stay
+       about agreement alone.  The 32-bit target is the only one of the four whose pointers are
+       four bytes wide.  The width literal is written unsigned so that
        comparing it against the unsigned result of sizeof cannot trip a sign-comparison
        diagnostic. */
     printf("arch_id_agrees_with_pointer_width=%d\n",
