@@ -88,8 +88,9 @@
 //! sits at file offset `0x10` in both classes, an interpreter program header is present only
 //! when the artifact is dynamically linked, and `-g` produces a `.debug_info` section. Reading
 //! those three things needs a few hundred bytes of header decoding, so the reader below is
-//! deliberately tiny, read-only and auditable in one sitting — [`elf_class`], [`elf_type`],
-//! [`has_interp`] and [`has_section`] are the whole of it. It is not a general ELF parser and
+//! deliberately tiny, read-only and auditable in one sitting — [`ElfImage::class`],
+//! [`ElfImage::e_type`], [`ElfImage::has_interp`] and [`ElfImage::has_section`] are the whole of
+//! it, and [`ElfImage::read`] is the only way to obtain one. It is not a general ELF parser and
 //! must not become one.
 //!
 //! **i686 is ELF32 while the other three targets are ELF64**, and the program- and

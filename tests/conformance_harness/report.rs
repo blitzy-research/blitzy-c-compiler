@@ -1216,7 +1216,7 @@ fn ensure_report_namespace(context: &str) -> HarnessResult<()> {
 /// exclusivity: the detection and the clearing are two steps, so two runs starting together both find
 /// no owner, both clear, and each destroys the artifacts the other is writing. `claim_run_namespace`
 /// is a single operation only one of two contenders can win, so it decides that before the first
-/// removal, and the claim is held for the life of the process by [`report_namespace_claim`].
+/// removal, and the claim is held for the life of the process by [`remember_report_claim`].
 ///
 /// The ownership stamp written at the end is not redundant with the claim: the claim answers "may I
 /// clear this now" and exists only while this run does, while the stamp answers "whose reports are

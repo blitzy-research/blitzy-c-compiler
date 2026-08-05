@@ -1743,16 +1743,41 @@ and cannot be established in each case:
 | --- | --- | --- |
 | `rustfmt --edition 2021 --check` on each `.rs` file directly | ✅ runs — needs no manifest | ✅ runs |
 | `CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata --out-dir target/conformance-typecheck tests/conformance.rs` | ✅ runs — type-checks the whole suite, needs no manifest **but does need `CARGO_MANIFEST_DIR`** ([why](#why-the-direct-rustc-invocation-needs-cargo_manifest_dir)) | ✅ runs |
+| `CARGO_MANIFEST_DIR="$(pwd)" rustdoc --edition 2021 --crate-type lib --crate-name conformance --document-private-items -o target/conformance-typecheck/doc tests/conformance.rs` | ✅ runs — proves every doc link names an item that exists, needs no manifest, same `CARGO_MANIFEST_DIR` reason ([what it checks and why `-D warnings` is not how](#the-doc-link-gate)) | ✅ runs |
 | `cargo test --test conformance --no-run` | ❌ **blocked** — no manifest to discover the target from | ✅ runs |
 | `cargo clippy -- -D warnings` | ❌ **blocked** — clippy drives Cargo | ✅ runs |
 | `cargo fmt -- --check` | ❌ **blocked** — `cargo fmt` drives Cargo | ✅ runs |
 | `cargo test --test conformance` (execution: [1,296 `bcc` cells](#the-enumerable-matrix), the corpus being complete) | ❌ **blocked**, and additionally there is no `bcc` to test | ✅ runs |
 | Whole-repository health gate `cargo test` | ❌ **blocked**, and the existing suites are not present either | ✅ runs |
 
-The two direct invocations in the first two rows are not a substitute for the Cargo gates and are not
+The three direct invocations in the first three rows are not a substitute for the Cargo gates and are not
 presented as one. They establish the properties that do not depend on packaging — that every file parses,
-type-checks and is correctly formatted — which is exactly the subset a manifest-less checkout can honestly
-claim. The rest is established by placing the suite in a package.
+type-checks, is correctly formatted, and documents itself in terms of items that exist — which is exactly
+the subset a manifest-less checkout can honestly claim. The rest is established by placing the suite in a
+package.
+
+#### The doc-link gate
+
+The third row exists because no other gate in this repository can see the suite's doc comments.
+`broken_intra_doc_links` is a **rustdoc** lint, not a rustc or clippy one, and `cargo doc` does not
+document integration-test targets at all — so a doc comment naming an item that does not exist passes
+`rustfmt`, passes `rustc --test -D warnings`, passes `cargo clippy -- -D warnings`, and still reaches a
+reader as an instruction to call something that is not there.
+
+**`-D warnings` is deliberately not how this is gated**, because doing that would fail on links that are
+correct. A doc build of an integration test cannot resolve every link a reader should still be given: a
+link to a `#[test]` function is unresolvable by construction, since `#[test]` items do not exist outside a
+`--test` build, and a cross-module short path resolves only in the module that imports the item. What the
+gate compares instead is the **difference** against an inventory of those known-unresolvable-but-real
+targets, in both directions — an unresolved target that is not inventoried, and an inventoried name that
+now resolves. The first is the defect: a link naming an item that exists nowhere. The second is a stale
+inventory line. Both are test-only edits, and the `diff` the gate prints says which one it is. The
+inventory lives in the workflow step that enforces it, `.github/workflows/ci.yml`, so there is one copy of
+it rather than two that can disagree.
+
+`--document-private-items` is required rather than cosmetic: the harness is a private module tree, so
+without it most of these items are undocumented and the report describes visibility instead of
+correctness.
 
 #### Every project-facing entry point states the same precondition
 
@@ -1764,8 +1789,8 @@ because a reader who finds the optimistic copy first has no reason to look furth
 | Entry point | What it says about the precondition |
 | --- | --- |
 | `README.md` at the repository root | Names the precondition **before** the run commands and links back to this section, so the front page cannot present a blocked command as a runnable one |
-| `.github/workflows/ci.yml`, job `conformance-static` | Runs exactly the two manifest-less rows of the table above, on every checkout, so a branch carrying the suite alone still has real gates rather than none |
-| `.github/workflows/ci.yml`, job `differential-conformance` | **Requires** the package: its first step establishes the manifest and the `bcc` binary target and **fails the job** when either is missing, with an error annotation and a job summary saying no oracle comparison was performed and nothing was established about `bcc`. An absent package is a failed **prerequisite**, never a skip and never a green run that judged nothing — this job exists to judge `bcc`, and the manifest-less subset earns its own green in `conformance-static` instead. There is deliberately no fallback inside it, because restating that subset here is exactly what would let the job pass while the matrix never ran |
+| `.github/workflows/ci.yml`, the three static-gate steps of job `differential-conformance` | Run exactly the three manifest-less rows of the table above, and run **ahead of** the package prerequisite, so a branch carrying the suite alone still has those gates executed and reported rather than none. They are steps of that one job rather than a job of their own, because the repository's own format and lint jobs keep their single definition over the whole crate and this workflow adds no second one |
+| `.github/workflows/ci.yml`, the rest of job `differential-conformance` | **Requires** the package: a later step establishes the manifest and the `bcc` binary target and **fails the job** when either is missing, with an error annotation and a job summary saying no oracle comparison was performed and nothing was established about `bcc`. An absent package is a failed **prerequisite**, never a skip and never a green run that judged nothing — this job exists to judge `bcc`, and the manifest-less subset is established by the three gate steps that already ran ahead of it. There is deliberately no fallback after it, because restating that subset there is exactly what would let the job pass while the matrix never ran |
 | `docs/project-guide.md` §3 | Records the suite's 18 tests as **planned/statically validated**, not as a measured `bcc` result, for as long as no run against the real compiler has supplied one |
 
 #### Why the direct `rustc` invocation needs `CARGO_MANIFEST_DIR`

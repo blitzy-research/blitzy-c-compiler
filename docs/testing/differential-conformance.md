@@ -1685,7 +1685,7 @@ and the clean results recorded in `docs/project-guide.md` §4 are the project's 
 package-complete tree rather than measurements of this checkout.
 
 What *can* be executed directly against this checkout, and what the suite's own static evidence
-consists of, is the three toolchain drivers invoked without Cargo:
+consists of, is the four toolchain drivers invoked without Cargo:
 
 ```bash
 mkdir -p target/conformance-typecheck
@@ -1694,15 +1694,25 @@ CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata \
   --out-dir target/conformance-typecheck tests/conformance.rs
 CARGO_MANIFEST_DIR="$(pwd)" clippy-driver --edition 2021 --test -D warnings --emit=metadata \
   --out-dir target/conformance-typecheck tests/conformance.rs
+CARGO_MANIFEST_DIR="$(pwd)" rustdoc --edition 2021 --crate-type lib \
+  --crate-name conformance --document-private-items \
+  -o target/conformance-typecheck/doc tests/conformance.rs
 ```
 
 Run from the repository root. The `mkdir -p` is the first line because a checkout that has never been
 built has no `target/` at all, and creating the output directory explicitly keeps the sequence
 independent of whether a particular toolchain in the supported range creates an absent `--out-dir`.
 
-These reach the same three checks — formatting, type checking and lint under deny-warnings — through
-the drivers Cargo would otherwise invoke, and `CARGO_MANIFEST_DIR` is supplied because the harness reads
-it to locate the corpus. **Runtime evidence requires a manifest**, so any run of the suite itself is
+The first three reach the same three checks — formatting, type checking and lint under deny-warnings —
+through the drivers Cargo would otherwise invoke, and `CARGO_MANIFEST_DIR` is supplied because the
+harness reads it to locate the corpus. The fourth reaches a check Cargo would **not** invoke on this
+target at all: `broken_intra_doc_links` is a rustdoc lint rather than a rustc or clippy one, and
+`cargo doc` does not document integration-test targets, so a doc comment naming an item that does not
+exist passes all three of the others. It is gated as a difference against an inventory of the links a
+doc build cannot resolve even when they are correct — a link to a `#[test]` function, or a short path
+to an item another module owns — rather than with `-D warnings`, which would fail on those. The
+inventory and the comparison live in `.github/workflows/ci.yml`; the reasoning is recorded under
+"the doc-link gate" in `tests/conformance/README.md`. **Runtime evidence requires a manifest**, so any run of the suite itself is
 performed in a scratch Cargo package built *outside* this checkout from a byte-identical copy of the
 suite, and every such result is **external to this repository** and labelled as such wherever it is
 cited. It is evidence about the suite's code, not about a `cargo test` this branch can perform.

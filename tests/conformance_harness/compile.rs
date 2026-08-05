@@ -594,10 +594,12 @@ impl BuildFailure {
 
     /// Whether this failure is a fault in this process's own bookkeeping.
     ///
-    /// Asked *before* [`BuildFailure::is_environment`] by every caller that decides a verdict,
-    /// because the two questions are not independent: a bookkeeping fault is neither the
-    /// compiler's nor the machine's, and answering only the environment question would file it
-    /// as an absence the run does not fail for.
+    /// Asked *before* [`BuildFailure::scope`] by every caller that decides a verdict, because the
+    /// two questions are not independent: a bookkeeping fault is neither the compiler's nor the
+    /// machine's, so a caller that reached for the attribution first would have to file it as one
+    /// of the two. There is deliberately no environment predicate to reach for instead — the note
+    /// earlier in this block records why a boolean cannot carry a three-way judgement, and why
+    /// [`FailureScope`] is matched exhaustively in its place.
     pub fn is_harness(&self) -> bool {
         matches!(self.scope, FailureScope::Harness)
     }

@@ -5269,8 +5269,8 @@ impl Drop for RunClaim {
     /// could not remove is reclaimed by the next run as stale — the protocol for that already exists
     /// and is exercised — so the condition is recoverable rather than an unaccounted resource, and
     /// failing a whole matrix over one undeletable four-field file would be the larger error. It is
-    /// still not silent: the release path is the same one [`RunClaim::release`] reports through, and a
-    /// caller that wants the failure calls that instead of dropping.
+    /// still not silent: the release path is the same one [`RunClaim::release_if_ours`] reports
+    /// through, and a caller that wants the failure calls that instead of dropping.
     fn drop(&mut self) {
         let context = format!(
             "releasing this run's claim on {} while it went out of scope",

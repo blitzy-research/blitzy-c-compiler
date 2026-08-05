@@ -31,11 +31,18 @@ mkdir -p target/conformance-typecheck
 rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs
 CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata \
   --out-dir target/conformance-typecheck tests/conformance.rs
+CARGO_MANIFEST_DIR="$(pwd)" rustdoc --edition 2021 --crate-type lib \
+  --crate-name conformance --document-private-items \
+  -o target/conformance-typecheck/doc tests/conformance.rs
 ```
 
 Run from the repository root. The first line is what makes the sequence work on a checkout that has
 never been built: `target/` does not exist there, and creating it explicitly keeps the commands
 independent of whether a given toolchain in the supported range creates an absent `--out-dir` for you.
+The last line is the one no other gate can perform: `broken_intra_doc_links` is a rustdoc lint, and
+`cargo doc` does not document integration-test targets, so a doc comment naming an item that does not
+exist is invisible to every other check
+([the doc-link gate](tests/conformance/README.md#the-doc-link-gate)).
 
 Full details, and what each checkout shape can and cannot establish:
 [the Cargo integration precondition](tests/conformance/README.md#the-cargo-integration-precondition).

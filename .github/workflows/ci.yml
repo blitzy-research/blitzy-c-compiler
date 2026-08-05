@@ -29,9 +29,10 @@
 # So the steps are ordered by what they need, and the precondition is asserted exactly once, in the
 # middle:
 #
-# - The two suite-scoped static gates — `rustfmt --check` over the driver and every harness module,
-#   and a `rustc --test` type-check of the whole suite with warnings denied — need no manifest and
-#   therefore run first, on any checkout.
+# - The three suite-scoped static gates — `rustfmt --check` over the driver and every harness
+#   module, a `rustc --test` type-check of the whole suite with warnings denied, and a `rustdoc`
+#   check that every doc link names an item that exists — need no manifest and therefore run
+#   first, on any checkout.
 # - The prerequisite step then establishes the manifest and the `bcc` binary target and FAILS the
 #   job when either is missing. An absent package is a failed prerequisite, never a skip, a warning
 #   or a fallback: this job exists to judge `bcc`, and a run that completed without judging it must
@@ -184,19 +185,21 @@ jobs:
           cargo --version
           rustfmt --version
 
-      # The two suite-scoped static gates, placed here because they need NO manifest and can
-      # therefore be established before the package prerequisite below is asserted. Both commands
-      # are the ones tests/conformance/README.md documents for a manifest-less checkout, copied
-      # exactly — including the `CARGO_MANIFEST_DIR` the direct `rustc` invocation needs, because
-      # `conformance_harness/mod.rs` resolves the package root through `env!` at compile time and
-      # the shorter form fails in a way that looks like the suite is broken when it is not.
+      # The three suite-scoped static gates, placed here because they need NO manifest and can
+      # therefore be established before the package prerequisite below is asserted. All three
+      # commands are the ones tests/conformance/README.md documents for a manifest-less checkout,
+      # copied exactly — including the `CARGO_MANIFEST_DIR` the direct `rustc` and `rustdoc`
+      # invocations need, because `conformance_harness/mod.rs` resolves the package root through
+      # `env!` at compile time and the shorter form fails in a way that looks like the suite is
+      # broken when it is not.
       #
       # These are steps of this job rather than a job of their own, and they are scoped to this
       # suite's own files rather than to the crate: the repository's own format and lint jobs keep
       # their single definition over the whole crate, and this workflow adds no second one. They
       # are not a substitute for the matrix and are not presented as one — they establish only that
-      # every file of the suite parses, type-checks with warnings denied, and is correctly
-      # formatted, which is exactly the subset that does not depend on packaging.
+      # every file of the suite parses, type-checks with warnings denied, is correctly formatted,
+      # and documents itself in terms of items that exist, which is exactly the subset that does
+      # not depend on packaging.
       - name: Check the formatting of the suite
         run: rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs
 
@@ -205,6 +208,66 @@ jobs:
           mkdir -p target/conformance-typecheck
           CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata \
             -D warnings --out-dir target/conformance-typecheck tests/conformance.rs
+
+      # The third manifest-less gate, and the only one that can catch a doc comment naming an item
+      # that does not exist. No other gate in this workflow can: `broken_intra_doc_links` is a
+      # rustdoc lint rather than a rustc or clippy one, and `cargo doc` does not document
+      # integration-test targets at all, so the suite's own doc comments are invisible to
+      # `rustfmt`, to the `rustc` step above, and to the repository's clippy job alike. A link
+      # naming something that is not there therefore parses, type-checks, lints and formats
+      # cleanly while telling a reader to reach for a method the type does not have.
+      #
+      # `-D warnings` is deliberately NOT how this is gated. A doc build of an integration test
+      # cannot resolve every link a reader should still be given: a link to a `#[test]` function is
+      # unresolvable by construction, because `#[test]` items do not exist outside a `--test`
+      # build, and a cross-module short path resolves only in the module that imports the item.
+      # Denying every warning would therefore fail on links that are correct. What is gated is the
+      # DIFFERENCE against the inventory below, in both directions: an unresolved target that is
+      # not inventoried, and an inventoried name that now resolves. The first is the defect — a
+      # link naming an item that exists nowhere; the second is a stale inventory line. Both are
+      # one-line edits, and the diff printed by the step says which one it is.
+      #
+      # `--document-private-items` is required, not cosmetic: the harness is a private module tree,
+      # so without it most of these items are undocumented and the report is about visibility
+      # rather than about correctness. Output goes into the directory the step above already owns,
+      # so no new artifact root is introduced.
+      - name: Check every doc link in the suite names an item that exists
+        run: |
+          set -euo pipefail
+          mkdir -p target/conformance-typecheck/doc
+          CARGO_MANIFEST_DIR="$(pwd)" rustdoc --edition 2021 --crate-type lib \
+            --crate-name conformance --document-private-items \
+            -o target/conformance-typecheck/doc tests/conformance.rs 2>&1 \
+            | tee target/conformance-typecheck/rustdoc.log
+          sed -n "s/^warning: unresolved link to \`\(.*\)\`\$/\1/p" \
+            target/conformance-typecheck/rustdoc.log \
+            | sort -u > target/conformance-typecheck/doclinks-observed.txt
+          # Every name here is a link whose target EXISTS and was verified to exist; only the doc
+          # build cannot reach it. Two are `#[test]` functions in tests/conformance.rs, which no
+          # doc build can see. The other eleven are items defined in one harness module and named
+          # from the doc comment of another, which is a short path rather than a wrong name.
+          printf '%s\n' \
+            'CompileOutcome::provenance' \
+            'Finding::new' \
+            'MAX_CONTRACT_EXIT_CODE' \
+            'MarkerAuthority' \
+            'MarkerAuthority::permits' \
+            'Provenance' \
+            'UB_AUDIT_SOURCE_SUPPRESSIONS_SANCTIONED' \
+            'findings_root' \
+            'infra_expected_divergence_register' \
+            'infra_oracle_capability_report' \
+            'measure_tree' \
+            'posix_quote' \
+            'remove_entry' \
+            | sort -u > target/conformance-typecheck/doclinks-inventoried.txt
+          if diff -u target/conformance-typecheck/doclinks-inventoried.txt \
+                    target/conformance-typecheck/doclinks-observed.txt; then
+            echo "::notice::Doc links: every link in the suite resolves except the $(wc -l < target/conformance-typecheck/doclinks-inventoried.txt) inventoried in this step, each of which names an item that exists and is unreachable only from a doc build."
+            exit 0
+          fi
+          echo "::error::The suite doc links no longer match the inventory in this step. A leading + above is a link rustdoc could not resolve and this step did not expect: if the item exists somewhere in the suite the link is only a short path and the name belongs in the inventory, and if it exists nowhere the doc comment is wrong and is the defect this gate exists to catch. A leading - is an inventoried name that now resolves, so that line must be deleted. Both are test-only edits. Reproduce with the rustdoc command in this step."
+          exit 1
 
       # Everything installed here serves the test oracles and nothing else. bcc invokes no
       # external assembler, linker or compiler of its own: it preprocesses, analyses, generates
@@ -352,7 +415,7 @@ jobs:
       # establishing it must not report success. A green check that judged nothing is worse than a
       # red one that says why, because the green one is what a reader trusts.
       #
-      # The two manifest-less static gates ran BEFORE this step precisely so that they are
+      # The three manifest-less static gates ran BEFORE this step precisely so that they are
       # established on any checkout and are unaffected by a failure here — which is why nothing is
       # lost by refusing any fallback at this point. There is deliberately no `if:` guard and no
       # alternative path below: either shape would let this job finish green while the matrix never
