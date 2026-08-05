@@ -577,6 +577,29 @@ registered suppression must be sanctioned for that program specifically and must
 `impl_defined_notes` per warning, exactly as a dropped gate flag does. `infra_ub_audit_gate` counts it
 among the recorded relaxations and reports it on an `in source:` line beside the command-line ones.
 
+**A registration mechanism that recognises one spelling has an unregistered bypass**, so the scan reads
+every spelling of a directive and refuses what it cannot resolve. A directive may be introduced by `#`,
+by the digraph `%:` or by the trigraph `??=`, and all three are recognised as the same preprocessing
+token a conforming compiler sees. The `_Pragma` operator form is honoured when its operand is a single
+plain string literal — destringized per C11 6.10.9, so an escaped warning name matches its registration
+exactly — and refused when the operand is a macro or anything else that cannot be resolved to one
+literal, because a pragma nobody can read is a pragma nobody can register. A `#define` whose replacement
+list can produce a directive is refused, since what it does depends on where it is used. A vendor pragma
+whose subject the audit does not model, such as `#pragma clang attribute`, is refused because it can
+attach an attribute to a whole region.
+
+**And the sanitizer gate is defended on the same terms as the warning gate**, which is the case that
+matters most. The `no_sanitize`, `no_address_safety_analysis` and `disable_sanitizer_instrumentation`
+attributes switch instrumentation off from inside the program; so does defining anything in the
+`__asan_`, `__ubsan_`, `__lsan_`, `__msan_`, `__tsan_` or `__sanitizer_` families, because
+`__ubsan_default_options` and its siblings are ordinary functions the runtime looks up by name. Any of
+these refuses the program **and skips the sanitizer run rather than performing it**: a clean sanitizer
+verdict obtained by switching the sanitizer off is worse than no verdict, since it would be recorded as
+evidence. Two properties of the scan are stated rather than assumed — it is **textual**, reading only
+code because comments and string literals are removed first, so prose may name every construct above;
+and it **fails closed**, so an unresolvable construct yields a test that must be rewritten instead of a
+gate that quietly passed.
+
 Alongside the machine half, every program carries a **written undefined-behaviour-freedom argument** in
 its record's `ub_notes`. That is the human half, and it is what a reviewer reads first when a
 divergence appears; its presence is enforced by the record parser rather than merely encouraged.
@@ -1617,12 +1640,17 @@ What *can* be executed directly against this checkout, and what the suite's own 
 consists of, is the three toolchain drivers invoked without Cargo:
 
 ```bash
+mkdir -p target/conformance-typecheck
 rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs
 CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata \
   --out-dir target/conformance-typecheck tests/conformance.rs
 CARGO_MANIFEST_DIR="$(pwd)" clippy-driver --edition 2021 --test -D warnings --emit=metadata \
   --out-dir target/conformance-typecheck tests/conformance.rs
 ```
+
+Run from the repository root. The `mkdir -p` is the first line because a checkout that has never been
+built has no `target/` at all, and creating the output directory explicitly keeps the sequence
+independent of whether a particular toolchain in the supported range creates an absent `--out-dir`.
 
 These reach the same three checks — formatting, type checking and lint under deny-warnings — through
 the drivers Cargo would otherwise invoke, and `CARGO_MANIFEST_DIR` is supplied because the harness reads

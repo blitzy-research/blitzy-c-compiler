@@ -126,10 +126,22 @@
 //! self-contained in pure `std` for exactly this reason, so the suite is complete either way.
 //!
 //! Which case holds is not left to a reader's inspection of this comment. It is **checked
-//! mechanically** on every run: [`infra_oracle_capability_report`] reports the helper module's state
-//! in its pre-flight output, and fails loudly if the file is present in the tree while this driver
-//! does not declare it. Prose describing an integration cannot notice when it stops being true; that
-//! assertion can.
+//! mechanically** on every run by [`infra_oracle_capability_report`], which puts the helper module's
+//! state in its pre-flight output and enforces two things about it. If the file is present while this
+//! driver does not declare it, the run fails. And if it is declared while nothing reaches into it, the
+//! run also fails — because a declaration alone compiles the helper and reuses nothing, which would
+//! satisfy a presence check while leaving the harness's duplicate compile, run, assertion and
+//! temporary-directory paths exactly where they were. Reuse, not presence, is what the convention
+//! asks for, so reuse is what is asserted.
+//!
+//! While the file is absent the pre-flight output states the integration as **outstanding** and names
+//! the remaining work in full, rather than reporting the situation as settled. It is not settled: the
+//! obligation is real and undischarged, and the reason it cannot be discharged here is that
+//! `tests/common/mod.rs` is an existing-system contract shared by every one of the repository's
+//! existing suites — authoring a stand-in for it would be a change to their shared dependency rather
+//! than an integration with it. Prose describing an integration cannot notice when it stops being
+//! true, and prose describing an open item cannot insist on itself; those assertions and that
+//! pre-flight line can.
 //!
 //! What the suite adds rather than delegates is the material no existing helper has: the three
 //! oracles, the expectation-record format, the six-verdict classification, the expected-divergence
@@ -1038,6 +1050,33 @@ fn assert_reproduction_script_is_protected() {
 /// Path of the repository's shared integration-test helper module, relative to the package root.
 const SHARED_HELPER_RELATIVE: [&str; 2] = ["tests", "common"];
 
+/// The harness modules a delegation could legitimately live in, alongside this driver.
+///
+/// The helper's compile, run and temporary-directory duties belong to `compile.rs`, `execute.rs` and
+/// `sandbox.rs` respectively, so a completed integration would reach the shared module from one of
+/// those rather than only from here. Scanning all of them is what keeps the check from demanding that
+/// the delegation be written in the wrong file.
+const DELEGATION_SITES: [&str; 4] = ["compile.rs", "execute.rs", "sandbox.rs", "mod.rs"];
+
+/// A path that reaches into the shared helper module, assembled from two fragments.
+///
+/// Deliberately not written as one literal. The check below scans this file's own source for such a
+/// path, and a literal spelling it out would appear in that source and satisfy the check by existing
+/// — a self-fulfilling assertion, which is worse than no assertion because it reports success.
+fn shared_helper_path_prefix() -> String {
+    format!("{}{}", "common", "::")
+}
+
+/// True when `source` reaches the shared helper somewhere other than in a comment.
+fn delegates_to_shared_helper(source: &str) -> bool {
+    let needle = shared_helper_path_prefix();
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//"))
+        .any(|line| line.contains(&needle))
+}
+
 /// Report how this suite integrates with the repository's shared helper module, and fail if the
 /// stated integration is no longer true.
 ///
@@ -1061,11 +1100,27 @@ fn assert_shared_helper_integration() {
         .fold(manifest_dir(), |path, part| path.join(part));
     let module = root.join("mod.rs");
     if !module.is_file() {
+        // Reported as an OUTSTANDING obligation, not as a settled state. The suite is complete and
+        // runnable without the helper, but "integrate with the repository's existing test
+        // conventions" is a requirement rather than a preference, and it is not yet discharged. Saying
+        // so here puts the open item in the pre-flight output of every run, which is where somebody
+        // will actually see it, instead of leaving it to live only in a review.
         println!(
-            "shared helper module: absent at {} — `mod common;` is correctly not declared, and \
-             `conformance_harness` stands alone in pure std, which is what makes the suite complete \
-             on a branch that carries it ahead of the shared helper.",
-            module.display()
+            "shared helper module: ABSENT at {}. Integration with it is therefore OUTSTANDING, not \
+             satisfied: `mod common;` is a compile-time assertion that the file exists, so declaring \
+             it against nothing would fail the build rather than degrade, and the file cannot be \
+             created here — it is an existing-system contract consumed by every one of the \
+             repository's existing integration suites, so authoring a stand-in would be a change to \
+             their shared dependency rather than an integration with it. `conformance_harness` \
+             therefore stands alone in pure std, which is what makes this suite complete and runnable \
+             in the meantime. What remains, in full, for whoever merges this suite onto the \
+             package-complete tree: declare `mod common;` beside `mod conformance_harness;`; replace \
+             the harness's own compile, run, assertion and temporary-directory helpers with the \
+             shared ones at every call site in {}; and update this driver's integration section to \
+             describe what is delegated. The two assertions below demand exactly that, and they \
+             activate the moment the file appears.",
+            module.display(),
+            DELEGATION_SITES.join(", "),
         );
         return;
     }
@@ -1106,10 +1161,50 @@ fn assert_shared_helper_integration() {
         driver.display(),
     );
 
+    // Declaring the module is necessary and not sufficient, and the difference is the whole point of
+    // the requirement. `mod common;` on its own compiles the helper and reuses nothing from it, which
+    // would satisfy a presence check while leaving the harness's duplicate compile, run, assertion and
+    // temporary-directory paths exactly where they were — the state this assertion exists to end. So
+    // the delegation is required too: at least one non-comment path into the shared module, in this
+    // driver or in the harness module that owns the corresponding duty.
+    let mut delegating: Vec<String> = Vec::new();
+    if delegates_to_shared_helper(&source) {
+        delegating.push(String::from("tests/conformance.rs"));
+    }
+    for site in DELEGATION_SITES {
+        let path = manifest_dir()
+            .join("tests")
+            .join("conformance_harness")
+            .join(site);
+        if let Ok(text) = fs::read_to_string(&path) {
+            if delegates_to_shared_helper(&text) {
+                delegating.push(format!("tests/conformance_harness/{site}"));
+            }
+        }
+    }
+
+    assert!(
+        !delegating.is_empty(),
+        "this suite declares `mod common;` but reaches nothing in it, so the shared helper is \
+         compiled and unused.\n\nThe convention this suite is required to integrate with is reuse of \
+         that module's compile helper, run helper, assertion macros and temporary-directory \
+         management — not merely its presence in the module tree. A declaration on its own leaves the \
+         harness's duplicate implementations of all four in place, which is the duplication the \
+         requirement forbids, while making a presence check report success.\n\nTo resolve: replace \
+         the harness's own compile, run, assertion and temporary-directory helpers with the shared \
+         ones at their call sites — {} are the modules that own those duties — and update this \
+         driver's integration section to state what is delegated. Searched: {} and each of those \
+         modules.",
+        DELEGATION_SITES.join(", "),
+        driver.display(),
+    );
+
     println!(
-        "shared helper module: present at {} and declared by this driver — its compile, run, \
-         assertion and temporary-directory helpers are the ones in use.",
-        module.display()
+        "shared helper module: present at {} and declared by this driver, with its compile, run, \
+         assertion and temporary-directory helpers reached from {} — the delegation is in place, not \
+         merely the declaration.",
+        module.display(),
+        delegating.join(", "),
     );
 }
 

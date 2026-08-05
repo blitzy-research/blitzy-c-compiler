@@ -25,6 +25,29 @@
 //! would prove nothing about undefined behaviour, so the instrumented artifact is **run**, and its
 //! termination and both of its streams are examined.
 //!
+//! # A gate is only as strong as what the program cannot switch off
+//!
+//! Both gates are decided by two things — the flags the record asks for and the **text of the
+//! program** — because valid C can relax either one from inside. So the program's source is read
+//! before a compiler is spawned, and what it may contain is settled in three layers:
+//!
+//! - a diagnostic-control directive is **admitted on the same terms as a command-line deviation**:
+//!   registered in the record, sanctioned for that program, bracketed by a matched `push`/`pop`, and
+//!   explained — see [`reconcile_source_suppressions`];
+//! - a directive whose effect cannot be resolved from the text at all is **refused**, never assumed
+//!   inert: an alternative spelling of `#`, a `_Pragma` operand a macro builds, a macro that expands
+//!   to a directive, or a vendor pragma subject this module does not model — see
+//!   [`scan_source_refusals`];
+//! - a construct that removes the **instrumentation** the sanitizer gate observes through — a
+//!   `no_sanitize` attribute, a sanitizer runtime hook — is refused as well, and it fails the
+//!   sanitizer gate rather than the warning gate, because that is the gate it empties.
+//!
+//! The reasoning behind all three is one sentence: requirement 1's guarantee is that
+//! undefined-behaviour freedom is **machine-enforced**, and an exception the machine cannot see is
+//! not enforced. A gate reported as fully applied while part of it had been switched off would make
+//! this module's central claim untrue, so a construct this audit cannot account for stops the
+//! program from being certified instead.
+//!
 //! # The reference compiler, and only the reference compiler
 //!
 //! Neither gate ever invokes the compiler under test, and that is a hard invariant rather than a
@@ -274,6 +297,53 @@ pub const SANITIZER_DIAGNOSTIC_MARKERS: &[&str] = &[
     "ThreadSanitizer",
     "SUMMARY:",
 ];
+
+/// Source spellings that switch the sanitizer instrumentation off, or reconfigure the runtime that
+/// reports it, from inside the translation unit.
+///
+/// # Why these are refused outright rather than registered
+///
+/// The second gate's whole guarantee is that an instrumented build of the program was **executed**
+/// and reported nothing. Every spelling below breaks that guarantee while leaving the gate's own
+/// observations — a clean build, a clean run, a clean exit — completely unchanged, which is what
+/// makes them different in kind from a diagnostic-control directive: a suppressed warning still
+/// leaves the compiler judging the rest of the file, whereas an uninstrumented function is not
+/// judged at all and nothing in the result says so.
+///
+/// There is also no scope at which one of these could be reviewed the way a bracketed `push`/`pop`
+/// suppression can be. An attribute applies to a whole function; a runtime hook applies to the whole
+/// process. So no registration key exists for them and none is offered: a program that needs one is
+/// a program whose undefined-behaviour-freedom argument cannot be established by this suite, and
+/// requirement 1 makes that argument the precondition every divergence this suite reports rests on.
+///
+/// Matched as substrings, on purpose. `no_sanitize` covers `no_sanitize("undefined")`,
+/// `no_sanitize_address`, `no_sanitize_undefined` and every other suffix in one entry; each `__…_`
+/// prefix covers the whole family of a runtime's hooks and interfaces — `__asan_default_options`,
+/// `__ubsan_default_options`, `__lsan_is_turned_off`, `__asan_on_error`,
+/// `__sanitizer_set_death_callback` and the rest — so a new spelling in an existing family is caught
+/// without this table being edited. Measured against the committed corpus: no program contains any
+/// of these, in code or in prose, so the table refuses nothing the suite needs.
+const SANITIZER_CONTROL_SPELLINGS: &[&str] = &[
+    "no_sanitize",
+    "no_address_safety_analysis",
+    "disable_sanitizer_instrumentation",
+    "__asan_",
+    "__ubsan_",
+    "__lsan_",
+    "__msan_",
+    "__tsan_",
+    "__sanitizer_",
+];
+
+/// The alternative spellings of the directive introducer `#` that a translation unit may carry.
+///
+/// C11 6.4.6 makes `%:` a digraph for `#`, and 5.2.1.1 makes `??=` a trigraph for it. Both reach the
+/// preprocessor as a directive introducer, so `%:pragma GCC diagnostic ignored "-Wsomething"` relaxes
+/// the warning gate exactly as the familiar spelling does. A scan that looked only for `#` would
+/// report the file as carrying no directive at all — the one failure mode a gate must not have — so
+/// both are recognised here, and then refused as spellings, because a corpus program has no reason to
+/// use either and an audit should not have to reason about a directive written to be hard to see.
+const DIRECTIVE_INTRODUCERS: &[&str] = &["#", "%:", "??="];
 
 /// The gate member whose removal is sanctioned in one feature area only.
 ///
@@ -1016,6 +1086,38 @@ impl GateResult {
                 "not invoked: the program's expectation record is defective, so the gate it asks \
                  for cannot be trusted — {joined}. Correct the record; the compiler under test is \
                  not involved in this judgement"
+            ),
+            None,
+        )
+    }
+
+    /// Build a result for a gate refused before any process was spawned, because the program's own
+    /// **source** carries a construct that would empty the gate of meaning.
+    ///
+    /// Separate from [`GateResult::record_defect`] because the remedy is a different file and the
+    /// reader needs to know which: a record defect is corrected in the `.expected` record, and this is
+    /// corrected in the `.c` program. Both are failures rather than unavailabilities — nothing about
+    /// the environment is missing — and neither says anything about the compiler under test.
+    ///
+    /// Running the gate anyway would be worse than refusing it. A gate whose instrumentation the
+    /// program removed reports a clean build, a clean run and a clean exit, so the refusal is what
+    /// keeps a pass from being recorded for an experiment that did not happen.
+    fn source_refusal(gate: Gate, refusals: &[String]) -> GateResult {
+        let joined = refusals
+            .iter()
+            .map(|refusal| sanitize_line(refusal))
+            .collect::<Vec<_>>()
+            .join("; ");
+        GateResult::new(
+            gate,
+            GateStatus::Failed,
+            Vec::new(),
+            Vec::new(),
+            Diagnostics::none(),
+            format!(
+                "not invoked: the program's own source would empty this gate of meaning, so a result \
+                 from it could not be trusted — {joined}. Correct the program; the compiler under \
+                 test is not involved in this judgement"
             ),
             None,
         )
@@ -2295,6 +2397,17 @@ struct GateDecision {
     /// Everything wrong with the record, each phrased as a sentence an author can act on. A
     /// non-empty list fails the warning gate.
     defects: Vec<String>,
+    /// Every construct in the program's own source that would switch off, or reconfigure the
+    /// reporting of, the **sanitizer** instrumentation the second gate depends on.
+    ///
+    /// Kept apart from [`GateDecision::defects`] because the two weaken different gates and each
+    /// must fail the gate it weakens rather than the other one. A diagnostic-control directive
+    /// relaxes the warning gate, so it belongs to `defects`; an uninstrumented function or a
+    /// reconfigured sanitizer runtime leaves the warning gate exactly as strict as it was and empties
+    /// the sanitizer gate instead — and a sanitizer gate that ran an uninstrumented artifact reports
+    /// a clean run that establishes nothing. A non-empty list therefore refuses the sanitizer gate
+    /// before an instrumented build is even attempted.
+    instrumentation: Vec<String>,
 }
 
 /// Decide the warning gate for one program, and validate the record's claim to deviate.
@@ -2320,10 +2433,10 @@ struct GateDecision {
 /// The reason is required to *name the dropped flag*, rather than merely to exist. A record that
 /// carries prose in the right field satisfies a presence check while explaining nothing about the
 /// relaxation, and the requirement that a deviation carry a reason is worth only as much as the
-/// link between the reason and the removal it is supposed to justify. Both notes fields are
-/// searched, because a program may reasonably record the deviation in either — the field whose
-/// purpose is narrowing, or the argument a reviewer reads first — and only the paragraphs that name
-/// a dropped flag are reported, so the report shows the explanation rather than the whole record.
+/// link between the reason and the removal it is supposed to justify. Exactly **one** field is
+/// searched — `impl_defined_notes`, for the reasons [`explain_deviation`] records in full — and only
+/// the paragraphs that name a dropped flag are reported, so the report shows the explanation rather
+/// than the whole record.
 fn decide_warning_gate(manifest: &Manifest) -> GateDecision {
     let mut defects: Vec<String> = Vec::new();
 
@@ -2438,6 +2551,9 @@ fn decide_warning_gate(manifest: &Manifest) -> GateDecision {
         // record, exactly as this function's name says.
         suppressions: Vec::new(),
         defects,
+        // Filled by `scan_source_refusals`, for the same reason: it is a property of the program
+        // text and no record can declare or excuse one.
+        instrumentation: Vec::new(),
     }
 }
 
@@ -2486,6 +2602,114 @@ struct SourceDirective {
     text: String,
 }
 
+/// The body of a directive line, when the line opens one, whatever spelling the `#` was written in.
+///
+/// Returns the text after the directive name's introducer, so a caller can go on to read the
+/// directive itself. `None` for a line that introduces no directive at all.
+///
+/// All three spellings in [`DIRECTIVE_INTRODUCERS`] are accepted, because all three reach the
+/// preprocessor as `#`: recognising only the familiar one would let `%:pragma GCC diagnostic ignored`
+/// relax the gate while the scan reported the file as carrying no directive.
+fn directive_body(trimmed: &str) -> Option<&str> {
+    DIRECTIVE_INTRODUCERS
+        .iter()
+        .find_map(|introducer| trimmed.strip_prefix(*introducer))
+        .map(str::trim_start)
+}
+
+/// The token sequence of a pragma, whichever of its two spellings the line uses.
+///
+/// One authority for "what a pragma line looks like", used by both the scan that reports the
+/// directives it can read and the scan that refuses the ones nobody can. Recognising a pragma in two
+/// places by two rules is how one of them ends up seeing a directive the other does not.
+///
+/// The directive form accepts every spelling of `#` (see [`directive_body`]) and requires `pragma` to
+/// be a whole token, so `#pragmatic` is not a pragma. The operator form reads the operand of
+/// `_Pragma`, honouring backslash escapes inside it, because the operator's operand is a string
+/// literal and the diagnostic-control pragma written that way necessarily contains escaped quotes —
+/// `_Pragma("GCC diagnostic ignored \"-Wshadow\"")`. Reading it any other way would truncate the
+/// operand at the first escaped quote and leave the scan reporting a directive that suppresses a
+/// warning whose name is a backslash.
+///
+/// `None` for a line that opens no pragma at all. An operand this function cannot resolve — one built
+/// by a macro, or spanning lines — also yields `None` here and is refused by [`scan_source_refusals`]
+/// instead, so an unresolvable form is never silently treated as "no directive".
+fn pragma_body(trimmed: &str) -> Option<String> {
+    if let Some(rest) = directive_body(trimmed) {
+        let body = rest.strip_prefix("pragma")?;
+        if !body.is_empty() && !body.starts_with(char::is_whitespace) {
+            return None;
+        }
+        return Some(String::from(body.trim()));
+    }
+    let open = trimmed.find(PRAGMA_OPERATOR)?;
+    let operand = string_literal_operand(&trimmed[open + PRAGMA_OPERATOR.len()..])?;
+    Some(String::from(destringize(operand).trim()))
+}
+
+/// The characters a string literal denotes, for the two escapes a pragma operand can contain.
+///
+/// C11 6.10.9 says the operator's operand is *destringized* before it is processed as a directive:
+/// each `\"` becomes `"` and each `\\` becomes `\`. Performing that here is what makes the two
+/// spellings of the same directive produce the same tokens, and it is load-bearing rather than tidy —
+/// the operator form of a diagnostic-control pragma necessarily escapes its quotes, so without this
+/// the warning it names would be read as `\"-Wshadow\` and would match neither the record's
+/// registration nor the sanctioned table. A registration that cannot match is a registered exception
+/// reported as an unregistered one.
+///
+/// No other escape is decoded, because no other escape can appear in a directive that this audit
+/// models: the tokens are pragma keywords and `-W…` warning names.
+fn destringize(operand: &str) -> String {
+    let mut decoded = String::with_capacity(operand.len());
+    let mut characters = operand.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some(escaped @ ('"' | '\\')) => decoded.push(escaped),
+            Some(other) => {
+                decoded.push('\\');
+                decoded.push(other);
+            }
+            None => decoded.push('\\'),
+        }
+    }
+    decoded
+}
+
+/// The operator spelling of a pragma, named once so both scans agree on it.
+const PRAGMA_OPERATOR: &str = "_Pragma";
+
+/// The contents of `( "…" )` at the start of `text`, with backslash escapes honoured.
+///
+/// Returns `None` unless the text opens with a parenthesised **single** plain string literal and
+/// closes it — the one operand shape whose directive can be read off the source. Anything else is a
+/// form this audit cannot resolve: a macro name, two concatenated literals, an operand continued on
+/// the next line. `None` is therefore not "no pragma here" but "a pragma nobody can read", which is
+/// why the caller that needs the difference asks this function directly.
+fn string_literal_operand(text: &str) -> Option<&str> {
+    let after_open = text.trim_start().strip_prefix('(')?.trim_start();
+    let body = after_open.strip_prefix('"')?;
+    let mut escaped = false;
+    for (offset, character) in body.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '"' => {
+                let closing = body[offset + character.len_utf8()..].trim_start();
+                return closing.strip_prefix(')').map(|_| &body[..offset]);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Every diagnostic-control directive in a program's source, in the order they appear.
 ///
 /// # What counts, and why the net is drawn this wide
@@ -2493,6 +2717,8 @@ struct SourceDirective {
 /// Both `#pragma GCC diagnostic …` and `_Pragma("GCC diagnostic …")` are recognised, and so are the
 /// `clang` spellings of each: the gate is driven by whichever reference driver the environment
 /// supplies, and a directive that only one vendor honours still relaxes the gate on that vendor. The
+/// `#` may also be written as either of its alternative spellings — see [`directive_body`] — so the
+/// digraph and trigraph forms are read as the directives they are rather than as ordinary text. The
 /// scan also recognises `#pragma GCC system_header`, whose effect is to suppress *every* diagnostic
 /// for the remainder of the file — it is caught here precisely so that it can be refused, rather than
 /// slipping past a scan that only looked for the word `ignored`.
@@ -2502,30 +2728,21 @@ struct SourceDirective {
 /// in: the cost is a spurious defect an author removes in one edit, whereas a missed directive is a
 /// gate reported as fully applied when it was not. The corpus forbids nothing that would make this a
 /// nuisance — one program carries directives at all, and every one of them is live code.
+///
+/// What this function deliberately does **not** attempt is the forms whose effect cannot be resolved
+/// textually at all — a `_Pragma` whose operand is built by a macro, a macro that expands to a
+/// directive, or an attribute that removes instrumentation rather than a diagnostic. Guessing at
+/// those would produce a scan that looked complete and was not, so they are refused instead, by
+/// [`scan_source_refusals`], and the division of labour is the point: this function reports the
+/// directives it can read, and that one refuses the spellings nobody can.
 fn scan_source_directives(text: &str) -> Vec<SourceDirective> {
     let mut found: Vec<SourceDirective> = Vec::new();
     for (index, raw) in text.lines().enumerate() {
         let line = index + 1;
         let trimmed = raw.trim();
-        // The two spellings a translation unit can carry. `_Pragma` is stripped down to the same
-        // shape as the `#pragma` form so that one parser handles both.
-        let body = if let Some(rest) = trimmed.strip_prefix('#') {
-            let rest = rest.trim_start();
-            match rest.strip_prefix("pragma") {
-                Some(body) => String::from(body.trim_start()),
-                None => continue,
-            }
-        } else if let Some(open) = trimmed.find("_Pragma") {
-            let after = &trimmed[open + "_Pragma".len()..];
-            let Some(quoted) = after.find('"').and_then(|start| {
-                after[start + 1..]
-                    .find('"')
-                    .map(|end| &after[start + 1..start + 1 + end])
-            }) else {
-                continue;
-            };
-            String::from(quoted.trim())
-        } else {
+        // Both shapes a translation unit can carry, reduced to one token sequence by
+        // `pragma_body`, so this loop reads a directive the same way whichever way it was written.
+        let Some(body) = pragma_body(trimmed) else {
             continue;
         };
 
@@ -2559,6 +2776,261 @@ fn scan_source_directives(text: &str) -> Vec<SourceDirective> {
             warning,
             text: String::from(trimmed),
         });
+    }
+    found
+}
+
+/// Which machine gate a refused source construct would weaken.
+///
+/// The distinction decides which gate the refusal fails, and getting it wrong would put a true
+/// statement in the wrong place: a diagnostic-control spelling says nothing about instrumentation, and
+/// an uninstrumented function says nothing about diagnostics.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Weakens {
+    /// The warning gate — a directive whose effect on the compiler's diagnostics this audit cannot
+    /// resolve textually.
+    WarningGate,
+    /// The sanitizer gate — instrumentation removed, or the runtime that reports it reconfigured,
+    /// from inside the translation unit.
+    SanitizerGate,
+}
+
+/// One construct in a program's source that this audit refuses to certify.
+struct SourceRefusal {
+    /// The gate this construct would weaken, which is the gate the refusal fails.
+    weakens: Weakens,
+    /// The refusal, phrased as a sentence an author can act on: it opens with the one-based line
+    /// number and quotes the line as written, because these two facts are the whole of what an author
+    /// needs and the defect channel this is folded into carries text rather than structure.
+    detail: String,
+}
+
+/// A program's source with every comment removed, one entry per input line.
+///
+/// # Why the refusal scan reads this and the directive scan does not
+///
+/// The two scans want to be wrong in opposite directions, so they read different text, and the
+/// asymmetry is deliberate rather than an oversight.
+///
+/// [`scan_source_directives`] reads the source verbatim. A `#pragma` inside a comment or a `#if 0`
+/// block has no effect, and reporting it anyway costs an author one edit, while missing a live one
+/// would report the gate as fully applied when it was not.
+///
+/// This scan cannot afford the same posture, because the constructs it refuses are ones the corpus
+/// legitimately **discusses**. `12_preprocessor/006_pragma_and_line.c` explains the `_Pragma` operator
+/// at length; several records and sources describe what the sanitizer gate does. A scan that refused a
+/// program for naming a construct in prose would refuse programs that use none of them, and a check
+/// that fires on correct material is a check that gets switched off. So comments go first, and what
+/// remains is code — where naming one of these spellings genuinely means using it.
+///
+/// String and character literals are **kept**, because a `_Pragma` operand is a literal and its
+/// resolvability is exactly what is being judged. A comment introducer inside a literal is therefore
+/// not mistaken for a comment: literals are consumed before comments are looked for, escapes and all.
+fn strip_comments(text: &str) -> Vec<String> {
+    let mut stripped: Vec<String> = Vec::new();
+    let mut in_block = false;
+    for raw in text.lines() {
+        let characters: Vec<char> = raw.chars().collect();
+        let mut kept = String::with_capacity(raw.len());
+        let mut index = 0usize;
+        while index < characters.len() {
+            let current = characters[index];
+            let next = characters.get(index + 1).copied();
+            if in_block {
+                if current == '*' && next == Some('/') {
+                    in_block = false;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                // A space stands in for every removed character, so a comment between two tokens
+                // cannot join them into one.
+                kept.push(' ');
+                continue;
+            }
+            if current == '"' || current == '\'' {
+                kept.push(current);
+                index += 1;
+                let mut escaped = false;
+                while index < characters.len() {
+                    let inner = characters[index];
+                    kept.push(inner);
+                    index += 1;
+                    if escaped {
+                        escaped = false;
+                        continue;
+                    }
+                    if inner == '\\' {
+                        escaped = true;
+                        continue;
+                    }
+                    if inner == current {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if current == '/' && next == Some('*') {
+                in_block = true;
+                kept.push(' ');
+                index += 2;
+                continue;
+            }
+            if current == '/' && next == Some('/') {
+                break;
+            }
+            kept.push(current);
+            index += 1;
+        }
+        stripped.push(kept);
+    }
+    stripped
+}
+
+/// Every construct in a program's source whose effect on a machine gate this audit cannot resolve,
+/// or must not certify.
+///
+/// # The gap this closes, and why refusal is the only sound answer
+///
+/// [`scan_source_directives`] and [`reconcile_source_suppressions`] together admit an in-source
+/// diagnostic relaxation on the same terms as a command-line one: registered, sanctioned, bracketed
+/// and explained. That model is sound only for directives the scan can actually **read**, and a
+/// translation unit can carry four kinds it cannot — each of which weakens a gate while leaving every
+/// observation the gate makes untouched:
+///
+/// - **An alternative spelling of `#`.** `%:pragma GCC diagnostic ignored "-Wshadow"` is the same
+///   directive as the familiar spelling. It is now read as one — so the registration rules apply to it
+///   — and refused as a spelling as well, because a corpus program has no reason to obscure a
+///   directive and an audit should not have to prove it can see through obfuscation.
+/// - **An operand no scan can resolve.** `_Pragma(MACRO)`, or an operand assembled from two literals
+///   or continued on the next line, produces a directive whose text exists only after preprocessing.
+///   Guessing is not available: the honest answer is that the file's gate cannot be established.
+/// - **A macro that expands to a directive.** `#define QUIET _Pragma("GCC diagnostic ignored …")`
+///   followed by `QUIET` puts the relaxation somewhere no line-oriented scan will find it.
+/// - **A vendor pragma this audit does not model.** `#pragma clang attribute push (…)` can apply an
+///   attribute — including an instrumentation-removing one — across a whole region. Only `diagnostic`
+///   and `system_header` are modelled here, so any other `GCC`/`clang` subject is refused rather than
+///   assumed inert.
+///
+/// And one kind that is not a directive at all: an attribute or runtime hook from
+/// [`SANITIZER_CONTROL_SPELLINGS`] that removes the instrumentation the sanitizer gate depends on. That
+/// one fails the **sanitizer** gate rather than the warning gate, because it is the sanitizer's
+/// observation it empties: an uninstrumented function builds cleanly, runs cleanly and exits cleanly,
+/// and the gate would report a pass that establishes nothing about the program's undefined behaviour.
+///
+/// Every case above is a **refusal**, never a registration. Requirement 1's guarantee is that
+/// undefined-behaviour freedom is machine-enforced, and an exception the machine cannot see is not
+/// enforced — so the only sound response to a construct whose effect cannot be established is to
+/// decline to certify the program at all, which is what a non-empty return value here does.
+fn scan_source_refusals(text: &str) -> Vec<SourceRefusal> {
+    let mut found: Vec<SourceRefusal> = Vec::new();
+    for (index, code) in strip_comments(text).iter().enumerate() {
+        let line = index + 1;
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        for introducer in DIRECTIVE_INTRODUCERS
+            .iter()
+            .filter(|spelling| **spelling != "#")
+        {
+            if trimmed.starts_with(*introducer) {
+                found.push(SourceRefusal {
+                    weakens: Weakens::WarningGate,
+                    detail: format!(
+                        "line {line} opens a directive with {introducer:?}, an alternative spelling \
+                         of `#`: {trimmed}. It reaches the preprocessor as a directive, so it can \
+                         relax the warning gate exactly as `#` can, while reading as ordinary text. \
+                         Write directives with `#`, which is the only spelling this corpus uses and \
+                         the only one a reviewer can be expected to notice"
+                    ),
+                });
+            }
+        }
+
+        let mut remainder = trimmed;
+        while let Some(at) = remainder.find(PRAGMA_OPERATOR) {
+            let after = &remainder[at + PRAGMA_OPERATOR.len()..];
+            if string_literal_operand(after).is_none() {
+                found.push(SourceRefusal {
+                    weakens: Weakens::WarningGate,
+                    detail: format!(
+                        "line {line} uses the `{PRAGMA_OPERATOR}` operator with an operand this \
+                         audit cannot resolve: {trimmed}. The operand must be a single parenthesised \
+                         string literal on this line, because that is the only shape whose directive \
+                         can be read off the source; a macro name, two concatenated literals or a \
+                         continued line produces a directive that exists only after preprocessing, \
+                         and a gate whose contents appear only after preprocessing is not \
+                         established. Write the pragma with its literal operand in place"
+                    ),
+                });
+            }
+            remainder = after;
+        }
+
+        if let Some(rest) = directive_body(trimmed) {
+            if let Some(replacement) = rest.strip_prefix("define") {
+                let opens_definition =
+                    replacement.is_empty() || replacement.starts_with(char::is_whitespace);
+                if opens_definition
+                    && (replacement.contains(PRAGMA_OPERATOR) || replacement.contains("pragma"))
+                {
+                    found.push(SourceRefusal {
+                        weakens: Weakens::WarningGate,
+                        detail: format!(
+                            "line {line} defines a macro whose replacement list can produce a \
+                             directive: {trimmed}. Every use of that macro is then a directive at a \
+                             line no scan of this file can attribute one to, so the gate the file is \
+                             compiled under stops being readable from the file. Write any directive \
+                             the program needs where it applies, so that it is visible, registrable \
+                             and reviewable"
+                        ),
+                    });
+                }
+            }
+        }
+
+        if let Some(body) = pragma_body(trimmed) {
+            let mut words = body.split_whitespace();
+            let vendor = words.next().unwrap_or_default();
+            if vendor == "GCC" || vendor == "clang" {
+                let subject = words.next().unwrap_or_default();
+                if subject != "diagnostic" && subject != "system_header" {
+                    found.push(SourceRefusal {
+                        weakens: Weakens::WarningGate,
+                        detail: format!(
+                            "line {line} carries a {vendor} pragma whose subject this audit does not \
+                             model, {subject:?}: {trimmed}. Only `diagnostic` and `system_header` are \
+                             modelled, and a subject outside them can change diagnostics, code \
+                             generation or instrumentation across a whole region — `clang attribute \
+                             push` can apply an instrumentation-removing attribute to every function \
+                             that follows it. An effect that cannot be reasoned about cannot be \
+                             certified, so the directive is refused rather than assumed inert"
+                        ),
+                    });
+                }
+            }
+        }
+
+        for spelling in SANITIZER_CONTROL_SPELLINGS {
+            if code.contains(spelling) {
+                found.push(SourceRefusal {
+                    weakens: Weakens::SanitizerGate,
+                    detail: format!(
+                        "line {line} names {spelling:?}, which switches off the sanitizer \
+                         instrumentation this audit's second gate depends on or reconfigures the \
+                         runtime that reports it: {trimmed}. An uninstrumented function builds, runs \
+                         and exits exactly as a clean one does, so the gate would report a pass that \
+                         established nothing about the program's undefined behaviour — which is the \
+                         precondition every divergence this suite reports rests on. There is no \
+                         registration for this and none is offered: remove the control, and if the \
+                         program genuinely cannot be instrumented, it cannot be a member of this \
+                         corpus"
+                    ),
+                });
+            }
+        }
     }
     found
 }
@@ -2795,6 +3267,11 @@ fn undecidable_gate(error: &HarnessError) -> GateDecision {
         // present because the field could not be inspected is the one answer no reader could act on.
         ub_notes_recorded: false,
         suppressions: Vec::new(),
+        // The source is not inspected at all when the record cannot be read, so nothing is known
+        // about the program's instrumentation controls either. Left empty rather than guessed: the
+        // record defect below already fails the warning gate, and inventing a second finding from an
+        // inspection that never happened would report an observation nobody made.
+        instrumentation: Vec::new(),
         defects: vec![format!(
             "the expectation record could not be read, so the gate this program asks for is unknown: \
              {error}"
@@ -2877,12 +3354,30 @@ fn audit_program(
                     }
                 }
                 decision.suppressions = suppressions;
+                // The refusals are collected from the same text in the same pass, and each is
+                // routed to the gate it would weaken. Nothing here is registrable: these are the
+                // constructs whose effect cannot be established at all, so the only sound outcome
+                // is to decline to certify the program under the gate they touch.
+                for refusal in scan_source_refusals(&text) {
+                    match refusal.weakens {
+                        Weakens::WarningGate => decision.defects.push(refusal.detail),
+                        Weakens::SanitizerGate => decision.instrumentation.push(refusal.detail),
+                    }
+                }
             }
-            Err(error) => decision.defects.push(format!(
-                "the program source could not be read, so this audit cannot establish whether it \
-                 carries a diagnostic-control directive that relaxes the warning gate from inside: \
-                 {error}"
-            )),
+            Err(error) => {
+                // One read failure, both gates. The warning gate cannot be established because the
+                // directives are unknown, and the sanitizer gate cannot be certified because an
+                // instrumentation control would be unknown too — and certifying either on the
+                // strength of the record alone is exactly the assumption this closes.
+                let cause = format!(
+                    "the program source could not be read, so this audit cannot establish whether it \
+                     relaxes a machine gate from inside — a diagnostic-control directive for the \
+                     warning gate, or an instrumentation control for the sanitizer gate: {error}"
+                );
+                decision.defects.push(cause.clone());
+                decision.instrumentation.push(cause);
+            }
         }
     }
     // A record that could not be read states no expectation, so the sanitizer run is judged against
@@ -2914,15 +3409,25 @@ fn audit_program(
             } else {
                 GateResult::record_defect(Gate::Warning, &decision.defects)
             };
-            let sanitizer = run_sanitizer_gate(
-                caps,
-                reference,
-                area,
-                program,
-                source,
-                expect_exit,
-                diagnostics,
-            )?;
+            // The sanitizer gate runs even when the RECORD is defective — its flags are fixed and do
+            // not come from the record, so it can still answer its own question. It does not run when
+            // the program's own source removes the instrumentation that question is asked through:
+            // there the gate would build cleanly, run cleanly and report a pass that establishes
+            // nothing, which is worse than not running it, because the report would carry a clean
+            // verdict nobody could act on.
+            let sanitizer = if decision.instrumentation.is_empty() {
+                run_sanitizer_gate(
+                    caps,
+                    reference,
+                    area,
+                    program,
+                    source,
+                    expect_exit,
+                    diagnostics,
+                )?
+            } else {
+                GateResult::source_refusal(Gate::Sanitizer, &decision.instrumentation)
+            };
             (warning, sanitizer)
         }
     };

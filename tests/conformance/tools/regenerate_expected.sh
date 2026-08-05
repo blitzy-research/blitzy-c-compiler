@@ -107,7 +107,7 @@
 #     Linux x86_64
 #     /bin/sh -> dash 0.5.12          awk -> mawk 1.3.4 20250131
 #     uutils coreutils 0.2.2          mktemp timeout tr tail sort mkdir cat
-#                                     basename dirname
+#                                     basename dirname env id ls
 #     GNU coreutils 9.5               cp mv rm
 #     GNU diffutils 3.10              cmp
 #     GNU grep 3.11                   grep
@@ -122,16 +122,35 @@
 #     awk -v                  grep -q / -q -x -F --      tr -d / tr -c SET1 SET2
 #     cat                     cmp -s -- / cmp --         tail -c 1
 #     cp -p --                mv --                      rm -f -- / rm -rf --
-#     mkdir -p -- / mkdir --  sort --                    printf
+#     mkdir -p -- / mkdir --  sort -- / sort -u          printf
 #     mktemp -d / -d --       sleep N                    command -v / -v --
 #     cd -P / pwd -P          kill -0 / -TERM / -KILL    wait
 #     du -sk / du -k --       rmdir --                   setsid
+#     env -i NAME=VALUE ...   id -u                      ls -ldn --
+#     ulimit -f BLOCKS
 #
 # `--` precedes every file operand. POSIX requires end-of-options handling from
 # utilities that follow the getopt convention, so this is portable -- and it is
 # what makes a record whose name begins with `-` harmless rather than an option.
 #
-# `du`, `rmdir`, `mkdir` and `tr -c` are POSIX, so they need no exception below.
+# `du`, `rmdir`, `mkdir`, `tr -c`, `sort -u`, `env -i`, `id -u`, `ls -ldn` and the
+# `ulimit -f` shell built-in are all POSIX, so the exception count below is still
+# exactly three. Four of them carry a duty worth naming, because each is the whole
+# mechanism behind a guarantee stated elsewhere in this file:
+#
+#   * `env -i` REPLACES a child's environment rather than filtering it, which is
+#     what makes "a variable reaches a child only by being named here" true.
+#   * `id -u` and `ls -ldn` are how a directory's trustworthiness is decided
+#     before it is allowed onto a child's PATH: numeric owner and mode, read
+#     without `stat`, which is not POSIX and is not in this tool set.
+#   * `ulimit -f` is the hard per-file ceiling on every child. It is a limit the
+#     kernel enforces on the process rather than a size this script checks
+#     afterwards, so a single runaway write cannot fill the working area between
+#     two of the supervisor's ticks.
+#
+# `sort -u` deserves one line of justification because a pipeline could sort and
+# then uniquify instead: `-u` is POSIX, and the alternative would add `uniq` to
+# this inventory for no gain.
 # `mkdir` carries a second duty beyond creating directories: it is the ATOMIC
 # primitive the corpus regeneration lock is built from, because one operation
 # either creates the directory or fails, with no window between a test and a
@@ -225,6 +244,62 @@ CF_RECORDS_MAX=512
 CF_WORK_KB_MAX=65536
 CF_WORK_ENTRIES_MAX=256
 
+# How deep the entry walk descends before the depth itself is the breach. A cell
+# workspace holds a handful of files one level down; eight levels is far beyond any
+# honest shape and finite, which is what a bound has to be. Exceeding it is
+# reported as a breach rather than silently truncating the count -- a tree this
+# script cannot finish measuring is one it must not certify as within the ceiling.
+CF_WALK_DEPTH_MAX=8
+
+# The hard per-file ceiling installed on every child with `ulimit -f`, in 512-byte
+# blocks: 131072 blocks is 64 MiB, the same figure as the whole-area ceiling above.
+#
+# It exists because the live supervisor polls once a second and a process can write
+# far more than the area ceiling between two polls -- a redirection to a file is as
+# fast as the disk. `ulimit` is a kernel limit rather than an observation, so it
+# stops the write itself instead of noticing it afterwards, and it is the only bound
+# here that a fast writer cannot outrun. The two work together: this caps any single
+# file, and the supervisor catches many files that are each under the cap.
+CF_FILE_BLOCKS_MAX=131072
+
+# The status at and above which a POSIX shell can no longer attribute an exit.
+#
+# `wait` reports death by signal N as 128+N, and a program that RETURNS 128+N as the
+# same number, so any status at or above this base is ambiguous rather than a signal.
+# tests/conformance_harness/findings.rs reaches the same conclusion and renders such
+# a status as `ambiguous <n>`; the wording here matches it deliberately, because two
+# artifacts describing the same status differently is how a reader learns to distrust
+# both.
+CF_SIGNAL_STATUS_BASE=128
+
+# --- The warning gate, mirrored from tests/conformance_harness/mod.rs -----------
+# A record's ub_audit_flags value is not merely "non-empty": the parser accepts
+# exactly two reductions of the default gate and nothing else, so a value it would
+# refuse must be refused here too -- before a compile is spent and long before a
+# rewrite. Keep these four in step with UB_AUDIT_GATE_DEFAULT,
+# UB_GATE_WITHOUT_PEDANTIC, UB_GATE_WITHOUT_CONVERSION and UB_AUDIT_GATE_MANDATORY.
+CF_UB_GATE_DEFAULT='-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror'
+CF_UB_GATE_WITHOUT_PEDANTIC='-Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror'
+CF_UB_GATE_WITHOUT_CONVERSION='-Wall -Wextra -pedantic -Wshadow -Werror'
+CF_UB_GATE_MANDATORY='-Werror'
+# The one area whose gate may drop -pedantic, where the subject under test is by
+# definition non-standard and that diagnostic exists precisely to reject it.
+CF_UB_GATE_EXTENSION_AREA='08_gcc_extensions'
+
+# --- The marker vocabulary, mirrored from tests/conformance_harness/mod.rs ------
+# The six observable divergence shapes plus the one class that names no shape at
+# all. Keep in step with DivergenceClass::label and COMPARISON_EXCLUDED_LABEL.
+CF_MARKER_CLASSES='compile_failure link_failure run_crash exit_code_mismatch
+stdout_mismatch timeout comparison_excluded'
+CF_MARKER_CLASS_EXCLUDED='comparison_excluded'
+
+# The oracle, target and optimization-level spellings a marker scope may name.
+# Mirrors Oracle::parse, Target::parse and OptLevel::parse.
+CF_SCOPE_ORACLE_SPELLINGS='a b c oracle_a oracle_b oracle_c'
+CF_SCOPE_TARGET_SPELLINGS='x86_64 i686 aarch64 riscv64
+x86_64-linux-gnu i686-linux-gnu aarch64-linux-gnu riscv64-linux-gnu'
+CF_SCOPE_OPT_SPELLINGS='-O0 -O1 -O2 O0 O1 O2'
+
 # --- Directories excluded from record enumeration ----------------------------
 # The three corpus companions that are siblings of the area directories and are
 # never walked for records. `findings/F-NNNN-*/reproducer.expected` IS a valid
@@ -258,10 +333,20 @@ CF_PROCESSED=0
 # that the next one has to reclaim.
 CF_LOCK_DIR=''
 CF_LOCK_HELD=0
+# This run's ownership token, written into the lock's owner file when the lock is
+# taken. Cleanup removes the lock only while the token on disk is still this one:
+# a lock another run has reclaimed is no longer ours to remove, and removing it
+# would hand the corpus to two writers at once -- the exact outcome the lock
+# exists to prevent.
+CF_LOCK_TOKEN=''
 # Why the live working-area ceiling was breached, set by cf_quota_breach and
 # empty whenever it was not.
 CF_QUOTA_REASON=''
 CF_CHANGED=0
+
+# The search path this script and every child it starts use, computed from the
+# inherited PATH by cf_sanitize_path and never read from the environment again.
+CF_TRUSTED_PATH=''
 
 # Resolved-tool cache. An empty value means "not resolved yet"; resolution is
 # lazy so a record that restricts its target list never requires a toolchain it
@@ -362,13 +447,23 @@ cf_release_staging() {
 	fi
 }
 
-# Give the corpus regeneration lock back, if this run took it. Defined beside the
-# staging releaser because both are exit-path duties and both must be safe to
-# call when there is nothing to release.
+# Give the corpus regeneration lock back, if this run took it AND it is still this
+# run's. Defined beside the staging releaser because both are exit-path duties and
+# both must be safe to call when there is nothing to release.
+#
+# Ownership is VERIFIED rather than assumed, and the difference is not theoretical.
+# A run whose own process was killed and whose working area was removed looks stale
+# to the next one, which reclaims the lock legitimately; if this handler then ran
+# -- on a signal, say -- an unconditional removal would delete the lock the OTHER
+# run is holding, and the corpus would have two writers with neither knowing. The
+# token settles it: this handler removes the lock only while the token on disk is
+# the one this run wrote.
 cf_release_lock() {
-	if [ "$CF_LOCK_HELD" -eq 1 ] && [ -n "$CF_LOCK_DIR" ]; then
-		rm -f -- "$CF_LOCK_DIR/owner"
-		rmdir -- "$CF_LOCK_DIR" 2> /dev/null || true
+	if [ "$CF_LOCK_HELD" -eq 1 ] && [ -n "$CF_LOCK_DIR" ] && [ -n "$CF_LOCK_TOKEN" ]; then
+		if [ "$(cf_lock_owner_field token)" = "$CF_LOCK_TOKEN" ]; then
+			rm -f -- "$CF_LOCK_DIR/owner"
+			rmdir -- "$CF_LOCK_DIR" 2> /dev/null || true
+		fi
 		CF_LOCK_HELD=0
 	fi
 }
@@ -441,34 +536,65 @@ BCC_BIN is deliberately NOT read: a golden record seeded from the compiler under
 test would certify that compiler against itself. Independence is proved the other
 way round, by requiring answers only a reference C driver can give.
 
-Every record is validated in full -- the closed key set, field kinds, duplicates,
-required keys, the four size ceilings, control bytes, the final newline, marker
-completeness, the oracle switches, the shared-flag set and the three command
-templates -- BEFORE any of its cells are compiled, so a record the harness would
-refuse is never rewritten and no compile is spent on one that could not be read
-back. Only the expected_stdout block is ever written; every other byte is copied
-through verbatim, and a record whose last byte is not a NEWLINE is refused rather
-than terminated for you.
+Every record is validated in full BEFORE any of its cells are compiled, against the
+same rules the harness parser applies -- the closed key set of 25 keys, field kinds,
+duplicates, required keys, the four size ceilings, control bytes, the final newline,
+marker completeness, the oracle switches, the shared-flag set and the three command
+templates, and equally: the declared warning gate as one of the two SANCTIONED
+reductions (with -pedantic droppable only in the extension area), a disabled oracle
+only ever accompanied by a marker that scopes it and classes it comparison_excluded,
+that class in turn scoping only oracles the record disables, and the marker's own
+identifier, class, scope and basis grammar with the cited basis resolved to a file
+that exists. Validation parity is the point: a record this script would rewrite but
+the harness would refuse is a record whose regeneration makes the very test it was
+for unrunnable. Only the expected_stdout block is ever written; every other byte is
+copied through verbatim, and a record whose last byte is not a NEWLINE is refused
+rather than terminated for you.
 
-Every compile and every run is bounded and hermetic: `timeout` is used where it is
-present and proven at startup to bound anything, otherwise this script's own
-self-tested sleep/kill watchdog is, and nothing is ever run unbounded. Each cell
-gets a fresh private directory and the same sanitized environment the harness
-installs (LC_ALL/LANG/LANGUAGE=C, TZ=UTC, TERM=dumb, forced sanitizer options,
-HOME/TMPDIR/TMP/TEMP inside the cell), so an ambient setting cannot change the
-bytes that become a golden record.
+The PROGRAM is audited too, before it is compiled: a source that calls an
+environment-reading, file-opening, network or process interface, or one whose output
+could not be a function of the program alone (a clock, a random value, a process
+identifier, a locale), is refused and named. Comments and literals are removed first
+and only an identifier that is actually CALLED counts, so a program may print the
+word "socket" and a variable may be named `time`.
+
+Every compile and every run is bounded and hermetic. Each child is started through
+`env -i`, so its environment is REPLACED rather than filtered and a variable reaches
+it only by being named: LC_ALL/LANG/LANGUAGE=C, TZ=UTC, TERM=dumb, forced sanitizer
+options, and HOME/TMPDIR/TMP/TEMP pointed inside the cell's own fresh private
+directory. The PATH children receive is computed rather than inherited -- every
+entry must be absolute, exist, and be writable by neither group nor other, with the
+sticky bit granting no exemption -- and a host where no entry survives that rule is
+refused rather than run. `timeout` is used where it is present and proven at startup
+to bound anything, otherwise this script's own self-tested sleep/kill watchdog is,
+and nothing is ever run unbounded.
 
 Bounds this script imposes on itself, none of them configurable away:
   * Every compile and every run is bounded, and BCC_CONFORMANCE_TIMEOUT_SECS is
     accepted only in 1..600 seconds. A budget with no ceiling configures no bound
     while appearing to configure one.
-  * The private working area is measured while a cell is running, and the cell is
-    terminated if it passes 65536 KiB or 256 entries. The time bound is no defence
-    against space: a process can write a great deal in one second.
+  * The private working area is measured while a cell is running -- in BOTH bounding
+    modes, by one supervisor, so choosing `timeout` never costs the space bound --
+    and the cell is terminated if it passes 65536 KiB or 256 entries at any depth.
+    The time bound is no defence against space: a process can write a great deal in
+    one second. Each child additionally carries a kernel-enforced `ulimit -f`
+    per-file ceiling, so one runaway write cannot fill the area between two ticks.
+    Both bounding modes and the file ceiling are self-tested at startup, and what
+    each self-test actually established is printed.
   * At most 512 records are processed in one invocation.
-  * One writing run at a time. An atomic lock directory in the corpus refuses a
-    second sweep while a live one holds it, and a stale one is reclaimed loudly.
-    --check takes no lock, because it writes nothing.
+  * One writing run at a time, through an atomic lock directory in the corpus. A
+    live lock refuses the second sweep; a lock still being initialised is waited
+    for and retried rather than mistaken for an abandoned one; a stale lock is
+    quarantined by a single rename -- which only one contender can win -- and then
+    competed for afresh, loudly. A lock path that is a symbolic link is refused, and
+    the release verifies this run's own token before removing anything, so a sweep
+    can never release a lock belonging to another. --check takes no lock at all,
+    because it writes nothing.
+  * A record is written only through the directory its containment check resolved:
+    staging and the installing rename are bare names inside that one resolved
+    directory, and after the rename the published file is re-read and required to be
+    a regular file, still inside the corpus area, and byte-identical to what was
+    staged.
   * Every reference driver and runner the selection needs is attested BEFORE the
     first record is processed, so a missing or unusable tool cannot leave the
     corpus half rewritten; and each one's fingerprint is re-checked before every
@@ -718,6 +844,13 @@ if [ "$(basename -- "$CF_TOOLS_DIR")" != 'tools' ]; then
 	cf_error "this script must live in tests/conformance/tools/, but it was found in \"$CF_TOOLS_DIR\""
 	exit "$CF_EXIT_ENVIRONMENT"
 fi
+# The package root, two levels above the corpus: a marker's basis cites a path
+# relative to it, and the citation is required to name a file that exists.
+CF_PACKAGE_ROOT=$(CDPATH='' cd -P -- "$CF_CORPUS_DIR/../.." && pwd -P) || {
+	cf_error "cannot resolve the package root above \"$CF_CORPUS_DIR\""
+	exit "$CF_EXIT_ENVIRONMENT"
+}
+
 if [ ! -f "$CF_CORPUS_DIR/README.md" ]; then
 	cf_error "\"$CF_CORPUS_DIR\" does not look like the conformance corpus: README.md is missing"
 	cf_detail 'the corpus contract is tests/conformance/README.md; the layout is expected to be unchanged'
@@ -747,6 +880,214 @@ if [ "$CF_TIMEOUT_SECS" -gt "$CF_TIMEOUT_SECS_MAX" ]; then
 	cf_detail 'a corpus cell takes milliseconds; a budget this large is the same as no bound at all'
 	exit "$CF_EXIT_ENVIRONMENT"
 fi
+
+# =============================================================================
+# The search path.
+#
+# Every tool this script runs -- the reference drivers, the emulators, and the
+# handful of utilities it leans on -- is found by NAME through PATH, so PATH
+# decides which program each name means. An entry that an account other than this
+# one can write to therefore decides it too: dropping a file called `awk`, `du`,
+# `cmp` or `gcc-13` into such a directory is enough to be selected, and a golden
+# record written afterwards would carry bytes from a toolchain nobody chose.
+#
+# So the inherited PATH is not used as given. It is filtered by exactly the rule
+# tests/conformance_harness/env.rs applies to the same question, and the filtered
+# value is what this script and every child it starts use:
+#
+#   * an EMPTY entry is refused -- a shell reads it as the current directory, which
+#     would make the selected tool depend on where the script was invoked from;
+#   * a RELATIVE entry is refused, for the same reason;
+#   * an entry that does not resolve is skipped in silence: it contributes no
+#     candidate and its absence is ordinary rather than suspicious;
+#   * an entry writable by ANY account, or by every member of its owning GROUP, or
+#     owned by an account that is neither the superuser nor this one, is refused --
+#     a group is not a single trusted principal, and an owner may change its own
+#     permissions at any time. The sticky bit is NOT an exemption: it restrains
+#     deleting an entry, not creating one, and creating one is the whole of the
+#     attack.
+#
+# Each accepted entry is recorded as its PHYSICAL path, so a symbolic link that
+# resolves into a trusted directory is honoured as the place it arrives at rather
+# than as the route taken -- and swapping the link afterwards cannot redirect a
+# later lookup.
+#
+# WHAT THIS CANNOT DO, STATED PLAINLY: the filter is computed with `ls` and `id`,
+# found through the PATH it is about to judge, so the bootstrap trusts the inherited
+# path for exactly those two lookups. Closing that would need a facility a POSIX
+# shell does not have. Everything after the filter -- every driver, every emulator,
+# every utility, and every child -- resolves through the filtered value.
+#
+# A host with no trusted entry at all is refused rather than run: on such a machine
+# there is no honest oracle, and a tool that cannot be found states that far better
+# than one that silently runs whatever was planted.
+# =============================================================================
+
+# Resolve a tool name to an ABSOLUTE path to a regular executable file, or fail.
+#
+# Absolute, because the cells run with their own working directory: a name
+# `command -v` answered with a relative path would be resolved against the
+# caller's directory and would not mean the same thing once a cell has changed
+# directory. Regular, because a directory or a device is not a tool however
+# willing the executable bit looks.
+CF_TOOL_PATH=''
+cf_tool_path() {
+	# $1 = the name or path to resolve
+	CF_TOOL_PATH=''
+	case $1 in
+	-*)
+		# `command -v` would read a leading hyphen as one of its own options, so
+		# such a value is refused by name rather than probed.
+		return 1
+		;;
+	esac
+	cf_tool_path_found=$(command -v "$1" 2> /dev/null) || return 1
+	[ -n "$cf_tool_path_found" ] || return 1
+	case $cf_tool_path_found in
+	/*) ;;
+	*)
+		cf_tool_path_dir=$(dirname -- "$cf_tool_path_found") || return 1
+		cf_tool_path_base=$(basename -- "$cf_tool_path_found") || return 1
+		cf_tool_path_dir=$(CDPATH='' cd -P -- "$cf_tool_path_dir" 2> /dev/null && pwd -P) ||
+			return 1
+		cf_tool_path_found="$cf_tool_path_dir/$cf_tool_path_base"
+		;;
+	esac
+	[ -f "$cf_tool_path_found" ] || return 1
+	[ -x "$cf_tool_path_found" ] || return 1
+	CF_TOOL_PATH=$cf_tool_path_found
+}
+
+# This account's numeric identity, for the ownership half of the rule above.
+CF_EUID=$(id -u 2> /dev/null) || CF_EUID=''
+case $CF_EUID in
+'' | *[!0-9]*) CF_EUID='' ;;
+esac
+
+# Why directory $1 is writable by an account this script does not trust, printed on
+# stdout; exit status 1 when it is trustworthy.
+#
+# The mode string is read from `ls -ld`, whose first field is the ten characters
+# POSIX defines: type, then user, group and other permissions in that order. So
+# group-write is character 6 and other-write is character 9, and the patterns below
+# say exactly that. `-n` prints the owner NUMERICALLY, which is what makes the
+# comparison an identity comparison rather than a name lookup.
+cf_untrusted_dir() {
+	cf_ud_real=$(CDPATH='' cd -P -- "$1" 2> /dev/null && pwd -P) || {
+		printf '%s\n' 'it does not resolve to a directory'
+		return 0
+	}
+	# `ls -ld` rather than `find -perm`: this script does not depend on findutils at
+	# all (see the PORTABILITY banner), the operand is a single directory path this
+	# script resolved itself rather than a name from a listing, and only the first
+	# field and the numeric owner are read -- so the filename-handling hazard the
+	# check warns about cannot arise here.
+	# shellcheck disable=SC2012
+	cf_ud_line=$(ls -ldn -- "$cf_ud_real" 2> /dev/null | awk 'NR == 1 { print $1 " " $3; exit }')
+	if [ -z "$cf_ud_line" ]; then
+		printf '%s\n' 'its permissions could not be read'
+		return 0
+	fi
+	cf_ud_mode=${cf_ud_line%% *}
+	cf_ud_owner=${cf_ud_line##* }
+	case $cf_ud_mode in
+	?????w????*)
+		printf '%s\n' 'it is writable by every member of its owning group, which is not a single trusted principal'
+		return 0
+		;;
+	esac
+	case $cf_ud_mode in
+	????????w*)
+		printf '%s\n' 'it is writable by any account on this machine (the sticky bit is not an exemption: it restrains deleting an entry, not creating one)'
+		return 0
+		;;
+	esac
+	case $cf_ud_owner in
+	'' | *[!0-9]*)
+		printf '%s\n' 'its owner could not be read numerically'
+		return 0
+		;;
+	esac
+	if [ "$cf_ud_owner" != '0' ] && [ "$cf_ud_owner" != "${CF_EUID:-0}" ]; then
+		printf '%s\n' "it is owned by account $cf_ud_owner, which is neither the superuser nor this one, and an owner may change its own permissions at any time"
+		return 0
+	fi
+	return 1
+}
+
+# Compute CF_TRUSTED_PATH from the inherited PATH, and report what was refused.
+cf_sanitize_path() {
+	cf_sp_inherited=${PATH:-}
+	CF_TRUSTED_PATH=''
+	cf_sp_refusals=0
+	if [ -z "$cf_sp_inherited" ]; then
+		cf_error 'PATH is not set, so no tool can be found by name'
+		cf_detail 'every tool this script needs is resolved through PATH; there is nothing to resolve'
+		exit "$CF_EXIT_ENVIRONMENT"
+	fi
+	# An empty element is reported before the split, because the split cannot see the
+	# difference between "a:" and "a" -- and an empty element is the one that means
+	# "the current directory".
+	case $cf_sp_inherited in
+	:* | *::* | *:)
+		cf_sp_refusals=$((cf_sp_refusals + 1))
+		cf_detail 'refused an empty PATH element (a leading, trailing or doubled separator): a shell reads it as the current directory'
+		;;
+	esac
+	cf_sp_rest=$cf_sp_inherited
+	while [ -n "$cf_sp_rest" ]; do
+		case $cf_sp_rest in
+		*:*)
+			cf_sp_entry=${cf_sp_rest%%:*}
+			cf_sp_rest=${cf_sp_rest#*:}
+			;;
+		*)
+			cf_sp_entry=$cf_sp_rest
+			cf_sp_rest=''
+			;;
+		esac
+		[ -n "$cf_sp_entry" ] || continue
+		case $cf_sp_entry in
+		/*) ;;
+		*)
+			cf_sp_refusals=$((cf_sp_refusals + 1))
+			cf_detail "refused the relative PATH entry \"$cf_sp_entry\": it resolves against a working directory this script does not fix"
+			continue
+			;;
+		esac
+		cf_sp_real=$(CDPATH='' cd -P -- "$cf_sp_entry" 2> /dev/null && pwd -P) || continue
+		if cf_sp_why=$(cf_untrusted_dir "$cf_sp_entry"); then
+			cf_sp_refusals=$((cf_sp_refusals + 1))
+			cf_detail "refused the PATH entry \"$cf_sp_entry\": $cf_sp_why"
+			continue
+		fi
+		# Deduplicated on the physical path, so two spellings of one directory do not
+		# each contribute a lookup.
+		case ":$CF_TRUSTED_PATH:" in
+		*":$cf_sp_real:"*) continue ;;
+		esac
+		if [ -z "$CF_TRUSTED_PATH" ]; then
+			CF_TRUSTED_PATH=$cf_sp_real
+		else
+			CF_TRUSTED_PATH="$CF_TRUSTED_PATH:$cf_sp_real"
+		fi
+	done
+	if [ -z "$CF_TRUSTED_PATH" ]; then
+		cf_error 'no directory on PATH is trustworthy, so no tool can be resolved'
+		cf_detail "inherited PATH: $cf_sp_inherited"
+		cf_detail 'each entry was empty, relative, unresolvable, or writable by an account other than'
+		cf_detail 'this one -- on such a host a planted file could be selected as the reference'
+		cf_detail 'compiler, so nothing is compiled rather than something being trusted blindly'
+		exit "$CF_EXIT_ENVIRONMENT"
+	fi
+	if [ "$cf_sp_refusals" -ne 0 ]; then
+		cf_note "$cf_sp_refusals PATH entry/entries refused (listed above); tools are resolved through the remainder"
+	fi
+}
+
+cf_sanitize_path
+PATH=$CF_TRUSTED_PATH
+export PATH
 
 # =============================================================================
 # Private working area. `mktemp -d` honours TMPDIR and creates a directory that
@@ -786,25 +1127,43 @@ mkdir -p -- "$CF_WORK/cell"
 # the child did, and a bound that fired is recorded by a separate marker instead.
 # The child cannot forge either file, because it never learns their names.
 #
-# TWO MECHANISMS, ONE DECODING
-# ----------------------------
-# With `timeout` present it does the bounding. Without it, this script bounds the
-# run itself: the command is backgrounded DIRECTLY, so the process identifier in
-# hand is the compiler or the program itself rather than a wrapper standing in
-# front of it, and that exact process is signalled -- TERM, then KILL a second
-# later for a child that ignores TERM. What the fallback cannot promise is a
-# process GROUP: creating one needs a facility POSIX shells do not offer, so a
-# grandchild that outlives its signalled parent is possible. That is stated
-# rather than glossed over, and it is still bounded execution: the process this
-# script started is terminated, and the outcome is reported.
+# TWO MECHANISMS, ONE SUPERVISOR, ONE DECODING
+# --------------------------------------------
+# With `timeout` present it enforces the TIME bound. Without it, this script
+# enforces time itself, from the same supervisor that enforces space.
+#
+# The SPACE bound is enforced identically in both modes, and that symmetry is the
+# point rather than a tidiness: a bound that exists in one mode and not the other
+# is a bound whose presence depends on which packages happen to be installed. So
+# the cell is backgrounded in both modes and one supervisor watches it, measuring
+# the working area once a second while it runs and terminating it on a breach. In
+# `timeout` mode the supervisor leaves time alone, because `timeout` already owns
+# it; in the fallback mode the same loop owns both.
+#
+# The supervisor is not the only space bound, because a poll cannot outrun a
+# redirection: a cell can write far more than the ceiling between two polls. So
+# every child also carries a HARD per-file limit installed with `ulimit -f`, which
+# the kernel enforces on the write itself. The two together bound one enormous file
+# and many merely large ones.
+#
+# What neither mechanism can promise without `setsid` is a process GROUP: creating
+# one needs a facility POSIX shells do not offer, so a grandchild that outlives its
+# signalled parent is possible. That is stated rather than glossed over, and it is
+# still bounded execution: the process this script started is terminated, and the
+# outcome is reported.
 #
 # Whichever mechanism ran, the decoding is the same and lives in one place:
 # a status file means the child completed and holds its true status; no status
-# file means it did not, and the marker says whether that was the bound.
+# file means it did not, and the markers say whether that was the time bound, the
+# space bound, or something else.
 # =============================================================================
 
 CF_BOUND_STATUS_FILE="$CF_WORK/bound.status"
 CF_BOUND_FIRED_FILE="$CF_WORK/bound.fired"
+# The status the bounding mechanism itself reported, written from inside the
+# subshell that ran it so the caller can read it: a subshell's variables do not
+# survive, and a file does.
+CF_BOUND_OUTER_FILE="$CF_WORK/bound.outer"
 # Set by the live working-area supervisor when it terminates a cell for space.
 # Out of band for the same reason the bound marker is: a status cannot carry it.
 CF_QUOTA_FIRED_FILE="$CF_WORK/bound.quota"
@@ -815,17 +1174,48 @@ CF_BOUND_STATUS=''  # the child's true exit status, when it completed
 CF_BOUND_TIMEDOUT=0 # 1 when the bound fired and the child was terminated
 CF_BOUND_ABORTED='' # non-empty when the bound itself failed to run the child
 
-if command -v timeout > /dev/null 2>&1; then
-	CF_BOUND_MODE='timeout'
-else
-	CF_BOUND_MODE='watchdog'
-fi
-
 # The interpreter that hosts the status-writing wrapper. `/bin/sh` rather than a
 # PATH lookup because this script's own interpreter is `/bin/sh`: a host that
 # lacks it could not have started the script at all, so naming it absolutely adds
 # no dependency and removes one lookup that PATH could redirect.
 CF_BOUND_SHELL='/bin/sh'
+
+# `env` is a HARD requirement, and the reason is the one below about the child's
+# environment: `env -i` is the only POSIX way to hand a child a KNOWN environment
+# rather than a filtered version of whatever this script inherited. A host without it
+# cannot give the guarantee, so it is refused rather than run with a weaker one.
+if cf_tool_path env; then
+	CF_ENV_BIN=$CF_TOOL_PATH
+else
+	cf_error 'the env utility is not on PATH, and it is required'
+	cf_detail 'every compile and every run is started through "env -i" so that the child receives'
+	cf_detail 'exactly the variables this script names and nothing else; without it an ambient'
+	cf_detail 'setting -- or a credential -- would reach a compiler and could reach a golden record'
+	exit "$CF_EXIT_ENVIRONMENT"
+fi
+# Proven, not assumed. A utility named `env` that does not clear the environment
+# would leave every child inheriting one while this script reported otherwise.
+# The single quotes are the point: this text is a program for the INNER shell, so the
+# expansion has to survive this one and happen there -- the same reason the status
+# wrapper below quotes the way it does.
+# shellcheck disable=SC2016
+CF_ENV_PROBE=$(CF_ISOLATION_PROBE=leaked "$CF_ENV_BIN" -i "$CF_BOUND_SHELL" -c \
+	'printf %s "${CF_ISOLATION_PROBE-cleared}"' 2> /dev/null || true)
+if [ "$CF_ENV_PROBE" != 'cleared' ]; then
+	cf_error "\"$CF_ENV_BIN\" -i did not clear the environment it was given"
+	cf_detail "a variable exported into it came back as: ${CF_ENV_PROBE:-<no output>}"
+	cf_detail 'the child environment is the only thing standing between an ambient credential and a'
+	cf_detail 'golden record, so an env that does not clear is refused rather than trusted'
+	exit "$CF_EXIT_ENVIRONMENT"
+fi
+
+if cf_tool_path timeout; then
+	CF_TIMEOUT_BIN=$CF_TOOL_PATH
+	CF_BOUND_MODE='timeout'
+else
+	CF_TIMEOUT_BIN=''
+	CF_BOUND_MODE='watchdog'
+fi
 
 # The wrapper. Its last command is the status write, so it exits 0 whatever the
 # child did -- which is precisely what makes the child's status readable from the
@@ -844,8 +1234,20 @@ printf '%s\n' \"\$?\" > \"\$cf_bound_status_file\""
 #
 # A golden record is a byte-exact expectation, so anything in the environment that
 # can change what a compiler emits or what a program prints can change the bytes
-# this script writes. Three groups are dealt with, and the reasoning differs:
+# this script writes -- and anything in it that a compiler or a program can PRINT
+# can be copied verbatim into a golden record. An ambient credential is both.
 #
+# So the environment is not filtered, it is REPLACED. Every child is started through
+# `env -i`, which clears it, and is then handed exactly the variables named below and
+# nothing else. That is the same posture -- and the same list --
+# tests/conformance_harness/mod.rs installs on every child it spawns through
+# isolate_child_environment; keep them in step.
+#
+# Four groups, and the reasoning differs for each:
+#
+#   * THE SEARCH PATH, set to the sanitized value computed under "The search path"
+#     rather than to the inherited one. A driver looks up its own subprograms, and an
+#     untrusted directory on the child's path decides which ones it finds.
 #   * FIXED so that output is reproducible. The C locale makes number and message
 #     formatting invariant; a locale that prints a decimal comma would silently
 #     change a floating-point line. TZ removes any dependence on the host's time
@@ -856,62 +1258,233 @@ printf '%s\n' \"\$?\" > \"\$cf_bound_status_file\""
 #     into the invoking user's home directory or a shared temporary directory. All
 #     four spellings are set, because different tools consult different ones and a
 #     tool reading the one left unset would fall back to the shared location.
-#   * UNSET because each one redirects the toolchain itself. An exported
-#     LD_PRELOAD, GCC_EXEC_PREFIX, COMPILER_PATH, CPATH or SOURCE_DATE_EPOCH
-#     changes which programs run, which headers are found, or what the output
-#     contains -- so the bytes would come from a toolchain the log does not
-#     describe. The sanitizer options are forced to their strictest values for the
-#     same reason in reverse: an inherited relaxed setting must not be able to
-#     weaken a diagnostic.
+#   * SANITIZER OPTIONS forced to their strictest values, so that no inherited
+#     setting can weaken a diagnostic.
 #
-# These are the same three groups tests/conformance_harness/mod.rs installs on
-# every child through isolate_child_environment; keep them in step.
+# Nothing is UNSET any more, and that is the improvement rather than an omission: a
+# list of variables to unset has to anticipate every name that could matter --
+# LD_PRELOAD, GCC_EXEC_PREFIX, COMPILER_PATH, CPATH, SOURCE_DATE_EPOCH and the rest
+# -- and the one nobody thought of is the one that reaches the compiler. Clearing
+# the environment inverts the burden: a variable reaches a child only by being named
+# here.
 #
-# WHAT THIS IS, PRECISELY: redirection of cooperating tools, not confinement. A
-# variable is only honoured by a program that reads it, so nothing here stops a
-# child writing to an absolute path of its own choosing. The environment is not
-# cleared wholesale either, because clearing it needs a utility outside this
-# script's tool set. What the hermeticity of a cell actually rests on is stated
-# where it is true: every child is spawned with the cell's own workspace as its
-# working directory, every path this script hands a tool lies inside that
-# workspace, and the corpus authoring rules forbid a program from opening a socket
-# or naming a path at all -- every input is a literal in its own source.
-#
-# Called inside the subshell that has already changed to the cell's workspace, so
-# the exports cannot leak into this script's own environment or into the next cell.
+# WHAT THIS IS, PRECISELY: a known environment, not confinement. A cleared
+# environment cannot carry a credential into a compiler or a program, and cannot
+# redirect a toolchain -- but a variable is only one route, and nothing here stops a
+# child writing to an absolute path of its own choosing. What the hermeticity of a
+# cell actually rests on is stated where it is true: every child is spawned with the
+# cell's own workspace as its working directory and with a hard file-size limit,
+# every path this script hands a tool lies inside that workspace, the corpus
+# authoring rules forbid a program from opening a socket or naming a path at all,
+# and cf_audit_source_surface refuses a program whose source names an
+# environment-reading, file-opening, process-spawning or network API at all.
 # =============================================================================
 
-cf_isolate_environment() {
-	# $1 = the cell's private workspace, which becomes the child's HOME and TMPDIR
-	LANG='C'
-	LC_ALL='C'
-	LANGUAGE='C'
-	TZ='UTC'
-	TERM='dumb'
-	export LANG LC_ALL LANGUAGE TZ TERM
+# The sanitizer settings, each the strictest available: a diagnostic terminates the
+# process rather than being recovered from, and it is printed rather than suppressed.
+# Spelled once, here, because they are handed to children in two places.
+CF_ASAN_OPTIONS='abort_on_error=1:halt_on_error=1:detect_leaks=1:print_summary=1:exitcode=1'
+CF_UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1:silence_unsigned_overflow=0'
+CF_LSAN_OPTIONS='exitcode=1'
+CF_MSAN_OPTIONS='halt_on_error=1:exitcode=1'
+CF_TSAN_OPTIONS='halt_on_error=1:exitcode=1'
 
-	ASAN_OPTIONS='abort_on_error=1:halt_on_error=1:detect_leaks=1:print_summary=1:exitcode=1'
-	UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1:silence_unsigned_overflow=0'
-	LSAN_OPTIONS='exitcode=1'
-	MSAN_OPTIONS='halt_on_error=1:exitcode=1'
-	TSAN_OPTIONS='halt_on_error=1:exitcode=1'
-	export ASAN_OPTIONS UBSAN_OPTIONS LSAN_OPTIONS MSAN_OPTIONS TSAN_OPTIONS
+# =============================================================================
+# What a test program is allowed to reach for.
+# =============================================================================
+#
+# A cleared environment and a per-cell workspace bound what a program INHERITS and
+# where a well-behaved one writes. Neither bounds what a program's own source code
+# asks the C library to do, and this script's whole purpose is to take the bytes such
+# a program prints and install them as the definition of correct output.
+#
+# Two separate guarantees rest on that, and both are the corpus authoring rules
+# rather than anything the operating system enforces:
+#
+#   * HERMETICITY. A generated program must not touch the network or a path outside
+#     its workspace. A program that opened a socket or a file would satisfy every
+#     check in this script and violate the constraint anyway, because nothing here
+#     traps a syscall.
+#   * DETERMINISM. Byte-exact comparison across four backends and three optimization
+#     levels is only meaningful if the bytes are a function of the program alone. A
+#     clock reading, a random value, a process identifier or a locale-dependent
+#     conversion makes the golden record a record of one moment on one machine.
+#
+# So the surface is audited in the source, before anything is compiled: a program
+# that NAMES one of these interfaces is refused rather than run. The scan is textual
+# and it is deliberately conservative in what it looks at -- comments and literals
+# are removed first, so prose and format strings can discuss anything, and only an
+# identifier that is actually CALLED counts, so a local variable named `time` is not
+# a finding. What it is not is a sandbox: it is the mechanical half of an authoring
+# rule that was previously only written down, and a determined author can still defeat
+# it through a function pointer or a macro. It closes the accidental case, which is
+# the case that actually occurs.
 
-	HOME=$1
-	TMPDIR=$1
-	TMP=$1
-	TEMP=$1
-	export HOME TMPDIR TMP TEMP
+# Interfaces a test program may not call, by the reason it may not. One group per
+# variable so the refusal can say which guarantee the call would break.
+CF_SURFACE_ENVIRONMENT='getenv secure_getenv putenv setenv unsetenv clearenv
+confstr sysconf pathconf uname sysinfo getlogin getpwuid getpwnam'
+CF_SURFACE_FILE='fopen freopen fdopen open openat creat fread fwrite fgets fputs
+fputc fgetc getc putc getchar getline getdelim fscanf scanf fprintf vfprintf
+read write pread pwrite close lseek dup dup2 stat fstat lstat fstatat access
+faccessat opendir fdopendir readdir rewinddir closedir remove rename renameat
+unlink unlinkat link symlink readlink mkdir mkdirat rmdir chdir fchdir getcwd
+chmod chown truncate ftruncate mmap munmap msync tmpfile tmpnam tempnam mkstemp
+mkdtemp popen pclose fsync fdatasync sync fseek fseeko ftell ftello rewind
+setbuf setvbuf freadable ioctl fcntl flock select poll'
+CF_SURFACE_NETWORK='socket socketpair connect bind listen accept accept4 send
+sendto sendmsg sendfile recv recvfrom recvmsg shutdown setsockopt getsockopt
+getsockname getpeername getaddrinfo freeaddrinfo getnameinfo gethostbyname
+gethostbyaddr inet_addr inet_aton inet_ntoa inet_pton inet_ntop if_nametoindex'
+CF_SURFACE_PROCESS='system fork vfork clone execl execlp execle execv execvp
+execvpe execve posix_spawn posix_spawnp wait waitpid waitid kill raise signal
+sigaction sigprocmask alarm pause abort atexit at_quick_exit quick_exit
+_exit setjmp longjmp sigsetjmp siglongjmp pthread_create pthread_join
+dlopen dlsym dlclose dladdr syscall'
+CF_SURFACE_NONDETERMINISM='time clock times gettimeofday settimeofday
+clock_gettime clock_getres difftime mktime ctime asctime localtime gmtime
+strftime strptime rand rand_r srand random srandom initstate setstate
+arc4random arc4random_uniform getpid getppid getuid geteuid getgid getegid
+setlocale localeconv nl_langinfo'
 
-	# Every one of these redirects the toolchain or the output. `unset` rather than
-	# emptied: an empty value is a value, and several of these are read as a path
-	# list where empty means "the current directory".
-	unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
-	unset GCC_EXEC_PREFIX COMPILER_PATH LIBRARY_PATH GCC_COMPARE_DEBUG
-	unset CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH
-	unset DEPENDENCIES_OUTPUT SUNPRO_DEPENDENCIES SOURCE_DATE_EPOCH
-	unset QEMU_LD_PREFIX QEMU_CPU QEMU_SET_ENV QEMU_STRACE
-	unset CFLAGS CPPFLAGS LDFLAGS
+# Objects -- not calls -- whose mere appearance is the same defect. `environ` IS the
+# environment, and a `main` that names its parameters is reading the invocation.
+CF_SURFACE_OBJECTS='environ __environ _environ argc argv envp'
+
+# Print the C source $1 with comments, string literals and character literals
+# replaced by a space, one output line per input line so a line number still means
+# something.
+#
+# Removing literals is what makes the audit usable rather than merely strict: a
+# program is free to PRINT the word "socket", and a comment is free to explain why the
+# program does not open one. Only code is scanned.
+cf_strip_source() {
+	awk '
+		BEGIN { inblock = 0 }
+		{
+			line = $0
+			out = ""
+			i = 1
+			n = length(line)
+			while (i <= n) {
+				c = substr(line, i, 1)
+				two = substr(line, i, 2)
+				if (inblock) {
+					if (two == "*/") { inblock = 0; i += 2 } else { i++ }
+					continue
+				}
+				if (two == "/*") { inblock = 1; out = out " "; i += 2; continue }
+				if (two == "//") { break }
+				if (c == "\"" || c == "'"'"'") {
+					quote = c
+					i++
+					while (i <= n) {
+						d = substr(line, i, 1)
+						if (d == "\\") { i += 2; continue }
+						i++
+						if (d == quote) { break }
+					}
+					out = out " "
+					continue
+				}
+				out = out c
+				i++
+			}
+			print out
+		}
+	' < "$1"
+}
+
+# Print every identifier the C source $1 CALLS, one per line.
+#
+# Requiring a following `(` is what keeps this precise: a local variable named `time`
+# is not a call to `time()`, and refusing it would be a false positive an author could
+# not act on. The whole stripped text is joined into one stream first, so a name and
+# its `(` separated by a line break still pair up.
+cf_source_calls() {
+	cf_strip_source "$1" | awk '
+		{ out = out " " $0 }
+		END {
+			while (match(out, /[A-Za-z_][A-Za-z_0-9]*[ \t]*\(/)) {
+				token = substr(out, RSTART, RLENGTH)
+				sub(/[ \t]*\($/, "", token)
+				print token
+				out = substr(out, RSTART + RLENGTH)
+			}
+		}
+	'
+}
+
+# Refuse a program whose source reaches outside itself. $1 = source path, $2 = label.
+# Returns non-zero after reporting every offending name, so an author sees all of
+# them in one run rather than one per invocation.
+cf_audit_source_surface() {
+	# $1 = source path, $2 = record label
+	cf_ass_bad=0
+	cf_source_calls "$1" | sort -u > "$CF_WORK/calls.list" || {
+		cf_error "$2: cannot read the program source to audit what it calls"
+		return 1
+	}
+	while IFS= read -r cf_ass_call; do
+		cf_ass_why=''
+		if cf_list_has "$CF_SURFACE_ENVIRONMENT" "$cf_ass_call"; then
+			cf_ass_why='reads the environment or the host configuration'
+		elif cf_list_has "$CF_SURFACE_FILE" "$cf_ass_call"; then
+			cf_ass_why='opens, reads or writes a file'
+		elif cf_list_has "$CF_SURFACE_NETWORK" "$cf_ass_call"; then
+			cf_ass_why='reaches the network'
+		elif cf_list_has "$CF_SURFACE_PROCESS" "$cf_ass_call"; then
+			cf_ass_why='starts, signals or unwinds out of a process'
+		elif cf_list_has "$CF_SURFACE_NONDETERMINISM" "$cf_ass_call"; then
+			cf_ass_why='produces a value that is not a function of the program alone'
+		fi
+		if [ -n "$cf_ass_why" ]; then
+			cf_error "$2: the program calls $cf_ass_call(), which $cf_ass_why"
+			cf_detail "first named on line $(cf_first_line "$1" "$cf_ass_call")"
+			cf_ass_bad=$((cf_ass_bad + 1))
+		fi
+	done < "$CF_WORK/calls.list"
+	for cf_ass_name in $CF_SURFACE_OBJECTS; do
+		if cf_source_names_object "$1" "$cf_ass_name"; then
+			cf_error "$2: the program names \"$cf_ass_name\", which is the invocation environment rather than a value of its own"
+			cf_detail "first named on line $(cf_first_line "$1" "$cf_ass_name")"
+			cf_ass_bad=$((cf_ass_bad + 1))
+		fi
+	done
+	if [ "$cf_ass_bad" -gt 0 ]; then
+		cf_detail 'every input a test program needs is a literal in its own source: that is what'
+		cf_detail 'makes a cell reproducible from the source and its record alone, keeps the run'
+		cf_detail 'hermetic, and makes byte-exact comparison across four backends meaningful'
+		return 1
+	fi
+	return 0
+}
+
+# True when the C source $1 uses $2 as a whole identifier outside comments and
+# literals. Separate from the call scan because these are objects, not calls.
+cf_source_names_object() {
+	cf_sno_hits=$(cf_strip_source "$1" | awk -v want="$2" '
+		{
+			gsub(/[^A-Za-z_0-9]/, " ")
+			for (i = 1; i <= NF; i++) { if ($i == want) { found++ } }
+		}
+		END { print found + 0 }
+	')
+	[ "$cf_sno_hits" -gt 0 ]
+}
+
+# The first line of file $1 on which $2 appears as a whole identifier, or `?` when
+# the name survives only across a line boundary. Advisory: it points a reader at the
+# right place and is never what decides the refusal.
+cf_first_line() {
+	cf_strip_source "$1" | awk -v want="$2" '
+		{
+			gsub(/[^A-Za-z_0-9]/, " ")
+			for (i = 1; i <= NF; i++) {
+				if ($i == want) { print NR; exit }
+			}
+		}
+	' | awk 'NR == 1 { print; found = 1 } END { if (!found) { print "?" } }'
 }
 
 # A tool's identity, as a single line: resolved path, size in KiB blocks, and the
@@ -986,33 +1559,66 @@ cf_signal_cell() {
 	kill -"$1" "$2" 2> /dev/null
 }
 
-# Count the entries beneath $1, stopping once the ceiling is exceeded.
+# Walk the tree beneath $1, counting entries at EVERY depth, following no link, and
+# stopping as soon as the ceiling is exceeded. Depth $2 is the recursion level.
 #
-# Bounded by construction: awk stops reading once it has seen one more entry than
-# the ceiling permits, so a directory holding a million files costs the same as
-# one holding a few hundred. Written with a shell glob walk rather than `find`,
-# which this script does not use, so the traversal depth is its own decision --
-# one level of subdirectory, which is all a cell workspace ever has.
-cf_count_entries() {
-	{
-		for cf_count_top in "$1"/* "$1"/.[!.]*; do
-			[ -e "$cf_count_top" ] || continue
-			printf 'x\n'
-			if [ -d "$cf_count_top" ]; then
-				for cf_count_inner in "$cf_count_top"/* "$cf_count_top"/.[!.]*; do
-					[ -e "$cf_count_inner" ] || continue
-					printf 'x\n'
-				done
+# Three properties, each of which the predecessor lacked:
+#
+#   * ALL DEPTHS. The predecessor descended exactly one level, so a cell that wrote a
+#     million files three levels down was measured as holding one directory. A
+#     ceiling that a subdirectory defeats is not a ceiling.
+#   * NO FOLLOWING. A symbolic link to a directory is counted as one entry and is
+#     never descended into. Following one would measure a tree the cell does not own
+#     -- and a link to `/` would make the measurement unbounded.
+#   * BOUNDED ANYWAY. Counting stops at the first entry past the ceiling, so a
+#     directory holding a million files costs the same as one holding a few hundred,
+#     and the depth is capped as well. Exceeding the depth cap sets
+#     CF_WALK_TOO_DEEP, which the caller treats as a BREACH rather than as a stopping
+#     point: a tree this walk cannot finish is one it must not certify as small.
+#
+# Written with shell globbing rather than `find`, which this script does not depend
+# on at all, so the traversal rules above are its own decisions rather than a
+# question about which findutils is installed. The three patterns together match
+# ordinary, dot- and dot-dot-prefixed names without ever matching `.` or `..`.
+CF_WALK_COUNT=0
+CF_WALK_TOO_DEEP=0
+cf_walk_entries() {
+	for cf_walk_entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+		if [ ! -e "$cf_walk_entry" ] && [ ! -L "$cf_walk_entry" ]; then
+			continue
+		fi
+		CF_WALK_COUNT=$((CF_WALK_COUNT + 1))
+		if [ "$CF_WALK_COUNT" -gt "$CF_WORK_ENTRIES_MAX" ]; then
+			return 0
+		fi
+		if [ -d "$cf_walk_entry" ] && [ ! -L "$cf_walk_entry" ]; then
+			if [ "$2" -ge "$CF_WALK_DEPTH_MAX" ]; then
+				CF_WALK_TOO_DEEP=1
+				return 0
 			fi
-		done
-	} | awk -v ceiling="$CF_WORK_ENTRIES_MAX" '
-		{ seen++ }
-		seen > ceiling { print seen; found = 1; exit }
-		END { if (! found) { print seen + 0 } }
-	'
+			cf_walk_entries "$cf_walk_entry" $(($2 + 1))
+			if [ "$CF_WALK_COUNT" -gt "$CF_WORK_ENTRIES_MAX" ] ||
+				[ "$CF_WALK_TOO_DEEP" -eq 1 ]; then
+				return 0
+			fi
+		fi
+	done
 }
 
-# Is the private working area past either live ceiling? Sets CF_QUOTA_REASON to a
+# Count the entries beneath $1 at every depth. Leaves the count in CF_WALK_COUNT and
+# sets CF_WALK_TOO_DEEP when the tree is deeper than the walk will go.
+#
+# Both results are returned through variables, and this must NOT be called with
+# `$(...)`: a command substitution runs a subshell, so the count would come back and
+# the depth flag would not -- and a tree too deep to measure is precisely the case
+# where the count is the answer that must not be trusted.
+cf_count_entries() {
+	CF_WALK_COUNT=0
+	CF_WALK_TOO_DEEP=0
+	cf_walk_entries "$1" 0
+}
+
+# Is the private working area past any live ceiling? Sets CF_QUOTA_REASON to a
 # ready-to-print sentence when it is, and clears it when it is not. `du -sk` is
 # POSIX; a reading that is not a number is treated as zero rather than as a
 # breach, because refusing a cell over an unreadable measurement would turn a
@@ -1027,11 +1633,60 @@ cf_quota_breach() {
 		CF_QUOTA_REASON="the working area held ${cf_quota_kb} KiB, past the ${CF_WORK_KB_MAX} KiB live ceiling"
 		return 0
 	fi
-	cf_quota_entries=$(cf_count_entries "$CF_WORK")
-	if [ "$cf_quota_entries" -gt "$CF_WORK_ENTRIES_MAX" ]; then
-		CF_QUOTA_REASON="the working area held ${cf_quota_entries} entries, past the ${CF_WORK_ENTRIES_MAX}-entry live ceiling"
+	cf_count_entries "$CF_WORK"
+	if [ "$CF_WALK_TOO_DEEP" -eq 1 ]; then
+		CF_QUOTA_REASON="the working area nested more than ${CF_WALK_DEPTH_MAX} levels deep, which is past the depth this measurement covers"
+		return 0
+	fi
+	if [ "$CF_WALK_COUNT" -gt "$CF_WORK_ENTRIES_MAX" ]; then
+		CF_QUOTA_REASON="the working area held ${CF_WALK_COUNT} entries, past the ${CF_WORK_ENTRIES_MAX}-entry live ceiling"
 	fi
 	return 0
+}
+
+# cf_supervise_cell <pid> <seconds>: watch one running cell until it is gone.
+#
+# ONE supervisor for both bounding mechanisms, which is the whole point: the space
+# ceilings are enforced identically whether or not `timeout` is installed, so the
+# guarantee does not depend on the package set. The division of labour is the only
+# difference between the modes -- in `timeout` mode the utility owns the time bound
+# and this loop owns space alone; in the fallback mode this loop owns both.
+#
+# The working area is measured WHILE the cell runs, because the time bound is no
+# defence against space: a process can write a great deal in one second. A breach
+# terminates the cell the same way the time bound does, and records WHY out of band,
+# because an exit status cannot carry it.
+#
+# Runs in a subshell of its own, so the counters it keeps cannot leak into the caller.
+cf_supervise_cell() {
+	cf_sup_pid=$1
+	cf_sup_secs=$2
+	cf_sup_tick=0
+	while :; do
+		sleep 1
+		kill -0 "$cf_sup_pid" 2> /dev/null || return 0
+		if cf_quota_breach && [ -n "$CF_QUOTA_REASON" ]; then
+			printf '%s\n' "$CF_QUOTA_REASON" > "$CF_QUOTA_REASON_FILE"
+			: > "$CF_QUOTA_FIRED_FILE"
+			cf_signal_cell TERM "$cf_sup_pid"
+			sleep 1
+			cf_signal_cell KILL "$cf_sup_pid"
+			return 0
+		fi
+		cf_sup_tick=$((cf_sup_tick + 1))
+		if [ "$CF_BOUND_MODE" != 'timeout' ] && [ "$cf_sup_tick" -ge "$cf_sup_secs" ]; then
+			# The marker is written only when the signal was actually delivered. A
+			# child that finished a moment before the last tick can no longer be
+			# signalled, so it is reported by its own status rather than as a bound it
+			# never reached.
+			if cf_signal_cell TERM "$cf_sup_pid"; then
+				: > "$CF_BOUND_FIRED_FILE"
+				sleep 1
+				cf_signal_cell KILL "$cf_sup_pid" || true
+			fi
+			return 0
+		fi
+	done
 }
 
 # cf_bound_run <seconds> <workdir> <stdout-file> <stderr-file> <command> [args...]
@@ -1051,7 +1706,7 @@ cf_bound_run() {
 	CF_BOUND_TIMEDOUT=0
 	CF_BOUND_ABORTED=''
 	rm -f -- "$CF_BOUND_STATUS_FILE" "$CF_BOUND_FIRED_FILE" \
-		"$CF_QUOTA_FIRED_FILE" "$CF_QUOTA_REASON_FILE"
+		"$CF_QUOTA_FIRED_FILE" "$CF_QUOTA_REASON_FILE" "$CF_BOUND_OUTER_FILE"
 	CF_QUOTA_REASON=''
 
 	if [ ! -d "$cf_bound_workdir" ]; then
@@ -1059,69 +1714,69 @@ cf_bound_run() {
 		return 0
 	fi
 
-	if [ "$CF_BOUND_MODE" = 'timeout' ]; then
-		if (
-			CDPATH='' cd -P -- "$cf_bound_workdir" || exit 126
-			cf_isolate_environment "$cf_bound_workdir"
-			timeout "$cf_bound_secs" "$CF_BOUND_SHELL" -c "$CF_BOUND_WRAPPER" \
-				cf_bound "$CF_BOUND_STATUS_FILE" "$@" \
-				< /dev/null > "$cf_bound_out" 2> "$cf_bound_err"
-		); then
+	(
+		CDPATH='' cd -P -- "$cf_bound_workdir" || exit 126
+		# The hard per-file backstop, installed on this subshell so every child
+		# inherits it. Attempted rather than required: a host whose hard limit is
+		# already lower keeps its own, and cf_verify_file_backstop proves at startup
+		# that the limit an ordinary host installs actually bites.
+		ulimit -f "$CF_FILE_BLOCKS_MAX" 2> /dev/null || true
+		# ONE argument vector, built once and used by both mechanisms, so a child
+		# receives the same cleared environment whichever one starts it. `set --`
+		# prepends: the command and its arguments are already the positional
+		# parameters here, and they stay in place after them.
+		set -- "$CF_ENV_BIN" -i \
+			"PATH=$CF_TRUSTED_PATH" \
+			LANG=C LC_ALL=C LANGUAGE=C TZ=UTC TERM=dumb \
+			"ASAN_OPTIONS=$CF_ASAN_OPTIONS" \
+			"UBSAN_OPTIONS=$CF_UBSAN_OPTIONS" \
+			"LSAN_OPTIONS=$CF_LSAN_OPTIONS" \
+			"MSAN_OPTIONS=$CF_MSAN_OPTIONS" \
+			"TSAN_OPTIONS=$CF_TSAN_OPTIONS" \
+			"HOME=$cf_bound_workdir" "TMPDIR=$cf_bound_workdir" \
+			"TMP=$cf_bound_workdir" "TEMP=$cf_bound_workdir" \
+			"$CF_BOUND_SHELL" -c "$CF_BOUND_WRAPPER" \
+			cf_bound "$CF_BOUND_STATUS_FILE" "$@"
+		# Backgrounded in BOTH modes, because the supervisor needs a pid to watch and
+		# the space ceilings must hold whether or not `timeout` is installed. Where
+		# `setsid` exists the cell leads its own session in both modes too, so a
+		# termination can reach the whole process tree rather than the direct child --
+		# which matters for `timeout` exactly as much as for the fallback, since a
+		# compiler driver forks.
+		if [ "$CF_BOUND_MODE" = 'timeout' ]; then
+			${CF_SETSID:+$CF_SETSID} "$CF_TIMEOUT_BIN" "$cf_bound_secs" "$@" \
+				< /dev/null > "$cf_bound_out" 2> "$cf_bound_err" &
+		else
+			${CF_SETSID:+$CF_SETSID} "$@" \
+				< /dev/null > "$cf_bound_out" 2> "$cf_bound_err" &
+		fi
+		cf_bound_child=$!
+		# The supervisor's own stderr is discarded: it says nothing a caller needs,
+		# and a host where `sleep` is missing would otherwise print one line per tick
+		# ahead of the single precise refusal cf_verify_bound already produces for
+		# exactly that case.
+		cf_supervise_cell "$cf_bound_child" "$cf_bound_secs" 2> /dev/null &
+		cf_bound_supervisor=$!
+		if wait "$cf_bound_child" > /dev/null 2>&1; then
 			cf_bound_outer=0
 		else
 			cf_bound_outer=$?
 		fi
-		if [ "$cf_bound_outer" -eq 124 ]; then
+		printf '%s\n' "$cf_bound_outer" > "$CF_BOUND_OUTER_FILE"
+		# `timeout` reports a bound that fired as 124, and that is the only thing this
+		# branch does with the outer status: it is turned into the same marker the
+		# fallback writes, so the decoding below is identical for both mechanisms.
+		if [ "$CF_BOUND_MODE" = 'timeout' ] && [ "$cf_bound_outer" -eq 124 ]; then
 			: > "$CF_BOUND_FIRED_FILE"
 		fi
+		kill -TERM "$cf_bound_supervisor" 2> /dev/null || true
+		wait "$cf_bound_supervisor" > /dev/null 2>&1 || true
+		exit 0
+	)
+	if [ -f "$CF_BOUND_OUTER_FILE" ]; then
+		cf_bound_outer=$(cat -- "$CF_BOUND_OUTER_FILE")
 	else
-		(
-			CDPATH='' cd -P -- "$cf_bound_workdir" || exit 126
-			cf_isolate_environment "$cf_bound_workdir"
-			${CF_SETSID:+$CF_SETSID} "$CF_BOUND_SHELL" -c "$CF_BOUND_WRAPPER" \
-				cf_bound "$CF_BOUND_STATUS_FILE" "$@" \
-				< /dev/null > "$cf_bound_out" 2> "$cf_bound_err" &
-			cf_bound_child=$!
-			# The watchdog's own stderr is discarded: it says nothing a caller
-			# needs, and a host where `sleep` is missing would otherwise print one
-			# line per tick ahead of the single precise refusal cf_verify_bound
-			# already produces for exactly that case.
-			(
-				cf_bound_tick=0
-				while [ "$cf_bound_tick" -lt "$cf_bound_secs" ]; do
-					sleep 1
-					kill -0 "$cf_bound_child" 2> /dev/null || exit 0
-					# The working area is measured WHILE the cell runs, because the
-					# time bound is no defence against space: a process can write a
-					# great deal in one second. A breach terminates the cell the same
-					# way the bound does, and records WHY out of band.
-					if cf_quota_breach && [ -n "$CF_QUOTA_REASON" ]; then
-						printf '%s\n' "$CF_QUOTA_REASON" > "$CF_QUOTA_REASON_FILE"
-						: > "$CF_QUOTA_FIRED_FILE"
-						cf_signal_cell TERM "$cf_bound_child"
-						sleep 1
-						cf_signal_cell KILL "$cf_bound_child"
-						exit 0
-					fi
-					cf_bound_tick=$((cf_bound_tick + 1))
-				done
-				# The marker is written only when the signal was actually
-				# delivered. A child that finished a moment before the last tick
-				# can no longer be signalled, so it is reported by its own status
-				# rather than as a bound it never reached.
-				if cf_signal_cell TERM "$cf_bound_child"; then
-					: > "$CF_BOUND_FIRED_FILE"
-					sleep 1
-					cf_signal_cell KILL "$cf_bound_child" || true
-				fi
-			) 2> /dev/null &
-			cf_bound_watchdog=$!
-			wait "$cf_bound_child" > /dev/null 2>&1 || true
-			kill -TERM "$cf_bound_watchdog" 2> /dev/null || true
-			wait "$cf_bound_watchdog" > /dev/null 2>&1 || true
-			exit 0
-		)
-		cf_bound_outer=0
+		cf_bound_outer='unreported'
 	fi
 
 	# One decoding, whichever mechanism ran. The status file wins over the marker,
@@ -1157,8 +1812,9 @@ cf_bound_run() {
 # fallback whose `sleep` or `kill` is missing, is caught here rather than
 # discovered when a compiler hangs -- which is what makes "every compile and
 # every run is bounded" a verified claim instead of an intention.
-cf_verify_bound() {
+cf_verify_bound_mode() {
 	cf_verify_dir="$CF_WORK/boundcheck"
+	rm -rf -- "$cf_verify_dir"
 	mkdir -p -- "$cf_verify_dir"
 
 	# A command that completes must yield its OWN status, including the value a
@@ -1200,11 +1856,92 @@ cf_verify_bound() {
 		exit "$CF_EXIT_ENVIRONMENT"
 	fi
 
+	# A cell that fills the working area must be terminated for SPACE, in this mode,
+	# whichever mechanism owns time. The ceilings are tightened for the duration of
+	# the check so that it costs one tick instead of 64 MiB of writing, and restored
+	# immediately afterwards -- the mechanism under test is the supervisor, not the
+	# size of the number it compares against.
+	cf_verify_kb_max=$CF_WORK_KB_MAX
+	cf_verify_entries_max=$CF_WORK_ENTRIES_MAX
+	CF_WORK_KB_MAX=1
+	CF_WORK_ENTRIES_MAX=2
+	cf_bound_run "$CF_TIMEOUT_SECS" "$cf_verify_dir" \
+		"$cf_verify_dir/out" "$cf_verify_dir/err" \
+		"$CF_BOUND_SHELL" -c \
+		'awk "BEGIN { line = sprintf(\"%99999s\", \"\"); for (i = 0; i < 40; i++) { print line } }" > flood; sleep 20'
+	CF_WORK_KB_MAX=$cf_verify_kb_max
+	CF_WORK_ENTRIES_MAX=$cf_verify_entries_max
+	case $CF_BOUND_ABORTED in
+	*'terminated for space'*) ;;
+	*)
+		cf_error "the $CF_BOUND_MODE execution bound did not terminate a cell that passed the live working-area ceiling"
+		cf_detail "a cell writing far past a 1 KiB ceiling was reported as: status \"$CF_BOUND_STATUS\", timed out $CF_BOUND_TIMEDOUT${CF_BOUND_ABORTED:+, aborted: $CF_BOUND_ABORTED}"
+		cf_detail 'the time bound is no defence against space, so a run whose space bound does not'
+		cf_detail 'work is refused rather than started: one runaway cell would fill the disk'
+		exit "$CF_EXIT_ENVIRONMENT"
+		;;
+	esac
+
 	rm -rf -- "$cf_verify_dir"
+}
+
+# Prove the HARD per-file limit actually stops a write, rather than assuming that
+# `ulimit -f` took. It is the only bound a fast writer cannot outrun -- the
+# supervisor polls once a second and a redirection is faster than that -- so a host
+# where it silently did nothing is a host where the space guarantee is one poll wide.
+#
+# Deliberately not fatal. On a host whose shell or kernel declines the limit the
+# supervisor still holds, so the run continues with the weaker guarantee STATED
+# rather than refused: reporting it is what keeps the claim honest, and refusing
+# would trade a real capability for a bound that is already covered.
+cf_verify_file_backstop() {
+	cf_backstop_dir="$CF_WORK/backstopcheck"
+	rm -rf -- "$cf_backstop_dir"
+	mkdir -p -- "$cf_backstop_dir"
+	cf_backstop_blocks=$CF_FILE_BLOCKS_MAX
+	CF_FILE_BLOCKS_MAX=1
+	cf_bound_run "$CF_TIMEOUT_SECS" "$cf_backstop_dir" \
+		"$cf_backstop_dir/out" "$cf_backstop_dir/err" \
+		"$CF_BOUND_SHELL" -c \
+		'awk "BEGIN { line = sprintf(\"%9999s\", \"\"); for (i = 0; i < 200; i++) { print line } }" > oversize'
+	CF_FILE_BLOCKS_MAX=$cf_backstop_blocks
+	cf_backstop_size=$(du -k -- "$cf_backstop_dir/oversize" 2> /dev/null |
+		awk 'NR == 1 { print $1 + 0; exit }')
+	case $cf_backstop_size in
+	'' | *[!0-9]*) cf_backstop_size=0 ;;
+	esac
+	rm -rf -- "$cf_backstop_dir"
+	if [ "$cf_backstop_size" -le 4 ]; then
+		cf_note "hard per-file ceiling: ulimit -f ${CF_FILE_BLOCKS_MAX} blocks (verified)"
+		return 0
+	fi
+	cf_note "hard per-file ceiling: ulimit -f is NOT enforced on this host (a 512-byte limit still let ${cf_backstop_size} KiB be written)"
+	cf_detail 'the live working-area supervisor is therefore the only space bound, and it measures'
+	cf_detail 'once a second -- a cell can write more than the ceiling between two measurements'
+}
+
+# Prove BOTH mechanisms, not merely whichever one this host will use.
+#
+# A bound that is only ever exercised in the mode the current machine happens to
+# select is a bound whose other half is unproven, and the other half is exactly what
+# a host without `timeout` runs. So each mode is verified in turn wherever it can be:
+# the fallback always can, since it needs only `sleep` and `kill`.
+cf_verify_bound() {
+	cf_verify_selected=$CF_BOUND_MODE
+	if [ -n "$CF_TIMEOUT_BIN" ]; then
+		CF_BOUND_MODE='timeout'
+		cf_verify_bound_mode
+		cf_note "execution bound: timeout ${CF_TIMEOUT_SECS}s and the live space ceilings (verified)"
+	fi
+	CF_BOUND_MODE='watchdog'
+	cf_verify_bound_mode
+	cf_note "execution bound: this script's own sleep/kill watchdog and the live space ceilings (verified)"
+	CF_BOUND_MODE=$cf_verify_selected
+	cf_verify_file_backstop
 	if [ "$CF_BOUND_MODE" = 'watchdog' ]; then
-		cf_note "no timeout utility found; runs are bounded by this script's own watchdog (${CF_TIMEOUT_SECS}s, verified)"
+		cf_note "no timeout utility found; this run bounds time with the verified watchdog (${CF_TIMEOUT_SECS}s)"
 	else
-		cf_note "execution bound: timeout ${CF_TIMEOUT_SECS}s (verified)"
+		cf_note "this run bounds time with timeout ${CF_TIMEOUT_SECS}s"
 	fi
 }
 
@@ -1346,6 +2083,27 @@ cf_require_area_dir() {
 # keeps an otherwise empty committed directory tracked.
 CF_KEPT_DOT_ENTRY='.gitkeep'
 
+# The two dot-prefixed names this script itself creates at the corpus root: the
+# regeneration lock, and the short-lived directory a stale lock is quarantined into
+# before it is discarded. Both are named here rather than beside the lock protocol
+# because the ENUMERATION has to know them too -- it walks the corpus root before the
+# lock is taken, and it rejects an entry the layout does not account for.
+#
+# That ordering was a real defect rather than a hypothetical one: a lock left behind
+# by a killed run made the next run fail during enumeration, before cf_acquire_lock
+# could reclaim it, so the documented "a stale one is reclaimed loudly" was
+# unreachable and the corpus needed a manual `rm` to become usable again.
+CF_LOCK_ENTRY='.regen-lock'
+CF_LOCK_STALE_PREFIX='.regen-lock-stale.'
+
+# True when $1 is one of this script's own transient root entries.
+cf_is_regen_state_entry() {
+	case $1 in
+	"$CF_LOCK_ENTRY" | "$CF_LOCK_STALE_PREFIX"*) return 0 ;;
+	esac
+	return 1
+}
+
 # List the records of ONE accepted area directory, one per line, on stdout.
 # Every entry is classified; nothing is passed over silently.
 #
@@ -1417,6 +2175,16 @@ cf_list_corpus_records() {
 		case $cf_list_topname in
 		. | ..) continue ;;
 		"$CF_KEPT_DOT_ENTRY") continue ;;
+		esac
+		# This script's own lock and quarantine entries are skipped rather than
+		# refused, and the reason is that enumeration happens BEFORE the lock is
+		# acquired: refusing them here would make a lock left by a killed run
+		# unreclaimable, which is the opposite of what the reclaim exists for. Both
+		# are ignored by .gitignore, so neither can be committed either.
+		if cf_is_regen_state_entry "$cf_list_topname"; then
+			continue
+		fi
+		case $cf_list_topname in
 		.*)
 			cf_reject_corpus_entry "$cf_list_topname" \
 				"it is a dot-prefixed entry, and only $CF_KEPT_DOT_ENTRY is allowed to be one"
@@ -1513,54 +2281,136 @@ fi
 #
 # `mkdir` is the primitive because it is atomic: one operation either creates the
 # directory or fails because it already exists, with no window between the test
-# and the creation. The owner file records the pid and the private working area,
-# so a lock left behind by a killed run can be told apart from a live one: the
-# owner is live only if its pid still exists AND its working area is still there.
-# A stale lock is reclaimed loudly rather than silently, because a reader should
-# know a previous run did not finish.
+# and the creation. But atomic creation alone is not a lock protocol, and the three
+# places it is not are where two writers used to get in:
+#
+#   * A LOCK BEING TAKEN IS NOT A STALE LOCK. The winner of `mkdir` writes its owner
+#     file a moment later, so a contender that read the directory in between saw no
+#     owner -- and treating "no owner" as "abandoned" let it declare a LIVE lock
+#     stale and proceed. A missing or partial owner file is therefore read as
+#     INITIALISING and retried, bounded, and only a complete owner naming a dead
+#     process is stale.
+#   * RECLAIMING MUST BE A COMPETITION SOMEBODY LOSES. Overwriting the owner file of
+#     a stale lock in place is not exclusive: two contenders can both do it and both
+#     conclude they hold it. So a stale lock is QUARANTINED with a single `mv`, which
+#     only one contender can win because `mv` needs its source to exist, and the
+#     winner then competes for a fresh `mkdir` like anyone else.
+#   * RELEASING MUST PROVE OWNERSHIP. A run whose lock has been legitimately
+#     reclaimed no longer owns the directory at that path, and removing it would hand
+#     the corpus to two writers. Every lock therefore carries a TOKEN, and cleanup
+#     removes the lock only while the token on disk is this run's.
+#
+# A symbolic link at the lock path is refused outright rather than followed: `mkdir`
+# on a link to an existing directory fails, so the run would otherwise read whatever
+# owner file the link's target happens to hold.
 #
 # --check takes no lock at all: it writes nothing inside the corpus, so it cannot
 # race with anything, and making it wait would be a bound with no purpose.
 #
-# The lock directory is named `.regen-lock` at the corpus root, which is the path
-# `.gitignore` names -- so a lock in flight never dirties `git status` and can
-# never be committed.
+# Both the lock and its quarantine live at the corpus root under names `.gitignore`
+# covers, so neither ever dirties `git status` and neither can be committed.
 # =============================================================================
 
-CF_LOCK_DIR="$CF_CORPUS_DIR/.regen-lock"
+CF_LOCK_DIR="$CF_CORPUS_DIR/$CF_LOCK_ENTRY"
+
+# How many times acquisition retries while another run is initialising its lock, at
+# one second each. Fifty seconds is far longer than the microseconds between a
+# `mkdir` and the write that follows it, and finite -- so a genuinely wedged lock
+# still reports rather than spinning for ever.
+CF_LOCK_ATTEMPTS_MAX=50
 
 # Read one `name=value` field out of the lock's owner file, or print nothing.
+#
+# An ABSENT owner file is an ordinary answer here rather than an error, and getting
+# that wrong is not hypothetical: a lock being taken has no owner file yet, and a
+# lock being reclaimed loses one, so both of the cases the protocol above exists to
+# distinguish reach this function with nothing to read. The redirection is performed
+# inside a subshell so that its failure cannot terminate a run under `set -e`, and
+# the diagnostic the shell would print about it goes nowhere -- the caller decides
+# what an empty answer means, which is the whole point of returning one.
 cf_lock_owner_field() {
-	awk -v want="$1" -F '=' '$1 == want { print $2; exit }' < "$CF_LOCK_DIR/owner" 2> /dev/null
+	[ -f "$CF_LOCK_DIR/owner" ] || return 0
+	(awk -v want="$1" -F '=' '$1 == want { print $2; exit }' < "$CF_LOCK_DIR/owner") 2> /dev/null ||
+		true
+}
+
+# Write this run's ownership into a lock this run has just created.
+#
+# The token is what makes the lock identifiable rather than merely present: it is
+# derived from the unpredictable name `mktemp -d` gave the private working area, so no
+# other run can produce it, and it is written together with the pid and the working
+# area that make staleness decidable.
+cf_lock_claim() {
+	CF_LOCK_TOKEN="${CF_WORK##*/}.$$"
+	printf 'token=%s\npid=%s\nwork=%s\n' "$CF_LOCK_TOKEN" "$$" "$CF_WORK" > "$CF_LOCK_DIR/owner"
+	CF_LOCK_HELD=1
+}
+
+# Move a stale lock out of the way, atomically, returning success only to the one
+# contender that actually did it.
+#
+# `mktemp -d` gives an unpredictable destination that cannot be planted in advance,
+# and `mv` requires its SOURCE to exist -- which is what makes this exclusive: of two
+# contenders reaching this point together, the second finds nothing to move and loses.
+# The quarantined lock is then discarded, so nothing accumulates.
+cf_lock_quarantine_stale() {
+	cf_lock_pen=$(mktemp -d -- "$CF_CORPUS_DIR/$CF_LOCK_STALE_PREFIX""XXXXXX" 2> /dev/null) || return 1
+	if mv -- "$CF_LOCK_DIR" "$cf_lock_pen/lock" 2> /dev/null; then
+		rm -rf -- "$cf_lock_pen"
+		return 0
+	fi
+	rm -rf -- "$cf_lock_pen"
+	return 1
 }
 
 cf_acquire_lock() {
-	if mkdir -- "$CF_LOCK_DIR" 2> /dev/null; then
-		CF_LOCK_HELD=1
-		printf 'pid=%s\nwork=%s\n' "$$" "$CF_WORK" > "$CF_LOCK_DIR/owner"
-		return 0
-	fi
-	cf_lock_pid=$(cf_lock_owner_field pid)
-	cf_lock_work=$(cf_lock_owner_field work)
-	case $cf_lock_pid in
-	'' | *[!0-9]*) cf_lock_pid='' ;;
-	esac
-	if [ -n "$cf_lock_pid" ] && [ -n "$cf_lock_work" ] &&
-		kill -0 "$cf_lock_pid" 2> /dev/null && [ -d "$cf_lock_work" ]; then
-		cf_error "another regeneration is already running (process $cf_lock_pid)"
-		cf_detail "lock: $CF_LOCK_DIR"
-		cf_detail 'two sweeps would each rename records independently, so the corpus could end up'
-		cf_detail 'holding a mixture from both runs'
-		cf_detail 'wait for it to finish, or use --check, which takes no lock and writes nothing'
+	if [ -L "$CF_LOCK_DIR" ]; then
+		cf_error "the regeneration lock path is a symbolic link: $CF_LOCK_DIR"
+		cf_detail 'a link there would make this run read another directory'"'"'s owner file and could'
+		cf_detail 'let two sweeps believe they each hold the lock; remove it and try again'
 		exit "$CF_EXIT_ENVIRONMENT"
 	fi
-	if [ -d "$CF_LOCK_DIR" ]; then
-		cf_note "reclaiming a stale lock at $CF_LOCK_DIR (owner ${cf_lock_pid:-unknown} is gone)"
-		CF_LOCK_HELD=1
-		printf 'pid=%s\nwork=%s\n' "$$" "$CF_WORK" > "$CF_LOCK_DIR/owner"
-		return 0
-	fi
-	cf_error "cannot create the regeneration lock at $CF_LOCK_DIR"
+	cf_lock_attempt=0
+	while [ "$cf_lock_attempt" -lt "$CF_LOCK_ATTEMPTS_MAX" ]; do
+		cf_lock_attempt=$((cf_lock_attempt + 1))
+		if mkdir -- "$CF_LOCK_DIR" 2> /dev/null; then
+			cf_lock_claim
+			return 0
+		fi
+		cf_lock_token=$(cf_lock_owner_field token)
+		cf_lock_pid=$(cf_lock_owner_field pid)
+		cf_lock_work=$(cf_lock_owner_field work)
+		case $cf_lock_pid in
+		'' | *[!0-9]*) cf_lock_pid='' ;;
+		esac
+		if [ -z "$cf_lock_token" ] || [ -z "$cf_lock_pid" ] || [ -z "$cf_lock_work" ]; then
+			# INITIALISING, not stale. Wait and look again rather than concluding
+			# anything: the run that won `mkdir` writes this file immediately
+			# afterwards, and mistaking that gap for an abandoned lock is exactly how
+			# two writers both proceeded.
+			sleep 1
+			continue
+		fi
+		if kill -0 "$cf_lock_pid" 2> /dev/null && [ -d "$cf_lock_work" ]; then
+			cf_error "another regeneration is already running (process $cf_lock_pid)"
+			cf_detail "lock: $CF_LOCK_DIR"
+			cf_detail 'two sweeps would each rename records independently, so the corpus could end up'
+			cf_detail 'holding a mixture from both runs'
+			cf_detail 'wait for it to finish, or use --check, which takes no lock and writes nothing'
+			exit "$CF_EXIT_ENVIRONMENT"
+		fi
+		# STALE: a complete owner file naming a process that is gone, or whose private
+		# working area is gone. Quarantine it and go round again -- the fresh `mkdir` on
+		# the next iteration is what decides the winner, so no contender ever adopts a
+		# lock it did not create.
+		if cf_lock_quarantine_stale; then
+			cf_note "reclaimed a stale lock at $CF_LOCK_DIR (owner $cf_lock_pid is gone)"
+		fi
+	done
+	cf_error "cannot take the regeneration lock at $CF_LOCK_DIR after $CF_LOCK_ATTEMPTS_MAX attempt(s)"
+	cf_detail 'the lock exists but names no complete owner, so it is either being taken right now or'
+	cf_detail 'was left half-created; nothing was compiled and nothing was written'
+	cf_detail 'if no other regeneration is running, remove the directory and try again'
 	exit "$CF_EXIT_ENVIRONMENT"
 }
 
@@ -1695,7 +2545,7 @@ cf_scan_record() {
 # =============================================================================
 # The closed key set, mirrored from tests/conformance_harness/manifest.rs.
 #
-# manifest.rs declares exactly 24 keys, each with a KIND (scalar or heredoc) and a
+# manifest.rs declares exactly 25 keys, each with a KIND (scalar or heredoc) and a
 # PRESENCE (required, optional or conditional), and treats an unknown key, a
 # duplicate key, a key written in the wrong kind and a missing required key as hard
 # parse errors. Every one of those is a record the harness REFUSES -- so a record
@@ -1706,7 +2556,7 @@ cf_scan_record() {
 # Keep this table and manifest.rs's KEYS array in step.
 # =============================================================================
 
-# Print S or H for key $1; exit status 1 when the key is not one of the 24.
+# Print S or H for key $1; exit status 1 when the key is not one of the 25.
 cf_key_kind() {
 	case $1 in
 	program | area | description | targets | opt_levels | shared_flags | \
@@ -1751,6 +2601,14 @@ CF_MARKER_OPTIONAL_KEYS='expected_divergence.documented expected_divergence.evid
 # The same five, spelled for a message rather than for iteration.
 CF_MARKER_REQUIRED_SHOWN='expected_divergence.{id,class,scope,basis,observed}'
 
+# The three marker keys whose VALUE has a grammar, named individually because the
+# diagnostics quote them.
+CF_MARKER_ID_KEY='expected_divergence.id'
+CF_MARKER_CLASS_KEY='expected_divergence.class'
+CF_MARKER_SCOPE_KEY='expected_divergence.scope'
+CF_MARKER_BASIS_KEY='expected_divergence.basis'
+CF_MARKER_OBSERVED_KEY='expected_divergence.observed'
+
 # The tokens a command template is required to lead with. Mirrors PLACEHOLDER_BCC,
 # PLACEHOLDER_REFERENCE_TEMPLATED and PLACEHOLDER_REFERENCE_BARE in manifest.rs.
 # Written with an escaped dollar inside double quotes: these are LITERAL text that
@@ -1778,7 +2636,7 @@ CF_TAB=$(printf '\t')
 # evaluating a string taken from the record -- and this script uses no `eval`.
 CF_VAL_DIR=''
 
-# The file name a key's value and presence are recorded under. The keys are the 24
+# The file name a key's value and presence are recorded under. The keys are the 25
 # known strings by the time this is called, so the mapping is total and collision
 # free; the dot becomes an underscore only because a dot in a name reads badly.
 cf_key_slot() {
@@ -1972,6 +2830,41 @@ cf_validate_record() {
 		cf_val_fault "$cf_vr_label" 0 'ub_audit_flags deviates from the default warning gate but there is no impl_defined_notes block recording why; a deviation without a recorded reason is a defect in the test'
 	fi
 
+	# --- The marker's own grammar ---------------------------------------------
+	# A marker is the one mechanism in the suite that turns a failure into a pass, so
+	# a malformed one is worse than a missing test: it would report a compiler defect
+	# as an expected divergence. The parser refuses each of these, and a record this
+	# script rewrote under a marker the parser refuses could not be read back.
+	#
+	# Cleared before the scope is read, never after: the oracle cross-checks below
+	# consult this, and a value surviving from the previous record would judge this
+	# one against a scope it does not carry.
+	CF_SCOPE_ORACLES=''
+	if cf_val_seen "$CF_MARKER_ID_KEY"; then
+		cf_vr_marker_id=$(cf_val_get "$CF_MARKER_ID_KEY")
+		if [ -z "$cf_vr_marker_id" ]; then
+			cf_val_fault "$cf_vr_label" 0 "$CF_MARKER_ID_KEY is empty; the identifier is what the register cross-check matches, so a marker without one cannot be audited in either direction"
+		elif [ "$(printf '%s' "$cf_vr_marker_id" | awk '{ print NF }')" != '1' ]; then
+			cf_val_fault "$cf_vr_label" 0 "$CF_MARKER_ID_KEY = \"$cf_vr_marker_id\" is not a single token; the register cross-check matches it exactly, so it may not contain whitespace"
+		fi
+	fi
+	if cf_val_seen "$CF_MARKER_CLASS_KEY"; then
+		cf_vr_marker_class=$(cf_val_get "$CF_MARKER_CLASS_KEY")
+		if ! cf_list_has "$CF_MARKER_CLASSES" "$cf_vr_marker_class"; then
+			cf_val_fault "$cf_vr_label" 0 "$CF_MARKER_CLASS_KEY = \"$cf_vr_marker_class\" is not a divergence class; the classifier's mapping is total over $(printf '%s' "$CF_MARKER_CLASSES" | tr '\n' ' ') and a class outside it could never match a cell"
+		fi
+	fi
+	if cf_val_seen "$CF_MARKER_SCOPE_KEY"; then
+		cf_validate_scope "$cf_vr_label" "$(cf_val_get "$CF_MARKER_SCOPE_KEY")"
+	fi
+	if cf_val_seen "$CF_MARKER_BASIS_KEY"; then
+		cf_validate_basis "$cf_vr_label" "$(cf_val_get "$CF_MARKER_BASIS_KEY")"
+	fi
+	if cf_val_seen "$CF_MARKER_OBSERVED_KEY" &&
+		[ "$(cf_val_get "$CF_MARKER_OBSERVED_KEY")" -eq 0 ]; then
+		cf_val_fault "$cf_vr_label" 0 "$CF_MARKER_OBSERVED_KEY has an empty body; the observation is how a reader tells whether what they are seeing is what was marked, so a marker without one describes nothing"
+	fi
+
 	# --- Values ---------------------------------------------------------------
 	if cf_val_seen program && [ "$(cf_val_get program)" != "$cf_vr_stem" ]; then
 		cf_val_fault "$cf_vr_label" 0 "program = \"$(cf_val_get program)\" but the file stem is \"$cf_vr_stem\"; the cheapest guard there is against a record copied from another program and only partly edited"
@@ -1985,8 +2878,17 @@ cf_validate_record() {
 	if cf_val_seen ub_notes && [ "$(cf_val_get ub_notes)" -eq 0 ]; then
 		cf_val_fault "$cf_vr_label" 0 'ub_notes has an empty body; it carries the written argument for why the program is free of undefined behaviour, which is what makes a divergence attributable at all'
 	fi
-	if cf_val_seen ub_audit_flags && [ -z "$(cf_val_get ub_audit_flags)" ]; then
-		cf_val_fault "$cf_vr_label" 0 'ub_audit_flags is present but empty; omit the key to accept the default gate rather than declaring an empty one'
+	if cf_val_seen ub_audit_flags; then
+		if [ -z "$(cf_val_get ub_audit_flags)" ]; then
+			cf_val_fault "$cf_vr_label" 0 'ub_audit_flags is present but empty; omit the key to accept the default gate rather than declaring an empty one'
+		else
+			# The gate is the one requirement-1 mechanism a record can narrow, so the
+			# narrowing itself is checked here rather than trusted. Only the two
+			# sanctioned reductions are accepted, and -pedantic only in the extension
+			# area: a record naming any other gate is one the parser refuses, so
+			# rewriting it would produce a file the harness could no longer read.
+			cf_validate_gate "$cf_vr_label" "$(cf_val_get ub_audit_flags)" "$cf_vr_area"
+		fi
 	fi
 
 	# A source-level suppression is registered, not merely mentioned. The parser
@@ -2025,6 +2927,7 @@ SANCTIONS
 		fi
 	fi
 
+	cf_vr_disabled=''
 	for cf_vr_key in oracle_a oracle_b oracle_c; do
 		if ! cf_val_seen "$cf_vr_key"; then
 			continue
@@ -2033,8 +2936,68 @@ SANCTIONS
 		if [ "$cf_vr_value" != "$CF_TOGGLE_ENABLED" ] &&
 			[ "$cf_vr_value" != "$CF_TOGGLE_DISABLED" ]; then
 			cf_val_fault "$cf_vr_label" 0 "$cf_vr_key = \"$cf_vr_value\"; an oracle switch is $CF_TOGGLE_ENABLED or $CF_TOGGLE_DISABLED and nothing else"
+		elif [ "$cf_vr_value" = "$CF_TOGGLE_DISABLED" ]; then
+			cf_vr_disabled="$cf_vr_disabled ${cf_vr_key#oracle_}"
 		fi
 	done
+
+	# --- A disabled oracle and its marker, checked in both directions ---------
+	# Requirement 5 forbids silently excluding a feature from testing, and a
+	# disabled oracle IS an exclusion. The parser therefore refuses a narrowing
+	# without a marker that scopes it, and refuses a marker that claims
+	# comparison_excluded while scoping an oracle that still runs. Both directions
+	# are enforced here, because a record that is merely internally consistent can
+	# still hide an exclusion, and a record this script rewrote past the parser's
+	# refusal would be unreadable by the harness that has to run it.
+	#
+	# oracle_c may never be disabled and at least one of oracle_a/oracle_b must
+	# remain enabled -- both are checked by require_judgeable_oracles in
+	# manifest.rs, and both are checked here too, because a record with no judging
+	# oracle left would compile and run 12 cells and conclude nothing from any of
+	# them.
+	case " $cf_vr_disabled " in
+	*' c '*)
+		cf_val_fault "$cf_vr_label" 0 'oracle_c is disabled; the golden record is the one oracle that detects both compilers changing together, and it costs nothing to run, so it may never be switched off'
+		;;
+	esac
+	if [ -n "$cf_vr_disabled" ]; then
+		case " $cf_vr_disabled " in
+		*' a '* )
+			case " $cf_vr_disabled " in
+			*' b '*)
+				cf_val_fault "$cf_vr_label" 0 'both oracle_a and oracle_b are disabled; at least one differential oracle must remain, or the record declares 12 cells that no independent authority ever judges'
+				;;
+			esac
+			;;
+		esac
+		if [ "$cf_vr_marker" -eq 0 ]; then
+			cf_val_fault "$cf_vr_label" 0 "the record disables$cf_vr_disabled but carries no expected-divergence marker; a narrowed oracle without a marker is exactly the silent exclusion requirement 5 forbids, so record the reason as $CF_MARKER_REQUIRED_SHOWN"
+		else
+			for cf_vr_key in $cf_vr_disabled; do
+				case " $CF_SCOPE_ORACLES " in
+				*" $cf_vr_key "*) ;;
+				*)
+					cf_val_fault "$cf_vr_label" 0 "oracle_$cf_vr_key is disabled but $CF_MARKER_SCOPE_KEY does not scope it; the marker must name the oracle it excuses, so that the set of comparisons not being made is as visible as the set that is"
+					;;
+				esac
+			done
+			if cf_val_seen "$CF_MARKER_CLASS_KEY" &&
+				[ "$(cf_val_get "$CF_MARKER_CLASS_KEY")" != "$CF_MARKER_CLASS_EXCLUDED" ]; then
+				cf_val_fault "$cf_vr_label" 0 "the record disables$cf_vr_disabled, so $CF_MARKER_CLASS_KEY must be $CF_MARKER_CLASS_EXCLUDED; a disabled oracle makes no comparison at all, so it can never produce the observable divergence any other class describes"
+			fi
+		fi
+	fi
+	if [ "$cf_vr_marker" -eq 1 ] && cf_val_seen "$CF_MARKER_CLASS_KEY" &&
+		[ "$(cf_val_get "$CF_MARKER_CLASS_KEY")" = "$CF_MARKER_CLASS_EXCLUDED" ]; then
+		for cf_vr_key in $CF_SCOPE_ORACLES; do
+			case " $cf_vr_disabled " in
+			*" $cf_vr_key "*) ;;
+			*)
+				cf_val_fault "$cf_vr_label" 0 "$CF_MARKER_CLASS_KEY is $CF_MARKER_CLASS_EXCLUDED and $CF_MARKER_SCOPE_KEY names oracle_$cf_vr_key, but oracle_$cf_vr_key is not disabled; excusing an oracle that still runs would turn a real divergence into an expected one"
+				;;
+			esac
+		done
+	fi
 
 	if cf_val_seen expect_exit; then
 		cf_vr_value=$(cf_val_get expect_exit)
@@ -2123,6 +3086,274 @@ SANCTIONS
 	fi
 }
 
+# True when whitespace-separated list $1 contains word $2 exactly.
+cf_list_has() {
+	for cf_lh_item in $1; do
+		if [ "$cf_lh_item" = "$2" ]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Canonicalize a declared warning gate into gate order, so two records expressing the
+# same deviation compare equal. Leaves the canonical form in CF_GATE_CANONICAL and
+# returns non-zero after faulting on anything the parser would refuse.
+#
+# The result is returned through a variable rather than printed, and that is not a
+# style choice. A fault increments CF_VAL_FAULTS, and a function whose output is read
+# with `$(...)` runs in a SUBSHELL, where every such increment is discarded the moment
+# it returns -- so a record naming a flag outside the gate was diagnosed and then
+# admitted anyway. Reporting a fault and returning a value are two effects, and a
+# command substitution can only carry one of them back.
+#
+# Mirrors parse_ub_audit_flags in tests/conformance_harness/manifest.rs, whose rules
+# exist because these flags are passed to a real compiler: a deviation may only ever
+# REMOVE a member of the fixed gate, never introduce an option of its own, so no
+# plugin, search path, output name or blanket suppression can be named at all.
+CF_GATE_CANONICAL=''
+cf_canonical_gate() {
+	# $1 = label, $2 = the declared value
+	CF_GATE_CANONICAL=''
+	cf_cg_seen=''
+	for cf_cg_flag in $2; do
+		if ! cf_list_has "$CF_UB_GATE_DEFAULT" "$cf_cg_flag"; then
+			cf_val_fault "$1" 0 "ub_audit_flags names \"$cf_cg_flag\", which is not a member of the default warning gate ($CF_UB_GATE_DEFAULT); a deviation is expressed as a REMOVAL from that fixed gate and never as a compiler invocation of its own, so no option outside it may appear"
+			return 1
+		fi
+		if cf_list_has "$cf_cg_seen" "$cf_cg_flag"; then
+			cf_val_fault "$1" 0 "ub_audit_flags names \"$cf_cg_flag\" twice; a repeated diagnostic switch says nothing the single occurrence does not, and a duplicate is a partly edited record rather than an intention"
+			return 1
+		fi
+		cf_cg_seen="$cf_cg_seen $cf_cg_flag"
+	done
+	cf_cg_canonical=''
+	for cf_cg_flag in $CF_UB_GATE_DEFAULT; do
+		if cf_list_has "$cf_cg_seen" "$cf_cg_flag"; then
+			if [ -z "$cf_cg_canonical" ]; then
+				cf_cg_canonical=$cf_cg_flag
+			else
+				cf_cg_canonical="$cf_cg_canonical $cf_cg_flag"
+			fi
+		fi
+	done
+	CF_GATE_CANONICAL=$cf_cg_canonical
+	return 0
+}
+
+# Validate a declared warning gate as one of the two SANCTIONED reductions, or fault.
+#
+# "Non-empty" is not the contract. The parser accepts exactly two values -- the
+# default gate without the conversion diagnostics, where a narrowing conversion is
+# the behaviour under test, and the default gate without -pedantic, in the extension
+# area alone, where the subject is non-standard by definition and that diagnostic
+# exists precisely to reject it -- and refuses everything else, including the full
+# gate spelled out (a deviation that deviates in nothing) and any combination of the
+# two removals. A record this script rewrote under a gate the parser refuses is a
+# record that then fails the very test the rewrite was for.
+cf_validate_gate() {
+	# $1 = label, $2 = declared value, $3 = area
+	cf_canonical_gate "$1" "$2" || return 0
+	cf_vg_canonical=$CF_GATE_CANONICAL
+	if ! cf_list_has "$cf_vg_canonical" "$CF_UB_GATE_MANDATORY"; then
+		cf_val_fault "$1" 0 "ub_audit_flags drops $CF_UB_GATE_MANDATORY, which it may never drop: without it every remaining diagnostic becomes advice and the gate stops being a gate"
+		return 0
+	fi
+	if [ "$cf_vg_canonical" = "$CF_UB_GATE_DEFAULT" ]; then
+		cf_val_fault "$1" 0 "ub_audit_flags names the entire default gate, so it deviates in nothing; a program that passes the full gate omits the key altogether, and recording a no-op deviation would demand a recorded reason for a narrowing that was never made"
+		return 0
+	fi
+	if [ "$cf_vg_canonical" = "$CF_UB_GATE_WITHOUT_CONVERSION" ]; then
+		return 0
+	fi
+	if [ "$cf_vg_canonical" = "$CF_UB_GATE_WITHOUT_PEDANTIC" ]; then
+		if [ "$3" != "$CF_UB_GATE_EXTENSION_AREA" ]; then
+			cf_val_fault "$1" 0 "ub_audit_flags drops -pedantic, which is sanctioned only in the $CF_UB_GATE_EXTENSION_AREA area, where the subject under test is by definition non-standard; this record is in $3, where a standard-conformance diagnostic is a genuine defect in the test program"
+		fi
+		return 0
+	fi
+	cf_val_fault "$1" 0 "ub_audit_flags = \"$2\" is neither sanctioned reduction of the default warning gate; the only accepted values are \"$CF_UB_GATE_WITHOUT_CONVERSION\" (a deliberate narrowing conversion) and \"$CF_UB_GATE_WITHOUT_PEDANTIC\" (the $CF_UB_GATE_EXTENSION_AREA area only), and a program that passes the full gate omits the key"
+	return 0
+}
+
+# Validate an expected-divergence scope, and set CF_SCOPE_ORACLES to the oracle
+# letters it covers.
+#
+# Mirrors parse_scope in manifest.rs: clauses separated by `;`, none of them empty,
+# each either a whole-dimension form or a comma list drawn UNIFORMLY from one
+# dimension, and each dimension constrained at most once. An empty clause is refused
+# rather than ignored for the reason the parser gives: ignoring it lets a scope that
+# constrains nothing fall back to every oracle, every target and every optimization
+# level -- the widest scope there is, reached by writing nothing.
+cf_validate_scope() {
+	# $1 = label, $2 = the declared scope
+	CF_SCOPE_ORACLES=''
+	cf_vs_oracles_set=0
+	cf_vs_targets_set=0
+	cf_vs_opts_set=0
+	cf_vs_position=0
+	cf_vs_rest=$2
+	if [ -z "$(printf '%s' "$2" | tr -d ' \t')" ]; then
+		cf_val_fault "$1" 0 "$CF_MARKER_SCOPE_KEY is empty; a marker with no scope could not be matched against any cell, so the divergence it describes could never be recognised"
+		return 0
+	fi
+	while :; do
+		case $cf_vs_rest in
+		*';'*)
+			cf_vs_clause=${cf_vs_rest%%;*}
+			cf_vs_rest=${cf_vs_rest#*;}
+			cf_vs_more=1
+			;;
+		*)
+			cf_vs_clause=$cf_vs_rest
+			cf_vs_more=0
+			;;
+		esac
+		cf_vs_position=$((cf_vs_position + 1))
+		cf_vs_clause=$(printf '%s' "$cf_vs_clause" | awk '{ $1 = $1; print }')
+		if [ -z "$cf_vs_clause" ]; then
+			cf_val_fault "$1" 0 "clause $cf_vs_position of $CF_MARKER_SCOPE_KEY is empty, which usually means a doubled, leading or trailing \";\"; an empty clause is refused rather than ignored, because ignoring it lets a scope that constrains nothing fall back to the widest scope there is"
+			[ "$cf_vs_more" -eq 1 ] || return 0
+			continue
+		fi
+		cf_vs_lowered=$(printf '%s' "$cf_vs_clause" | tr '[:upper:]' '[:lower:]')
+		case $cf_vs_lowered in
+		'all oracle' | 'all oracles')
+			cf_vs_oracles_set=$((cf_vs_oracles_set + 1))
+			CF_SCOPE_ORACLES='a b c'
+			;;
+		'all target' | 'all targets')
+			cf_vs_targets_set=$((cf_vs_targets_set + 1))
+			;;
+		'all opt level' | 'all opt levels' | 'all opt_level' | 'all opt_levels' | \
+			'all optimization level' | 'all optimization levels')
+			cf_vs_opts_set=$((cf_vs_opts_set + 1))
+			;;
+		'all '*)
+			cf_val_fault "$1" 0 "$CF_MARKER_SCOPE_KEY clause \"$cf_vs_clause\" names no dimension; the whole-dimension forms are \"all oracles\", \"all targets\" and \"all opt levels\""
+			;;
+		*)
+			cf_validate_scope_clause "$1" "$cf_vs_clause"
+			;;
+		esac
+		[ "$cf_vs_more" -eq 1 ] || break
+	done
+	for cf_vs_count in "$cf_vs_oracles_set" "$cf_vs_targets_set" "$cf_vs_opts_set"; do
+		if [ "$cf_vs_count" -gt 1 ]; then
+			cf_val_fault "$1" 0 "$CF_MARKER_SCOPE_KEY constrains one dimension in more than one clause; each of oracles, targets and optimization levels is named at most once, so that the set of cells a marker covers is decidable"
+		fi
+	done
+	# A dimension no clause constrains widens to all of it, which is what a
+	# maintainer writing one clause means. parse_scope resolves the oracle
+	# dimension the same way, and the resolved set -- never the written one -- is
+	# what the class and narrowing cross-checks read, so an omitted oracle clause
+	# has to widen HERE or the two would disagree on scopes nobody wrote.
+	if [ -z "$CF_SCOPE_ORACLES" ]; then
+		CF_SCOPE_ORACLES='a b c'
+	fi
+	return 0
+}
+
+# Validate one comma-list scope clause: every item must parse, and all of them must
+# belong to the SAME dimension.
+cf_validate_scope_clause() {
+	# $1 = label, $2 = the clause
+	cf_vsc_kind=''
+	cf_vsc_items=0
+	cf_vsc_rest=$2
+	while :; do
+		case $cf_vsc_rest in
+		*','*)
+			cf_vsc_item=${cf_vsc_rest%%,*}
+			cf_vsc_rest=${cf_vsc_rest#*,}
+			cf_vsc_more=1
+			;;
+		*)
+			cf_vsc_item=$cf_vsc_rest
+			cf_vsc_more=0
+			;;
+		esac
+		cf_vsc_item=$(printf '%s' "$cf_vsc_item" | awk '{ $1 = $1; print }')
+		if [ -z "$cf_vsc_item" ]; then
+			cf_val_fault "$1" 0 "$CF_MARKER_SCOPE_KEY clause \"$2\" holds an empty element; a stray comma is a hard error rather than a dropped element"
+			[ "$cf_vsc_more" -eq 1 ] || return 0
+			continue
+		fi
+		cf_vsc_items=$((cf_vsc_items + 1))
+		if cf_list_has "$CF_SCOPE_ORACLE_SPELLINGS" "$cf_vsc_item"; then
+			cf_vsc_this='oracle'
+			CF_SCOPE_ORACLES="$CF_SCOPE_ORACLES ${cf_vsc_item#oracle_}"
+		elif cf_list_has "$CF_SCOPE_TARGET_SPELLINGS" "$cf_vsc_item"; then
+			cf_vsc_this='target'
+		elif cf_list_has "$CF_SCOPE_OPT_SPELLINGS" "$cf_vsc_item"; then
+			cf_vsc_this='optimization level'
+		else
+			cf_val_fault "$1" 0 "$CF_MARKER_SCOPE_KEY names \"$cf_vsc_item\", which is not an oracle, a target or an optimization level; the accepted spellings are $CF_SCOPE_ORACLE_SPELLINGS for oracles, x86_64/i686/aarch64/riscv64 and their -linux-gnu triples for targets, and -O0/-O1/-O2 for levels"
+			[ "$cf_vsc_more" -eq 1 ] || return 0
+			continue
+		fi
+		if [ -z "$cf_vsc_kind" ]; then
+			cf_vsc_kind=$cf_vsc_this
+			# Count this clause against its dimension, exactly once, the moment the
+			# dimension becomes known. cf_validate_scope counts only the whole-dimension
+			# forms, so without this a scope could constrain the same dimension twice by
+			# writing one clause as a list and the other as "all X" -- and the check that
+			# each dimension is named at most once, which is what makes the covered set
+			# of cells decidable, would never see it.
+			case $cf_vsc_this in
+			oracle) cf_vs_oracles_set=$((cf_vs_oracles_set + 1)) ;;
+			target) cf_vs_targets_set=$((cf_vs_targets_set + 1)) ;;
+			*) cf_vs_opts_set=$((cf_vs_opts_set + 1)) ;;
+			esac
+		elif [ "$cf_vsc_kind" != "$cf_vsc_this" ]; then
+			cf_val_fault "$1" 0 "$CF_MARKER_SCOPE_KEY clause \"$2\" mixes a $cf_vsc_kind with a $cf_vsc_this; one clause constrains one dimension, so write each dimension as its own clause separated by \";\""
+			return 0
+		fi
+		[ "$cf_vsc_more" -eq 1 ] || break
+	done
+	return 0
+}
+
+# Validate an expected-divergence basis: a repository-relative path, a comma, then
+# the section that authorises the marker -- and the path must name a file that
+# actually exists, because the register audit resolves the citation inside it.
+cf_validate_basis() {
+	# $1 = label, $2 = the declared basis
+	case $2 in
+	*','*) ;;
+	*)
+		cf_val_fault "$1" 0 "$CF_MARKER_BASIS_KEY = \"$2\" is not a basis; write a repository-relative file path, then a comma, then the section or description that authorises the marker"
+		return 0
+		;;
+	esac
+	# Split on the FIRST comma only: a citation legitimately contains commas of its
+	# own, and the path never does.
+	cf_vb_path=$(printf '%s' "${2%%,*}" | awk '{ $1 = $1; print }')
+	cf_vb_citation=$(printf '%s' "${2#*,}" | awk '{ $1 = $1; print }')
+	if [ -z "$cf_vb_path" ]; then
+		cf_val_fault "$1" 0 "$CF_MARKER_BASIS_KEY names no file before its comma; the register audit asserts that the cited document exists, so the citation must begin with a path"
+		return 0
+	fi
+	if [ -z "$cf_vb_citation" ]; then
+		cf_val_fault "$1" 0 "$CF_MARKER_BASIS_KEY names a file but cites no section within it; a whole-document citation cannot be checked by a reader, which is the point of recording it"
+		return 0
+	fi
+	case $cf_vb_path in
+	/*)
+		cf_val_fault "$1" 0 "$CF_MARKER_BASIS_KEY names the absolute path \"$cf_vb_path\"; a basis cites a repository artifact, so the path is relative to the package root"
+		return 0
+		;;
+	*..*)
+		cf_val_fault "$1" 0 "$CF_MARKER_BASIS_KEY names \"$cf_vb_path\", which climbs out of the repository; a basis cites a repository artifact, so the path may not contain a parent-directory component"
+		return 0
+		;;
+	esac
+	if [ ! -f "$CF_PACKAGE_ROOT/$cf_vb_path" ]; then
+		cf_val_fault "$1" 0 "$CF_MARKER_BASIS_KEY cites \"$cf_vb_path\", which is not a file in this repository; a divergence may be classified as expected only when a limitation the repository already DOCUMENTS authorises it, and a citation nobody can open documents nothing"
+	fi
+	return 0
+}
+
 # Split comma list $1 into one trimmed item per line on stdout. Exit status 1
 # when an element is empty, which the format treats as a hard error rather than
 # a dropped element.
@@ -2203,40 +3434,10 @@ cf_is_out_of_scope_opt() {
 # reported with the package that carries it, as text for a human to act on.
 # =============================================================================
 
-# Resolve a tool name to an ABSOLUTE path to a regular executable file, or fail.
-#
-# Absolute, because the cells run with their own working directory: a name
-# `command -v` answered with a relative path would be resolved against the
-# caller's directory and would not mean the same thing once a cell has changed
-# directory. Regular, because a directory or a device is not a tool however
-# willing the executable bit looks.
-CF_TOOL_PATH=''
-cf_tool_path() {
-	# $1 = the name or path to resolve
-	CF_TOOL_PATH=''
-	case $1 in
-	-*)
-		# `command -v` would read a leading hyphen as one of its own options, so
-		# such a value is refused by name rather than probed.
-		return 1
-		;;
-	esac
-	cf_tool_path_found=$(command -v "$1" 2> /dev/null) || return 1
-	[ -n "$cf_tool_path_found" ] || return 1
-	case $cf_tool_path_found in
-	/*) ;;
-	*)
-		cf_tool_path_dir=$(dirname -- "$cf_tool_path_found") || return 1
-		cf_tool_path_base=$(basename -- "$cf_tool_path_found") || return 1
-		cf_tool_path_dir=$(CDPATH='' cd -P -- "$cf_tool_path_dir" 2> /dev/null && pwd -P) ||
-			return 1
-		cf_tool_path_found="$cf_tool_path_dir/$cf_tool_path_base"
-		;;
-	esac
-	[ -f "$cf_tool_path_found" ] || return 1
-	[ -x "$cf_tool_path_found" ] || return 1
-	CF_TOOL_PATH=$cf_tool_path_found
-}
+# `cf_tool_path`, which resolves a name to an absolute executable, is defined much
+# earlier -- under "The search path", beside the sanitization that decides which
+# directories it may resolve through. It has to be, because the execution bound
+# resolves `env` and `timeout` with it before any of the tool discovery below runs.
 
 # Resolve a tool into CF_CHOSEN, or fail loudly.
 #   $1 = value of the override variable (may be empty)
@@ -2970,8 +4171,8 @@ cf_capture_cell() {
 	if [ "$CF_BOUND_STATUS" -ne 0 ]; then
 		cf_error "$cf_capture_rec: the reference compiler failed on $cf_capture_label (status $CF_BOUND_STATUS)"
 		cf_detail "command: $cf_capture_command"
-		if [ "$CF_BOUND_STATUS" -gt 128 ]; then
-			cf_detail "a status above 128 means the compiler died from signal $((CF_BOUND_STATUS - 128)) rather than exiting"
+		if [ "$CF_BOUND_STATUS" -ge "$CF_SIGNAL_STATUS_BASE" ]; then
+			cf_detail "the status is ambiguous $CF_BOUND_STATUS: a POSIX shell reports death by signal $((CF_BOUND_STATUS - CF_SIGNAL_STATUS_BASE)) and a program that RETURNED $CF_BOUND_STATUS as the same number, so which of the two happened cannot be established here"
 		fi
 		if [ -s "$cf_capture_cc_out" ]; then
 			cf_detail_file "$cf_capture_cc_out" 20
@@ -3017,8 +4218,8 @@ cf_capture_cell() {
 		cf_error "$cf_capture_rec: $cf_capture_label exited with $CF_BOUND_STATUS but the record declares expect_exit = $cf_capture_expect"
 		cf_detail 'the status is as much of the expectation as the bytes are, so stdout captured'
 		cf_detail 'from a run that ended the wrong way is not a golden record'
-		if [ "$CF_BOUND_STATUS" -gt 128 ]; then
-			cf_detail "a status above 128 means the run was ended by signal $((CF_BOUND_STATUS - 128)); that is not a normal exit of the same number"
+		if [ "$CF_BOUND_STATUS" -ge "$CF_SIGNAL_STATUS_BASE" ]; then
+			cf_detail "the status is ambiguous $CF_BOUND_STATUS: death by signal $((CF_BOUND_STATUS - CF_SIGNAL_STATUS_BASE)) and a normal exit of $CF_BOUND_STATUS are the same number to a POSIX shell, so this run cannot say which occurred -- tests/conformance_harness/findings.rs reports such a status the same way, as ambiguous rather than as a signal"
 		fi
 		if [ -s "$cf_capture_run_err" ]; then
 			cf_detail_file "$cf_capture_run_err" 20
@@ -3063,6 +4264,88 @@ cf_rec_abort() {
 	cf_release_staging
 	cf_detail 'nothing was written; the record is unchanged'
 	exit "$CF_EXIT_RECORD"
+}
+
+# =============================================================================
+# Writing through a directory that was resolved ONCE.
+# =============================================================================
+#
+# Every write this script performs inside the corpus goes through one of the three
+# functions below, and all three take the record's PHYSICAL directory -- the
+# fully symlink-resolved path its containment check approved -- and name everything
+# else relative to it.
+#
+# The alternative, which these replace, was to check the resolved path and then
+# write through the path as WRITTEN. That is two resolutions of one name at two
+# different moments, and they agree only while no component of the name changes in
+# between. A feature-area directory replaced by a symbolic link after the check
+# would be approved here and written somewhere else, with every message in the run
+# still displaying a corpus path -- and the file being written is the one the whole
+# suite treats as the definition of correct output.
+#
+# `cd -P` into an already-resolved absolute path lands in the directory that was
+# approved, and from there a bare name has no component left to re-resolve. That is
+# the whole of the mechanism; the value is that there is now exactly ONE resolution
+# per record instead of one per operation.
+
+# The name a staging file always takes inside its staging directory. A fixed leaf is
+# safe precisely because the DIRECTORY around it is the unpredictable part.
+CF_STAGING_LEAF='record'
+
+# Create a staging directory inside the pinned directory $1 and copy the record $2
+# into it as CF_STAGING_LEAF. Prints the staging directory's name RELATIVE to $1, so
+# the caller can neither be handed nor act on an absolute path built elsewhere.
+cf_stage_beside() {
+	# $1 = pinned physical directory, $2 = record base name
+	(
+		CDPATH='' cd -P -- "$1" || exit 1
+		cf_sb_dir=$(mktemp -d -- './.regen.XXXXXX' 2> /dev/null) || exit 1
+		cf_sb_dir=${cf_sb_dir#./}
+		cp -p -- "$2" "$cf_sb_dir/$CF_STAGING_LEAF" || {
+			rm -rf -- "$cf_sb_dir"
+			exit 1
+		}
+		printf '%s\n' "$cf_sb_dir"
+	)
+}
+
+# Install the staged record: rename $1/$2/CF_STAGING_LEAF onto $1/$3. One rename
+# within one directory, both operands bare names, so the record is either fully
+# updated or byte-identical to what it was.
+cf_install_staged() {
+	# $1 = pinned physical directory, $2 = staging directory (relative), $3 = record base
+	(
+		CDPATH='' cd -P -- "$1" || exit 1
+		mv -- "$2/$CF_STAGING_LEAF" "$3" || exit 1
+	)
+}
+
+# Confirm that the file now at $1/$2 is exactly the bytes retained in $3, still
+# physically inside $4, and still a regular file. Sets CF_VERIFY_REASON and returns
+# non-zero on the first thing that is not true.
+CF_VERIFY_REASON=''
+cf_verify_published() {
+	# $1 = pinned physical directory, $2 = record base, $3 = retained bytes,
+	# $4 = the area directory the record must physically live in
+	CF_VERIFY_REASON=''
+	cf_vp_dir=$(cf_physical_dir "$1") || cf_vp_dir=''
+	if [ "$cf_vp_dir" != "$4" ]; then
+		CF_VERIFY_REASON="after the rename the directory resolves to \"${cf_vp_dir:-<unresolvable>}\" rather than \"$4\""
+		return 1
+	fi
+	if [ -L "$cf_vp_dir/$2" ]; then
+		CF_VERIFY_REASON='the installed record is a symbolic link; a rename cannot produce one, so the name was replaced'
+		return 1
+	fi
+	if [ ! -f "$cf_vp_dir/$2" ]; then
+		CF_VERIFY_REASON='the installed record is not a regular file'
+		return 1
+	fi
+	if ! cmp -s -- "$3" "$cf_vp_dir/$2"; then
+		CF_VERIFY_REASON='the installed record differs byte for byte from what was staged'
+		return 1
+	fi
+	return 0
 }
 
 # Turn a structure status from the auditor or the rewriter into an actionable
@@ -3192,8 +4475,24 @@ cf_process_record() {
 		cf_detail 'outside the corpus would decide both while every message showed a corpus path'
 		exit "$CF_EXIT_RECORD"
 	fi
+	# From here on the RESOLVED directory is the one every read and every write goes
+	# through, and the name the record arrived under is used only in messages.
+	#
+	# The containment check above resolves a path; the staging and the installing
+	# rename used to act on the path as WRITTEN, which is a second resolution
+	# performed later. Two resolutions of the same name are two different answers
+	# whenever a component of that name changes in between -- and an area directory
+	# replaced by a symbolic link between the check and the rename would have been
+	# checked here and written somewhere else. Resolving once and operating through
+	# that one answer removes the gap rather than narrowing it: `cf_rec_phys_dir` is
+	# fully symlink-resolved, so `cd -P` into it lands in the directory this check
+	# approved, and every mutation below is a BARE NAME inside it with no component
+	# left to re-resolve.
+	cf_rec_phys_dir=$cf_rec_real_dir
+	cf_rec_phys="$cf_rec_phys_dir/$cf_rec_base"
+	cf_rec_src="$cf_rec_phys_dir/$cf_rec_stem.c"
 
-	if [ ! -f "$cf_rec" ] || [ -L "$cf_rec" ]; then
+	if [ ! -f "$cf_rec_phys" ] || [ -L "$cf_rec_phys" ]; then
 		cf_error "$cf_rec_label: the record is not a regular file (a symbolic link is refused)"
 		exit "$CF_EXIT_RECORD"
 	fi
@@ -3211,7 +4510,16 @@ cf_process_record() {
 	# switches, the shared-flag set and the three command templates. It stores
 	# every value the rest of this function needs, so there is exactly ONE reader
 	# of the record format here and no second one to disagree with it.
-	cf_validate_record "$cf_rec" "$cf_rec_label" "$cf_rec_stem" "$cf_rec_area"
+	cf_validate_record "$cf_rec_phys" "$cf_rec_label" "$cf_rec_stem" "$cf_rec_area"
+
+	# --- What the program itself reaches for, before it is compiled ------------
+	# The record has been validated; this validates the other half of the pair. A
+	# program that opens a file or reads the clock would compile, run, and have its
+	# output installed as the definition of correct behaviour -- so the surface is
+	# audited before any compiler is invoked on it, not after.
+	if ! cf_audit_source_surface "$cf_rec_src" "$cf_rec_label"; then
+		exit "$CF_EXIT_RECORD"
+	fi
 
 	# --- Matrix ---------------------------------------------------------------
 	# The record's own declaration is honoured exactly and never widened.
@@ -3331,7 +4639,7 @@ cf_process_record() {
 		cf_rec_staging="$CF_WORK/candidate.expected"
 		rm -f -- "$cf_rec_staging"
 		CF_STAGING=$cf_rec_staging
-		if ! cp -p -- "$cf_rec" "$cf_rec_staging"; then
+		if ! cp -p -- "$cf_rec_phys" "$cf_rec_staging"; then
 			cf_error "$cf_rec_label: cannot stage a candidate in the working area"
 			exit "$CF_EXIT_ENVIRONMENT"
 		fi
@@ -3359,22 +4667,25 @@ cf_process_record() {
 		#     one directory: the record is either fully updated or byte-identical to
 		#     what it was, never half-written.
 		#
+		#   * THROUGH THE PINNED DIRECTORY. Created relative to the resolved
+		#     directory this record's containment check approved, never relative to
+		#     the name the record arrived under, so the directory the staging file
+		#     lands in is the directory that was verified and not a second
+		#     resolution of the same name taken later.
+		#
 		# The permissions still come from the record itself, by copying it in as the
 		# staging file's first content, so the private umask cannot leak into the
 		# corpus and a regenerated record keeps the mode it had.
-		if ! cf_rec_staging_dir=$(mktemp -d -- "$cf_rec_dir/.regen.XXXXXX"); then
-			cf_error "$cf_rec_label: cannot create a staging directory beside the record"
-			cf_detail "tried: $cf_rec_dir/.regen.XXXXXX"
+		if ! cf_rec_staging_rel=$(cf_stage_beside "$cf_rec_phys_dir" "$cf_rec_base"); then
+			cf_error "$cf_rec_label: cannot stage the record beside it"
+			cf_detail "in: $cf_rec_phys_dir"
 			cf_detail 'the corpus directory must be writable to regenerate a record; use --check'
 			cf_detail 'to compare without writing'
 			exit "$CF_EXIT_ENVIRONMENT"
 		fi
+		cf_rec_staging_dir="$cf_rec_phys_dir/$cf_rec_staging_rel"
 		CF_STAGING=$cf_rec_staging_dir
-		cf_rec_staging="$cf_rec_staging_dir/record"
-		if ! cp -p -- "$cf_rec" "$cf_rec_staging"; then
-			cf_error "$cf_rec_label: cannot stage the record in \"$cf_rec_staging_dir\""
-			cf_rec_abort
-		fi
+		cf_rec_staging="$cf_rec_staging_dir/$CF_STAGING_LEAF"
 	fi
 
 	if cf_rewrite_record "$cf_rec" "$cf_rec_golden" "$cf_rec_staging" "$cf_rec_bodylines"; then
@@ -3394,7 +4705,7 @@ cf_process_record() {
 
 	# --- Install, or report ---------------------------------------------------
 	CF_PROCESSED=$((CF_PROCESSED + 1))
-	if cmp -s -- "$cf_rec" "$cf_rec_staging"; then
+	if cmp -s -- "$cf_rec_phys" "$cf_rec_staging"; then
 		cf_release_staging
 		cf_note "$cf_rec_label: $cf_rec_cells cell(s) agree; unchanged"
 		return 0
@@ -3406,10 +4717,33 @@ cf_process_record() {
 		cf_note "$cf_rec_label: $cf_rec_cells cell(s) agree; WOULD CHANGE (--check wrote nothing)"
 		return 0
 	fi
+	# Retained before the rename because the rename consumes the staging file, and
+	# what was published has to be compared against something afterwards.
+	if ! cp -p -- "$cf_rec_staging" "$CF_WORK/published.expected"; then
+		cf_error "$cf_rec_label: cannot retain a copy of the staged record for verification"
+		cf_rec_abort
+	fi
 	# One rename inside one directory, so the record is either fully updated or
-	# byte-identical to what it was -- never half-written.
-	if ! mv -- "$cf_rec_staging" "$cf_rec"; then
+	# byte-identical to what it was -- never half-written. Performed relative to the
+	# pinned directory, so the rename lands where the containment check looked.
+	if ! cf_install_staged "$cf_rec_phys_dir" "$cf_rec_staging_rel" "$cf_rec_base"; then
 		cf_error "$cf_rec_label: cannot install the regenerated record"
+		cf_rec_abort
+	fi
+	# --- And confirm that what is now on disk is what was written -------------
+	# The rename reported success; this asks the file system what actually exists at
+	# the record's name now. A write is the one operation in this script whose
+	# result nothing downstream re-reads, so an unverified success here is a claim
+	# that the next run would inherit as fact -- and "the regenerated record" is the
+	# file the whole suite then treats as the definition of correct output.
+	if ! cf_verify_published "$cf_rec_phys_dir" "$cf_rec_base" \
+		"$CF_WORK/published.expected" "$CF_CORPUS_DIR/$cf_rec_area"; then
+		cf_error "$cf_rec_label: the installed record is not what was staged"
+		cf_detail "$CF_VERIFY_REASON"
+		cf_detail "named:    $cf_rec"
+		cf_detail "resolved: $cf_rec_phys"
+		cf_detail 'the staged bytes are kept for inspection at:'
+		cf_detail "  $CF_WORK/published.expected"
 		cf_rec_abort
 	fi
 	cf_release_staging

@@ -25,11 +25,15 @@
 #
 # - `conformance-static` runs the two gates that need no manifest — formatting and a full
 #   type-check of the suite — and therefore runs on every checkout, including one that carries the
-#   suite ahead of the compiler tree.
-# - `differential-conformance` runs the Cargo-dependent gates and the matrix itself. It detects the
-#   manifest first and, when there is none, says so loudly — a warning annotation and a job summary
-#   naming the precondition — rather than failing on a property of the checkout or, worse, passing
-#   silently as though the matrix had run.
+#   suite ahead of the compiler tree. That job is where a manifest-less checkout earns its green.
+# - `differential-conformance` runs the Cargo-dependent gates and the matrix itself, and it
+#   REQUIRES the package. Its first step establishes the manifest and the `bcc` binary target and
+#   FAILS the job when either is missing, so an absent package is a failed prerequisite rather than
+#   a successful non-execution path. The distinction is the whole point: this job exists to judge
+#   `bcc`, and a run that completed without judging it must not report success, because a green
+#   check that established nothing about the compiler is worse than a red one that says so. There
+#   is deliberately no fallback here — the manifest-less subset already has its own job, and
+#   restating it inside this one would let this job pass while the matrix never ran.
 name: CI
 
 # WHY THERE IS NO `pull_request` TRIGGER, WHICH IS A DELIBERATE OMISSION RATHER THAN A GAP.
@@ -117,10 +121,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
+      # The checkout credential is not persisted, here as in the matrix job below: no step in
+      # either job pushes, tags or otherwise talks back to the repository, so leaving a usable
+      # token in `.git/config` for the rest of the job would grant reach nothing needs — and this
+      # job then compiles and type-checks the checkout, which is repository-controlled input.
+      # Every checkout in this workflow disables it, so there is no shape in which a token
+      # outlives the step that fetched the tree.
       - name: Check out the repository
         # Pinned by digest, not by tag: a tag is mutable, so `@v4` is a promise the action's owner
         # can rewrite under this workflow without any change to this file.
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # Pinned to the exact supported version rather than to a channel. `stable` moves without any
       # change to this file, which makes a green run unreproducible and a red one hard to
@@ -181,14 +193,10 @@ jobs:
       BCC_REF_CC_AARCH64: aarch64-linux-gnu-gcc-13
       BCC_REF_CC_RISCV64: riscv64-linux-gnu-gcc-13
     steps:
-      # `@v4` is a MAJOR-VERSION selector, not an immutable pin: the tag is mutable and resolves
-      # to whatever v4 release is current. It is used deliberately, because a major-version
-      # selector is what receives the action's own security fixes; the accurate description is
-      # recorded here rather than the file claiming a pin it does not have.
-      #
       # The checkout credential is not persisted: no later step pushes, tags or otherwise talks
       # back to the repository, so leaving a usable token in `.git/config` for the rest of the
-      # job would grant reach nothing here needs.
+      # job would grant reach nothing here needs — and this job compiles and executes
+      # repository-controlled C and Rust.
       - name: Check out the repository
         # Pinned by digest, not by tag: a tag is mutable, so `@v4` is a promise the action's owner
         # can rewrite under this workflow without any change to this file.
@@ -196,10 +204,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # `@stable` is a CHANNEL BRANCH — the mutable ref this action publishes to track the
-      # current Rust stable release — and tracking stable is exactly the semantics wanted: the
-      # suite's documented minimum is 1.70+ and it must keep building on the current stable.
-      # Named accurately for the same reason as above.
       # Pinned to the exact supported version rather than to a channel. `stable` moves without any
       # change to this file, which makes a green run unreproducible and a red one hard to
       # attribute; the repository builds against 1.93.1, so this installs that. Using rustup
@@ -338,18 +342,26 @@ jobs:
           done
           exit "$status"
 
-      # The gate the two `cargo` steps below depend on: establish whether this checkout actually
-      # carries the Cargo package they presuppose, and record the answer where both a reader and
-      # those steps can see it. Three conditions, because each failure is a different situation
-      # and all three are fatal to `cargo test --test conformance`: a manifest must exist,
-      # `cargo metadata` must be able to read it, and it must declare the `bcc` binary target the
-      # suite resolves through `CARGO_BIN_EXE_bcc`.
+      # THE PREREQUISITE THIS JOB'S VERDICT RESTS ON. Every command below judges `bcc`, and every
+      # one of them presupposes the compiler's own Cargo package. Three conditions, because each
+      # failure is a different situation and all three are fatal to `cargo test --test conformance`:
+      # a manifest must exist, `cargo metadata` must be able to read it, and it must declare the
+      # `bcc` binary target the suite resolves through `CARGO_BIN_EXE_bcc`.
       #
-      # A checkout without the package is reported as a warning and a job-summary section rather
-      # than a silent skip or a failure: the suite genuinely cannot run there, saying so is the
-      # honest outcome, and hiding it would leave the workflow claiming a run it never made.
-      - name: Determine whether the compiler's Cargo package is present in this checkout
-        id: package
+      # An absent package FAILS this job. It is a failed prerequisite and not a skip, a warning or a
+      # fallback, and the reasoning is worth stating because the opposite shape is the tempting one:
+      # this job exists to establish something about the compiler, so a run that finished without
+      # establishing it must not report success. A green check that judged nothing is worse than a
+      # red one that says why, because the green one is what a reader trusts. The manifest-less
+      # subset of the checks has its own job above and earns its own green there, so nothing is lost
+      # by refusing to restate it here — and restating it here is precisely what would let this job
+      # pass while the matrix never ran.
+      #
+      # The suite adds no manifest and must never add one (C1 makes `Cargo.toml` read-only), so the
+      # remedy is never a change to this workflow or to the suite: it is to run this job on a
+      # checkout where the suite and the compiler tree are on one branch. See "The Cargo integration
+      # precondition" in tests/conformance/README.md.
+      - name: Require the compiler's Cargo package, which every check below depends on
         run: |
           set -euo pipefail
           metadata="$RUNNER_TEMP/cargo-metadata.json"
@@ -362,62 +374,52 @@ jobs:
           elif ! python3 -c 'import json, sys; metadata = json.load(open(sys.argv[1])); sys.exit(0 if any(target["name"] == "bcc" and "bin" in target["kind"] for package in metadata["packages"] for target in package["targets"]) else 1)' "$metadata"; then
             reason="the manifest declares no bcc binary target"
           fi
-          if [ -z "$reason" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-            echo "the Cargo package is present; the conformance suite will run"
+          if [ -n "$reason" ]; then
+            echo "::error::The differential conformance suite cannot judge bcc in this checkout: $reason. cargo test --test conformance requires the compiler's Cargo package (a Cargo.toml declaring the bcc binary target, plus the src/** tree it builds from), which this suite deliberately does not supply and must never add. This is a failed prerequisite, not a skip: run this job on a checkout carrying the suite and the compiler tree together. See 'The Cargo integration precondition' in tests/conformance/README.md."
             {
-              echo "### Differential conformance suite"
-              echo
-              echo "The compiler's Cargo package is present in this checkout, so the suite was executed:"
-              echo "the oracle pre-flight followed by the full matrix, in strict mode."
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::The differential conformance suite was NOT executed: $reason. cargo test --test conformance requires the compiler's Cargo package (Cargo.toml declaring the bcc binary target, plus src/**), which this suite deliberately does not supply. See 'The Cargo integration precondition' in tests/conformance/README.md."
-            {
-              echo "### Differential conformance suite — NOT executed"
+              echo "### Differential conformance suite — PREREQUISITE NOT MET"
               echo
               echo "This checkout does not carry the compiler's Cargo package: $reason."
               echo
               echo "\`cargo test --test conformance\` presupposes a \`Cargo.toml\` declaring the \`bcc\`"
               echo "binary target and the \`src/**\` tree it builds from. The suite adds no manifest and"
-              echo "must never add one, so the Cargo gates cannot run until the suite and the compiler"
-              echo "tree are on one branch. See **The Cargo integration precondition** in"
-              echo "\`tests/conformance/README.md\`."
+              echo "must never add one, so **no oracle comparison was performed and nothing was"
+              echo "established about \`bcc\`** — which is why this job failed rather than passing."
               echo
-              echo "What ran instead: \`rustfmt --check\` on the driver and every harness module, and a"
-              echo "\`rustc --test\` type-check of the whole suite with warnings denied — the checks that"
-              echo "do not depend on packaging. **No oracle comparison was performed.**"
+              echo "The manifest-less subset — \`rustfmt --check\` on the driver and every harness"
+              echo "module, and a \`rustc --test\` type-check of the whole suite with warnings denied —"
+              echo "is established by the **Conformance suite static gates** job, which runs on every"
+              echo "checkout and is unaffected by this failure."
+              echo
+              echo "See **The Cargo integration precondition** in \`tests/conformance/README.md\`."
             } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
+          echo "the Cargo package is present; the conformance suite will run"
+          {
+            echo "### Differential conformance suite"
+            echo
+            echo "The compiler's Cargo package is present in this checkout, so the suite was executed:"
+            echo "the oracle pre-flight followed by the full matrix, in strict mode."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # This step is the intended pre-flight. It prints the discovered oracle inventory and
       # states exactly which arms of which oracles will run, so a misconfigured environment is
       # diagnosed in seconds rather than after the whole matrix has executed against a silently
       # reduced oracle set.
+      #
+      # No `if:` condition, here or below. The prerequisite step above fails the job when the
+      # package is absent, so reaching this step already means the package is there — and a
+      # condition would reintroduce the very path that let this job finish without running the
+      # matrix.
       - name: Pre-flight the oracle inventory
-        if: steps.package.outputs.present == 'true'
         run: cargo test --test conformance infra_oracle_capability_report -- --nocapture
 
       # Each area accumulates every verdict before it asserts, so --nocapture puts the complete
       # per-area verdict table and the deliverable summary in the job log without anyone having
       # to download the artifact first.
       - name: Run the differential conformance suite
-        if: steps.package.outputs.present == 'true'
         run: cargo test --test conformance -- --nocapture
-
-      # The manifest-less shape, and the only two checks it can honestly claim. Both are lifted
-      # verbatim from the table in "The Cargo integration precondition": every file parses,
-      # type-checks and is correctly formatted. `CARGO_MANIFEST_DIR` is required rather than
-      # decorative — the harness resolves the corpus relative to it — and the type-check output
-      # goes to the runner's temporary directory so nothing lands in the checkout.
-      - name: Static checks that need no Cargo package
-        if: steps.package.outputs.present != 'true'
-        run: |
-          set -euo pipefail
-          rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs
-          CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata -D warnings \
-            --out-dir "$RUNNER_TEMP/conformance-typecheck" tests/conformance.rs
 
       # `if: always()` is load-bearing rather than defensive. A failing run is precisely when
       # these artifacts matter, and the harness writes the per-area reports and the run summary
@@ -426,29 +428,45 @@ jobs:
       #
       # ## Why only the report is published by default
       #
-      # The report tree is safe to publish by construction: every free-text value that reaches a
-      # report row passes through the harness's secret redaction, root elision and report-safe
-      # rendering at the single point an outcome comes into existence, so a published report cannot
-      # carry a credential or the absolute location of this workspace. A generated finding
-      # directory is deliberately the opposite — it describes the machine that produced it as
-      # freely as it likes, because that is what makes it re-runnable there — and its own manifest
-      # says so, recording `disclosure_review = not-performed`. `tests/conformance/FINDINGS.md`
-      # §5.3 requires that review before a finding is published, and publishing the raw directory
-      # by default would route evidence around the one gate that exists to hold it.
+      # Every free-text value that reaches a report row passes through the harness's secret
+      # redaction, root elision and report-safe rendering at the single point an outcome comes into
+      # existence. That guarantee is BOUNDED rather than absolute, and the bound is stated here
+      # because a workflow that published on the strength of an absolute claim would be publishing
+      # on a claim the harness itself does not make: `conformance_harness/mod.rs` documents, beside
+      # `BARE_REDACTION_MIN_CHARS` and `is_path_value`, exactly what the redactor leaves in place —
+      # a credential-bearing value shorter than the floor and appearing *bare*, without its variable
+      # name beside it, and a value recognised as an absolute filesystem path. It calls that a
+      # residual risk rather than an absence, and so does this workflow. What the report therefore
+      # is, precisely: sanitized by construction against the named forms, with a narrow residual
+      # class the module enumerates, which is why the step below states the bound in the run log
+      # where the artifact is produced.
+      #
+      # A generated finding directory is deliberately the opposite — it describes the machine that
+      # produced it as freely as it likes, because that is what makes it re-runnable there — and its
+      # own manifest says so, recording `disclosure_review = not-performed`.
+      # `tests/conformance/FINDINGS.md` §5.3 requires that review before a finding is published, and
+      # publishing the raw directory by default would route evidence around the one gate that exists
+      # to hold it.
       #
       # So the raw directories are behind an explicit opt-in below, and the report — which names
       # every finding, its identifier and its directory, with a sanitized account of each
       # divergence — is what a reader gets without asking.
+      - name: State the report's disclosure bound before publishing it
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "::notice::The conformance-report artifact is redacted by the harness at the point each outcome is created — secret redaction, root elision and report-safe rendering — but that guarantee is bounded, not absolute: conformance_harness/mod.rs documents that a bare credential shorter than its redaction floor, and a value recognised as an absolute filesystem path, are left in the text. Treat the report as sanitized against the named forms with a narrow residual class, and inspect it before republishing it outside this repository."
+
       - name: Upload the conformance reports
-        if: always() && steps.package.outputs.present == 'true'
+        if: always()
         # Pinned by digest for the same reason as the checkout above.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: conformance-report
           # A run that fails before any report is written must warn, not turn a missing
-          # directory into a second, misleading failure on top of the real one. In the
-          # manifest-less shape no report exists at all, and that too is a warning rather than a
-          # failure, because the step above has already said why.
+          # directory into a second, misleading failure on top of the real one — including a run
+          # that failed on the package prerequisite above, where no report exists at all and that
+          # step has already said why.
           if-no-files-found: warn
           path: target/conformance-report/**
 
@@ -457,7 +475,7 @@ jobs:
       # operator who opted in knows exactly what they are downloading — and so a directory that
       # somehow claimed to have been reviewed by a run is caught here instead of being believed.
       - name: Audit the generated findings before releasing them
-        if: always() && steps.package.outputs.present == 'true' && inputs.publish_raw_findings
+        if: always() && inputs.publish_raw_findings
         run: |
           set -euo pipefail
           root=target/conformance-findings
@@ -483,7 +501,7 @@ jobs:
           echo "::warning::Releasing $count raw generated finding directory(ies) as the conformance-findings-raw artifact. Every one of them is UNREVIEWED and UNMINIMIZED evidence: each retains captured diagnostics, exact commands and absolute tool paths, and each reproducer is a verbatim copy of a corpus program rather than a reduced case. Perform the tests/conformance/FINDINGS.md §5.3 disclosure review on what you download before sharing it further, and the §5.1 minimization step before treating any of it as a filed finding."
 
       - name: Upload the raw generated finding directories (UNREVIEWED evidence, opt-in)
-        if: always() && steps.package.outputs.present == 'true' && inputs.publish_raw_findings
+        if: always() && inputs.publish_raw_findings
         # Pinned by digest for the same reason as the checkout above.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

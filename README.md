@@ -27,10 +27,15 @@ a property of the checkout rather than a defect in the suite. That shape can sti
 which does not depend on packaging:
 
 ```bash
+mkdir -p target/conformance-typecheck
 rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs
 CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata \
   --out-dir target/conformance-typecheck tests/conformance.rs
 ```
+
+Run from the repository root. The first line is what makes the sequence work on a checkout that has
+never been built: `target/` does not exist there, and creating it explicitly keeps the commands
+independent of whether a given toolchain in the supported range creates an absent `--out-dir` for you.
 
 Full details, and what each checkout shape can and cannot establish:
 [the Cargo integration precondition](tests/conformance/README.md#the-cargo-integration-precondition).

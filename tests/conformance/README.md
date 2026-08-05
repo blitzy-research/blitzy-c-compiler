@@ -826,6 +826,36 @@ Each item below is a **hard error**.
   `#pragma GCC system_header` is refused outright, since it would silence the whole file at once.
   `infra_ub_audit_gate` counts a registered suppression among the recorded relaxations and reports it
   on an `in source:` line beside the command-line ones, so it is visible in the same place.
+- **A gate is only as strong as what the program cannot switch off, so the scan reads more than one
+  spelling of a directive and fails closed on the rest.** A registration mechanism that recognises
+  exactly one way of writing a directive is a registration mechanism with an unregistered bypass, and
+  the following are therefore refused rather than parsed hopefully:
+    - **Every spelling of `#`.** A directive may be introduced by `#`, by the digraph `%:`, or by the
+      trigraph `??=`, and all three are the same preprocessing token to a conforming compiler. All
+      three are recognised.
+    - **A `_Pragma` operand the audit cannot read.** The operator form is honoured when its operand is
+      a single plain string literal, whose contents are destringized per C11 6.10.9 so an escaped
+      warning name matches its registration exactly. An operand that is a macro, a concatenation, or
+      anything else this audit cannot resolve to one literal is refused — because a pragma nobody can
+      read is a pragma nobody can register.
+    - **A macro whose replacement list can produce a directive.** A `#define` that expands to
+      `_Pragma(...)` is refused, since what it does depends on where it is used and the scan cannot
+      follow it there.
+    - **A vendor pragma whose subject is not modelled**, `#pragma clang attribute` among them, since
+      it can attach an attribute to a whole region of code.
+    - **Every control over sanitizer instrumentation.** The `no_sanitize`,
+      `no_address_safety_analysis` and `disable_sanitizer_instrumentation` attributes, and any
+      definition in the `__asan_`, `__ubsan_`, `__lsan_`, `__msan_`, `__tsan_` or `__sanitizer_`
+      families — `__ubsan_default_options` and its siblings are ordinary functions the runtime looks
+      up by name, so defining one reconfigures the sanitizer from inside the program under test. A
+      refusal on any of these applies to the **sanitizer** gate as well as the warning gate, and the
+      sanitizer run is skipped rather than performed, because a clean sanitizer verdict obtained by
+      switching the sanitizer off is worse than no verdict at all.
+  Two properties of this scan are worth stating precisely rather than leaving to be assumed. It is
+  **textual**: comments and string literals are removed first, so a comment may name every construct
+  above and a program may print them, and only code is read. And it **fails closed**: where a
+  construct cannot be resolved the program is refused, so the failure mode is a test that must be
+  rewritten rather than a gate that quietly passed.
 - `ub_notes` is required and must be non-empty in every record without exception.
   Put the deviation's explanation in a **paragraph of its own** — paragraphs are separated by a
   blank line — because the audit quotes the reason back by collecting exactly those paragraphs of
@@ -1695,7 +1725,7 @@ because a reader who finds the optimistic copy first has no reason to look furth
 | --- | --- |
 | `README.md` at the repository root | Names the precondition **before** the run commands and links back to this section, so the front page cannot present a blocked command as a runnable one |
 | `.github/workflows/ci.yml`, job `conformance-static` | Runs exactly the two manifest-less rows of the table above, on every checkout, so a branch carrying the suite alone still has real gates rather than none |
-| `.github/workflows/ci.yml`, job `differential-conformance` | Detects `Cargo.toml` and `src/**` first and conditions every Cargo step on the result. When they are absent it emits a warning annotation and a job summary saying the matrix did **not** run and that no verdict in that run is evidence about `bcc` — a reported gap, never a silent pass and never a red build over a property of the checkout |
+| `.github/workflows/ci.yml`, job `differential-conformance` | **Requires** the package: its first step establishes the manifest and the `bcc` binary target and **fails the job** when either is missing, with an error annotation and a job summary saying no oracle comparison was performed and nothing was established about `bcc`. An absent package is a failed **prerequisite**, never a skip and never a green run that judged nothing — this job exists to judge `bcc`, and the manifest-less subset earns its own green in `conformance-static` instead. There is deliberately no fallback inside it, because restating that subset here is exactly what would let the job pass while the matrix never ran |
 | `docs/project-guide.md` §3 | Records the suite's 18 tests as **planned/statically validated**, not as a measured `bcc` result, for as long as no run against the real compiler has supplied one |
 
 #### Why the direct `rustc` invocation needs `CARGO_MANIFEST_DIR`
@@ -1736,6 +1766,13 @@ everything else this suite writes goes beneath the build directory: without it, 
 `libconformance.rmeta` into whatever directory you ran it from — the repository root — and a
 documentation-only checkout would gain an untracked file from running its own type-check. Directed into
 `target/`, the artifact is covered by the existing `.gitignore` entry and `git status` stays clean.
+
+Precede it with `mkdir -p target/conformance-typecheck`. A checkout that has never been built has no
+`target/` at all, so creating the output directory explicitly is what keeps the invocation independent
+of whether a particular toolchain in the supported range creates an absent `--out-dir` for you. Both
+project-facing copies of this sequence — the root `README.md` and
+`docs/testing/differential-conformance.md` — lead with that line for the same reason, and the CI job
+that runs the same three drivers creates the directory in its own step.
 
 **Establishing the Cargo gates without adding a manifest to this repository.** The suite's own files are
 copied, byte-for-byte unmodified, into a scratch Cargo package created **outside** the repository, which
@@ -2657,7 +2694,9 @@ tests/conformance/
 entry still carries it: the curated finding directory shape under `findings/`, which is a template
 rather than a file — no finding has been admitted as evidence yet, so there is nothing for it to
 name. Everything unmarked is committed and present, including all fourteen area directories, all 108
-sources, all 108 records, all three Markdown registers, the `support/` fixture and
+sources, all 108 records, all three of the suite's Markdown documents — this contract and the two
+registers, [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) and
+[`FINDINGS.md`](FINDINGS.md) — the `support/` fixture and
 [`tools/regenerate_expected.sh`](tools/regenerate_expected.sh). Nothing in this document links to a
 `PLANNED` path: a link that resolves to nothing is worse than no link, because it reads as a promise
 the repository does not keep.
@@ -2759,8 +2798,16 @@ regenerating a record mechanically; the *protection* is structural and independe
 #### What the script requires, and what it guarantees
 
 Because it is the only writer the corpus has, its contract is stated here rather than left to be
-inferred. Run `sh tools/regenerate_expected.sh --help` for the option and environment reference; this
-is the part a reviewer needs.
+inferred. For the option and environment reference, run — **from the repository root**, which is where
+every other command in this document is run and where the script expects to be invoked —
+
+```bash
+sh tests/conformance/tools/regenerate_expected.sh --help
+```
+
+The path is spelled in full deliberately: `sh tools/regenerate_expected.sh --help` works only from
+inside this directory, and a command whose working directory is left to be guessed is a command that
+fails for the first reader who guesses differently. What follows is the part a reviewer needs.
 
 **It requires.** POSIX `sh` and POSIX `awk` — the tested baseline is Linux x86-64 with `/bin/sh` as
 `dash` 0.5.12 and `awk` as `mawk` 1.3.4, against a deliberately mixed userland (uutils coreutils
@@ -2788,10 +2835,25 @@ reader can check against the source.
   than C17, name the gnu17 driver through `BCC_REF_CC`.
 - **`BCC_BIN` is never read.** Seeding a golden record from the compiler under test would certify it
   against itself.
-- **The record is validated in full before a single compile is spent on it**, against the same closed
-  key set, field kinds, duplicate rules, required keys, size ceilings, toggles, shared-flag rules and
-  command-template placeholders `manifest.rs` enforces — so a record the harness would refuse is
-  never rewritten.
+- **The record is validated in full before a single compile is spent on it**, against the same rules
+  `manifest.rs` enforces: the closed 25-key set, field kinds, duplicate rules, required keys, size
+  ceilings, control bytes, the final newline, the oracle toggles, the shared-flag rules and the
+  command-template placeholders — and equally the rules that decide what a *narrowing* may be. The
+  declared warning gate is accepted only as one of the two sanctioned reductions, with `-pedantic`
+  droppable in the extension area alone. A disabled oracle must carry a marker that scopes it and
+  classes it `comparison_excluded`; that class in turn may scope only oracles the record disables; and
+  `oracle_c` may never be disabled, nor both differential oracles at once. The marker's own
+  identifier, class, scope and basis must parse, and the cited basis must resolve to a file that
+  exists. Parity is the whole point: a record this script would rewrite but the harness would refuse
+  is a record whose regeneration makes the very test it was for unrunnable.
+- **The program is audited too, before it is compiled.** A source that calls an environment-reading,
+  file-opening, network or process interface — or anything whose value is not a function of the
+  program alone, such as a clock, a random source, a process identifier or a locale — is refused and
+  named. Comments and string literals are removed first and only an identifier that is actually
+  *called* counts, so a program may print the word `socket` and a local may be named `time`. This is
+  the mechanical half of an authoring rule that was otherwise only written down; it is not a sandbox,
+  and a determined author could still route around it through a function pointer or a macro. What it
+  closes is the accidental case, which is the one that occurs.
 - **Only `expected_stdout` changes.** Every other byte is copied through verbatim, and a record whose
   final byte is not a newline is refused rather than terminated for you, because adding that byte
   would itself be a change outside the block.
@@ -2799,9 +2861,17 @@ reader can check against the source.
   golden record is asserted against all of them.
 - **Bounded and hermetic execution.** Every compile and every run is bounded — by `timeout` where it
   is present and proven at startup to bound anything, by the script's own self-tested `sleep`/`kill`
-  watchdog otherwise — and runs in a fresh per-cell directory under the same sanitized environment
-  the harness installs, so an ambient locale, `TZ`, `HOME` or toolchain variable cannot change the
-  bytes that become a golden record. Expiry is recorded **out of band** and never inferred from an
+  watchdog otherwise — and runs in a fresh per-cell directory. Each child is started through
+  `env -i`, so its environment is **replaced rather than filtered** and a variable reaches it only by
+  being named: the same fixed set `mod.rs` installs, namely `LC_ALL`/`LANG`/`LANGUAGE=C`, `TZ=UTC`,
+  `TERM=dumb`, the forced sanitizer options, and `HOME`/`TMPDIR`/`TMP`/`TEMP` pointed inside the
+  cell's own directory. A list of variables to *unset* has to anticipate every name that could
+  matter — `LD_PRELOAD`, `GCC_EXEC_PREFIX`, `CPATH`, `SOURCE_DATE_EPOCH` and the rest — and the one
+  nobody thought of is the one that reaches the compiler. The `PATH` children receive is computed by
+  the same trust rule `env.rs` applies rather than inherited: every entry must be absolute, exist, and
+  be writable by neither group nor other, with the sticky bit granting no exemption; a host where no
+  entry survives is refused rather than run. So an ambient locale, `TZ`, `HOME` or toolchain variable
+  cannot change the bytes that become a golden record. Expiry is recorded **out of band** and never inferred from an
   exit status: expected exit codes run to 125, so a cell that exits 124 of its own accord stays
   distinguishable from the bound firing, and the status a completing cell reports always wins over
   the marker.
@@ -2809,19 +2879,40 @@ reader can check against the source.
   accepted only in `1..600` seconds, because a budget with no ceiling configures no bound while
   appearing to configure one. At most 512 records are processed in one invocation, which refuses a
   corpus that has become something else rather than compiling it cell by cell. And the private
-  working area is measured *while a cell runs* and the cell is terminated if it passes 65536 KiB or
-  256 entries — the time bound is no defence against space, because a process can write a great deal
-  in one second. Where `setsid` is available the cell is started as its own session leader so the
-  whole process tree can be terminated; without it the exact child is signalled, which is a genuinely
-  weaker guarantee rather than an equivalent one.
-- **One writing run at a time.** An atomic lock directory in the corpus refuses a second sweep while
-  a live one holds it, and reclaims a stale one loudly so a reader knows a previous run did not
-  finish. `mkdir` is the primitive because it is atomic — one operation creates the directory or
-  fails — and the owner file records the pid and working area, so a lock left by a killed run is told
-  apart from a live one. Two concurrent sweeps would each rename records independently and the corpus
-  could end up holding a mixture from both, with every record still internally consistent, which is
-  exactly what would make the mixture hard to notice afterwards. `--check` takes no lock, because it
-  writes nothing.
+  working area is measured *while a cell runs* — in **both** bounding modes, by one supervisor, so
+  choosing `timeout` never costs the space bound — and the cell is terminated if it passes 65536 KiB
+  or 256 entries at any depth. The walk covers every level and never follows a symbolic link, and a
+  tree too deep to measure is itself treated as a breach rather than as a stopping point, because an
+  unmeasurable area is not a measured-and-clean one. Each child additionally carries a
+  kernel-enforced `ulimit -f` per-file ceiling, so a single runaway write cannot fill the area between
+  two of the supervisor's ticks. The time bound is no defence against space, because a process can
+  write a great deal in one second. Both bounding modes and the file ceiling are self-tested at
+  startup and the run prints what each self-test established. Where `setsid` is available the cell is
+  started as its own session leader so the whole process tree can be terminated; without it the exact
+  child is signalled, which is a genuinely weaker guarantee rather than an equivalent one.
+- **One writing run at a time.** `mkdir` is the primitive, because one operation either creates the
+  directory or fails, with no window between a test and a create. Four states are then told apart
+  rather than conflated. A **live** lock refuses the second sweep. A lock still being **initialised** —
+  its owner file not yet written, or written only in part — is waited for and retried, up to a bounded
+  number of attempts, rather than mistaken for an abandoned one. A **stale** lock is quarantined by a
+  single rename, which only one contender can win because `mv` requires its source to exist, and the
+  fresh `mkdir` is then competed for openly and loudly, so a reader knows a previous run did not
+  finish. A lock path that is a **symbolic link** is refused outright. Release verifies this run's own
+  token before removing anything, so a sweep can never release a lock belonging to another; and full
+  corpus enumeration skips the lock's own entries, so a leftover lock is reclaimable rather than a
+  refusal that blocks its own recovery. Two concurrent sweeps would each rename records independently
+  and the corpus could end up holding a mixture from both, with every record still internally
+  consistent, which is exactly what would make the mixture hard to notice afterwards. `--check` takes
+  no lock, because it writes nothing.
+- **A record is written only through the directory its containment check resolved.** The check
+  resolves the record's physical directory; staging and the installing rename are then bare names
+  inside *that one resolved directory*, never a second resolution of the path as written. Two
+  resolutions of one name agree only while no component of it changes in between, and an area
+  directory replaced by a symbolic link after the check would have been approved here and written
+  somewhere else with every message still showing a corpus path. After the rename the published file
+  is read back and required to be a regular file, still inside the corpus area, and byte-identical to
+  what was staged — because a write is the one operation whose result nothing downstream re-reads, so
+  an unverified success here is a claim the next run would inherit as fact.
 - **The toolchain is attested before the first write, and is still the same one at the last.** Every
   driver and runner the selection needs is resolved and attested *before the first record is
   processed*, so a missing or unusable tool cannot leave the corpus half rewritten — the target union

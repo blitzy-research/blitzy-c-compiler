@@ -728,7 +728,13 @@ further inventories enumerate the same extension set, and none of the five names
 | `docs/technical-specifications.md` lines 13, 107 and 506 | The same seven-item extension set, in the capability summary, the module inventory and the file-creation specification for the extension parser |
 | `docs/project-guide.md` §2.1, the `C11 Frontend — Parser` row | The same five-construct parsed list for the parser subsystem |
 
-A recursive, case-insensitive search of `docs/` for `case range` returns **zero** matches.
+A recursive, case-insensitive search of the two authoritative implementation documents —
+`docs/project-guide.md` and `docs/technical-specifications.md` — for `case range` returns **zero**
+matches. Those two are the whole of the basis, and the scope of the claim is deliberately drawn around
+them: `case range` does occur elsewhere under `docs/`, in this suite's own methodology page
+`docs/testing/differential-conformance.md`, which describes this very marker and is therefore the
+suite's own reasoning rather than independent evidence for it. A basis that counted it would be citing
+itself.
 
 **Exactly how strong that basis is, stated plainly rather than glossed.** It establishes a boundary,
 not a behaviour, and the difference matters. It is said here rather than left to a reader to discover,
@@ -1000,8 +1006,12 @@ literal inventory:
 - Line 498 repeats the inventory in the file plan, listing the suffixes `u`, `l`, `ll` and `f` plus
   C escape sequences, and again no prefix.
 - Line 497's 44-keyword C11 list contains neither of the two C11 character type names.
-- Recursive searches of `docs/` for `unicode`, `char16`, `char32` and `wchar` return **zero**
-  matches.
+- Recursive, case-insensitive searches of the two authoritative implementation documents —
+  `docs/project-guide.md` and `docs/technical-specifications.md` — for `unicode`, `char16`, `char32`
+  and `wchar` return **zero** matches. As with `XD-GCCEXT-CASE-RANGES-001` above, the claim is scoped to
+  those two on purpose: these terms do appear elsewhere under `docs/`, in this suite's own methodology
+  page `docs/testing/differential-conformance.md`, which discusses this very question and so cannot be
+  evidence for its own conclusion.
 
 What that establishes is that nothing in the repository *mentions* these prefixes. It does **not**
 establish that the frontend rejects them — and the difference is the whole reason no marker is
