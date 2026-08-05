@@ -62,7 +62,10 @@ each compiler and each backend, an environment fingerprint and exact reproductio
 files a verbatim copy of the corpus program, because reduction is a supervised curation step
 performed before a finding is promoted to the curated set rather than something a run performs),
 FAIL, or UNAVAILABLE (an oracle's tooling is genuinely absent). A run summary is written to
-`conformance-report/summary.md` beneath the build directory (`target/` unless `CARGO_TARGET_DIR` redirects it).
+`conformance-report/summary.md` beneath the build directory (`target/` unless `CARGO_TARGET_DIR` redirects it),
+and every finding also gets a review copy of all seven of its artifacts at
+`conformance-report/findings/<finding-id>/` — rendered to the same grade as the rest of the report — so a
+finding survives in whatever archive carries the report, given that a FINDING does not fail the run.
 
 - Suite contract, verdict taxonomy, environment variables and how to reproduce any cell by
   hand: [`tests/conformance/README.md`](tests/conformance/README.md)

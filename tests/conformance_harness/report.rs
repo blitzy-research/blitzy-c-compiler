@@ -25,10 +25,11 @@
 //! | `target/conformance-report/areas/<area>.md` | Per-area human-readable report | this module |
 //! | `target/conformance-report/areas/<area>.tsv` | Per-area machine-readable report | this module |
 //! | `target/conformance-report/evidence/<cell>+oracle_<x>.txt` | Durable, sanitized evidence for an outcome that was reported without failing, whose cell workspace was therefore discarded | this module |
+//! | `target/conformance-report/findings/<finding-id>/…` | The **review copy** of every finding this run recorded: all seven artifact classes, rendered to report grade, plus a `BUNDLE.txt` index. See [`publish_finding_bundle`] | this module |
 //! | `target/conformance-report/.run-owner` | Which run owns this directory, so a second one is refused | this module |
 //! | `target/conformance-report/run.txt` | The run manifest: which run produced the reports beside it, under what configuration, and the retention ceilings | `sandbox.rs`, named by [`super::sandbox::RUN_MANIFEST_NAME`] |
 //!
-//! Those seven paths are a contract shared with the suite driver, with the build directory's
+//! Those eight paths are a contract shared with the suite driver, with the build directory's
 //! ignore rules and with the continuous-integration job that uploads them, so they are named by
 //! the constants and helpers below rather than spelled at a call site. The run manifest is listed
 //! because it lands in the same directory and is uploaded with the rest, even though the module
@@ -273,6 +274,19 @@ pub const EVIDENCE_DIR_NAME: &str = "evidence";
 
 /// Extension of an evidence document.
 pub const EVIDENCE_EXTENSION: &str = "txt";
+
+/// Directory beneath [`report_root`] that carries the review copy of every finding this run recorded.
+///
+/// Deliberately the same name the generated-finding root uses beneath the build directory, because it
+/// holds the same seven artifact classes for the same findings — what differs is the grade of the
+/// bytes, which [`BUNDLE_INDEX_NAME`] states inside every copy. Inside the report root for exactly the
+/// reason [`EVIDENCE_DIR_NAME`] is: this is the directory continuous integration uploads and a
+/// maintainer attaches to an issue, and a finding published anywhere else is a deliverable that
+/// reaches nobody.
+pub const FINDING_BUNDLE_DIR_NAME: &str = "findings";
+
+/// Index written into every review copy, naming what the copy is and what it is not.
+pub const BUNDLE_INDEX_NAME: &str = "BUNDLE.txt";
 
 /// File stem of the two run-summary artifacts.
 pub const SUMMARY_STEM: &str = "summary";
@@ -879,6 +893,37 @@ pub fn evidence_document_path(key: &CellKey, oracle: Oracle) -> PathBuf {
     ))
 }
 
+/// Absolute path of the directory holding the review copy of every finding this run recorded.
+pub fn finding_bundle_root() -> PathBuf {
+    report_root().join(FINDING_BUNDLE_DIR_NAME)
+}
+
+/// Absolute path of the review copy of one finding.
+///
+/// Named from the finding's own identifier, exactly as the generated directory is, so the two copies
+/// of one finding are recognisably one finding and a reader holding a report row can compute either.
+/// The identifier draws on an alphabet that excludes the path separator and can be neither `.` nor
+/// `..` — [`FindingId::directory`] carries that argument in full — so joining it here always yields a
+/// direct child of this root, which every write below re-establishes regardless.
+pub fn finding_bundle_dir(id: &FindingId) -> PathBuf {
+    finding_bundle_root().join(id.as_str())
+}
+
+/// The review copy's location as a report reader sees it: relative to the report root.
+///
+/// Takes the identifier as text rather than as a [`FindingId`], because the two callers hold it in
+/// different forms — the publisher has the derived value, a report row has the rendered string it
+/// carries in its own column — and one definition of the address is what keeps a row's pointer and the
+/// directory the publisher creates from drifting apart.
+///
+/// Deliberately **relative**. Every area report is required to be byte-identical between two runs over
+/// identical inputs, so a column carrying an absolute build path would differ between two machines that
+/// agree perfectly; and the reader of that column already holds the report root, because they are
+/// reading a file inside it.
+pub fn finding_bundle_reference(identifier: &str) -> String {
+    format!("{FINDING_BUNDLE_DIR_NAME}/{identifier}/")
+}
+
 // ---------------------------------------------------------------------------------------------
 // Run identity
 //
@@ -1229,12 +1274,25 @@ fn prepare_report_namespace() -> HarnessResult<()> {
         )?;
         pinned.remove_within(context, &stale)?;
     }
-    require_replaceable(
-        context,
-        &pinned.shown_entry(AREAS_DIR_NAME),
-        Replaceable::Directory,
-    )?;
-    pinned.remove_within(context, AREAS_DIR_NAME)?;
+    // Three directories rather than one, and the two beyond `areas/` are not an afterthought.
+    // Everything beneath this root is named deterministically, so an earlier run's document does not
+    // collide with this run's — it *survives beside* it, and a reader of the uploaded artifact cannot
+    // tell which run produced which file. For an area report that would corrupt an aggregate, which is
+    // why it was always cleared; for an evidence document and a finding's review copy it is worse in a
+    // different way, because both are evidence: a marker retired since the last run, or a finding that
+    // has stopped diverging, would keep publishing its old evidence into every later report as though
+    // this run had observed it. Clearing all three is also what makes this suite's own statement true —
+    // `tests/conformance/FINDINGS.md` §4 says the report root is emptied whole at the start of every
+    // run — and each removal keeps the same guard as the first: the entry must be a real directory this
+    // module put there, addressed through the one pinned handle.
+    for directory in [AREAS_DIR_NAME, EVIDENCE_DIR_NAME, FINDING_BUNDLE_DIR_NAME] {
+        require_replaceable(
+            context,
+            &pinned.shown_entry(directory),
+            Replaceable::Directory,
+        )?;
+        pinned.remove_within(context, directory)?;
+    }
     purge_stale_temporaries(context, &pinned)?;
     create_directory_chain_below(context, &root, &areas_dir())?;
     claim_ownership(context, &root)?;
@@ -1659,6 +1717,528 @@ fn sanitize_document_for_evidence(text: &str) -> String {
         .map(sanitize_text_for_report)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// ---------------------------------------------------------------------------------------------
+// The review copy of a finding
+//
+// A finding is the one verdict the requirements call a *deliverable*: keep the program, keep both
+// sides' output, keep the exact reproduction commands. `findings.rs` does all of that, into
+// `<build>/conformance-findings/<id>/`, and that directory is complete — seven artifact classes,
+// checked against its own manifest at the moment it is written and again immediately before any
+// report advertises it.
+//
+// It was, however, the one deliverable a run could publish and then lose. A FINDING does not fail the
+// run, so a run carrying findings *passes*; the cell's workspace is retained, which means the cell
+// never reaches the evidence path above; and the generated finding root is not the directory
+// continuous integration uploads. The report named the directory in its findings table and the
+// directory went with the runner. Nothing was wrong with the finding — it simply reached nobody, which
+// is the same defect the evidence documents above exist to close, arriving through the one door they
+// did not cover.
+//
+// So every finding now also gets a **review copy** beneath the report root, and the two copies are
+// deliberately different things rather than duplicates:
+//
+// - The **generated** directory holds the exact bytes and the exact commands. It is what a
+//   reproduction runs, and `report.rs` says elsewhere why nothing in it is redacted: a redacted
+//   command is not a runnable command, and captured bytes compared against redacted ones report a
+//   divergence in the compiler. It stays git-ignored, stays behind the workflow's explicit opt-in, and
+//   keeps its manifest's `disclosure_review = not-performed`.
+// - The **review copy** holds the same seven classes rendered to *report grade*: redacted, sanitized,
+//   bounded, and — where a capture is not text at all — described rather than transcribed. It is what
+//   a reader of the uploaded report gets without asking, and it is enough to read a finding, judge it
+//   and decide whether to ask for the exact bytes. [`BUNDLE_INDEX_NAME`] states that distinction
+//   inside every copy, so the copy cannot be mistaken for the evidence it points at.
+//
+// That preserves the disclosure gate rather than routing around it. The gate exists because a curated
+// finding is committed and permanent, and `FINDINGS.md` §5.3 requires a person to read every byte
+// before it lands; publishing the *unredacted* directory by default would hand that judgement to a
+// workflow. A report-grade copy makes no claim the report does not already make about itself, and the
+// copy's own index repeats the report's bound: sanitized against the named forms, with the narrow
+// residual class `mod.rs` enumerates, so inspect it before republishing it outside the repository.
+
+/// Longest one artifact of a review copy may be, in bytes, after rendering.
+///
+/// The same ceiling an evidence document gets, and for the same reason: these are the two things this
+/// module publishes from bytes it did not itself compose. A capture is already bounded where it was
+/// produced, so this bites only on the pathological one, and an artifact that reaches it is truncated
+/// with a final line saying so — never silently shortened.
+const BUNDLE_ARTIFACT_BYTES_MAX: usize = 384 * 1024;
+
+/// Longest total the review copies of one run may take, in bytes.
+///
+/// A run against a compiler that diverges everywhere files a finding per cell and class, and
+/// `findings.rs` bounds that at 1,536 directories and a gibibyte. This is the report root's own,
+/// smaller ceiling on the *copies*: 64 MiB, chosen to match the evidence ceiling beside it, which is
+/// far more than any real run needs and still bounds the pathological one. What does not fit is
+/// refused and the refusal is reported in the summary, because the generated directories still hold
+/// everything and the run must say which copies it did not publish.
+const BUNDLE_RUN_BYTES_MAX: u64 = 64 * 1024 * 1024;
+
+/// Most entries of one finding's `outputs/` directory a review copy carries.
+///
+/// One capture per side per stream per cell, and a finding is one cell, so a real directory holds a
+/// handful. The ceiling exists so that a directory that somehow holds thousands cannot turn one
+/// finding's copy into the whole run's budget before the byte ceiling notices.
+const BUNDLE_CAPTURE_COUNT_MAX: usize = 64;
+
+/// Bytes of review copy this run has published.
+static BUNDLE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Artifact files of review copies this run has published.
+static BUNDLE_FILES: AtomicU64 = AtomicU64::new(0);
+
+/// Findings whose review copy this run has published.
+static BUNDLE_FINDINGS: AtomicU64 = AtomicU64::new(0);
+
+/// Findings whose review copy has already been published, so a second oracle does not publish it again.
+///
+/// A finding identifier is derived from the cell and the divergence class, never from the oracle, so
+/// one directory answers for every arm that observed the divergence — up to three per cell. Publishing
+/// it once per arm would charge the run's budget three times for identical bytes.
+fn published_bundles() -> &'static Mutex<BTreeSet<String>> {
+    static PUBLISHED: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    PUBLISHED.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+/// Claim the right to publish this finding's review copy, or report that it is already published.
+fn claim_bundle(id: &FindingId) -> bool {
+    match published_bundles().lock() {
+        Ok(mut held) => held.insert(String::from(id.as_str())),
+        // A poisoned lock means a thread panicked while claiming. Publishing again writes identical
+        // bytes to the same paths, so the safe direction is to allow it: a duplicated charge against a
+        // 64 MiB ceiling is a smaller problem than a finding whose copy was never published because a
+        // lock was poisoned somewhere else.
+        Err(poisoned) => poisoned.into_inner().insert(String::from(id.as_str())),
+    }
+}
+
+/// Findings, files and bytes of review copy this run has published.
+pub fn finding_bundle_totals() -> (u64, u64, u64) {
+    (
+        BUNDLE_FINDINGS.load(Ordering::Relaxed),
+        BUNDLE_FILES.load(Ordering::Relaxed),
+        BUNDLE_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+/// What became of one artifact on its way into a review copy.
+enum Carriage {
+    /// Carried whole, and rendering changed nothing.
+    Whole(u64),
+    /// Carried whole, but rendering changed it — a redaction, or a byte written as a visible escape.
+    Rendered(u64),
+    /// Carried as a prefix, because the whole of it exceeded the per-artifact ceiling.
+    Truncated { original: u64, carried: usize },
+    /// Described rather than transcribed, because the bytes are not text.
+    Described(u64),
+    /// Not carried, with the reason.
+    Refused(String),
+}
+
+impl Carriage {
+    /// The sentence [`BUNDLE_INDEX_NAME`] records for this artifact.
+    fn describe(&self) -> String {
+        match self {
+            Carriage::Whole(bytes) => {
+                format!("carried whole, {bytes} byte(s), rendering changed nothing")
+            }
+            Carriage::Rendered(bytes) => format!(
+                "carried whole, {bytes} byte(s), rendered for a report — a redaction or a visible \
+                 escape changed it, so read it rather than run it"
+            ),
+            Carriage::Truncated { original, carried } => format!(
+                "carried as a prefix: {carried} of {original} byte(s), past the \
+                 {BUNDLE_ARTIFACT_BYTES_MAX}-byte per-artifact ceiling"
+            ),
+            Carriage::Described(bytes) => format!(
+                "described rather than transcribed: {bytes} byte(s) that are not text, so no report \
+                 could carry them faithfully"
+            ),
+            Carriage::Refused(reason) => format!("NOT carried: {reason}"),
+        }
+    }
+
+    /// Whether anything reached the review copy for this artifact.
+    fn carried(&self) -> bool {
+        !matches!(self, Carriage::Refused(_))
+    }
+}
+
+/// Publish the review copy of one finding beneath the report root.
+///
+/// Returns the sentence to print beside the cell, or `None` when this finding's copy has already been
+/// published by an earlier arm of the same divergence.
+///
+/// Nothing is raised, deliberately and for the same reason [`publish_cell_evidence`] raises nothing:
+/// this runs while a cell is being retired, after its verdicts are decided, and a decided cell must not
+/// be re-decided by a problem with its own archiving. A refusal is recorded for the summary instead, at
+/// run scope, where a copy that was not published is a fact about the run.
+///
+/// The generated directory is **read, never moved**: the finding itself stays exactly where
+/// `findings.rs` published it, complete and unredacted, so the checks that validate it — at write time
+/// and again before any report advertises it — go on seeing the artifact they were written for.
+pub fn publish_finding_bundle(id: &FindingId) -> Option<String> {
+    if !claim_bundle(id) {
+        return None;
+    }
+    let source = id.directory();
+    let destination = finding_bundle_dir(id);
+    let context = format!("publishing the review copy of finding {id}");
+
+    if let Err(error) = ensure_report_namespace(&context) {
+        return Some(note_evidence_refusal(format!(
+            "the review copy of finding {} was not published: {}",
+            sanitize_text_for_report(id.as_str()),
+            error.cause()
+        )));
+    }
+
+    let mut carried: Vec<(String, Carriage)> = Vec::new();
+    for name in findings::REQUIRED_ARTIFACTS
+        .iter()
+        .filter(|name| **name != findings::OUTPUTS_DIR_NAME)
+    {
+        let state = copy_bundle_artifact(&context, &source, &destination, name, name);
+        carried.push((String::from(*name), state));
+    }
+    for name in bundle_capture_names(&context, &source, &mut carried) {
+        let shown = format!("{}/{name}", findings::OUTPUTS_DIR_NAME);
+        let state = copy_bundle_artifact(
+            &context,
+            &source.join(findings::OUTPUTS_DIR_NAME),
+            &destination.join(findings::OUTPUTS_DIR_NAME),
+            &name,
+            &shown,
+        );
+        carried.push((shown, state));
+    }
+
+    // Written last, because it reports what happened to everything above it. Its own bytes are charged
+    // like any other artifact's, and a run that cannot write it says so in the returned sentence: a
+    // copy whose index is missing is still readable, but nothing in it would state its grade.
+    let index = render_bundle_index(id, &source, &carried);
+    let index_state = write_bundle_bytes(&context, &destination, BUNDLE_INDEX_NAME, &index);
+
+    let published = carried.iter().filter(|(_, state)| state.carried()).count();
+    let refused: Vec<&str> = carried
+        .iter()
+        .filter(|(_, state)| !state.carried())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    BUNDLE_FINDINGS.fetch_add(1, Ordering::Relaxed);
+
+    let mut sentence = format!(
+        "finding review copy published: {} ({published} artifact file(s))",
+        shown_path(&destination)
+    );
+    if let Err(reason) = &index_state {
+        sentence.push_str(&format!(
+            "; its {BUNDLE_INDEX_NAME} could not be written, so the copy does not state its own \
+             grade: {reason}"
+        ));
+    }
+    if !refused.is_empty() {
+        // Named in the sentence *and* recorded at run scope: the first tells whoever is watching the
+        // run, the second reaches the summary, which is what a reader of the artifact has.
+        let note = note_evidence_refusal(format!(
+            "the review copy of finding {} is incomplete: {} was not carried. The generated \
+             directory still holds all of it — publish it with the workflow's raw-findings opt-in, or \
+             read it beside the run",
+            sanitize_text_for_report(id.as_str()),
+            refused.join(", ")
+        ));
+        sentence.push_str(&format!("; {note}"));
+    }
+    Some(sanitize_text_for_report(&sentence))
+}
+
+/// Every capture name in one finding's `outputs/` directory, in a fixed order.
+///
+/// Listed through a pinned handle rather than by name, so a directory substituted between the listing
+/// and the reads is refused at the listing rather than read through. Sorted, because the copy is
+/// compared between runs and a filesystem's own enumeration order is not a property of the finding. A
+/// directory that cannot be listed, and every entry past the count ceiling, is recorded as a refusal
+/// against the `outputs/` class itself rather than silently omitted.
+fn bundle_capture_names(
+    context: &str,
+    source: &Path,
+    carried: &mut Vec<(String, Carriage)>,
+) -> Vec<String> {
+    let captures = source.join(findings::OUTPUTS_DIR_NAME);
+    let pinned = match PinnedDirectory::pin(context, &captures) {
+        Ok(pinned) => pinned,
+        Err(error) => {
+            carried.push((
+                format!("{}/", findings::OUTPUTS_DIR_NAME),
+                Carriage::Refused(format!(
+                    "{} could not be held open, so no capture could be copied from it: {}",
+                    shown_path(&captures),
+                    error.cause()
+                )),
+            ));
+            return Vec::new();
+        }
+    };
+    let mut names = match pinned.entry_names(context) {
+        Ok(names) => names,
+        Err(error) => {
+            carried.push((
+                format!("{}/", findings::OUTPUTS_DIR_NAME),
+                Carriage::Refused(format!(
+                    "{} could not be listed, so no capture could be copied from it: {}",
+                    shown_path(&captures),
+                    error.cause()
+                )),
+            ));
+            return Vec::new();
+        }
+    };
+    names.sort();
+    if names.len() > BUNDLE_CAPTURE_COUNT_MAX {
+        let dropped = names.split_off(BUNDLE_CAPTURE_COUNT_MAX);
+        carried.push((
+            format!("{}/", findings::OUTPUTS_DIR_NAME),
+            Carriage::Refused(format!(
+                "{} holds {} entries, past the {BUNDLE_CAPTURE_COUNT_MAX} this copy carries; {} \
+                 further entry(ies) were left in the generated directory",
+                shown_path(&captures),
+                BUNDLE_CAPTURE_COUNT_MAX + dropped.len(),
+                dropped.len()
+            )),
+        ));
+    }
+    names
+}
+
+/// Copy one artifact of a finding into its review copy, rendering it for a report on the way.
+///
+/// `source` and `destination` are the artifact's directory in each copy — the same relative position in
+/// the copy as in the original — `name` is its entry name in both, and `shown` is how the index names
+/// it, which for a capture carries the `outputs/` prefix the reader expects.
+fn copy_bundle_artifact(
+    context: &str,
+    source: &Path,
+    destination: &Path,
+    name: &str,
+    shown: &str,
+) -> Carriage {
+    let entry = source.join(name);
+    let observed = match fs::symlink_metadata(&entry) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return Carriage::Refused(format!(
+                "{} could not be inspected: {error}",
+                shown_path(&entry)
+            ))
+        }
+    };
+    if !observed.is_file() {
+        return Carriage::Refused(format!(
+            "{} is not a regular file this run wrote, so it is refused rather than followed",
+            shown_path(&entry)
+        ));
+    }
+    let original = observed.len();
+    // The ceiling one artifact of a *generated* finding may hold, so an artifact this run published
+    // always fits and anything larger is refused rather than held in memory.
+    let bytes = match read_file_bounded(context, &entry, findings::FINDING_ARTIFACT_BYTES_MAX) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Carriage::Refused(format!(
+                "{} could not be read: {}",
+                shown_path(&entry),
+                error.cause()
+            ))
+        }
+    };
+
+    let (document, carriage) = match String::from_utf8(bytes) {
+        Ok(text) => {
+            let rendered = render_artifact_for_review(&text);
+            let changed = rendered != text;
+            if rendered.len() > BUNDLE_ARTIFACT_BYTES_MAX {
+                let mut cut = BUNDLE_ARTIFACT_BYTES_MAX;
+                while cut > 0 && !rendered.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                let mut prefix = String::from(&rendered[..cut]);
+                prefix.push_str(&format!(
+                    "\n[truncated] this is the first {cut} byte(s) of {shown}, which reached the \
+                     {BUNDLE_ARTIFACT_BYTES_MAX}-byte ceiling one artifact of a review copy may take. \
+                     The whole of it is in the generated finding directory named in \
+                     {BUNDLE_INDEX_NAME}\n"
+                ));
+                (
+                    prefix,
+                    Carriage::Truncated {
+                        original,
+                        carried: cut,
+                    },
+                )
+            } else if changed {
+                (rendered, Carriage::Rendered(original))
+            } else {
+                (rendered, Carriage::Whole(original))
+            }
+        }
+        Err(_) => (
+            format!(
+                "[described] {shown} holds {original} byte(s) that are not valid UTF-8, so no report \
+                 could carry them faithfully and this copy does not try. The exact bytes are in the \
+                 generated finding directory named in {BUNDLE_INDEX_NAME}, and the finding's own \
+                 {} records this entry's size and digest, which is what a comparison should be made \
+                 against.\n",
+                findings::MANIFEST_NAME
+            ),
+            Carriage::Described(original),
+        ),
+    };
+
+    match write_bundle_bytes(context, destination, name, &document) {
+        Ok(()) => carriage,
+        Err(reason) => Carriage::Refused(reason),
+    }
+}
+
+/// Render one artifact of a finding for a report, keeping its final newline.
+///
+/// [`sanitize_document_for_evidence`] rebuilds a document from its lines, which drops a trailing
+/// newline — harmless where that function assembles a document of its own, and not harmless here. An
+/// artifact of a review copy stands in for a file a maintainer will read beside the original, and a
+/// copy one byte shorter than the file it copies is a difference a reader has to explain: a captured
+/// stdout whose last line has quietly lost its terminator looks like exactly the kind of divergence
+/// this suite exists to report. Restoring it also makes the copy byte-identical to its source whenever
+/// nothing was actually redacted or escaped, which is what lets [`Carriage`] say so honestly instead of
+/// claiming a change that never happened.
+fn render_artifact_for_review(text: &str) -> String {
+    let mut rendered = sanitize_document_for_evidence(text);
+    if text.ends_with('\n') && !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered
+}
+
+/// Publish one rendered document into a review copy, charging the run's budget for it.
+///
+/// Returns the reason on any failure. Publication takes the same four guards every other write beneath
+/// the report root takes — strictly beneath the root, every directory on the way proved to be a real
+/// directory rather than a link, the destination absent or a plain file, and the temporary created
+/// exclusively — so a copy cannot be redirected out of the build directory by anything that can predict
+/// where it is about to be written.
+fn write_bundle_bytes(
+    context: &str,
+    destination: &Path,
+    name: &str,
+    document: &str,
+) -> Result<(), String> {
+    let path = destination.join(name);
+    let bytes = document.len() as u64;
+    let charged = BUNDLE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    if charged > BUNDLE_RUN_BYTES_MAX {
+        // Give the charge back, so one refused artifact does not close the sink for every later one.
+        BUNDLE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        return Err(format!(
+            "carrying it would have taken this run past the {BUNDLE_RUN_BYTES_MAX}-byte ceiling on \
+             finding review copies ({charged} bytes charged)"
+        ));
+    }
+    if let Err(error) = create_directory_chain_below(context, &report_root(), destination)
+        .and_then(|()| require_replaceable(context, &path, Replaceable::RegularFile))
+        .and_then(|()| super::publish_bytes_no_follow(context, &path, document.as_bytes()))
+    {
+        BUNDLE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        return Err(String::from(error.cause()));
+    }
+    BUNDLE_FILES.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Render the index that states what a review copy is, what it is not, and what reached it.
+fn render_bundle_index(id: &FindingId, source: &Path, carried: &[(String, Carriage)]) -> String {
+    let mut text = String::new();
+    text.push_str("# Review copy of one finding — what this is, and what it is not\n\n");
+    text.push_str(&format!("finding_id = {id}\n"));
+    text.push_str(&format!("generated_from = {}\n", shown_path(source)));
+    // Spelled against the elided root above rather than as an absolute path, because this document is a
+    // report artifact and every path a report renders is elided. A reader who has the generated
+    // directory has its absolute location already; one who does not would gain nothing from the build
+    // path of a machine they are not on, and the report would have published it for no reader at all.
+    text.push_str(&format!(
+        "reproduce_with = sh <generated_from>/{COMMANDS_NAME}\n"
+    ));
+    text.push('\n');
+    text.push_str(
+        "This directory is a REPORT-GRADE copy of the finding named above, published inside the run\n\
+         report so that a reader of the uploaded report has the finding itself and not only a row\n\
+         naming a directory that went with the runner. Every artifact beside this file has been\n\
+         redacted for credentials, sanitized so no byte in it can forge a line of a report, and\n\
+         bounded; a capture that is not text is described rather than transcribed. So this copy is for\n\
+         READING a finding — deciding whether it is real, what it is about, and whether to ask for the\n\
+         rest. It is not the evidence itself.\n\n\
+         The EXACT bytes and the runnable commands are in the generated directory named above, which\n\
+         is git-ignored, is not redacted, and is uploaded only behind the workflow's explicit\n\
+         raw-findings opt-in — because that directory names absolute tool paths and carries captured\n\
+         diagnostics verbatim, and `tests/conformance/FINDINGS.md` §5.3 requires a person to read all of\n\
+         it before any of it is published or committed. Nothing here performs that review or stands in\n\
+         for it.\n\n\
+         This copy inherits the report's own disclosure bound rather than improving on it:\n\
+         `conformance_harness/mod.rs` documents, beside BARE_REDACTION_MIN_CHARS and is_path_value,\n\
+         exactly what the redactor leaves in place — a credential-bearing value shorter than the floor\n\
+         and appearing bare, and a value recognised as an absolute filesystem path. Treat this copy as\n\
+         sanitized against the named forms with a narrow residual class, and read it before\n\
+         republishing it outside this repository.\n",
+    );
+    text.push('\n');
+    text.push_str("## The two curation judgements, as the finding itself records them\n\n");
+    text.push_str(
+        "Both are copied from the finding's own manifest, unchanged. A run writes `not-performed` for\n\
+         each — truthfully, because nothing under the build directory is committed — and the curated\n\
+         audit refuses that value, so a promotion into `tests/conformance/findings/` cannot happen\n\
+         without a person replacing it with what they found. A review copy changes neither.\n\n",
+    );
+    let manifest_text = read_file_bounded(
+        "reading the manifest of the finding this review copy was made from",
+        &source.join(findings::MANIFEST_NAME),
+        findings::FINDING_ARTIFACT_BYTES_MAX,
+    )
+    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    .unwrap_or_default();
+    for prefix in [
+        findings::MANIFEST_DISCLOSURE_PREFIX,
+        findings::MANIFEST_MINIMIZATION_PREFIX,
+    ] {
+        let line = manifest_text
+            .lines()
+            .find(|line| line.starts_with(prefix))
+            .map(|line| sanitize_text_for_report(line.trim()))
+            .unwrap_or_else(|| {
+                format!(
+                    "{}<not stated in the manifest this copy was made from>",
+                    prefix.trim_end()
+                )
+            });
+        text.push_str(&format!("{line}\n"));
+    }
+    text.push('\n');
+    text.push_str("## What reached this copy\n\n");
+    let published = carried.iter().filter(|(_, state)| state.carried()).count();
+    text.push_str(&format!(
+        "{published} of {} entry(ies) were carried, and every one is listed below whether or not it\n\
+         was — an absence is stated here rather than inferred from a missing file. The six single-file\n\
+         artifact classes appear by name; the seventh, `{}/`, appears as its individual captures, or,\n\
+         if the directory itself could not be read, as one row naming the class.\n\n",
+        carried.len(),
+        findings::OUTPUTS_DIR_NAME
+    ));
+    for (name, state) in carried {
+        text.push_str(&format!(
+            "[artifact] {} — {}\n",
+            sanitize_text_for_report(name),
+            state.describe()
+        ));
+    }
+    sanitize_document_for_evidence(&text)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4497,7 +5077,21 @@ fn render_marker_block(
     lines
 }
 
-/// Every finding as a table, each row naming its artifact directory and its reproduction command.
+/// Every finding as a table, each row naming its artifact directory, the review copy inside this
+/// report, and its reproduction command.
+///
+/// The `Review copy` column is what makes the `Artifact directory` column usable to a reader who was
+/// not present at the run. The directory holds the exact bytes and the runnable commands and is beneath
+/// the build directory, so it is there for whoever is standing in front of the machine and gone for
+/// everyone else; the review copy is the same seven artifact classes rendered to report grade, inside
+/// the directory this report is published from and therefore inside whatever archive carried it here.
+///
+/// It is rendered from the identifier rather than looked up on disk, deliberately. Every area report is
+/// required to be byte-identical between two runs over identical inputs, and a column reporting what a
+/// run's budget happened to allow would break that for a reason that has nothing to do with the
+/// comparison the row reports. Whether a copy was published, and what was refused, is therefore a
+/// run-scope statement in the summary — where a reduced set of published evidence is a fact about the
+/// run — and this column is the address the copy occupies when it exists.
 fn render_finding_table(rows: &[&Row]) -> Vec<String> {
     let table_rows: Vec<Vec<String>> = rows
         .iter()
@@ -4521,6 +5115,10 @@ fn render_finding_table(rows: &[&Row]) -> Vec<String> {
                     Some(path) => finding_artifact_state(path),
                     None => String::from(ABSENT_CELL),
                 },
+                match &row.finding_id {
+                    Some(identifier) => md_code(&finding_bundle_reference(identifier)),
+                    None => String::from(ABSENT_CELL),
+                },
                 match &directory {
                     Some(path) => md_code(&reproduce_command(path)),
                     None => String::from(ABSENT_CELL),
@@ -4536,6 +5134,7 @@ fn render_finding_table(rows: &[&Row]) -> Vec<String> {
             "Class",
             "Artifact directory",
             "Artifacts",
+            "Review copy",
             "Reproduce",
         ],
         &table_rows,
@@ -5827,6 +6426,45 @@ fn render_summary_markdown(
         ),
     ]));
     lines.push(String::new());
+    // The third and last part of the same answer, and the one a passing run needs most. A finding does
+    // not fail the run, so its cell workspace is kept and it never publishes an evidence document — and
+    // the directory holding its seven artifact classes is beneath the build directory, which is not what
+    // an archive of this report carries. Each finding therefore also has a report-grade copy inside this
+    // report, and the accounting below is what says so without a reader going to look.
+    let (bundle_findings, bundle_files, bundle_bytes) = finding_bundle_totals();
+    lines.extend(property_table(&[
+        (
+            String::from("Findings with a review copy in this report"),
+            bundle_findings.to_string(),
+        ),
+        (
+            String::from("Review-copy artifact files published"),
+            bundle_files.to_string(),
+        ),
+        (
+            String::from("Review-copy bytes"),
+            format!("{bundle_bytes} of {BUNDLE_RUN_BYTES_MAX} permitted for the run"),
+        ),
+        (
+            String::from("Per-artifact ceiling"),
+            BUNDLE_ARTIFACT_BYTES_MAX.to_string(),
+        ),
+        (
+            String::from("Where they are"),
+            format!("`{FINDING_BUNDLE_DIR_NAME}/<finding-id>/` beneath this report"),
+        ),
+    ]));
+    lines.push(String::new());
+    lines.push(format!(
+        "A review copy is redacted, sanitized and bounded, and a capture that is not text is described \
+         rather than transcribed, so it is what a reader judges a finding *from* and not the evidence \
+         itself. The exact bytes and the runnable commands stay in the generated directory each row of \
+         section 4 names, which is git-ignored and — in continuous integration — released only behind \
+         the explicit raw-findings opt-in, because `{FINDINGS_REGISTER}` §5.3 requires a person to read \
+         all of it before any of it is published. Every copy states that distinction in its own \
+         `{BUNDLE_INDEX_NAME}`, together with what reached it and what did not."
+    ));
+    lines.push(String::new());
     let refusals = evidence_refusal_notes();
     if refusals.is_empty() {
         lines.push(String::from(
@@ -6182,6 +6820,30 @@ fn render_summary_tsv(
             .set(COL_LABEL, "evidence_bytes")
             .set(COL_COUNT, evidence_bytes.to_string())
             .set(COL_REFERENCE, EVIDENCE_RUN_BYTES_MAX.to_string()),
+    );
+
+    // The findings' own half of the same account. Emitted as `meta` rows beside the evidence rows rather
+    // than as new columns, deliberately: the column header of an area report is the contract the summary
+    // aggregates through, so a run-scope total belongs in a row an aggregator can read or ignore, never
+    // in a column every per-outcome row would then have to carry and leave empty.
+    let (bundle_findings, bundle_files, bundle_bytes) = finding_bundle_totals();
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "finding_review_copies")
+            .set(COL_COUNT, bundle_findings.to_string())
+            .set(COL_REFERENCE, FINDING_BUNDLE_DIR_NAME),
+    );
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "finding_review_copy_files")
+            .set(COL_COUNT, bundle_files.to_string())
+            .set(COL_REFERENCE, FINDING_BUNDLE_DIR_NAME),
+    );
+    rows.push(
+        SummaryRow::new(RECORD_META)
+            .set(COL_LABEL, "finding_review_copy_bytes")
+            .set(COL_COUNT, bundle_bytes.to_string())
+            .set(COL_REFERENCE, BUNDLE_RUN_BYTES_MAX.to_string()),
     );
     for note in evidence_refusal_notes() {
         rows.push(

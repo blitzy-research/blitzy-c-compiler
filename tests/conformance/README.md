@@ -3069,13 +3069,14 @@ business rather than the repository's.
 | --- | --- |
 | `target/conformance-work/` | Per-cell workspaces. **Retained** whenever the cell produced an outcome that **fails the run under the policy in force** — so a strict run keeps an `UNAVAILABLE` cell where a permissive run does not — or a `FINDING`, which never fails the run and whose evidence is therefore needed precisely when the run passes; and retained for **every** cell when `BCC_CONFORMANCE_KEEP_WORK` is set. **Removed** otherwise, and every non-`PASS` outcome of a removed cell publishes an evidence document first. A retained directory leaves behind exactly the artifacts needed to investigate it, and the run prints its path. A timeout is not a separate rule: it reaches the retained set by way of the `FAIL` or `FINDING` verdict it produces. There is deliberately no destructor that deletes, so a panicking cell cannot erase its own evidence |
 | `target/conformance-report/run.txt` | Which run produced the reports in this directory: its run token, its configuration fingerprint and the four retention ceilings |
-| `target/conformance-report/.run-owner` | Which run owns this directory, so a second concurrent one is refused. Harness bookkeeping rather than a deliverable, listed so this table and `report.rs`'s own artifact table name the same seven report-root paths |
+| `target/conformance-report/.run-owner` | Which run owns this directory, so a second concurrent one is refused. Harness bookkeeping rather than a deliverable, listed so this table and `report.rs`'s own artifact table name the same eight report-root paths |
 | `target/conformance-report/areas/<area>.md` | Per-area human-readable report |
 | `target/conformance-report/areas/<area>.tsv` | Per-area machine-readable report — each area writes only its own file, so there is no contention under parallel execution. Its **first line** is the generation preamble described below, which carries the run's coverage as well as its identity; the column header is line two, and it names **26** columns |
 | `target/conformance-report/summary.md` | The deliverable summary |
 | `target/conformance-report/summary.tsv` | The same data, machine-readable. Its **first line** is the same generation preamble, for the same reason and in the same shape as an area report's; the column header is line two |
-| `target/conformance-report/evidence/<cell-slug>+oracle_<x>.txt` | Durable, sanitized evidence for an outcome that was **reported without failing** and whose cell workspace was therefore discarded — an expected divergence, or a permissive run's absent oracle. Holds the cell's identity, the verdict, the marker, both sides' exact commands and terminations, the detail, and the archived content of the capture files the cell persisted. See [what survives a run](#what-survives-a-run--a-retained-workspace-or-an-evidence-document) |
-| `target/conformance-findings/F-<digest>-<cell-slug>-<class>/` | Auto-generated finding artifacts from the current run. One directory per divergence, **not** per oracle: every oracle that observed the same divergence at the same cell contributes to this one directory and is indexed in its `MANIFEST.txt` `observed_by` line. Four ceilings bound what a run may publish here — 8 MiB on one artifact, 16 MiB on one directory, 1 GiB and 1,536 directories across the run — and exhausting any of them fails the run loudly rather than filling the disk |
+| `target/conformance-report/evidence/<cell-slug>+oracle_<x>.txt` | Durable, sanitized evidence for an outcome that was **reported without failing** and whose cell workspace was therefore discarded — an expected divergence, or a permissive run's absent oracle. Holds the cell's identity, the verdict, the marker, both sides' exact commands and terminations, the detail, and the archived content of the capture files the cell persisted. See [what survives a run](#what-survives-a-run--a-retained-workspace-an-evidence-document-or-a-findings-review-copy) |
+| `target/conformance-report/findings/F-<digest>-<cell-slug>-<class>/` | The **review copy** of every finding this run recorded: all seven artifact classes, rendered to the same grade as everything else in the report — redacted, sanitized, bounded, with a capture that is not text described rather than transcribed — plus a `BUNDLE.txt` naming what the copy is, what it is not, the generated directory holding the exact bytes, the two curation attestations copied from the finding's own manifest, and the carriage state of every entry. It exists because a `FINDING` does not fail the run: the cell keeps its workspace and publishes no evidence document, and the generated root below is beneath the build directory rather than inside the report, so a passing run used to name a finding whose evidence nobody could open. Two ceilings bound it — 384 KiB on one artifact and 64 MiB across the run — and exceeding either **refuses the copy and reports the refusal in the summary** rather than failing the cell, because the generated directory still holds all of it |
+| `target/conformance-findings/F-<digest>-<cell-slug>-<class>/` | Auto-generated finding artifacts from the current run — the **exact bytes and the runnable commands**, unredacted, which is why it is git-ignored and, in continuous integration, released only behind an explicit opt-in. One directory per divergence, **not** per oracle: every oracle that observed the same divergence at the same cell contributes to this one directory and is indexed in its `MANIFEST.txt` `observed_by` line. Four ceilings bound what a run may publish here — 8 MiB on one artifact, 16 MiB on one directory, 1 GiB and 1,536 directories across the run — and exhausting any of them fails the run loudly rather than filling the disk |
 
 **`findings.rs` never writes into `tests/conformance/`.** The curated finding set and both registers
 are human-maintained committed deliverables. A run writes only beneath the build directory.
@@ -3337,11 +3338,15 @@ unreadable" value the moment a single area was missing would be a constant acros
 and would detect nothing whatever. On this branch all fourteen areas enumerate and all 108 files are
 readable, so every one of them contributes its own bytes.
 
-### What survives a run — a retained workspace, or an evidence document
+### What survives a run — a retained workspace, an evidence document, or a finding's review copy
 
 Every cell writes its captures into its own workspace, and a workspace is removed once the cell has
 nothing left to investigate. Both halves of that sentence needed fixing, and the two fixes together
-are what make a reported outcome's evidence reach a reader.
+are what make a reported outcome's evidence reach a reader. A third route exists for the one verdict
+the requirements call a **deliverable** — see
+[a finding's review copy](#a-findings-review-copy-inside-the-report), below — because retention and
+evidence documents between them still left a finding's artifacts outside everything an archive of a run
+carries.
 
 **Retention now asks the run's own policy rather than a fixed list of verdicts.** It used to keep
 `FAIL`, `XPASS` and `FINDING` and remove everything else. That list and the policy the run asserts on
@@ -3392,6 +3397,46 @@ halves of transcribing it are wrong: a few hundred kilobytes of lossily decoded 
 unreadable, and at that size it exhausts the per-cell archive that the compiler diagnostics and the
 program's own stdout needed. It is the one entry `commands.txt` — archived beside it — regenerates
 byte for byte, and its true size is still recorded, so nothing about the cell goes unmentioned.
+
+#### A finding's review copy, inside the report
+
+A `FINDING` is the one verdict that reaches neither of the two routes above, and it is the one verdict
+the requirements call a deliverable. It does not fail the run, so a run carrying findings **passes**;
+retention keeps its workspace, so it publishes no evidence document; and its seven artifact classes are
+written to `conformance-findings/` beneath the build directory, which is not the directory an archive of
+a run carries. In continuous integration the consequence was exact: a green job named a finding by
+identifier and by directory, and then the runner — holding the reproducer, the expectation record, the
+exact commands, both sides' captures, the environment fingerprint and the computed diff — was
+destroyed.
+
+So each finding also gets a **review copy** at `conformance-report/findings/<finding-id>/`, published
+the moment its cell is retired and carried by every archive of the report:
+
+| Part | Content |
+| --- | --- |
+| The seven classes | `reproducer.c`, `reproducer.expected`, `MANIFEST.txt`, `commands.sh`, `environment.txt`, `diff.txt` and every entry of `outputs/`, each at the same relative position as in the generated directory |
+| `BUNDLE.txt` | What the copy is and what it is not: the generated directory holding the exact bytes, the reproduction command spelled against it, the report's own disclosure bound, the `disclosure_review` and `minimization` attestations **copied verbatim** from the finding's manifest, and one line per entry stating whether it was carried whole, rendered, truncated, described or refused |
+
+The two copies answer different questions, and neither replaces the other:
+
+- **The generated directory is the evidence.** Exact bytes, exact commands, absolute tool paths,
+  unredacted diagnostics. It is what `sh commands.sh` runs, it stays git-ignored, and continuous
+  integration releases it only behind an explicit opt-in — because `FINDINGS.md` §5.3 requires a person
+  to read all of it before any of it is published.
+- **The review copy is how a finding is read.** Every artifact goes through the same redaction and
+  report-safe rendering every other line of the report goes through, a capture that is not valid UTF-8
+  is described rather than transcribed, and 384 KiB per artifact and 64 MiB per run bound it. In
+  practice an artifact needing no redaction is copied byte for byte and `BUNDLE.txt` says
+  `rendering changed nothing`, so the copy is usually identical to the original — but it is never
+  *promised* to be, which is why the exact bytes are named rather than assumed.
+
+Neither copy performs the §5.3 disclosure review or stands in for it: both manifests still say
+`disclosure_review = not-performed`, and only a person promoting a finding into
+`tests/conformance/findings/` can change that. One copy is published per **finding**, not per oracle, so
+one divergence seen by three arms is copied once. Exceeding either ceiling **refuses the copy and names
+it in the summary** rather than failing the cell, because the generated directory still holds all of it;
+the summary's own accounting states how many copies were published, how many bytes they took, and every
+refusal.
 
 ### What a retained cell workspace holds
 

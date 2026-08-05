@@ -449,9 +449,31 @@ jobs:
       # publishing the raw directory by default would route evidence around the one gate that exists
       # to hold it.
       #
+      # ## Why a finding nevertheless always reaches this artifact
+      #
+      # Naming a finding is not delivering one, and for a while this job did only the first. A FINDING
+      # does not fail the run — requirement 6 makes it a deliverable rather than a defect — so a run
+      # carrying findings PASSES; the harness keeps that cell's workspace instead of publishing an
+      # evidence document for it; and `target/conformance-findings/` is not what the step below
+      # uploads. The report therefore named an identifier and a directory, this job finished green, the
+      # runner was destroyed, and the reproducer, the expectation record, the exact commands, both
+      # sides' captures, the environment fingerprint and the computed diff went with it. The one
+      # verdict class the requirements call a deliverable was the one class this job could lose.
+      #
+      # So the harness now publishes a REVIEW COPY of every finding inside the report root —
+      # `conformance-report/findings/<finding-id>/`, all seven artifact classes plus a `BUNDLE.txt`
+      # that states what the copy is — and the unconditional upload below carries it. That closes the
+      # loss without touching the gate above, because the two copies are different things: the review
+      # copy is rendered to exactly the grade this artifact already claims for itself (redacted,
+      # sanitized, bounded, and a capture that is not text described rather than transcribed), while
+      # the generated directory keeps the exact bytes and the runnable commands and stays behind the
+      # opt-in. Neither copy performs the §5.3 review or stands in for it: both manifests still record
+      # `disclosure_review = not-performed`, and only a person promoting a finding into
+      # `tests/conformance/findings/` can change that.
+      #
       # So the raw directories are behind an explicit opt-in below, and the report — which names
-      # every finding, its identifier and its directory, with a sanitized account of each
-      # divergence — is what a reader gets without asking.
+      # every finding, its identifier and its directory, carries a review copy of each, and gives a
+      # sanitized account of each divergence — is what a reader gets without asking.
       #
       # Evidence integrity is a separate, enforced gate rather than part of that prose-redaction
       # claim. Before a captured stream can enter `conformance-report/evidence/`, the harness pins
@@ -466,6 +488,11 @@ jobs:
           set -euo pipefail
           echo "::notice::Every archived capture in conformance-report/evidence passed the harness's pinned-workspace, verified-regular-file, single-hard-link and parent-identity checks. Any integrity refusal is an infrastructure breach that fails the area rather than evidence that this upload step accepts."
           echo "::notice::The conformance-report artifact is redacted by the harness at the point each outcome is created — secret redaction, root elision and report-safe rendering — but that guarantee is bounded, not absolute: conformance_harness/mod.rs documents that a bare credential shorter than its redaction floor, and a value recognised as an absolute filesystem path, are left in the text. Treat the report as sanitized against the named forms with a narrow residual class, and inspect it before republishing it outside this repository."
+          copies=0
+          if [ -d target/conformance-report/findings ]; then
+            copies=$(find target/conformance-report/findings -mindepth 1 -maxdepth 1 -type d | wc -l)
+          fi
+          echo "::notice::This artifact carries a review copy of ${copies} finding(s) under conformance-report/findings/, each holding all seven artifact classes — reproducer, expectation record, manifest, commands, captures, environment fingerprint and diff — plus a BUNDLE.txt stating that the copy is report-grade rather than the byte-exact evidence. A finding does not fail this job, so without these copies a green run would have named findings whose evidence went with the runner. The exact bytes and the runnable commands stay in target/conformance-findings/, which is released only by a manual dispatch setting publish_raw_findings, because tests/conformance/FINDINGS.md §5.3 requires a person to read all of it first; the run summary's own accounting states how many copies were published and names any that were refused."
 
       - name: Upload the conformance reports
         if: always()

@@ -403,7 +403,19 @@ investigating a finding will want them:
 | Path | Content |
 |---|---|
 | `target/conformance-work/` | Per-cell workspaces. **Retained** for any cell that produced a FAIL, an XPASS or a FINDING — and for every cell when `BCC_CONFORMANCE_KEEP_WORK` is set — so a divergence leaves behind exactly the artifacts needed to investigate it; removed otherwise |
-| `target/conformance-report/` | `areas/<area>.md` and `areas/<area>.tsv` per feature area, plus `summary.md` and `summary.tsv` for the run as a whole |
+| `target/conformance-report/` | `areas/<area>.md` and `areas/<area>.tsv` per feature area, plus `summary.md` and `summary.tsv` for the run as a whole, and `findings/<finding-id>/` — the **review copy** of every finding the run recorded |
+
+**The review copy is a third set, and it is neither of the two above.** A transient finding directory
+holds the exact bytes and the runnable commands; the review copy holds the same seven artifact classes
+rendered to the grade every other line of the report is held to — redacted, sanitized, bounded, with a
+capture that is not text described rather than transcribed — and a `BUNDLE.txt` that states which of the
+two a reader is holding. It exists because a FINDING **does not fail the run**: the cell keeps its
+workspace and publishes no evidence document, and the transient root is not what an archive of a run
+carries, so a passing run could name a finding whose evidence went with the machine. The copy changes
+nothing about curation: it is not committed, it carries the manifest's `disclosure_review =
+not-performed` unchanged, and promotion into the curated set is still the human act §5 describes. What
+it changes is who can read a finding — anyone holding the report, rather than only whoever was standing
+at the runner.
 
 **The harness never writes into `tests/conformance/**`.** Not the curated findings directory, not
 this register, not the expected-divergence register, not a corpus program. The corpus is opened for
@@ -450,7 +462,7 @@ They are different artifacts answering different questions, and conflating them 
 
 | Artifact | Scope | Lifetime |
 |---|---|---|
-| `target/conformance-report/summary.md` | **This run.** Its section 4 lists every finding the run recorded, with a pointer to the reproducer and the reproduction commands, alongside the feature areas covered, the outcome tally and every expected divergence with its documented basis | Overwritten by the next run |
+| `target/conformance-report/summary.md` | **This run.** Its section 4 lists every finding the run recorded, with a pointer to the reproducer, to the review copy beside the summary, and to the reproduction commands, alongside the feature areas covered, the outcome tally and every expected divergence with its documented basis | Overwritten by the next run |
 | This file | **Every curated finding, across runs** | Committed; durable |
 
 A run's summary is the deliverable the requirements ask each run to emit. This register is what
@@ -464,8 +476,11 @@ trusted.
 
 1. **Run the suite and read the verdicts.** `cargo test --test conformance` and then
    `target/conformance-report/summary.md`; its findings section names every FINDING the run recorded
-   and points at the transient artifact directory for each. A FINDING does not fail the run, so it
-   will not announce itself by failing — read the summary.
+   and points, for each, at the transient artifact directory *and* at the review copy beside the
+   summary. A FINDING does not fail the run, so it will not announce itself by failing — read the
+   summary. Curate from the **transient directory**, never from the review copy: the copy is rendered
+   for reading and makes no promise of being byte-exact, and a curated finding's captures have to be
+   the bytes the programs produced.
 2. **Confirm the divergence is real and reproducible.** Re-run the affected cell, and then reproduce
    it **by hand** from the `.expected` command templates — the procedure is in
    [`README.md`](README.md#reproducing-a-cell-by-hand). Reproducing it outside the harness is what
@@ -1089,11 +1104,30 @@ modules are under `tests/conformance_harness/`; and the documentation page is
 
 ### 7.4 Register changelog
 
-A row here records **when a curated finding was added, amended or withdrawn**, by date and
-description. No entry names an identifier that does not correspond to a directory under
+This is the changelog of **the register**, and it admits exactly two kinds of row, by date and
+description:
+
+- **A curated-finding lifecycle event** — a curated finding added to §2's table, amended, superseded
+  (§2.1) or withdrawn (§2.1). §2.1 requires both a supersession and a withdrawal to be recorded here,
+  so this kind cannot be dropped without breaking that requirement.
+- **A change to a statement this register makes** — its establishment, or its correction — about the
+  corpus, the active marker set, the triage rule or the artifact contract. Those statements are what a
+  reader *acts on*: §5 step 3 decides whether an observation is a finding at all, §6.2 decides which
+  marker already covers it, and §3 decides what a curated directory must hold. So when one of them is
+  established or stops being true, the fact of it and its date are part of the register's evidence
+  rather than an aside about it.
+
+Everything else stays out. A change to this document's **wording** — a clearer sentence, a fixed
+link, a reordered paragraph — belongs in version control and not here, because a changelog of prose
+is not evidence about a compiler; what earns a row is a change to what this register *asserts*. And
+no entry names an identifier that does not correspond to a directory under
 [`findings/`](findings/), for the same reason §2 has no illustrative row: an identifier in a register
-is a promise that the evidence exists. Editorial changes to this document's own prose belong in
-version control rather than here — a changelog of wording is not evidence about a compiler.
+is a promise that the evidence exists.
+
+The two kinds are deliberately not merged into one count. The **audit** reads §2's table and nothing
+else — a finding described in a row here has been *recounted*, not *indexed* — so a reader asking what
+this suite has ever found reads §2, and a reader asking how this register came to say what it says
+reads the rows below.
 
 **A row states what was true on its own date and is never rewritten afterwards**, which is what makes
 a dated log worth keeping. So a marker's class, scope or status as quoted in a row below is that
@@ -1103,8 +1137,12 @@ carries the current marker set, and the marker blocks in the records plus
 audit re-establishes on every run. Where a later row supersedes an earlier one, the earlier row is
 left standing and the later one says so.
 
-**The curated findings set is empty, so this log is empty.** The suite has recorded no undocumented
-divergence, [`findings/`](findings/) holds only its placeholder, and §2's table has no row.
+**The curated findings set is empty, so this log carries no curated-finding row.** The suite has
+recorded no undocumented divergence, [`findings/`](findings/) holds only its placeholder, and §2's
+table has no row. Every row below is therefore of the second kind — the establishment or the
+correction of a statement this register makes — and each one says in its own words that the curated set
+was, and remained, empty on its date. That is the distinction the paragraphs above draw: the log is not
+empty, and the register still is.
 
 | Date | Change |
 |---|---|

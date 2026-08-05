@@ -2581,12 +2581,57 @@ impl<'a> CellPlan<'a> {
             }
         }
 
+        // A finding takes the *other* branch — its workspace is always kept — so it never reached the
+        // evidence path above, and that is precisely why it needed one. A FINDING does not fail the
+        // run, so a run carrying findings passes, and what a passing run publishes is the report root:
+        // the generated finding directory is beneath the build directory and goes with the runner.
+        // The report named it and nobody could open it.
+        //
+        // So every finding also publishes a report-grade review copy of all seven artifact classes
+        // inside the report root, which is uploaded unconditionally. Done here rather than at write
+        // time for the same reason the evidence documents are: this is the moment the cell's verdicts
+        // are decided, so the set of findings to copy is known exactly, and — like every other line in
+        // this function — a problem with the copy is printed beside the cell and never allowed to
+        // amend a verdict that has already been reached.
+        //
+        // Deduplicated by identifier before anything is copied, because a finding is identified by its
+        // cell and divergence class and not by the oracle that observed it: one refused build seen by
+        // three oracles is three outcomes naming one directory, and copying it three times would
+        // charge the run's budget three times for identical bytes.
+        for identifier in finding_identifiers(outcomes) {
+            if let Some(note) = report::publish_finding_bundle(&identifier) {
+                println!("  {note}");
+            }
+        }
+
         if investigate || keep_everything {
             println!("  workspace retained: {}", workspace.retain().describe());
         } else if let Some(note) = workspace.discard_advisory() {
             println!("  note: {note}");
         }
     }
+}
+
+/// The identifier of every finding these outcomes recorded, each named once, in a fixed order.
+///
+/// An outcome carrying no divergence class cannot derive an identifier and therefore names no
+/// directory; that is an internal inconsistency the area report already diagnoses by name, so it is
+/// skipped here rather than reported a second time as a lost artifact it never had.
+fn finding_identifiers(outcomes: &[Outcome]) -> Vec<findings::FindingId> {
+    let mut identifiers: BTreeMap<String, findings::FindingId> = BTreeMap::new();
+    for outcome in outcomes {
+        if outcome.verdict() != Verdict::Finding {
+            continue;
+        }
+        let Some(class) = outcome.class() else {
+            continue;
+        };
+        let identifier = findings::FindingId::derive(outcome.key(), class);
+        identifiers
+            .entry(String::from(identifier.as_str()))
+            .or_insert(identifier);
+    }
+    identifiers.into_values().collect()
 }
 
 /// Whether this outcome makes its cell's workspace evidence that must be kept.
