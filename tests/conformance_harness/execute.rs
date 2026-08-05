@@ -261,7 +261,7 @@
 
 use std::ffi::OsStr;
 use std::fmt;
-use std::fs::{self, Metadata};
+use std::fs::{self, File, Metadata};
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::ExitStatusExt;
@@ -281,10 +281,10 @@ use super::sandbox::{
 use super::{
     ensure_within, infrastructure_breach, infrastructure_breach_refusal, isolate_child_environment,
     own_process_group, posix_command_line, public_text, reap_bounded, record_infrastructure_breach,
-    redact_secrets, require_regular_file, sanitize_text_for_report, shown_path,
-    terminate_process_group, CaptureIntegrity, CellKey, DivergenceClass, GroupTermination,
-    HarnessError, HarnessResult, ReapOutcome, Target, CAPTURE_CHUNK_BYTES,
-    CAPTURE_RETAINED_BYTES_MAX,
+    redact_secrets, register_process_group, require_regular_file, sanitize_text_for_report,
+    shown_path, terminate_process_group, CaptureIntegrity, CellKey, DivergenceClass,
+    GroupTermination, HarnessError, HarnessResult, PinnedDirectory, ReapOutcome, Target,
+    CAPTURE_CHUNK_BYTES, CAPTURE_RETAINED_BYTES_MAX,
 };
 
 /// The highest exit code a corpus program may be expected to return.
@@ -1595,6 +1595,12 @@ fn execute_bounded(
     // The group identifier equals the leader's own process identifier, which is this child, so no
     // extra bookkeeping is needed to name the group on any later path.
     let group = child.id();
+    // Owned from this line. Every path below can fail or panic — a missing pipe, a refused capture, an
+    // assertion in a helper — and an emulator guest left running once per failing cell is a leak
+    // multiplied by the matrix; the guard sweeps the group on any ending this process unwinds through.
+    // It also enrols the group with the external supervisor, which covers the endings it cannot unwind
+    // through at all.
+    let guard = register_process_group(group);
 
     let stdout_capture = match child.stdout.take() {
         Some(pipe) => spawn_reader(pipe),
@@ -1636,6 +1642,10 @@ fn execute_bounded(
     // member still in the group is a descendant that outlived it, and the verification inside is
     // what turns that from an invisible leak into a recorded fact.
     let swept = terminate_process_group(group, kill_tool());
+    // Released only after this module's own sweep, which reports its outcome on the cell where a sweep
+    // from a destructor could not. Prompt release is also what keeps the supervisor's live set exact: a
+    // group identifier becomes reusable once its leader has been reaped, which has just happened.
+    guard.release();
 
     let drain_deadline = Instant::now() + CAPTURE_DRAIN_GRACE;
     let stdout_stream = drain(stdout_capture, STDOUT_ROLE, drain_deadline);
@@ -2580,42 +2590,103 @@ impl ArchivedCapture {
 /// problem with its own tidying — the same rule the retirement path already follows. An entry that
 /// could not be read therefore appears in the archive saying so, which is strictly more informative
 /// than an absence.
+///
+/// # Why an integrity refusal here is a run-level failure and not merely a note
+///
+/// The paragraph above is right about a *tidying* problem and wrong about an *integrity* one, and the
+/// difference is what a report goes on to claim. These bytes are published into
+/// `target/conformance-report/`, which the continuous-integration workflow uploads as an ordinary
+/// artifact — so this function is an egress path, and the thing it must never do is carry bytes it
+/// cannot attribute to a file this cell produced. A cell workspace is a directory a compiler under test
+/// and a compiled program were both allowed to write into, at a path derived from the cell identity and
+/// therefore predictable, so three substitutions are available at exactly this moment:
+///
+/// - a capture name replaced by a **symbolic link** to any readable file on the machine;
+/// - a capture name replaced by a **hard link** to one, which is not a link at the leaf and is
+///   indistinguishable from an ordinary file by kind — so neither the symbolic-link refusal nor
+///   exclusive creation sees it;
+/// - the **workspace directory itself** replaced between the listing and the reads, so the entries
+///   archived are entries of somewhere else while every row still names this cell.
+///
+/// All three are closed by addressing every read through one pinned handle on the workspace root and
+/// requiring each entry to be a regular file, proved to be the entry that was inspected, with exactly
+/// **one** hard link ([`PinnedDirectory::open_regular_within`]). And when a refusal does occur it
+/// latches an infrastructure breach: the cell's verdicts are left exactly as they were decided — a
+/// tidying step still may not re-decide a cell — while the *run* stops scheduling and fails, because a
+/// run that met a substituted evidence file has met an attempt to route outside bytes into its own
+/// published artifact, and reporting that as a line inside the artifact is not reporting it at all.
 pub fn archive_persisted_captures(workspace: &Workspace) -> Vec<ArchivedCapture> {
     let root = workspace.root();
-    let mut entries: Vec<(String, PathBuf)> = match fs::read_dir(root) {
-        Ok(listing) => listing
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let name = entry.file_name().to_str().map(String::from)?;
-                Some((name, entry.path()))
-            })
-            .collect(),
+    let context = "archiving the captures a cell persisted";
+    let pinned = match PinnedDirectory::pin(context, root) {
+        Ok(pinned) => pinned,
         Err(error) => {
-            return vec![ArchivedCapture {
-                name: String::from("<workspace>"),
-                text: sanitize_text_for_report(&format!(
-                    "{} could not be listed, so no capture could be archived from it: {error}",
-                    shown_path(root)
-                )),
-                bytes: 0,
-                truncated: false,
-                binary: false,
-            }];
+            return vec![refused_capture(
+                "<workspace>",
+                &format!(
+                    "{} could not be held open, so no capture could be archived from it with its \
+                     identity established: {}",
+                    shown_path(root),
+                    error.cause()
+                ),
+            )];
         }
     };
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut entries: Vec<String> = match pinned.entry_names(context) {
+        Ok(names) => names,
+        Err(error) => {
+            return vec![refused_capture(
+                "<workspace>",
+                &format!(
+                    "{} could not be listed, so no capture could be archived from it: {}",
+                    shown_path(root),
+                    error.cause()
+                ),
+            )];
+        }
+    };
+    entries.sort();
 
     let mut archived = Vec::new();
     let mut spent = 0usize;
     let mut omitted = Vec::new();
-    for (name, path) in entries {
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            omitted.push(name);
+    for name in entries {
+        let path = pinned.shown_entry(&name);
+        // Opened through the handle and vetted in one step: a regular file, proved to be the entry
+        // that was inspected, carrying exactly one hard link. Every refusal is fatal to the RUN and
+        // is recorded as such before it is described in the archive, because a name inside a cell
+        // workspace that is not the ordinary file this suite wrote there is an attempt to put
+        // somebody else's bytes into a published report.
+        let opened = match pinned.open_regular_within(context, &name) {
+            Ok(opened) => Some(opened),
+            Err(error) => {
+                let metadata = fs::symlink_metadata(&path);
+                // An entry that is simply not a regular file — a sub-workspace directory, most often —
+                // is not an integrity problem and never was: it is skipped exactly as before.
+                if metadata
+                    .as_ref()
+                    .is_ok_and(|metadata| metadata.file_type().is_dir())
+                {
+                    continue;
+                }
+                // Absence is the one remaining benign reading, and it is the ordinary race: the entry
+                // was listed and is now gone. Reported as omitted, not as a breach.
+                if metadata
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
+                {
+                    omitted.push(name);
+                    continue;
+                }
+                record_capture_integrity_breach(&path, error.cause());
+                archived.push(refused_capture(&name, error.cause()));
+                continue;
+            }
+        };
+        let Some((file, metadata)) = opened else {
             continue;
         };
-        if !metadata.is_file() {
-            continue;
-        }
         let bytes = metadata.len();
         let remaining = ARCHIVED_TOTAL_BYTES_MAX.saturating_sub(spent);
         if remaining == 0 {
@@ -2623,7 +2694,7 @@ pub fn archive_persisted_captures(workspace: &Workspace) -> Vec<ArchivedCapture>
             continue;
         }
         let budget = ARCHIVED_ENTRY_BYTES_MAX.min(remaining);
-        let (head, truncated) = match read_bounded_prefix(&path, budget) {
+        let (head, truncated) = match read_bounded_prefix(file, budget) {
             Ok(read) => read,
             Err(error) => (
                 format!(
@@ -2667,8 +2738,9 @@ pub fn archive_persisted_captures(workspace: &Workspace) -> Vec<ArchivedCapture>
             name: String::from("<omitted>"),
             text: sanitize_text_for_report(&format!(
                 "{} entr(ies) were not archived because the {ARCHIVED_TOTAL_BYTES_MAX}-byte budget \
-                 for one cell's evidence was exhausted or they could not be inspected: {}. The \
-                 cell's workspace path is named above; re-run the cell to reproduce them",
+                 for one cell's evidence was exhausted, or because they ceased to exist between the \
+                 listing and the read: {}. The cell's workspace path is named above; re-run the cell \
+                 to reproduce them",
                 omitted.len(),
                 omitted.join(", ")
             )),
@@ -2677,10 +2749,66 @@ pub fn archive_persisted_captures(workspace: &Workspace) -> Vec<ArchivedCapture>
             binary: false,
         });
     }
+    // Verified last, so a workspace substituted while its captures were being read cannot be reported
+    // as a cell's own evidence. Every entry above was addressed through the handle, so the bytes came
+    // from the pinned directory whatever the name now resolves to — but the report is about to print
+    // that name, so a name that has stopped leading there is an integrity failure of the same kind and
+    // is latched the same way.
+    if let Err(error) = pinned.require_still_pinned(context, "after the captures were archived") {
+        record_capture_integrity_breach(root, error.cause());
+        archived.push(refused_capture("<workspace>", error.cause()));
+    }
     archived
 }
 
-/// Read at most `budget` bytes from the start of a file, reporting whether more remained.
+/// One archived entry standing in for a capture this run refused to transcribe.
+///
+/// A refusal is *recorded* rather than omitted, for the reason the whole archive exists: an entry that
+/// is simply absent from a report and an entry that was refused look identical to a reader and mean
+/// opposite things.
+fn refused_capture(name: &str, cause: &str) -> ArchivedCapture {
+    ArchivedCapture {
+        name: sanitize_text_for_report(name),
+        text: sanitize_text_for_report(&redact_secrets(cause)),
+        bytes: 0,
+        truncated: false,
+        binary: false,
+    }
+}
+
+/// Latch an evidence-integrity refusal as a run-level breach.
+///
+/// The cell's verdicts are already decided and are deliberately left alone — a tidying step must never
+/// re-decide a cell. What must not be left alone is the **run**: a name inside a cell workspace that is
+/// not the ordinary single-linked regular file this suite wrote there is an attempt to route bytes this
+/// run cannot attribute into `target/conformance-report/`, which the continuous-integration workflow
+/// publishes as an artifact. So the same latch the resource guards use is set, which refuses every
+/// subsequent launch and — through the driver's own assertion — fails the run with the recorded reason.
+///
+/// Recorded once and never overwritten, like every other breach: the first refusal is the one that
+/// explains the rest.
+fn record_capture_integrity_breach(path: &Path, cause: &str) {
+    record_infrastructure_breach(sanitize_text_for_report(&redact_secrets(&format!(
+        "the evidence a cell persisted into {} could not be attributed to a file that cell produced, \
+         so it was refused rather than published: {cause}. The cell's own verdicts stand as they were \
+         decided — a tidying step does not re-decide a cell — but the run stops here, because this \
+         evidence is copied into the report directory that continuous integration uploads, and a name \
+         inside a cell workspace that is not the ordinary single-linked regular file this suite wrote \
+         there is an attempt to route bytes this run cannot account for into that artifact. Inspect \
+         the named workspace on the machine that produced it",
+        shown_path(path)
+    ))));
+}
+
+/// Read at most `budget` bytes from the start of an **already-opened, already-vetted** file, reporting
+/// whether more remained.
+///
+/// Takes the open handle rather than a path, and that is the whole of the change that makes this safe
+/// to point at a cell workspace. Re-opening by name would be a second resolution of a predictable
+/// path, so the file vetted by the caller and the file read here could differ — which is precisely how
+/// a link planted at a capture name gets read while every report still names the cell's own entry. The
+/// caller establishes the properties once, through [`PinnedDirectory::open_regular_within`], and hands
+/// over the handle those properties were established on; there is no second lookup to race.
 ///
 /// Yields the raw bytes rather than a string, because the caller has to decide from them whether the
 /// entry is text at all, and that decision cannot be made after a decode has already destroyed the
@@ -2688,8 +2816,7 @@ pub fn archive_persisted_captures(workspace: &Workspace) -> Vec<ArchivedCapture>
 /// arbitrary bytes a compiled program wrote, so it is not required to be valid UTF-8, and refusing to
 /// archive a program's output for that reason alone would discard exactly the evidence an unusual
 /// failure produces.
-fn read_bounded_prefix(path: &Path, budget: usize) -> io::Result<(Vec<u8>, bool)> {
-    let mut file = fs::File::open(path)?;
+fn read_bounded_prefix(mut file: File, budget: usize) -> io::Result<(Vec<u8>, bool)> {
     let mut buffer = vec![0u8; budget];
     let mut filled = 0usize;
     while filled < budget {

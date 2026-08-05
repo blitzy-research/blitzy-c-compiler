@@ -198,6 +198,18 @@ expected_divergence.documented <<END
 GCC extensions explicitly required: `__attribute__`, `__builtin_*` intrinsics, inline assembly (`asm`/`__asm__` with operand constraints), statement expressions, `typeof`/`__typeof__`, computed goto, `__extension__`
 END
 expected_divergence.observed <<END
+THIS IS A FROZEN SPECIFICATION EXCEPTION, NOT AN OBSERVED DIVERGENCE, and that distinction is now
+enforced by the harness rather than left to this prose. The marker's identifier, its class and the
+document its basis cites are fixed in an immutable allowlist compiled into the conformance harness;
+this record may only instantiate that definition and is refused outright if it restates any part of it,
+so the authority for carrying this marker does not live in this file and cannot be edited here. Every
+marker the allowlist does NOT name is admitted on captured evidence alone -- a quotation resolved inside
+the very section its basis cites, plus a structured, re-runnable observation of command, exit status,
+output, toolchain and capture date -- and the verdict detail of each arm a marker excuses states which
+of those two tiers admitted it. Nothing about how this field is worded is what makes the marker
+acceptable, which is the point: the previous contract could be satisfied by careful phrasing, and this
+one cannot.
+
 WHAT THIS MARKER COVERS, AND WHAT STANDS BEHIND EACH HALF OF IT. It covers exactly one divergence: a
 refusal by the compiler under test to translate the case-range label form, on oracle (a) alone. A
 refusal produces no artifact, so oracle (a) has nothing to compare, while the reference compiler

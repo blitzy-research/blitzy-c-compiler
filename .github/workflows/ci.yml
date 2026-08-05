@@ -81,12 +81,12 @@ permissions:
 # though the first two describe trees nobody will merge — paying full price for a verdict on
 # a commit that has already been superseded.
 #
-# The group key is the workflow paired with the pull request it belongs to, falling back to the
-# git ref when there is no pull request — resolving to `CI-123` for pull request 123 and
-# `CI-refs/heads/main` for a push to main, so different branches and different pull requests
-# never share a group and never cancel each other. Keying a pull request by its NUMBER rather
-# than by the synthesized merge ref names it by its own identity, which survives a rename or a
-# force-push of its head branch.
+# The group key is exactly the workflow name plus the git ref. This workflow has only two
+# triggers: a push to `main`, which resolves to `CI-refs/heads/main`, and a manual dispatch,
+# which resolves to the branch or tag selected by the operator. Runs for the same selected ref
+# share a group and the newer one cancels the older one; runs for different refs never cancel
+# each other. There is no pull-request key or fallback because this workflow deliberately has
+# no `pull_request` trigger, as the execution-boundary explanation above records.
 #
 # Cancellation is safe here specifically because this suite is a FULL sweep rather than an
 # incremental one: every run compares the same 108 programs over the same matrix, so the run
@@ -451,10 +451,19 @@ jobs:
       # So the raw directories are behind an explicit opt-in below, and the report — which names
       # every finding, its identifier and its directory, with a sanitized account of each
       # divergence — is what a reader gets without asking.
+      #
+      # Evidence integrity is a separate, enforced gate rather than part of that prose-redaction
+      # claim. Before a captured stream can enter `conformance-report/evidence/`, the harness pins
+      # the cell workspace, opens the entry through that directory handle, verifies a plain regular
+      # file with exactly one hard link, and re-checks the workspace identity. Any refusal latches an
+      # infrastructure breach, and the area assertion fails the run. The always-upload policy may
+      # therefore publish a partial failing report for diagnosis, but it never turns an unverified
+      # symlink/hard-link/name substitution into ordinary report evidence.
       - name: State the report's disclosure bound before publishing it
         if: always()
         run: |
           set -euo pipefail
+          echo "::notice::Every archived capture in conformance-report/evidence passed the harness's pinned-workspace, verified-regular-file, single-hard-link and parent-identity checks. Any integrity refusal is an infrastructure breach that fails the area rather than evidence that this upload step accepts."
           echo "::notice::The conformance-report artifact is redacted by the harness at the point each outcome is created — secret redaction, root elision and report-safe rendering — but that guarantee is bounded, not absolute: conformance_harness/mod.rs documents that a bare credential shorter than its redaction floor, and a value recognised as an absolute filesystem path, are left in the text. Treat the report as sanitized against the named forms with a narrow residual class, and inspect it before republishing it outside this repository."
 
       - name: Upload the conformance reports

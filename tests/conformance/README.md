@@ -625,10 +625,10 @@ carrying its weight:
 
 Append the **five required keys**, or none of them. The block is optional as a whole; within it, the
 five are mandatory and a partial block is a hard error. Two further keys — `documented` and
-`evidence` — are **optional enrichment**: write either when you can fill it honestly, omit it when you
-cannot, and in neither case does its absence decide whether the marker is accepted. This is the
-**syntax**; whether a marker may legitimately be written is a separate question, answered immediately
-below.
+`evidence` — are **tiered**: whether they are required depends on which of two authorities admits the
+marker, and for every marker an author mints of their own accord **both are mandatory**. This is the
+**syntax**; who may legitimately write a marker is a separate question, answered under
+[Marker authority](#marker-authority-two-tiers-and-no-third) below.
 
 ```text
 expected_divergence.id       = XD-<AREA>-<SUBJECT>-<NNN>
@@ -676,8 +676,9 @@ anything. A **narrowing** marker names the oracle its record switches off and ca
 `comparison_excluded` class instead of any of the six, because nothing is compared there;
 `XD-TYPE-LONGDOUBLE-001` is that shape.
 
-**What the format enforces about a basis, and what it deliberately leaves to a reviewer.** A marker
-reclassifies a divergence on the authority of something this repository documents, so the citation
+**What the format enforces about a basis, and what it deliberately leaves to a reviewer.** This is a
+check on the *citation*, applied only after the tier above has already decided the marker may exist. A
+marker reclassifies a divergence on the authority of something this repository documents, so the citation
 must be **followable**: the document is resolved, contained, read, and its locator resolved to a
 concrete line range on every run, and a `documented` quotation must occur **inside that range**. What
 the format does *not* do is adjudicate how strong the cited passage is. An **omission** from a
@@ -689,26 +690,61 @@ today: the case-range marker cites the compliance rule that fixes the **required
 states a boundary rather than leaving one to be inferred from silence. Judging a citation is a reviewer's job, performed against the register; the
 audit's job is to guarantee the reviewer can find the passage.
 
-**Do not attach a marker speculatively, and this is enforced.** `expected_divergence.observed` must
-state what was actually seen: wording that describes the divergence as predicted — "is expected to",
-"will reject", "anticipated", "no verdict has been recorded" — is refused at parse time, and so is the
-same wording in `evidence`. For a divergence nobody has observed, the correct record is **no marker**
-and the run reports it as a **FINDING**, which is a first-class reported outcome rather than a
-compromise. A marker minted on a guess does active harm: if the construct in fact works the cell agrees,
-the verdict is **XPASS**, and the run fails on a mistake in the test material rather than a defect in
-the compiler; and until someone notices, it blinds the suite to a genuine regression in exactly the
-construct it was meant to document.
+### Marker authority: two tiers, and no third
 
-**The two markers the frozen brief names are the case that rule does not decide, and conflating the two
-is what produced four reversals in `EXPECTED_DIVERGENCES.md` §8.3.** The brief fixes each of them for a
-named program by identifier, class, scope and basis and requires the record to carry it, so carrying one
-is a requirement rather than an author's speculation. What such a marker owes a reader is **disclosure**
-— `evidence` left unwritten, and `observed` saying which half of the pair is measured and which is not —
-never deletion. And the `XPASS` safeguard stays fully in force, which is exactly why disclosure is
-enough: an unconfirmed marker fails every run in which the construct works, so it cannot blind anything.
-Retiring one then needs an **independent** observation from the real compiler under test; an agreement
-produced by a stand-in that forwards to the reference toolchain compares one toolchain with itself and
-settles nothing. `EXPECTED_DIVERGENCES.md` §8.5 is the checklist for any **new** marker, and §4 works
+A marker is the one mechanism in this suite that turns a failing comparison into a non-failing verdict,
+so the only question that really matters about one is **who authorised it**. There are exactly two
+admissible answers, they are decided in the harness before anything else about the marker is considered,
+and a marker satisfying neither is refused **at parse time** — the record does not load, and the
+program's cells are not run rather than being quietly excused.
+
+| Tier | What authorises it | `documented` | `evidence` |
+|---|---|---|---|
+| **Frozen** | An immutable allowlist compiled into `../conformance_harness/manifest.rs`, fixing the identifier, class and basis document of each exception the frozen brief names in advance. | enrichment | enrichment |
+| **Observed** | Captured evidence, and nothing else. | **required** | **required** |
+
+**The frozen tier is unreachable by editing files, and that is its entire value.** The allowlist is
+source, not data: no expectation record and no edit to `EXPECTED_DIVERGENCES.md` can add to it or change
+an entry. A record may only *instantiate* an entry — name a frozen identifier while declaring a different
+class, or cite a different document, and the record is refused rather than believed. So the shape that
+used to be sufficient is no longer sufficient: adding a marker to a program's record, mirroring it in the
+register, and letting the bidirectional audit certify that the two agree authenticates nothing, because
+two documents agreeing with each other was only ever evidence that one author wrote both.
+
+**The observed tier is the only way a new exception enters, and it costs an observation.** Both keys are
+required, and each is checked for something prose cannot supply: `documented` must quote the cited
+passage verbatim and the quotation must resolve **inside the region the basis locator names**, and
+`evidence` must carry all five of `command`, `exit`, `output`, `toolchain` and `captured`. That does not
+make a marker true — nothing automated can weigh whether a passage supports a claim — but it moves
+forging one from *writing a plausible sentence* to *fabricating a reproducible observation* that the next
+run's `XPASS` safeguard is positioned to contradict. Every non-failing verdict prints which tier admitted
+its marker, so a reader never has to open another file to see what stopped a divergence from failing.
+
+**Wording is hygiene, not authority, and treating it as authority was the defect this replaced.**
+`expected_divergence.observed` must still state what was actually seen, and wording that describes the
+divergence as predicted — "is expected to", "will reject", "anticipated", "no verdict has been recorded" —
+is still refused at parse time, in `evidence` too. Keep writing records that way: it turns a muddled
+record into a clear error at the moment it is written. But do not mistake it for a check on legitimacy. A
+phrase blacklist assumes an author with no observation will say so in one of a listed set of words, which
+holds for an honest author writing carelessly and fails completely for a careless author writing
+confidently — any synonym, any paraphrase, any flatly declarative sentence walks straight past it.
+
+**For a divergence nobody has observed, the correct record is no marker.** The run reports it as a
+**FINDING**, which is a first-class reported outcome rather than a compromise. A marker minted on a guess
+does active harm even now that one is hard to mint: if the construct in fact works the cell agrees, the
+verdict is **XPASS**, and the run fails on a mistake in the test material rather than a defect in the
+compiler; and until someone notices, it blinds the suite to a genuine regression in exactly the construct
+it was meant to document.
+
+**What a frozen marker still owes, since its tier excuses it from the evidence keys and nothing else.**
+Disclosure rather than deletion: `evidence` left unwritten, and `observed` saying which half of the pair
+is measured and which is not. The `XPASS` safeguard stays fully in force for every tier, which is exactly
+why disclosure is enough — an unconfirmed marker fails every run in which the construct works, so it
+cannot blind anything. Retiring one then needs an **independent** observation from the real compiler under
+test; an agreement produced by a stand-in that forwards to the reference toolchain compares one toolchain
+with itself and settles nothing. Conflating the frozen and observed cases is what produced four reversals
+in `EXPECTED_DIVERGENCES.md` §8.3, and the two tiers exist so that the distinction is enforced rather than
+argued. `EXPECTED_DIVERGENCES.md` §8.5 is the checklist for any **new** marker, and §4 works
 through all three candidates the suite has analysed — the third, the wide and Unicode literal prefixes,
 is deliberately left **unmarked**.
 
@@ -868,9 +904,12 @@ Each item below is a **hard error**.
 **Marker block**
 
 - **A partial `expected_divergence.*` block is a hard error** — all **five** required keys (`id`,
-  `class`, `scope`, `basis`, `observed`) or none of them. `documented` and `evidence` are optional
-  enrichment: either may be omitted, and omitting one is never a reason to reject a marker. Writing
-  one when the block itself is absent is an error, because there would be no marker for it to enrich.
+  `class`, `scope`, `basis`, `observed`) or none of them. `documented` and `evidence` are **tiered**:
+  both may be omitted only for one of the exceptions the frozen brief fixes in advance, whose authority
+  does not come from the record; for every other marker both are **required**, because captured evidence
+  is that marker's only route in. See [Marker authority](#marker-authority-two-tiers-and-no-third).
+  Writing either when the block itself is absent is an error, because there would be no marker for it to
+  enrich.
 - `expected_divergence.class` must be one of the six class identifiers listed above.
 - `expected_divergence.scope` is structured. Clauses are separated by `;`. A clause either names a
   whole dimension — `all oracles`, `all targets`, `all opt levels` — or lists members of exactly one
@@ -914,6 +953,12 @@ Each item below is a **hard error**.
     because the audit's one-line tolerance still resolves it. A phrase moves with the passage it
     quotes. Both live markers cite this way, and §7 of the register records which form each cited
     document takes.
+- **Authority is decided before the basis is examined at all.** Either the identifier appears in the
+  immutable allowlist compiled into `../conformance_harness/manifest.rs` — in which case its class and
+  basis document are fixed there and a record that restates either is refused — or the marker carries
+  both `documented` and `evidence` and is admitted on that capture alone. There is no third route, and in
+  particular the absence of anticipatory wording is not one. Every bullet below is a check on a marker
+  that has *already* been authorised by one of those two tiers.
 - **A basis resting on an omission is permitted, and is not adjudicated by the parser.** A passage
   that enumerates what is implemented and does not name the construct authorises less than an
   assertion would, and the frozen brief mandates exactly that basis for `XD-GCCEXT-CASE-RANGES-001`.
@@ -924,20 +969,23 @@ Each item below is a **hard error**.
   basis is. Permitting a citation is not endorsing it: the case-range marker rests on such an omission,
   and §4.1 records both that it is the basis the brief fixes and that a silence authorises less than an
   assertion would.
-- `expected_divergence.documented`, **when written**, must carry the authorising passage **quoted
-  verbatim**, at least 24 bytes long so it identifies a passage rather than a word, and
+- `expected_divergence.documented` — **required for every marker the allowlist does not name**, and
+  enrichment for the ones it does — must carry the authorising passage **quoted verbatim**, at least 24 bytes long so it identifies a passage rather than a word, and
   `infra_expected_divergence_register` finds it **inside the range the locator resolves to** — with
   runs of whitespace collapsed — rather than anywhere in the file. A locator proves a line exists;
   finding the quotation in that range is what proves the citation points where it says it does. When
   the key is omitted the locator is still resolved and reported.
-- `expected_divergence.evidence`, **when written**, must name all five of `command`, `exit`, `output`,
-  `toolchain` and `captured`, each as a `name: value` line with a non-empty value, and its wording is
-  held to the same non-anticipatory standard as `observed`. Written, it makes the divergence
-  re-runnable and contradictable; omitted, the marker still stands on its `observed` field and its
-  basis.
+- `expected_divergence.evidence` — **required for every marker the allowlist does not name**, and
+  enrichment for the ones it does — must name all five of `command`, `exit`, `output`, `toolchain` and
+  `captured`, each as a `name: value` line with a non-empty value, and its wording is held to the same
+  non-anticipatory standard as `observed`. It is what makes the divergence re-runnable and
+  contradictable, which is precisely why it is not optional for a marker nobody but its author
+  authorised: a marker that cannot be contradicted is a marker that cannot be wrong.
 - `expected_divergence.observed` must describe the divergence **as seen**. Anticipatory wording — "is
-  expected to", "will reject", "anticipated", "no verdict has been recorded" — is refused. What the
-  parser enforces is the *wording*; for a marker an author mints of their own accord the correct record
+  expected to", "will reject", "anticipated", "no verdict has been recorded" — is refused. This is
+  **hygiene, not authority**: a phrase blacklist is trivially walked past by a synonym or a flatly
+  declarative sentence, so it catches an honest author writing carelessly and nothing else. What the
+  parser enforces here is the *wording*; for a marker an author mints of their own accord the correct record
   for a divergence nobody has observed is **no marker**, and the run then reports it as a `FINDING`,
   with a reproducer and exact reproduction commands, which is what requirement 6 asks for. The two
   markers the frozen brief fixes are carried regardless, with the unmeasured half **disclosed** in

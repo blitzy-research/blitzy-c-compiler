@@ -181,9 +181,10 @@ use super::execute::TIMEOUT_UTILITY_OUTER_MARGIN;
 use super::manifest::Execution;
 use super::{
     build_root, digest_hex, isolate_child_environment, own_process_group, reap_bounded,
-    record_infrastructure_breach, redact_secrets, run_id, sanitize_text_for_report, shown_path,
-    stable_digest, terminate_process_group, AreaSpec, HarnessError, HarnessResult, OptLevel,
-    Oracle, ReapOutcome, RunGeneration, Target, BCC_TARGET_FLAG,
+    record_infrastructure_breach, redact_secrets, register_process_group, run_id,
+    sanitize_text_for_report, shown_path, stable_digest, terminate_process_group, AreaSpec,
+    HarnessError, HarnessResult, OptLevel, Oracle, ReapOutcome, RunGeneration, Target,
+    BCC_TARGET_FLAG,
 };
 
 // Every variable the harness reads is a named constant so that a diagnostic can quote the exact
@@ -2255,9 +2256,16 @@ fn run_bounded_probe(command: &mut Command) -> Option<ProbeCapture> {
     // each of its three phases being bounded separately and summing to three times the budget.
     let deadline = Instant::now() + PROBE_DEADLINE;
     let group = child.id();
+    // Owned for the whole probe. A probe is short and ordinarily well behaved, which is exactly why an
+    // unswept one is easy to overlook: the pre-flight runs dozens of them, and a probe of a tool that
+    // forks would otherwise leave a descendant behind for every one. The guard covers an ending this
+    // function unwinds through, and enrols the group with the external supervisor for the rest.
+    let guard = register_process_group(group);
     let stdout_reader = child.stdout.take().map(spawn_capped_reader);
     let stderr_reader = child.stderr.take().map(spawn_capped_reader);
     let (timed_out, status) = await_child_within_deadline(&mut child, group, deadline);
+    // Released after the wait, which is where this module performs its own sweep and reap.
+    guard.release();
     let stdout = harvest_within_deadline(stdout_reader, deadline);
     let stderr = harvest_within_deadline(stderr_reader, deadline);
     Some(ProbeCapture {
@@ -2454,6 +2462,39 @@ fn confirm_signalling_tool_unchanged(program: &Path) -> Option<String> {
 /// looked up by name rather than hard-coded to a directory so that a host which installs it in
 /// `/bin` rather than `/usr/bin` still works.
 const KILL_TOOL_NAME: &str = "kill";
+
+/// The name under which the POSIX shell is looked up.
+///
+/// Needed for exactly one purpose: running the small program that supervises this run's process
+/// groups from outside the process, so that a signal this process cannot catch still ends the
+/// children it started. Looked up by name for the same reason `kill` is.
+const SHELL_TOOL_NAME: &str = "sh";
+
+/// The POSIX shell this run uses to host its process-group supervisor, if one could be trusted.
+///
+/// Resolved through the ordinary trusted search and memoized for the life of the run, exactly like
+/// [`kill_tool`] — the two are used together, and a second discovery path would be a second chance to
+/// disagree about which file on this machine was trusted. Trust matters more here than for most tools,
+/// not less: this one is handed a program to execute.
+///
+/// [`None`] means no trusted shell was found, in which case the external supervisor is simply not
+/// started. That is a disclosed degradation rather than a failure — the in-process guard that sweeps a
+/// group when a cell unwinds is unaffected, and the pre-flight capability report states whether
+/// external supervision is in force — for the same reason a missing `kill` utility does not fail a run:
+/// refusing a whole matrix over a capability gap would be a worse answer than performing it with the
+/// gap stated.
+pub(super) fn shell_tool() -> Option<&'static Path> {
+    static SHELL_TOOL: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SHELL_TOOL
+        .get_or_init(|| {
+            let resolved = resolve_tool(SHELL_TOOL_NAME)?;
+            if untrusted_reason(&resolved).is_some() {
+                return None;
+            }
+            Some(resolved)
+        })
+        .as_deref()
+}
 
 /// Capture a tool's banner for the environment fingerprint.
 ///
@@ -4664,6 +4705,26 @@ impl Capabilities {
             self.config.timeout_secs(),
             VAR_TIMEOUT_SECS
         ));
+        // Whether the second line of defence around this run's process groups is in force, stated
+        // rather than assumed. Each spawned child is put in a group of its own so that terminating an
+        // invocation terminates everything it started — and so that an interrupt aimed at the test
+        // runner cannot kill a compiler mid-write. The cost of that isolation is that a signal ending
+        // THIS process no longer ends the children, and no `std` facility can catch a signal to make up
+        // for it. A guard value covers every ending this process unwinds through; the external
+        // supervisor covers the ones it does not, and it needs a trusted shell to exist. A machine
+        // without one is told so here, because a reader of a green run is entitled to know which of the
+        // two guarantees was in force.
+        lines.push(match super::process_group_supervision() {
+            Some(detail) => format!("  process groups: {detail}"),
+            None => String::from(
+                "  process groups: NO EXTERNAL SUPERVISOR — a trusted POSIX shell and a trusted \
+                 `kill` utility are both required to host one, and at least one was not found, so a \
+                 group is swept only by this run's own cleanup and by the guard that fires when a \
+                 cell unwinds. Should this process be killed outright, a compiler or emulator it had \
+                 launched could outlive it. Installing both on the trusted search path restores the \
+                 guarantee",
+            ),
+        });
         lines.push(String::new());
 
         lines.push(String::from("Effective matrix"));

@@ -146,7 +146,7 @@ reader faced with two entries cannot tell which is the authority.
 
 ## 2. The marker contract
 
-### 2.1 The five required keys, and two optional ones
+### 2.1 The five required keys, and two whose requirement depends on the tier
 
 A marker is a block inside a program's `.expected` record. **Five keys are required — either all
 five are present or none is**: a partial block is a hard parse error, not a warning, because each
@@ -161,46 +161,88 @@ reproduced here rather than reinterpreted.
 | `expected_divergence.basis` | The repository artifact and the located section that authorises the marker. | Without it the divergence is reclassified on no authority at all. |
 | `expected_divergence.observed` | The divergence as seen, in prose, and **not** as anticipated. | Without it a reader cannot tell whether what they are looking at is what was marked; written in the future tense it would excuse a cell on an expectation. |
 
-Two further keys are **optional**. Each strengthens a marker and neither gates one, and the
-distinction matters more than it looks:
+Two further keys are **tiered**: whether they are required depends on *who authorises the marker*.
+For one of the exceptions the project specification fixes in advance they remain enrichment, because the
+authority is not the record's to supply. For every other marker they are the only route in, and both are
+mandatory. §2.1.1 states the rule; here is what each key holds:
 
 | Optional key | Holds | What it adds |
 |---|---|---|
 | `expected_divergence.documented` | A **verbatim quotation** of the passage that authorises the marker, resolved **inside the region the basis locator names**. | A locator proves a section exists; a quotation from inside it proves the section says something, and pins which sentence the author meant. |
 | `expected_divergence.evidence` | The **captured** observation: `command`, `exit`, `output`, `toolchain`, `captured`. | It records that somebody produced the divergence rather than reasoned about it, and it tells the next reader how to produce it again. |
 
-**Why they are optional, recorded because they were once required and that was wrong.** A revision
-of this suite required both, on the reasoning that a marker minted from a citation plus prose can be
-neither contradicted nor re-run. The reasoning is sound as an argument for writing them; it is not
-sound as an admission rule, because neither of the two markers the project specification mandates can
-satisfy it. One rests on an inventory's *silence*, which no sentence can quote. The other documents a
-type whose cross-backend comparison the same specification switches **off**, so no arm exists that
-could ever produce a captured observation for it. Requiring both keys therefore did not raise the
-standard — it made the two mandated markers inexpressible, and the exclusions they document were
-reported `XFAIL` with no identifier, no register entry and no resolved basis behind them, which is
-strictly less auditable than the markers it refused. Write them whenever you can; the format will
-not pretend a marker is illegitimate without them.
+#### 2.1.1 Two tiers of authority, and no third
 
-**What does gate a marker, stated precisely, because this is where the register has contradicted
-itself before.** Three things, and no more. `observed` must be present. Its wording must not describe
-the divergence as a *prediction* (§1.1, "Observed — not anticipatory"), which is enforced at parse
-time. And a marker an author mints of their own accord needs the observation §8.5 step 1 demands —
-because a marker excuses a cell, so minting one from a guess inverts the burden of proof.
+A marker converts a real failing comparison into a non-failing verdict, so the only question that
+matters about one is **who authorised it**. There are exactly two admissible answers, they are decided
+in the harness before anything else about the marker is considered, and a marker that satisfies neither
+is refused at parse time — the record does not load, and the program's cells are not run rather than
+being quietly excused.
 
-**The two markers the frozen specification names are the one case where that third condition is
-supplied from outside, and pretending otherwise is what caused the thrash logged in §8.3.** The
-specification fixes each of them for a named program by identifier, class, scope and basis, and
-requires the record beside that program to carry it. That is a requirement this register enforces, not
-an inference it may withdraw — exactly as §2.4.1 admits an omission-based basis because refusing it
-would refuse a marker the specification mandates. (That latitude is a property of the format rather
-than a description of the corpus: neither active marker relies on it today, §4.1 having moved to the
-affirmative compliance rule that fixes the required extension set.) What is *required* of such a marker is **disclosure**
-rather than deletion: leave `evidence` unwritten, and say in `observed` which half of the pair is
-measured and which is not. What is *not* suspended is §3.1. An unconfirmed marker on a construct that
-works produces `XPASS` and **fails the run**, naming the marker and both places it lives, so the gap is
-a loud state nobody can walk past rather than a silent pass. Retirement then takes an observation of its
-own — see §3.2 — and specifically an **independent** one: an agreement produced by a stand-in that
-forwards to the reference toolchain is one toolchain compared with itself, and settles nothing.
+| Tier | What authorises the marker | `documented` | `evidence` |
+|---|---|---|---|
+| **Frozen** | An immutable allowlist **compiled into the conformance harness**, which fixes the identifier, the divergence class and the basis document for each exception the project specification names in advance. | enrichment | enrichment |
+| **Observed** | Captured evidence, and nothing else. | **required** | **required** |
+
+**The frozen tier cannot be reached by editing files, and that is the whole of its value.** The
+allowlist lives in `tests/conformance_harness/manifest.rs`, in source that no expectation record and no
+edit to this register can reach. A record may *instantiate* an entry and may do nothing else with it: if
+it names a frozen identifier and declares a different class, or cites a different document, the record is
+refused rather than believed. So the shape that used to work — edit a program's record to add a marker,
+edit this register to mirror it, and watch the bidirectional audit certify that the two agree — no longer
+authenticates anything. Two documents agreeing with each other was never evidence about a compiler; it
+was evidence that one author wrote both.
+
+**The observed tier is the only way a new exception enters, and it costs an observation.** Both keys are
+required, and each is checked for something a sentence cannot fake: `documented` must quote the cited
+passage verbatim and the quotation must resolve **inside the region the basis locator names**, and
+`evidence` must carry all five of `command`, `exit`, `output`, `toolchain` and `captured`. That does not
+make a marker true — no automated check can weigh whether a passage supports a claim — but it moves
+forging one from *writing a plausible sentence* to *fabricating a reproducible observation*, which the
+next run's §3.1 safeguard is positioned to contradict.
+
+**Wording authenticates nothing, and treating it as though it did was the defect this replaces.** The
+parser still refuses `observed` phrased as a prediction (§1.1, "Observed — not anticipatory"), and that
+check is worth keeping for what it actually is: hygiene that turns a muddled record into a clear error at
+the moment it is written. It is not an authority test. Its premise — that an author who has made no
+observation will say so in one of a listed set of phrases — holds for an honest author writing carelessly
+and fails completely for a careless author writing confidently, because any synonym, any paraphrase and
+any flatly declarative sentence walks past it. Absence of blacklisted wording is evidence of nothing.
+
+**Why the two mandated markers are frozen rather than evidenced, which is the case that forced the two
+tiers to exist.** Neither can satisfy the observed tier, and not because their authors were lazy. One
+rests on an inventory's *silence*, which no sentence can quote. The other documents a type whose
+cross-backend comparison the same specification switches **off**, so no arm exists that could ever produce
+a captured observation for it. An earlier revision of this suite required both keys of every marker, which
+did not raise the standard: it made the two mandated markers inexpressible, and the exclusions they
+document were then reported `XFAIL` with no identifier, no register entry and no resolved basis behind
+them — strictly less auditable than the markers it had refused. The next revision made both keys
+unconditionally optional, which made every marker as weak as the weakest one. Tiering them is what lets a
+mandated exception be expressible *and* a new exception be expensive.
+
+**The specification names a third marker in advance, and it is deliberately not in the allowlist.** The
+wide-and-Unicode-literal candidate of §4.3 — whose identifier this register does not spell, because §1.1's
+reverse check requires every `XD-` token written anywhere here to resolve to a live marker — is fixed
+*conditionally*: the specification directs that it be attached "only if a divergence is actually observed
+and traceable to that documentation gap". A conditional-on-observation marker is precisely an
+observed-tier marker, so freezing it would grant it the one thing its own definition withholds. Its
+absence from the allowlist is the specification being followed rather than an entry overlooked, and §4.3
+records the candidate as analysed with no marker. The allowlist in the harness spells the identifier in a
+comment for the same reason this register does not: source is not scanned by the reverse check, so that is
+where the name can be recorded without registering it.
+
+**What a frozen marker still owes, and what is never suspended.** Disclosure rather than deletion: leave
+`evidence` unwritten, and say in `observed` which half of the pair is measured and which is not. §3.1 is
+not suspended for any tier. An unconfirmed marker on a construct that works produces `XPASS` and **fails
+the run**, naming the marker and both places it lives, so the gap is a loud state nobody can walk past
+rather than a silent pass. Retirement then takes an observation of its own — see §3.2 — and specifically
+an **independent** one: an agreement produced by a stand-in that forwards to the reference toolchain is
+one toolchain compared with itself, and settles nothing.
+
+**Every non-failing verdict states its tier.** The detail of each `XFAIL` row names the marker and then
+names what admitted it — a frozen exception, with the definition quoted, or captured evidence, with the
+five fields it rests on. A reader deciding how much weight to give a comparison that differed and did not
+fail the run never has to open another file to find out which kind of authority stopped it.
 
 The exact record syntax — `key = value` lines, `#` comments and `key <<END … END` heredoc blocks —
 is documented in [`README.md`](README.md). It is not restated here, so that there is one authority
@@ -399,6 +441,13 @@ repository, it is readable, and the section named resolves inside it. Whether th
 the marker is a judgement, and the format leaves it to the person reviewing the marker rather than
 pretending to decide it.
 
+**This is not the check that decides whether the marker may exist.** That question is answered first, by
+§2.1.1's two tiers, and it is answered in the harness rather than in any file a marker's author can edit.
+A marker reaching the basis check has already been admitted either as a frozen exception whose class and
+document the harness owns, or on captured evidence that includes a quotation resolved inside the very
+section this check locates. So the latitude described below is latitude about *strength of citation*
+within an already-authorised marker — never latitude about whether an unauthorised one gets in.
+
 That division is deliberate, and an earlier revision got it wrong in an instructive way. It refused
 any basis whose wording rested on what a document does *not* say — "omits", "absent from", "does not
 list" and their kin — reasoning that an omission from an inventory is evidence only that nobody wrote
@@ -413,13 +462,16 @@ endorsement, and the two must not be confused: §4.1 records in as many words th
 weakest of the three analysed here and that no `bcc` verdict has been captured against it, so a
 reviewer weighing that citation is given the material to weigh rather than a verdict to accept.
 
-So the rules that remain are the mechanical ones, and they are the ones a machine can actually decide:
-a repository-relative path, a document that reads, and at least one locator that resolves. What a
+So the rules that remain *for the basis* are the mechanical ones, and they are the ones a machine can
+actually decide: a repository-relative path, a document that reads, and at least one locator that
+resolves. They are not the whole of what a marker must satisfy — §2.1.1 is — and reading them as though
+they were is what made an earlier revision of this register describe a weaker contract than the suite
+actually enforced. What a
 reader does with the section they are sent to is their business, and every marker's entry in §4 states
 in prose exactly how strong its own basis is, so nobody has to infer it.
 
-**The optional `documented` key is how an author does better than a citation.** When it is written it
-must be a quotation, not a description of one; long enough to identify a passage rather than a word;
+**The `documented` key is how an author does better than a citation — and for an observed-tier marker it
+is mandatory, not better.** When it is written it must be a quotation, not a description of one; long enough to identify a passage rather than a word;
 and it must occur **inside the region the locator resolved to** — a line and its immediate neighbours,
 a line range as written, or a section from its heading to the next heading. Bounding the search is the
 point of it: searching the whole file let a marker cite one section and quote a sentence from an
@@ -636,6 +688,9 @@ citation named here resolves to a line they can open.
 
 **What the audit establishes about these two entries, and what it leaves to a reviewer, stated here so
 the distinction is not lost between sections.** On every run the audit proves that each marker is
+authorised by one of the two tiers in §2.1.1 — and for both entries below that tier is **frozen**, so
+their identifier, class and basis document are checked against an allowlist compiled into the harness
+rather than against anything either of these two files says. It then proves that each marker is
 registered in both directions, that each entry's eight fields agree with the record character for
 character, that each cited document is contained in this repository and readable, that each locator
 resolves inside it, and that each supplied quotation occurs inside the region the locator named. It
@@ -658,7 +713,7 @@ marker changes how a divergence would be *classified*, never whether the feature
 | Basis | docs/technical-specifications.md, line 761, the C11 + GCC Extensions Compliance Rule states which GCC extensions are explicitly required and case ranges are not among them |
 | Documented | GCC extensions explicitly required: `__attribute__`, `__builtin_*` intrinsics, inline assembly (`asm`/`__asm__` with operand constraints), statement expressions, `typeof`/`__typeof__`, computed goto, `__extension__` |
 | Evidence | (not written) |
-| Observed | WHAT THIS MARKER COVERS, AND WHAT STANDS BEHIND EACH HALF OF IT. It covers exactly one divergence: a refusal by the compiler under test to translate the case-range label form, on oracle (a) alone. A refusal produces no artifact, so oracle (a) has nothing to compare, while the reference compiler accepts the same source and prints the eighteen-line golden record this file carries for it, beginning cr_bucket_neg=10 and ending cr_runtime_hex=12. The reference half is measured on this branch: gcc 13.4.0 accepts this program and prints those bytes on all four targets at all three optimization levels. The compiler-under-test half carries no independent capture, and expected_divergence.evidence is left unwritten rather than filled in from something weaker -- this checkout holds the corpus and no bcc, and the only compiler under test it can offer forwards every invocation to the pinned reference driver for the requested target, so that compiler's agreement is a measurement of the environment, one toolchain compared with itself, and it speaks to neither bcc nor case ranges. A run of that shape has been performed here and is recorded for exactly what it is: non-independent environment evidence, which settles nothing in either direction. So no such refusal has been captured on this branch, and this field describes the divergence the marker is scoped to explain rather than one a capture attests. The marker is present because the frozen project specification fixes it for this program by identifier, class, scope and basis, and its basis is the affirmative compliance rule cited above, which fixes the required GCC extension set and does not place case ranges inside it. The register's section 3.1 XPASS safeguard is what keeps carrying it honest: where the compiler under test accepts the construct, the arm this marker scopes agrees, the verdict is XPASS and the run FAILS, naming the marker and both places it lives. Only a real, independent bcc observation retires it. |
+| Observed | THIS IS A FROZEN SPECIFICATION EXCEPTION, NOT AN OBSERVED DIVERGENCE, and that distinction is now enforced by the harness rather than left to this prose. The marker's identifier, its class and the document its basis cites are fixed in an immutable allowlist compiled into the conformance harness; this record may only instantiate that definition and is refused outright if it restates any part of it, so the authority for carrying this marker does not live in this file and cannot be edited here. Every marker the allowlist does NOT name is admitted on captured evidence alone -- a quotation resolved inside the very section its basis cites, plus a structured, re-runnable observation of command, exit status, output, toolchain and capture date -- and the verdict detail of each arm a marker excuses states which of those two tiers admitted it. Nothing about how this field is worded is what makes the marker acceptable, which is the point: the previous contract could be satisfied by careful phrasing, and this one cannot. WHAT THIS MARKER COVERS, AND WHAT STANDS BEHIND EACH HALF OF IT. It covers exactly one divergence: a refusal by the compiler under test to translate the case-range label form, on oracle (a) alone. A refusal produces no artifact, so oracle (a) has nothing to compare, while the reference compiler accepts the same source and prints the eighteen-line golden record this file carries for it, beginning cr_bucket_neg=10 and ending cr_runtime_hex=12. The reference half is measured on this branch: gcc 13.4.0 accepts this program and prints those bytes on all four targets at all three optimization levels. The compiler-under-test half carries no independent capture, and expected_divergence.evidence is left unwritten rather than filled in from something weaker -- this checkout holds the corpus and no bcc, and the only compiler under test it can offer forwards every invocation to the pinned reference driver for the requested target, so that compiler's agreement is a measurement of the environment, one toolchain compared with itself, and it speaks to neither bcc nor case ranges. A run of that shape has been performed here and is recorded for exactly what it is: non-independent environment evidence, which settles nothing in either direction. So no such refusal has been captured on this branch, and this field describes the divergence the marker is scoped to explain rather than one a capture attests. The marker is present because the frozen project specification fixes it for this program by identifier, class, scope and basis, and its basis is the affirmative compliance rule cited above, which fixes the required GCC extension set and does not place case ranges inside it. The register's section 3.1 XPASS safeguard is what keeps carrying it honest: where the compiler under test accepts the construct, the arm this marker scopes agrees, the verdict is XPASS and the run FAILS, naming the marker and both places it lives. Only a real, independent bcc observation retires it. |
 
 | Aspect | Value |
 |---|---|

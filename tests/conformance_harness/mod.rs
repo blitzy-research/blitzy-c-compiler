@@ -82,6 +82,7 @@ pub mod report;
 pub mod sandbox;
 pub mod ubaudit;
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -89,7 +90,7 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -2486,6 +2487,35 @@ pub fn target_dir_rejection() -> Option<String> {
     validated_target_dir().err()
 }
 
+/// The containment condition of the build root this run actually writes beneath, or `None`.
+///
+/// `Some(reason)` means some existing level of [`build_root`]'s chain of directories can be replaced
+/// or written into by a principal this process has no reason to trust, so the containment guarantee
+/// the reports rest on is **detected rather than prevented** at that level.
+///
+/// # Why this is disclosed rather than refused
+///
+/// A *configured* build root is refused outright when its chain cannot be trusted — the operator
+/// chose the value, so they can choose a trusted one, and [`validated_target_dir`] falls back to the
+/// package-relative default and says why. The default root is a different question: it is
+/// `<package>/target`, and the package is wherever the checkout happens to be, so refusing it would
+/// refuse the whole matrix over a property of the machine rather than of the suite. A checkout under
+/// a world-writable `/tmp` that is missing its sticky bit is exactly that case, and it is common
+/// enough in containers to matter.
+///
+/// So the condition is **stated** instead, in the pre-flight capability report and beside the run
+/// summary, and it is stated precisely: what remains after it is not an unguarded suite but a
+/// weaker guarantee. Every removal this suite performs addresses its entry through an open handle on
+/// the pinned parent ([`remove_entry`]), and every publication re-verifies afterwards that the path
+/// a report will print still designates the object that was written
+/// ([`PinnedDirectory::require_unchanged`]) — so a substituted ancestor cannot silently redirect a
+/// removal, and cannot silently be reported as a successful publication. What an untrusted ancestor
+/// still buys an attacker is the ability to make this run *fail*, which is the outcome the whole
+/// design prefers to a quiet one.
+pub fn build_root_trust_defect() -> Option<String> {
+    untrusted_ancestry_defect(&build_root())
+}
+
 /// The configured build directory, validated, or `None` when the variable is unset or empty.
 ///
 /// # Errors
@@ -2550,6 +2580,27 @@ fn validated_target_dir() -> Result<Option<PathBuf>, String> {
         return Err(format!(
             "{VAR_CARGO_TARGET_DIR} is set to {shown:?}, whose chain of directories cannot be \
              trusted: {defect}. The package-relative default build directory is used instead"
+        ));
+    }
+
+    // The second half of trusting that chain, and the half a link check cannot make. A level that is
+    // a real directory today can still be *replaced* tomorrow by anyone with write permission on its
+    // parent, and a level anyone may write into can have a new entry planted inside it — so a chain
+    // of perfectly ordinary directories owned or writable by an untrusted principal offers exactly
+    // the substitution the link check refuses, arranged one step later. Because this value decides
+    // where every workspace, report and finding is written *and removed*, an untrusted level above it
+    // aims this run's wholesale purges at a directory somebody else chose.
+    //
+    // Refused rather than disclosed, because this value is the operator's own: they supplied it, so
+    // they can supply a trusted one, and the fallback is a build root whose trust is separately
+    // reported by `build_root_trust_defect`.
+    if let Some(defect) = untrusted_ancestry_defect(&resolved) {
+        return Err(format!(
+            "{VAR_CARGO_TARGET_DIR} is set to {shown:?}, whose chain of directories is writable by a \
+             principal this run has no reason to trust: {defect}. Every workspace, report and \
+             finding of this run would be created — and purged — beneath that level, so a value \
+             whose chain another principal controls is refused rather than written into; the \
+             package-relative default build directory is used instead"
         ));
     }
 
@@ -3489,7 +3540,14 @@ fn restore_first_half(context: &str, path: &Path, previous: Option<&[u8]>) -> St
         // Nothing stood here — the ordinary case, since the report root is emptied at the start of
         // every run. Removing the half just published leaves no pair at all, which is honest: an
         // absent report is recognised as absent, where a lone half is not.
-        None => match fs::remove_file(path) {
+        //
+        // Routed through the shared guarded removal rather than a bare `remove_file`, so this
+        // half-published file is unlinked through an open handle on its pinned parent like every
+        // other removal in the suite. It matters here as much as anywhere: this runs on the failure
+        // path of a publication, which is exactly the moment a parent is most likely to have been
+        // interfered with, and the name being removed is one this suite chose and is therefore
+        // predictable.
+        None => match remove_entry(context, path) {
             Ok(()) => format!(
                 "{} held nothing before this publication and the half just published has been \
                  removed, so no mismatched pair remains. Re-run the affected area to replace it",
@@ -3500,7 +3558,7 @@ fn restore_first_half(context: &str, path: &Path, previous: Option<&[u8]>) -> St
                  document remains with no sibling: do not aggregate totals from it, and re-run the \
                  affected area to replace both halves",
                 shown_path(path),
-                restore
+                restore.cause()
             ),
         },
     }
@@ -4019,6 +4077,19 @@ impl PinnedDirectory {
         }
     }
 
+    /// The path an operation on *this directory itself* must use.
+    ///
+    /// The zero-entry case of [`PinnedDirectory::operand`], kept separate rather than spelled as
+    /// joining an empty name: an empty join yields a trailing separator that reads as a mistake, and
+    /// the two cases are asked for by different callers — one addresses an entry, this one addresses
+    /// the directory.
+    fn self_operand(&self) -> PathBuf {
+        match handle_relative_base(&self.handle).filter(|_| self.handle_relative) {
+            Some(base) => base,
+            None => self.named.clone(),
+        }
+    }
+
     /// The path a diagnostic or a report should show for `name` inside this directory.
     ///
     /// Always the named form. A message quoting `/proc/self/fd/7/summary.md` would name something no
@@ -4033,6 +4104,213 @@ impl PinnedDirectory {
     /// than leaving a reader to infer it from the platform.
     fn handle_relative(&self) -> bool {
         self.handle_relative
+    }
+
+    /// The path a diagnostic or a report should show for `name` inside this directory.
+    ///
+    /// The public form of [`PinnedDirectory::shown`], for a caller that pins a root once and needs to
+    /// name entries of it in its own messages. Always the named form, for the reason
+    /// [`PinnedDirectory::shown`] gives.
+    pub fn shown_entry(&self, name: &str) -> PathBuf {
+        self.shown(name)
+    }
+
+    /// Require that this directory's name still designates the object that was pinned.
+    ///
+    /// The public form of [`PinnedDirectory::require_unchanged`], for a caller that performs several
+    /// operations through one pin and must be able to say, at each step, that the path its report will
+    /// print still leads to what it wrote. `when` names the moment and appears in the failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory failure when the name is absent, is no longer a directory, or now
+    /// designates a different object than the pinned one.
+    pub fn require_still_pinned(&self, context: &str, when: &str) -> HarnessResult<()> {
+        self.require_unchanged(context, when)
+    }
+
+    /// The names of every entry directly inside this directory, in sorted order.
+    ///
+    /// Listed **through the handle**, so the listing describes the pinned object rather than whatever
+    /// the directory's name currently resolves to — which is what makes a caller's subsequent
+    /// per-entry operation address the same directory the listing came from. Sorted so that two runs
+    /// over one directory retire, archive or report its entries in the same order, which is the
+    /// property the reports are required to hold.
+    ///
+    /// An entry whose name is not valid text is **reported rather than skipped**: the suite writes
+    /// only names it chose, so such an entry was created by something else, and silently omitting it
+    /// from a retirement would leave a directory a caller believes it emptied.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory failure when the pin no longer holds, when the directory cannot be
+    /// listed, when an entry cannot be read, or when an entry's name is not valid text.
+    pub fn entry_names(&self, context: &str) -> HarnessResult<Vec<String>> {
+        self.require_unchanged(context, "before its entries were listed")?;
+        let listing = fs::read_dir(self.self_operand()).map_err(|error| {
+            HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} could not be listed through its own open handle: {error}; a listing taken by \
+                     name could describe a directory that replaced this one between the two steps, so \
+                     it is refused rather than used",
+                    shown_path(&self.named)
+                ),
+            )
+        })?;
+        let mut names = Vec::new();
+        for entry in listing {
+            let entry = entry.map_err(|error| {
+                HarnessError::new(
+                    String::from(context),
+                    format!(
+                        "an entry of {} could not be read: {error}",
+                        shown_path(&self.named)
+                    ),
+                )
+            })?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or_else(|| {
+                HarnessError::new(
+                    String::from(context),
+                    format!(
+                        "{} holds an entry whose name is not valid text ({:?}), so it can be neither \
+                         named in a report nor addressed by this run. This suite writes only names it \
+                         chose, all of which are valid text, so something else created it; it is \
+                         reported rather than passed over, because a directory reported as emptied \
+                         must actually be empty",
+                        shown_path(&self.named),
+                        name
+                    ),
+                )
+            })?;
+            names.push(String::from(name));
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// Remove the entry `name` inside this directory, and everything beneath it, through the handle.
+    ///
+    /// The primitive [`remove_entry`] is built from, and the one a caller holding a pin should use
+    /// directly when it removes several entries from one directory: pinning once and removing through
+    /// that pin is both cheaper and stronger than pinning again per entry.
+    ///
+    /// Absence is success. A symbolic link is removed **as a link**, so whatever it pointed at is left
+    /// byte-identical; anything that is not a directory is removed as one entry; a real directory is
+    /// removed with its contents.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory failure when `name` is not a plain entry name, when the pin no longer
+    /// holds before or after the removal, when the entry cannot be inspected for a reason other than
+    /// absence, or when the removal fails.
+    pub fn remove_within(&self, context: &str, name: &str) -> HarnessResult<()> {
+        self.require_plain_entry_name(context, name)?;
+        self.require_unchanged(context, "before the entry was removed")?;
+        let operand = self.operand(name);
+        let shown = self.shown(name);
+        let metadata = match fs::symlink_metadata(&operand) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(HarnessError::new(
+                    String::from(context),
+                    format!(
+                        "{} could not be inspected before removal: {error}",
+                        shown_path(&shown)
+                    ),
+                ));
+            }
+        };
+        let file_type = metadata.file_type();
+        let removal = if file_type.is_symlink() || !file_type.is_dir() {
+            fs::remove_file(&operand)
+        } else {
+            fs::remove_dir_all(&operand)
+        };
+        removal.map_err(|error| {
+            HarnessError::new(
+                String::from(context),
+                format!("{} could not be removed: {error}", shown_path(&shown)),
+            )
+        })?;
+        self.require_unchanged(context, "after the entry was removed")
+    }
+
+    /// Open the entry `name` inside this directory as a regular file with **exactly one** hard link.
+    ///
+    /// The reading counterpart of [`PinnedDirectory::remove_within`], for a caller that reads evidence
+    /// back out of a directory a tool under test was allowed to write into. Three properties hold
+    /// together, and each closes a distinct way bytes could be attributed to the wrong file:
+    ///
+    /// - the entry is addressed **through this handle**, so it is an entry of the pinned directory
+    ///   rather than of whatever the directory's name now resolves to;
+    /// - the opened handle is proved to be the entry that was inspected, by
+    ///   [`open_verified_regular_file`], so a link or a replacement between the two is a refusal
+    ///   rather than a silent read of somewhere else;
+    /// - the file must carry exactly **one** hard link. A second link means the same bytes are
+    ///   reachable under another name, which is how a readable file from anywhere on the machine
+    ///   becomes an entry of a directory this suite reads — a hazard exclusive creation and the
+    ///   symbolic-link refusal both leave open, because a hard link is not a link at the leaf and is
+    ///   indistinguishable from an ordinary file by kind. Where the platform does not report a link
+    ///   count the check is declined rather than assumed, and the caller is told so.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory failure when `name` is not a plain entry name, when the pin no longer
+    /// holds, when the entry is absent, is a link, is not a regular file, is not the entry that was
+    /// inspected, or carries more than one hard link.
+    pub fn open_regular_within(
+        &self,
+        context: &str,
+        name: &str,
+    ) -> HarnessResult<(File, fs::Metadata)> {
+        self.require_plain_entry_name(context, name)?;
+        self.require_unchanged(context, "before the entry was read")?;
+        let shown = self.shown(name);
+        let (file, metadata) = open_verified_regular_file(context, &self.operand(name))?;
+        if hard_link_count(&metadata).is_some_and(|links| links != 1) {
+            return Err(HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} carries more than one hard link, so its bytes are reachable under at least \
+                     one other name. Nothing this suite writes is ever linked twice, so a second link \
+                     means something else linked an existing file into this directory — which is how \
+                     a readable file from elsewhere on the machine would be read back as though a \
+                     cell had produced it. It is refused rather than read, because bytes this run \
+                     cannot attribute to a file it produced are not evidence",
+                    shown_path(&shown)
+                ),
+            ));
+        }
+        Ok((file, metadata))
+    }
+
+    /// Refuse a name that is anything other than a single entry of this directory.
+    ///
+    /// Every handle-relative operation joins `name` onto a base, so a name carrying a separator or a
+    /// directory traversal would leave the pinned directory — which would defeat the pin instead of
+    /// using it. Checked here, once, rather than at each of the three call sites.
+    fn require_plain_entry_name(&self, context: &str, name: &str) -> HarnessResult<()> {
+        let shown = sanitize_text_for_report(name);
+        let plain = !name.is_empty()
+            && name != "."
+            && name != ".."
+            && !name.contains('/')
+            && !name.contains(std::path::MAIN_SEPARATOR);
+        if plain {
+            return Ok(());
+        }
+        Err(HarnessError::new(
+            String::from(context),
+            format!(
+                "{shown:?} is not a single entry name inside {}, so an operation on it would leave \
+                 the directory this value pinned — which would defeat the pin rather than use it. \
+                 Every handle-relative operation addresses exactly one entry of the pinned directory",
+                shown_path(&self.named)
+            ),
+        ))
     }
 
     /// Require that this directory's *name* still designates the object that was pinned.
@@ -4282,6 +4560,159 @@ fn directory_ancestry_defect(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Why some existing level above or at `path` is controlled by a principal this run cannot trust,
+/// or `None` when the whole existing chain is trustworthy.
+///
+/// # What "cannot trust" means here, precisely
+///
+/// The hazard is substitution, and substitution needs write permission on a *directory*: POSIX lets
+/// a principal rename or unlink an entry exactly when it may write the entry's parent, and lets it
+/// create a new entry inside a directory exactly when it may write that directory. So a level is
+/// judged on two questions, and either one being wrong is enough:
+///
+/// - **Who owns it.** An owner may change a directory's mode at will, so a level owned by another
+///   unprivileged principal is one mode change away from being writable by them whatever it reads as
+///   right now. Only the effective user of this process and the superuser are accepted; the superuser
+///   because a machine whose administrator is hostile to a test run has already decided the outcome,
+///   and refusing every system directory on that reasoning would refuse every path on the machine.
+/// - **Who may write it.** A group-writable or other-writable directory may have its entries created,
+///   renamed and unlinked by principals outside this run. The **sticky bit is the documented
+///   exemption**, and it is not a courtesy: on a sticky directory only the owner of an entry — or of
+///   the directory — may rename or remove that entry, which is precisely why the conventional
+///   world-writable shared temporary directory is safe to hold a directory of one's own. A
+///   world-writable directory *without* the sticky bit is the classic hazard and is refused.
+///
+/// # Walk semantics
+///
+/// The walk covers every existing level from the filesystem root down to `path` itself, and stops at
+/// the first level that does not exist, for the same reason [`directory_ancestry_defect`] does: the
+/// levels below an absent one are absent too, and the creating counterpart establishes each as it
+/// goes. `path` itself is included when it exists, because entries planted *inside* the build root
+/// are as consequential as a substituted level above it.
+///
+/// On a platform that does not express ownership and permission bits this way the question cannot be
+/// asked, and `None` is returned — which every caller must read as "nothing was established", never
+/// as "the chain was verified".
+#[cfg(unix)]
+fn untrusted_ancestry_defect(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+
+    /// Mode bits: set-user-ID and set-group-ID are not consulted here; only these three are.
+    const STICKY: u32 = 0o1000;
+    const GROUP_WRITE: u32 = 0o020;
+    const OTHER_WRITE: u32 = 0o002;
+
+    let ours = trusted_owner_uid();
+    let mut walked = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => walked.push(prefix.as_os_str()),
+            Component::RootDir => walked.push(Component::RootDir.as_os_str()),
+            Component::Normal(name) => walked.push(name),
+            // Refused by `directory_ancestry_defect` before this runs; repeated rather than assumed,
+            // because a relative component makes the level being judged undecidable and answering
+            // "trusted" about an undecidable level would be the one wrong answer.
+            Component::CurDir | Component::ParentDir => {
+                return Some(format!(
+                    "{} contains a relative directory component, so which level is being judged \
+                     cannot be decided without resolving it",
+                    shown_path_within_package(path)
+                ));
+            }
+        }
+        let metadata = match fs::symlink_metadata(&walked) {
+            Ok(metadata) => metadata,
+            // The first absent level ends the walk. Everything below it is absent too.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                return Some(format!(
+                    "{} could not be inspected: {error}, so whether it is writable by another \
+                     principal could not be established — and a level that cannot be judged is not \
+                     assumed sound",
+                    shown_path_within_package(&walked)
+                ));
+            }
+        };
+        let owner = metadata.uid();
+        if owner != ours && owner != 0 {
+            return Some(format!(
+                "{} is owned by user id {owner}, which is neither this process's own user id \
+                 ({ours}) nor the superuser; its owner may change its mode at any moment, so a \
+                 level owned by another principal is a level that principal decides the contents of",
+                shown_path_within_package(&walked)
+            ));
+        }
+        let mode = metadata.mode();
+        let shared_write = mode & (GROUP_WRITE | OTHER_WRITE);
+        if shared_write != 0 && mode & STICKY == 0 {
+            return Some(format!(
+                "{} has mode {:04o}: it is writable by {} and carries no sticky bit, so a principal \
+                 outside this run may create, rename and unlink entries inside it — including \
+                 renaming aside a directory of this run's and putting something else at its name. A \
+                 world-writable directory WITH the sticky bit would be accepted, because a sticky \
+                 directory only lets an entry's own owner rename or remove it",
+                shown_path_within_package(&walked),
+                mode & 0o7777,
+                match (mode & GROUP_WRITE != 0, mode & OTHER_WRITE != 0) {
+                    (true, true) => "its group and by everyone else",
+                    (true, false) => "its group",
+                    (false, true) => "everyone",
+                    // Unreachable while `shared_write` is non-zero; written so the match is total
+                    // rather than closed with a wildcard that a later edit could widen unnoticed.
+                    (false, false) => "another principal",
+                }
+            ));
+        }
+    }
+    None
+}
+
+/// Fallback for a platform that does not express directory ownership and permission bits this way.
+///
+/// Returns `None`, which callers must read as "the question could not be asked" rather than as a
+/// verified chain — the same rule [`object_identity`] and [`hard_link_count`] follow.
+#[cfg(not(unix))]
+fn untrusted_ancestry_defect(_path: &Path) -> Option<String> {
+    None
+}
+
+/// The user id whose ownership of a directory this run treats as its own.
+///
+/// The **effective** user id, because that is the identity the kernel checks this process's writes
+/// against — a run that has dropped or assumed privilege is judged by what it can actually do rather
+/// than by who invoked it. Read from `/proc/self/status`, which reports it as the second field of the
+/// `Uid:` line (real, effective, saved, filesystem), because `std` exposes no accessor for it and no
+/// `libc` dependency is permitted here.
+///
+/// Falls back to the owner of a path this process is known to have created — the build root's
+/// longest existing prefix — and, failing even that, to the superuser, which is the value that makes
+/// [`untrusted_ancestry_defect`] refuse the least while still refusing every world-writable level.
+#[cfg(unix)]
+fn trusted_owner_uid() -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    static UID: OnceLock<u32> = OnceLock::new();
+    *UID.get_or_init(|| {
+        if let Some(effective) = fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Uid:").map(str::to_string))
+            })
+            .and_then(|line| {
+                line.split_whitespace()
+                    .nth(1)
+                    .and_then(|field| field.parse::<u32>().ok())
+            })
+        {
+            return effective;
+        }
+        fs::metadata(resolve_existing_prefix(&manifest_dir()))
+            .map(|metadata| metadata.uid())
+            .unwrap_or(0)
+    })
 }
 
 /// Require every existing level of the absolute path `path` to be a real directory.
@@ -4653,13 +5084,39 @@ pub fn write_new_file(context: &str, path: &Path, bytes: &[u8]) -> HarnessResult
 /// function centralises is the one that is easy to get subtly wrong, and getting it wrong in one of
 /// three copies is how the wrong one survives review.
 ///
+/// # Why the parent is pinned, and why a containment check above could not substitute for it
+///
+/// The three judgements above are made about a **name**, and so was the removal that used to follow
+/// them: `symlink_metadata(path)` and then `remove_dir_all(path)` are two independent resolutions of
+/// the same components, and every path this suite removes is deterministic and therefore predictable
+/// before the run that removes it. Between the two resolutions, any principal who can write a
+/// directory on the chain can rename an intermediate level aside and put a symbolic link in its
+/// place; the inspection reports an ordinary directory of this run's and the recursive removal
+/// executes inside the link's target, while every diagnostic still names the path that was asked for.
+/// A caller's containment check cannot close it, because that check is one more resolution of the
+/// same name with one more window after it — and the recursive removal is the single most destructive
+/// operation in the suite, so it is the last place a window may be left open.
+///
+/// So the parent is opened once and held ([`PinnedDirectory`]), and both the inspection and the
+/// removal address the entry **through that handle** rather than through the parent's name. On Linux
+/// that makes them reach the pinned object no matter what the parent's name now resolves to, which is
+/// the same guarantee `unlinkat` would give, from `std` alone. The pin is verified before and after,
+/// so on a platform with no handle-relative path the substitution is *detected* and the removal is
+/// refused rather than silently redirected. `std`'s own recursive removal is race-resistant **below**
+/// its argument — it descends with directory handles rather than by re-resolving names — so anchoring
+/// the argument itself is exactly the missing half.
+///
 /// # Errors
 ///
-/// Returns an explanatory failure naming the path when it cannot be inspected for a reason other
-/// than absence, or when the removal itself fails.
+/// Returns an explanatory failure naming the path when it names no entry inside a directory, when its
+/// parent cannot be opened and held, when the entry cannot be inspected for a reason other than
+/// absence, when the removal itself fails, or when the parent stopped designating the pinned
+/// directory at any point.
 pub fn remove_entry(context: &str, path: &Path) -> HarnessResult<()> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
+    // Absence settles it before anything is opened, so the ordinary "there is nothing there" case
+    // costs one metadata call and cannot fail on a parent it never needed.
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(HarnessError::new(
@@ -4670,20 +5127,484 @@ pub fn remove_entry(context: &str, path: &Path) -> HarnessResult<()> {
                 ),
             ));
         }
-    };
+    }
+    let (parent, name) = publication_parts(context, path)?;
+    let parent = PinnedDirectory::pin(context, &parent)?;
+    parent.remove_within(context, &name)
+}
 
-    let file_type = metadata.file_type();
-    let removal = if file_type.is_symlink() || !file_type.is_dir() {
-        fs::remove_file(path)
-    } else {
-        fs::remove_dir_all(path)
+// ---------------------------------------------------------------------------------------------
+// Atomic cross-process namespace claims
+//
+// Three directories in this suite are addressed by a *deterministic* name and are cleared wholesale
+// at the start of a run: a cell workspace, the report root and the generated-findings root. That
+// determinism is deliberate — a report row must lead straight to a directory — and it has one
+// consequence that has to be closed rather than accepted: two runs of the suite against one build
+// directory address the same three names, so each must be able to tell that the other is working
+// there.
+//
+// Asking "does a live foreign owner stamp exist?" and then clearing the directory does NOT establish
+// that. The question and the clearing are two steps, and two runs starting together both answer "no"
+// before either has written its own answer, so both proceed and each destroys the other's evidence —
+// a failure whose symptom is a report describing a matrix that was never executed, which is worse
+// than either run failing. Writing the stamp earlier does not fix it either: a plain write is not an
+// answer to "was I first", because both runs can write.
+//
+// What IS an answer to "was I first" is a single operation that only one of two contenders can win.
+// `OpenOptions::create_new` maps to `O_CREAT | O_EXCL`, which POSIX requires to fail with `EEXIST`
+// when the name already exists — including when it is a symbolic link, whatever it points at. Exactly
+// one of two processes creating the same name therefore succeeds, and the loser learns it lost. That
+// is the primitive below, and every destructive step in the three modules happens *after* it.
+//
+// Reclaiming a claim left by a run that died needs a second, distinct guarantee, because "read it,
+// see it is stale, delete it, create mine" is the same two-step race one level up. `rename` is the
+// operation used instead: renaming one source onto one unpredictable destination is something two
+// contenders cannot both do, and the winner then proves the bytes it moved are the stale ones it
+// read. This is the identical protocol the corpus regeneration tool already uses for its own lock,
+// and sharing the reasoning across the two is deliberate.
+// ---------------------------------------------------------------------------------------------
+
+/// The suffix appended to a claimed directory's name to form the entry that IS the claim.
+///
+/// A sibling of the claimed directory rather than an entry inside it, for one decisive reason: a
+/// workspace claim has to survive the purge of the very directory it covers, and an entry inside that
+/// directory would be deleted by the step it exists to guard. Every claimed directory in this suite
+/// lives beneath the build root, so its siblings do too, and the build directory is ignored wholesale
+/// by version control.
+const CLAIM_SUFFIX: &str = ".claim";
+
+/// The infix of the unpredictably named directory a stale claim is quarantined into before discard.
+const CLAIM_QUARANTINE_INFIX: &str = ".claim-stale.";
+
+/// How many times acquisition retries after reclaiming a stale claim.
+///
+/// Reclaiming is the only path that loops: it removes an obstruction and tries again. Two attempts
+/// suffice for a single stale claim, and the extra ones cover the case where a *second* run reclaims
+/// concurrently — but the count is small and finite on purpose, because a name that keeps being
+/// re-obstructed is contention to report rather than to out-wait.
+const CLAIM_ATTEMPTS: usize = 4;
+
+/// Upper bound on the bytes read back from a claim entry.
+///
+/// A claim record is three short fields on one line. The bound exists so that a name substituted for
+/// something large costs one refusal rather than its own size in memory.
+const CLAIM_MAX_BYTES: u64 = 4 * 1024;
+
+/// An exclusive, cross-process claim on one deterministically named directory.
+///
+/// Held for as long as the run needs the directory, and released **only** when the value is dropped.
+/// There is deliberately no explicit release method: a caller that could release early could release
+/// while a cell was still writing, and every caller's real requirement is "hold this for as long as I
+/// exist", which is exactly what a scope-bound value expresses. A workspace therefore keeps its own
+/// claim for the life of the cell, and the report and findings modules move theirs somewhere that
+/// outlives every area thread. Dropping on an unwinding panic releases it with no call site having to
+/// remember to.
+///
+/// # A claim that spans a whole run outlives the process, on purpose
+///
+/// A per-cell claim is released as its cell concludes, so a completed run leaves none behind. The two
+/// run-scoped claims — on the report root and on the generated-findings root — are a different case:
+/// they must be held while fourteen concurrent areas write beneath those roots, so they are stored in
+/// a value that outlives every area thread, and Rust does not run destructors for such a value at
+/// process exit. Their entries are therefore still present when the run ends, and that is a designed
+/// outcome rather than a leak to be worked around: the alternative would be releasing them from some
+/// "last" area, and no area is last in a filtered or a failing run.
+///
+/// It is safe because the reclaim protocol is what handles it. The next run finds an entry whose
+/// process is gone, proves it is gone from the recorded process identity rather than from the number
+/// alone, and reclaims it through the rename-and-verify protocol below. A run whose process is still
+/// alive is still correctly refused, which is the property that matters. The steady state is two small
+/// entries beside the two roots, inside the build directory, which version control ignores wholesale —
+/// exactly like the ownership stamps these sit beside, which are likewise replaced by the next run
+/// rather than removed by the last one.
+///
+/// # What holding one proves, and what it does not
+///
+/// It proves that no *other* process holding a claim on the same directory can be inside its
+/// destructive phase at the same time, because the claim entry was created exclusively and is removed
+/// only by its owner. It does not make the directory unwritable by something that never asked for a
+/// claim — nothing in a filesystem can — which is why the ownership stamp *inside* each directory is
+/// kept as well: the claim answers "may I clear this now", and the stamp answers "whose artifacts are
+/// these", and a reader of a retained directory needs the second even when no run is live.
+///
+/// Comparable so that the values holding one — a workspace, most of all — stay comparable themselves.
+/// Two claims are equal when they cover the same directory under the same record, which is the only
+/// sense in which two of them could describe the same thing.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RunClaim {
+    /// The directory this claim covers. Diagnostics and reports name this, never the claim entry.
+    covers: PathBuf,
+    /// The claim entry: the sibling whose exclusive creation IS the claim.
+    entry: PathBuf,
+    /// The record written into it, compared before release so a reclaimed claim is never removed.
+    token: String,
+}
+
+impl RunClaim {
+    /// Remove the claim entry, but only while it still holds this run's own record.
+    ///
+    /// The condition is what makes release safe against the reclaim protocol. A run whose process was
+    /// killed leaves a claim the next run legitimately reclaims; if this value were then dropped — on
+    /// a signal handler's unwind, say — an unconditional removal would delete the claim the *other*
+    /// run is holding, and both would believe they had exclusive use. Comparing the record settles it:
+    /// this releases only the claim it wrote.
+    fn release_if_ours(&self, context: &str) -> HarnessResult<()> {
+        let Some(record) = read_claim_record(&self.entry) else {
+            // Absent, unreadable, or holding something this run cannot parse. Nothing of ours to
+            // remove, and nothing to say: an unparseable entry is reclaimed by whoever needs the name
+            // next, exactly as an unparseable ownership stamp is.
+            return Ok(());
+        };
+        if record != self.token {
+            return Ok(());
+        }
+        remove_entry(context, &self.entry)
+    }
+}
+
+impl Drop for RunClaim {
+    /// Release on the ordinary path and on an unwinding one alike.
+    ///
+    /// A failure here is deliberately **not** latched as an infrastructure breach. A claim this run
+    /// could not remove is reclaimed by the next run as stale — the protocol for that already exists
+    /// and is exercised — so the condition is recoverable rather than an unaccounted resource, and
+    /// failing a whole matrix over one undeletable four-field file would be the larger error. It is
+    /// still not silent: the release path is the same one [`RunClaim::release`] reports through, and a
+    /// caller that wants the failure calls that instead of dropping.
+    fn drop(&mut self) {
+        let context = format!(
+            "releasing this run's claim on {} while it went out of scope",
+            shown_path(self.covers.as_path())
+        );
+        let _ = self.release_if_ours(&context);
+    }
+}
+
+/// Take an exclusive, cross-process claim on `covers` before anything destructive happens to it.
+///
+/// `covers` names a directory this run is about to clear and then write into. The claim is a sibling
+/// entry created exclusively, so exactly one of two contending runs takes it; the loser is told which
+/// run holds it and what to do.
+///
+/// # Ordering rule, which is the whole point
+///
+/// **Acquire this before the first destructive operation, not after it.** A caller that clears the
+/// directory and then claims it has performed the destruction outside the mutual exclusion, which is
+/// the defect this exists to remove.
+///
+/// # Errors
+///
+/// Returns an explanatory failure when the claim's parent directory cannot be established or held,
+/// when a claim is already held by a run whose process is still alive, when a stale claim could not
+/// be reclaimed, or when the claim entry could not be created for any other reason.
+pub fn claim_run_namespace(context: &str, covers: &Path) -> HarnessResult<RunClaim> {
+    let (parent, name) = publication_parts(context, covers)?;
+    let entry_name = format!("{name}{CLAIM_SUFFIX}");
+    let entry = parent.join(&entry_name);
+    let token = claim_record();
+
+    for attempt in 1..=CLAIM_ATTEMPTS {
+        // Pinned per attempt rather than once: a reclaim removes an entry and retries, and re-pinning
+        // is what makes the retry a fresh, fully verified operation rather than one resting on an
+        // answer from before the removal.
+        let held = PinnedDirectory::pin(context, &parent)?;
+        let shown = held.shown_entry(&entry_name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(held.operand(&entry_name))
+        {
+            Ok(mut file) => {
+                // The stored record carries no terminator, and the write adds one: the entry stays a
+                // single readable line for `cat`, and the value compared against it stays exactly what
+                // `read_claim_record` yields.
+                file.write_all(format!("{token}\n").as_bytes())
+                    .and_then(|()| file.sync_all())
+                    .map_err(|error| {
+                    HarnessError::new(
+                        String::from(context),
+                        format!(
+                            "{} was created exclusively but this run's identity could not be written \
+                             into it: {error}. An empty claim cannot be released safely — the release \
+                             removes only a claim holding this run's own record — so it is reported \
+                             rather than held",
+                            shown_path(&shown)
+                        ),
+                    )
+                })?;
+                held.require_still_pinned(context, "after the claim was created")?;
+                return Ok(RunClaim {
+                    covers: PathBuf::from(covers),
+                    entry,
+                    token,
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                match claim_holder(&entry) {
+                    ClaimHolder::Live { run, pid } => {
+                        return Err(HarnessError::new(
+                            String::from(context),
+                            format!(
+                                "{} is claimed by run {} (process {}), which is still running. The \
+                                 paths this suite writes are deterministic so that a report row leads \
+                                 straight to a directory, which means two concurrent runs address the \
+                                 same ones — and this run's next step would clear it. Let that run \
+                                 finish, or set {VAR_CARGO_TARGET_DIR} to a different build directory \
+                                 for this one",
+                                shown_path(covers),
+                                sanitize_text_for_report(&run),
+                                pid
+                            ),
+                        ));
+                    }
+                    ClaimHolder::Ourselves => {
+                        return Err(HarnessError::new(
+                            String::from(context),
+                            format!(
+                                "{} is already claimed by this very run. Each of the directories a \
+                                 run clears is claimed exactly once, from one place, so a second \
+                                 claim means two code paths in this process both believe they own it \
+                                 — and while that is true, one of them may clear the other's \
+                                 artifacts. It is reported rather than granted",
+                                shown_path(covers)
+                            ),
+                        ));
+                    }
+                    ClaimHolder::Stale { record } => {
+                        reclaim_stale_claim(context, &held, &entry_name, record.as_deref())?;
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(HarnessError::new(
+                    String::from(context),
+                    format!(
+                        "{} could not be created to claim {} for this run: {error}",
+                        shown_path(&shown),
+                        shown_path(covers)
+                    ),
+                ));
+            }
+        }
+        if attempt == CLAIM_ATTEMPTS {
+            return Err(HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} could not be claimed in {CLAIM_ATTEMPTS} attempt(s): each time, a claim left \
+                     by a run that is no longer running was reclaimed and a new one was immediately \
+                     in place. That is contention rather than a stale entry — more than one other run \
+                     is starting against this build directory — and it is reported rather than \
+                     out-waited, because a claim taken on the last of many attempts says nothing \
+                     about who else believes they hold it",
+                    shown_path(covers)
+                ),
+            ));
+        }
+    }
+    // Unreachable: the loop either returns or fails on its final attempt. Written as a refusal rather
+    // than as an `unreachable!`, because a future edit to the loop must not be able to turn a missing
+    // claim into a granted one.
+    Err(HarnessError::new(
+        String::from(context),
+        format!(
+            "{} could not be claimed for this run, and the acquisition ended without an outcome",
+            shown_path(covers)
+        ),
+    ))
+}
+
+/// Who holds an existing claim entry.
+enum ClaimHolder {
+    /// A different run whose process is still alive. Nothing may be cleared.
+    Live { run: String, pid: u32 },
+    /// This very process. A second claim on one directory is a defect in the suite.
+    Ourselves,
+    /// A run that is no longer running, or an entry this run cannot read as a claim at all. Carries
+    /// the exact bytes observed, when there were any, so the reclaim can prove it moved *those*.
+    Stale { record: Option<String> },
+}
+
+/// Read an existing claim entry and decide who holds it.
+fn claim_holder(entry: &Path) -> ClaimHolder {
+    let Some(record) = read_claim_record(entry) else {
+        return ClaimHolder::Stale { record: None };
     };
-    removal.map_err(|error| {
-        HarnessError::new(
+    let mut fields = record.split('\t');
+    let run = fields.next().unwrap_or_default().trim().to_string();
+    let pid = fields
+        .next()
+        .and_then(|field| field.trim().parse::<u32>().ok());
+    let started = fields.next().map(|field| field.trim().to_string());
+    let (Some(pid), Some(started)) = (pid, started) else {
+        return ClaimHolder::Stale {
+            record: Some(record),
+        };
+    };
+    if run == run_id() && pid == std::process::id() {
+        return ClaimHolder::Ourselves;
+    }
+    // Alive is decided by process identity rather than by the number alone: a process identifier is
+    // reused, so a record naming a long-gone process whose number has since been handed to something
+    // else would report a live holder that is not this suite at all. A platform that cannot answer
+    // reports the claim as stale, which restores the ordinary reclaim path rather than wedging every
+    // future run — the pre-existing behaviour of the ownership stamps this sits beside.
+    match process_start_token(pid) {
+        Some(current) if current == started => ClaimHolder::Live { run, pid },
+        _ => ClaimHolder::Stale {
+            record: Some(record),
+        },
+    }
+}
+
+/// The bytes of a claim entry, or `None` when it is absent, unreadable, oversized or not text.
+///
+/// Read through the guarded reader, so a claim name replaced by a symbolic link, a device node or a
+/// FIFO is refused rather than followed or blocked on. Every such refusal reads as `None` — "there is
+/// no claim of ours here" — which routes the entry into the reclaim protocol, where it is renamed
+/// aside rather than trusted.
+fn read_claim_record(entry: &Path) -> Option<String> {
+    let bytes = read_file_bounded("reading a run claim", entry, CLAIM_MAX_BYTES).ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    let line = text.lines().next()?;
+    match line.trim().is_empty() {
+        true => None,
+        false => Some(String::from(line)),
+    }
+}
+
+/// This run's claim record: run identifier, process identifier, and process start identity.
+///
+/// Three tab-separated fields on **one line, with no terminator**, because that is exactly the form
+/// [`read_claim_record`] returns — it yields the entry's first line, of which a trailing newline is
+/// not part. Producing the record in one shape and reading it back in another would make every
+/// comparison against it false, and the comparison that matters most is the one
+/// [`RunClaim::release_if_ours`] makes: a claim that never compares equal to its own record is a claim
+/// that is never released, so one run would leave its entry behind and the next would have to reclaim
+/// it as stale. The newline belongs to the write, and is added there.
+///
+/// None of the three fields can contain a tab: two are decimal numbers and [`run_id`] is hexadecimal.
+/// The start identity is what makes the process identifier meaningful, for the reason
+/// [`claim_holder`] gives.
+fn claim_record() -> String {
+    let pid = std::process::id();
+    format!(
+        "{}\t{pid}\t{}",
+        run_id(),
+        process_start_token(pid).unwrap_or_else(|| String::from("unknown"))
+    )
+}
+
+/// Reclaim a claim entry left behind by a run that is no longer running.
+///
+/// # Why a rename rather than a removal
+///
+/// "See that it is stale, delete it, create mine" is the same two-step race the claim exists to
+/// close, moved one level up: two runs can both see the stale entry, both delete it, and the second
+/// deletion can land on the *first run's fresh claim*. A rename is used instead, because renaming one
+/// source onto one destination is an operation two contenders cannot both win, and the destination is
+/// unpredictable — derived from this run's own identity — so no other run is even aiming at it.
+///
+/// The winner then **proves it moved the entry it read**: the quarantined bytes must equal the stale
+/// record that was observed. If they differ, this run renamed aside a claim that had been written
+/// between the read and the rename — someone else's fresh one — so it is put back and the caller is
+/// told to stop rather than retry, because a run that has just displaced another's claim must not go
+/// on to clear the directory.
+fn reclaim_stale_claim(
+    context: &str,
+    parent: &PinnedDirectory,
+    entry_name: &str,
+    observed: Option<&str>,
+) -> HarnessResult<()> {
+    let quarantine_name = format!(
+        "{entry_name}{CLAIM_QUARANTINE_INFIX}{}",
+        digest_hex(&[run_id(), entry_name])
+    );
+    let from = parent.operand(entry_name);
+    let to = parent.operand(&quarantine_name);
+    let shown = parent.shown_entry(entry_name);
+    parent.require_still_pinned(context, "before a stale claim was reclaimed")?;
+    match fs::rename(&from, &to) {
+        Ok(()) => {}
+        // Another run reclaimed it first. Nothing to do and nothing wrong: the caller retries, and
+        // its exclusive creation is what decides which of the two ends up holding the claim.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(HarnessError::new(
+                String::from(context),
+                format!(
+                    "{} holds a claim from a run that is no longer running, and it could not be moved \
+                     aside to reclaim it: {error}. It is renamed rather than deleted because a rename \
+                     onto a name derived from this run is the only step two contending runs cannot \
+                     both take; a deletion could remove a claim another run had just written",
+                    shown_path(&shown)
+                ),
+            ));
+        }
+    }
+    let moved = read_claim_record(&to);
+    let matches_observed = match (observed, moved.as_deref()) {
+        (Some(expected), Some(found)) => expected == found,
+        // Nothing readable was observed and nothing readable was moved: the entry was not a claim in
+        // either reading, so no fresh claim was displaced.
+        (None, None) => true,
+        // Either a readable record appeared where none was observed, or the reverse. Both mean the
+        // entry changed between the read and the rename.
+        _ => false,
+    };
+    if !matches_observed {
+        // Put it back before reporting, so the run that wrote it still holds it. A failed restore is
+        // reported in the same sentence rather than swallowed: a displaced claim that could not be
+        // returned is exactly the condition a maintainer must be told about.
+        let restored = fs::rename(&to, &from);
+        return Err(HarnessError::new(
             String::from(context),
-            format!("{} could not be removed: {error}", shown_path(path)),
-        )
-    })
+            format!(
+                "{} was moved aside as a claim left by a finished run, but the bytes that moved are \
+                 not the ones that were read: another run wrote a fresh claim in between. This run \
+                 has therefore displaced a live claim and stops rather than clearing the directory. \
+                 {}",
+                shown_path(&shown),
+                match restored {
+                    Ok(()) => "The claim has been put back, so the run that wrote it still holds it; \
+                               re-run this one once that run has finished",
+                    Err(_) => "It could NOT be put back, so the other run's claim is now under a \
+                               quarantine name beside it. Let that run finish, then remove the \
+                               leftover entry by hand before re-running",
+                }
+            ),
+        ));
+    }
+    // Removed through the pinned parent rather than through the operand path built above. Handing that
+    // path to the shared removal would make it derive a parent of its own from the spelling — and on a
+    // platform whose handle-relative base is a magic link, that "parent" is the link itself, which the
+    // shared removal correctly refuses as not a directory. Addressing the entry through the pin this
+    // function already holds is both simpler and the operation actually intended.
+    parent.remove_within(context, &quarantine_name)
+}
+
+/// A token that identifies one incarnation of a process identifier, or `None` if unavailable.
+///
+/// On Linux this is the process's start time in clock ticks, field 22 of `/proc/<pid>/stat`. The field
+/// is read positionally **from the end**, because field 2 is the executable name in parentheses and
+/// may itself contain spaces and parentheses — splitting from the front is the classic way to misparse
+/// this file. Fields 3 onwards contain no spaces, so counting back from the last field is unambiguous.
+///
+/// Paired with a process identifier, this makes an identity: identifiers are reused, so a record
+/// naming a long-gone process whose number has since been handed to something else would otherwise
+/// report a live owner that is nothing of the kind. `None` means the question could not be asked —
+/// the process is gone, or this is not a system with a `/proc` filesystem — and every caller reads
+/// that as "not a live owner", which is the answer that keeps a sequential re-run working rather than
+/// wedging it.
+///
+/// Lives here rather than in one of the modules that needs it because three of them do — the
+/// workspace ownership stamps, the run claims above, and the environment fingerprint — and two
+/// implementations of "is this the same process" is two chances to answer it differently.
+pub fn process_start_token(pid: u32) -> Option<String> {
+    let raw = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let tail = raw.rsplit_once(')')?.1;
+    let fields: Vec<&str> = tail.split_whitespace().collect();
+    // `tail` begins at field 3, so field 22 is index 19.
+    fields.get(19).map(|value| (*value).to_string())
 }
 
 /// Require that a directory the suite created is a real directory beneath `root`, and return its
@@ -6283,6 +7204,316 @@ pub fn own_process_group(command: &mut Command) {
 #[cfg(not(unix))]
 pub fn own_process_group(_command: &mut Command) {}
 
+// ---------------------------------------------------------------------------------------------
+// Owning the groups this run creates
+//
+// `own_process_group` gives every child a group of its own, which is what makes a whole compiler
+// driver tree terminable together — and, deliberately, what stops a terminal interrupt aimed at
+// `cargo test` from reaching a compiler mid-write. That second property has a cost that has to be
+// paid rather than accepted: a signal that ends this process no longer ends the children, and the
+// cleanup that would have ended them is on the RETURN PATH of the functions that spawned them. A
+// return path does not run when the process is signalled.
+//
+// So the groups are owned twice over, by two mechanisms that fail in different circumstances:
+//
+// - **A guard value, for every ending this process survives long enough to unwind.** `GroupGuard`
+//   terminates and deregisters its group when it is dropped, so a panic in a cell — an assertion, a
+//   poisoned lock, anything that unwinds — sweeps the group on the way out. This is the mechanism
+//   that covers the overwhelming majority of abnormal endings inside a test binary.
+// - **An external supervisor, for every ending this process does NOT survive.** No `std` API can
+//   catch a signal, and no `libc` dependency or `unsafe` block is permitted here, so nothing inside
+//   this process can run after `SIGKILL` — or after `SIGINT` with its default disposition. The
+//   supervisor is therefore a separate process, told which groups are live through a pipe it reads
+//   and this process holds the write end of. When this process ends for ANY reason the pipe closes,
+//   the supervisor's read returns end of file, and it kills every group still in its set. It needs no
+//   signal handling of its own, which is exactly why it works for signals that cannot be handled.
+//
+// Neither mechanism can signal a group whose identifier has been recycled, and the argument is the
+// same for both: a group is deregistered the moment its leader is reaped, and a process group cannot
+// be recycled while any member — including an unreaped zombie leader — still exists. So every
+// identifier in the live set names a group this run still owns.
+// ---------------------------------------------------------------------------------------------
+
+/// Ownership of one process group this run created.
+///
+/// Held beside the [`Child`] that leads the group, and consumed by [`GroupGuard::release`] once that
+/// child has been reaped and its group swept by the caller's own accounting. Dropped without a release
+/// — which is what happens when a cell panics — it sweeps the group itself.
+///
+/// The value carries no lifetime and borrows nothing, so it can be held in the same record as the
+/// child and moved as freely.
+#[derive(Debug)]
+pub struct GroupGuard {
+    /// The group's identifier, which equals the leading child's process identifier.
+    pgid: u32,
+    /// Whether the caller has already accounted for this group, so dropping must do nothing.
+    released: bool,
+}
+
+impl GroupGuard {
+    /// Give up ownership because the caller has reaped the child and swept the group itself.
+    ///
+    /// Every ordinary path calls this: the modules that spawn children sweep with
+    /// [`terminate_process_group`] and report the outcome on the cell, which is strictly more
+    /// informative than a silent sweep from a destructor. Releasing tells the guard that the work is
+    /// done and removes the group from the supervisor's live set.
+    pub fn release(mut self) {
+        self.released = true;
+        deregister_process_group(self.pgid);
+    }
+}
+
+impl Drop for GroupGuard {
+    /// Sweep the group if the caller never got as far as accounting for it.
+    ///
+    /// This is the panic path, and it is the reason the guard exists at all: an assertion that fails
+    /// between the spawn and the sweep would otherwise leave a compiler driver's whole tree running,
+    /// once per failing cell, across a matrix of thousands. Failure is deliberately not reported here —
+    /// a destructor running during an unwind has no honest way to report anything, and the run is
+    /// already failing — but a group that survives its kill still latches a breach inside
+    /// [`terminate_process_group`], so the condition is not lost.
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        terminate_owned_process_group(self.pgid, env::kill_tool());
+        deregister_process_group(self.pgid);
+    }
+}
+
+/// Kill a process group whose **leader this run has not reaped**, so the identifier is still its own.
+///
+/// The companion to [`terminate_process_group`], and the distinction between them is the whole reason
+/// this exists rather than being folded into it.
+///
+/// [`terminate_process_group`] is called *after* the leading child has been reaped. At that moment the
+/// identifier should belong to no process at all, so a process answering to it means the number has
+/// been recycled and the group is no longer this run's — and delivering an uncatchable signal to a
+/// stranger's group is a consequence no test result could justify. That check is correct there and it is
+/// load-bearing.
+///
+/// Here it would be exactly wrong. This runs from a guard's destructor, on the path where a cell
+/// unwound *between* the spawn and the reap — so the leading child has not been waited on, is either
+/// running or an unreaped zombie of this process, and therefore **answers to its own identifier by
+/// definition**. Applying the recycled-identifier test would read that as a stranger's group on every
+/// single unwind and sweep nothing, which is precisely the leak the guard exists to prevent. A process
+/// identifier cannot be reassigned while the process or its unreaped zombie exists, so ownership here is
+/// not an assumption: it is a consequence of not having reaped.
+///
+/// The existence probe is kept, because it distinguishes "already gone" from "signalled", and the
+/// result is deliberately discarded: this runs during an unwind, where there is no diagnostic to attach
+/// a note to and the run is already failing. A group that survives an uncatchable kill is still visible,
+/// because the next cell's own sweep latches it.
+fn terminate_owned_process_group(pgid: u32, kill_tool: Option<&Path>) {
+    let Some(tool) = kill_tool else {
+        return;
+    };
+    let group = format!("-{pgid}");
+    if signal_group(tool, "-0", &group) != Some(true) {
+        return;
+    }
+    let _ = signal_group(tool, "-KILL", &group);
+}
+
+/// Take ownership of the group led by a child this run has just spawned.
+///
+/// `pgid` is the child's own process identifier, which is also its group's because
+/// [`own_process_group`] was applied before the spawn. Registering has two effects: the returned guard
+/// sweeps the group if the caller unwinds before accounting for it, and the group joins the set the
+/// external supervisor will sweep if this process is killed outright.
+///
+/// Called immediately after a successful spawn, before anything that can fail.
+pub fn register_process_group(pgid: u32) -> GroupGuard {
+    match live_process_groups().lock() {
+        Ok(mut live) => {
+            live.insert(pgid);
+            // Announced to the supervisor only while the set actually changed, so a repeated
+            // registration cannot desynchronize the two views.
+            supervisor_announce(&format!("+{pgid}"));
+        }
+        // A poisoned lock means some thread panicked while holding it. The guard is still returned, so
+        // the in-process sweep is unaffected; only the supervisor's view of this one group is lost, and
+        // that is recorded rather than hidden.
+        Err(poisoned) => {
+            poisoned.into_inner().insert(pgid);
+            supervisor_announce(&format!("+{pgid}"));
+        }
+    }
+    GroupGuard {
+        pgid,
+        released: false,
+    }
+}
+
+/// Remove a group from the live set, because it has been reaped and swept.
+///
+/// Deregistering promptly is what makes the live set safe to signal: a process group identifier can be
+/// recycled once no member of the group remains, and a member remains until the leader is reaped — so a
+/// group deregistered at that moment is never signalled after its identifier could have been handed to
+/// something else.
+fn deregister_process_group(pgid: u32) {
+    let removed = match live_process_groups().lock() {
+        Ok(mut live) => live.remove(&pgid),
+        Err(poisoned) => poisoned.into_inner().remove(&pgid),
+    };
+    if removed {
+        supervisor_announce(&format!("-{pgid}"));
+    }
+}
+
+/// Every process group this run has created and not yet accounted for.
+fn live_process_groups() -> &'static Mutex<BTreeSet<u32>> {
+    static LIVE: OnceLock<Mutex<BTreeSet<u32>>> = OnceLock::new();
+    LIVE.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+/// The shell program text of the external supervisor.
+///
+/// Deliberately tiny, and POSIX shell rather than anything richer, because it is spawned through an
+/// argument vector into whatever `sh` the trusted search found.
+///
+/// It reads one instruction per line for as long as this process lives — `+<pgid>` when a group starts,
+/// `-<pgid>` when one is accounted for — and blocks in `read` between them, so it costs nothing while
+/// the matrix runs. When the pipe closes, `read` fails, the loop ends, and every identifier still in
+/// the set is signalled as a group. A malformed line is ignored rather than guessed at: the only writer
+/// is [`supervisor_announce`], so a line that is neither form means the two have drifted, and acting on
+/// a number of unknown provenance with an uncatchable signal is the one thing this must not do.
+///
+/// `$1` is the **path of the signalling utility**, handed in as an argument rather than resolved by the
+/// shell. Two reasons, and the second was discovered by measurement rather than reasoned about:
+///
+/// - it is the same utility, discovered and trust-vetted once, that [`terminate_process_group`] uses,
+///   so the in-process sweep and the external one cannot end up signalling through different files;
+/// - a shell's **built-in** `kill` is not a substitute for it. Measured on this host, `dash` — which is
+///   `/bin/sh` — rejects `kill -0 -- -<pgid>` outright with a usage error, because its built-in does
+///   not accept the end-of-options delimiter, so a program written against the built-in silently swept
+///   nothing at all. Delegating to the utility keeps `--` available, which is what makes the negative
+///   operand unambiguously a process group rather than something a future `kill` might read as an
+///   option.
+///
+/// `-0` before `-KILL` is not caution about the signal; it is what keeps the sweep from reporting
+/// anything about a group that is already gone, which is the ordinary case for a run that ended
+/// normally with an empty set.
+const SUPERVISOR_PROGRAM: &str = "\
+live=''
+while IFS= read -r line; do
+  case $line in
+    '+'*) live=\"$live ${line#+}\" ;;
+    '-'*)
+      keep=''
+      for g in $live; do
+        [ \"$g\" = \"${line#-}\" ] || keep=\"$keep $g\"
+      done
+      live=$keep
+      ;;
+  esac
+done
+for g in $live; do
+  \"$1\" -0 -- \"-$g\" 2>/dev/null || continue
+  \"$1\" -KILL -- \"-$g\" 2>/dev/null || :
+done
+exit 0
+";
+
+/// The `$0` the supervisor is given, so that a process listing names it recognisably.
+const SUPERVISOR_ARGV0: &str = "bcc-conformance-group-supervisor";
+
+/// Tell the supervisor about a change to the live set, if there is a supervisor to tell.
+///
+/// Failure is silent by design and by necessity. The supervisor is a best-effort second line of
+/// defence behind [`GroupGuard`]: a write that fails means the supervisor has gone, which leaves the
+/// guard — the mechanism that covers every ending this process survives — completely intact. Latching a
+/// breach here would fail a whole matrix over the loss of a fallback, on a machine that may simply not
+/// have a shell to spawn; the pre-flight capability report states whether supervision is in force, so
+/// its absence is disclosed rather than assumed.
+fn supervisor_announce(instruction: &str) {
+    let Some(pipe) = supervisor() else {
+        return;
+    };
+    let Ok(mut pipe) = pipe.lock() else {
+        return;
+    };
+    let _ = pipe.write_all(instruction.as_bytes());
+    let _ = pipe.write_all(b"\n");
+    let _ = pipe.flush();
+}
+
+/// Whether this run has an external supervisor watching its process groups.
+///
+/// Read by the pre-flight capability report so that a machine without one is told so rather than left
+/// to assume the guarantee is in force. Consulting it also starts the supervisor, which is deliberate:
+/// the pre-flight is the right moment for it to appear in the process table.
+pub fn process_group_supervision() -> Option<String> {
+    supervisor().map(|_| {
+        String::from(
+            "an external supervisor holds this run's process groups and sweeps them if this process \
+             is killed outright",
+        )
+    })
+}
+
+/// The write end of the supervisor's instruction pipe, starting it on first use.
+///
+/// Started once per process and never restarted. A supervisor that could be restarted would be a
+/// supervisor with an empty set while groups were already live, which is worse than none — the sweep it
+/// promised would silently cover nothing.
+fn supervisor() -> Option<&'static Mutex<std::process::ChildStdin>> {
+    static SUPERVISOR: OnceLock<Option<Mutex<std::process::ChildStdin>>> = OnceLock::new();
+    SUPERVISOR.get_or_init(spawn_supervisor).as_ref()
+}
+
+/// Spawn the supervisor, or `None` when this machine offers no trusted shell and signalling utility.
+///
+/// Both tools are required, and neither is a partial substitute for the other: without the shell there
+/// is nothing to host the wait, and without the signalling utility there is nothing to sweep with — a
+/// supervisor that could wait but not signal would be a promise with no mechanism behind it, which is
+/// worse than a stated absence.
+///
+/// Five properties of the spawn matter, and each has a reason:
+///
+/// - the program arrives as an **argument** to `sh -c`, not through a file and not through a shell
+///   command line assembled from anything variable, so there is nothing to inject into;
+/// - the signalling utility's path arrives as a **positional argument**, not interpolated into the
+///   program text, so the program is a constant and the path is data;
+/// - the supervisor is put in **its own process group**, so the terminal interrupt this whole
+///   mechanism exists to survive does not reach the supervisor either;
+/// - its standard output and error are **discarded**, so it can neither interleave with the test
+///   runner's output nor keep a pipe open that something else is waiting on;
+/// - its standard input is the **pipe this process keeps the write end of**, which is the entire
+///   signalling mechanism: it needs no signal handler, because the pipe closing is the event, and a
+///   closed pipe is something every ending of this process produces — including one it cannot catch.
+///
+/// The child is deliberately never waited on. It outlives this process on purpose, and a process whose
+/// parent has gone is reaped by the init process rather than left behind.
+///
+/// # The one group this run creates and does not own
+///
+/// Every other [`own_process_group`] site in the suite pairs the spawn with a [`register_process_group`]
+/// so the group is swept if the caller unwinds. This one deliberately does not, and the asymmetry is the
+/// point rather than an omission: registering would enrol the supervisor in the very set it exists to
+/// sweep, so the first ending it was built to survive would begin by killing it. It is also the one
+/// child that *should* outlive this process — its whole function is to still be running afterwards — and
+/// a guard's contract is the opposite of that. What bounds it instead is the pipe: the supervisor exits
+/// of its own accord the moment the write end closes, which every ending of this process produces,
+/// including the ones no code here can react to.
+fn spawn_supervisor() -> Option<Mutex<std::process::ChildStdin>> {
+    let shell = env::shell_tool()?;
+    let signaller = env::kill_tool()?;
+    let mut command = Command::new(shell);
+    command
+        .arg("-c")
+        .arg(SUPERVISOR_PROGRAM)
+        .arg(SUPERVISOR_ARGV0)
+        .arg(signaller)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    isolate_child_environment(&mut command, Path::new("/"));
+    own_process_group(&mut command);
+    let mut child = command.spawn().ok()?;
+    child.stdin.take().map(Mutex::new)
+}
+
 /// How long a child this suite has killed is given to be reaped before the wait is abandoned.
 ///
 /// Every cleanup path in the suite reaps through [`reap_bounded`], and this is the bound it applies.
@@ -6482,8 +7713,21 @@ pub fn infrastructure_breach_refusal(breach: &str) -> String {
 //
 // This measurement therefore iterates over an explicit stack, stops at stated ceilings on depth,
 // entry count and elapsed time, and reports what it could not measure instead of scoring it zero.
-// The caller decides what an incomplete measurement means, and both callers decide the same thing:
-// fail closed.
+//
+// Every caller decides the same thing about an incomplete measurement: FAIL CLOSED. A ceiling
+// enforced against a lower bound is not enforced, so a walk that stopped at one of its own limits, or
+// that could not read an entry that was there, refuses the thing it was gating rather than allowing it
+// on the strength of a number known to be too small.
+//
+// That rule is only affordable because the measurement distinguishes two conditions a naive walk
+// conflates. An entry that has CEASED TO EXIST since it was listed has been measured exactly — at
+// nothing — and is counted in `vanished`, which is not a shortfall. An entry that is STILL THERE and
+// unreadable is counted in `unmeasured`, which is. Without that distinction, the ordinary case of a
+// compiler deleting its own temporary file mid-walk would read as a measurement failure, and a caller
+// gating live compilation on it would have to choose between terminating honest work on a busy machine
+// and not enforcing its ceiling at all. Earlier revisions of this suite made the second choice for the
+// live workspace ceiling while this note claimed otherwise; both the code and the note now say the
+// same thing, and it is the first choice.
 // ---------------------------------------------------------------------------------------------
 
 /// The ceilings one bounded tree measurement observes.
@@ -6514,16 +7758,38 @@ pub struct TreeMeasurement {
     pub entries: u64,
     /// Why the walk stopped early, or [`None`] when it visited everything.
     pub truncated: Option<String>,
-    /// Entries whose size could not be determined at all.
+    /// Entries that **exist** and whose size could not be determined.
+    ///
+    /// A measurement loss, and the only kind: an unreadable directory, or an entry whose metadata
+    /// could not be read for a reason other than its no longer being there. Any of these makes
+    /// [`Self::bytes`] a lower bound, so [`Self::complete`] is false and every caller fails closed.
     pub unmeasured: u64,
+    /// Entries that ceased to exist during the walk, each a **complete** observation of nothing.
+    ///
+    /// Held apart from [`Self::unmeasured`] because the two look identical in the code — both are a
+    /// failed metadata read — and mean opposite things. An entry that is *gone* has been measured
+    /// exactly: it occupies no bytes, and a total that omits it is the truth rather than a lower
+    /// bound. An entry that is *there* but unreadable has not been measured at all.
+    ///
+    /// The distinction is what lets a ceiling be enforced fail-closed without manufacturing failures.
+    /// A compiler driver deleting its own temporary file between the listing and the measurement is an
+    /// ordinary race that happens constantly on a busy machine, and it is the case that used to force
+    /// the live workspace ceiling to fail *open* to avoid terminating honest compilations. Counted and
+    /// reported rather than dropped, so a reader can see how much churn a walk observed.
+    pub vanished: u64,
 }
 
 impl TreeMeasurement {
-    /// Whether every entry was visited and every visited entry was measured.
+    /// Whether every entry was visited and every visited entry that still existed was measured.
     ///
-    /// The one question a caller enforcing a ceiling must ask before trusting [`Self::bytes`]. Both
-    /// callers in this suite fail closed on a `false`, for the reason the section note above gives:
+    /// The one question a caller enforcing a ceiling must ask before trusting [`Self::bytes`]. **Every
+    /// caller in this suite fails closed on a `false`**, for the reason the section note above gives:
     /// a ceiling enforced against a lower bound is not enforced.
+    ///
+    /// [`TreeMeasurement::vanished`] deliberately does **not** make a measurement incomplete. An entry
+    /// that no longer exists has been measured exactly — at nothing — so counting it as a shortfall
+    /// would report a complete measurement as a partial one, and that is precisely the reading that
+    /// once forced a caller to fail open in order to keep working on a busy machine.
     pub fn complete(&self) -> bool {
         self.truncated.is_none() && self.unmeasured == 0
     }
@@ -6539,8 +7805,8 @@ impl TreeMeasurement {
         }
         if self.unmeasured > 0 {
             reasons.push(format!(
-                "{} entr(y/ies) could not be measured at all, so the {} byte(s) counted are a lower \
-                 bound rather than a size",
+                "{} entr(y/ies) that still existed could not be measured at all, so the {} byte(s) \
+                 counted are a lower bound rather than a size",
                 self.unmeasured, self.bytes
             ));
         }
@@ -6557,16 +7823,74 @@ impl TreeMeasurement {
 /// Never fails. An unreadable directory, an entry whose metadata cannot be read and a walk that hit
 /// a ceiling are all *reported* on the measurement rather than raised, because this runs while a cell
 /// is being concluded or while a child is being watched, and a measurement problem must not become
-/// the verdict.
+/// the verdict — the caller decides what an incomplete measurement means for what it is enforcing.
+///
+/// An entry that **ceased to exist** during the walk is counted separately, in
+/// [`TreeMeasurement::vanished`], and is not a shortfall. Both conditions surface as a failed metadata
+/// read, so distinguishing them is the whole of what makes fail-closed enforcement possible: without
+/// it, a compiler deleting its own temporary file mid-walk is indistinguishable from a directory
+/// nobody could read, and a caller has to choose between terminating honest work and not enforcing its
+/// ceiling at all.
 pub fn measure_tree(root: &Path, limits: TreeLimits) -> TreeMeasurement {
+    walk_tree(vec![(root.to_path_buf(), 0)], 0, limits)
+}
+
+/// Measure the tree beneath a **pinned** directory, addressing every entry through its handle.
+///
+/// The counterpart of [`measure_tree`] for a caller that has to know the answer is about the directory
+/// it is holding rather than about whatever that directory's name currently resolves to. The one case
+/// that makes the difference concrete: a child process can `rename` its own working directory aside
+/// and keep writing into the renamed tree through the working directory it already has open, leaving
+/// an empty replacement at the old name. A measurement addressed by name would size the replacement.
+///
+/// The root cannot simply be handed to [`measure_tree`] as a handle-relative path, because on Linux
+/// that path is a magic link and the walk — correctly — declines to follow a link at any position. So
+/// the root is accounted for here and its children are seeded through the handle, after which the
+/// walk is the identical one, with the identical ceilings.
+///
+/// A listing that fails is recorded as one unmeasured entry rather than raised, exactly as it is in
+/// the name-based form: this runs while a child is being watched, and a measurement problem must be
+/// the caller's decision rather than an error thrown out of the watchdog. The caller's rule for an
+/// incomplete measurement is to fail closed, so the effect of an unreadable root is the same either
+/// way — it just arrives as data rather than as a panic.
+pub fn measure_pinned_tree(root: &PinnedDirectory, limits: TreeLimits) -> TreeMeasurement {
+    // The root itself: visited, and contributing no bytes of its own, exactly as the name-based walk
+    // accounts for a directory.
+    let Ok(names) = root.entry_names("measuring a held directory") else {
+        return TreeMeasurement {
+            bytes: 0,
+            entries: 1,
+            truncated: None,
+            unmeasured: 1,
+            vanished: 0,
+        };
+    };
+    let pending: Vec<(PathBuf, usize)> = names
+        .into_iter()
+        .map(|name| (root.operand(&name), 1))
+        .collect();
+    walk_tree(pending, 1, limits)
+}
+
+/// The shared bounded walk, seeded with whatever the caller has already accounted for.
+///
+/// `already_visited` is the number of entries the caller counted before seeding — one, for the pinned
+/// root — so the entry ceiling bounds the whole measurement rather than only the part this loop
+/// performs.
+fn walk_tree(
+    seed: Vec<(PathBuf, usize)>,
+    already_visited: u64,
+    limits: TreeLimits,
+) -> TreeMeasurement {
     let started = Instant::now();
     let mut bytes = 0_u64;
-    let mut entries = 0_u64;
+    let mut entries = already_visited;
     let mut unmeasured = 0_u64;
+    let mut vanished = 0_u64;
     let mut truncated: Option<String> = None;
     // Depth travels with each path, so the bound is on the tree rather than on the order the walk
     // happens to take.
-    let mut pending: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    let mut pending: Vec<(PathBuf, usize)> = seed;
     while let Some((path, depth)) = pending.pop() {
         if entries >= limits.entries_max {
             truncated = Some(format!(
@@ -6585,9 +7909,22 @@ pub fn measure_tree(root: &Path, limits: TreeLimits) -> TreeMeasurement {
             break;
         }
         entries = entries.saturating_add(1);
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            unmeasured = unmeasured.saturating_add(1);
-            continue;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            // Gone: measured exactly, at nothing. This is the ordinary race — a tool removing its own
+            // temporary between the listing that found it and the read that would have sized it — and
+            // reading it as a measurement failure is what used to make a fail-closed ceiling
+            // unusable.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                vanished = vanished.saturating_add(1);
+                continue;
+            }
+            // Still there, and unreadable. A genuine loss: the bytes it holds are unknown, so the
+            // total is a lower bound and the caller must not enforce a ceiling against it.
+            Err(_) => {
+                unmeasured = unmeasured.saturating_add(1);
+                continue;
+            }
         };
         let file_type = metadata.file_type();
         if file_type.is_symlink() {
@@ -6608,13 +7945,24 @@ pub fn measure_tree(root: &Path, limits: TreeLimits) -> TreeMeasurement {
             ));
             continue;
         }
-        let Ok(listing) = fs::read_dir(&path) else {
-            unmeasured = unmeasured.saturating_add(1);
-            continue;
+        let listing = match fs::read_dir(&path) {
+            Ok(listing) => listing,
+            // A directory that has been removed between being queued and being opened contributes
+            // nothing, exactly as a removed file does.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                vanished = vanished.saturating_add(1);
+                continue;
+            }
+            Err(_) => {
+                unmeasured = unmeasured.saturating_add(1);
+                continue;
+            }
         };
         for entry in listing {
             match entry {
                 Ok(entry) => pending.push((entry.path(), depth + 1)),
+                // An error from the iterator is a failure to read the directory's own contents, so what
+                // is behind it is unknown rather than known to be absent.
                 Err(_) => unmeasured = unmeasured.saturating_add(1),
             }
         }
@@ -6624,6 +7972,7 @@ pub fn measure_tree(root: &Path, limits: TreeLimits) -> TreeMeasurement {
         entries,
         truncated,
         unmeasured,
+        vanished,
     }
 }
 

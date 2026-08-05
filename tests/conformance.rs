@@ -226,12 +226,12 @@ use conformance_harness::report;
 use conformance_harness::sandbox::{self, Workspace};
 use conformance_harness::ubaudit;
 use conformance_harness::{
-    corpus_root, findings_root, manifest_dir, redact_secrets, report_root, shown_path,
-    target_dir_rejection, work_root, AreaSpec, Cell, CellKey, DivergenceClass, HarnessError,
-    MarkerClass, OptLevel, Oracle, Outcome, Provenance, Target, Verdict, AREAS, AREA_COUNT,
-    BCC_CELL_COUNT, MIN_PROGRAMS_PER_MANDATED_AREA, OPT_LEVEL_COUNT, ORACLE_A_COMPARISON_COUNT,
-    ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT, TARGET_COUNT,
-    TOTAL_ASSERTION_COUNT,
+    build_root_trust_defect, corpus_root, findings_root, manifest_dir, redact_secrets, report_root,
+    shown_path, target_dir_rejection, work_root, AreaSpec, Cell, CellKey, DivergenceClass,
+    HarnessError, MarkerClass, OptLevel, Oracle, Outcome, Provenance, Target, Verdict, AREAS,
+    AREA_COUNT, BCC_CELL_COUNT, MIN_PROGRAMS_PER_MANDATED_AREA, OPT_LEVEL_COUNT,
+    ORACLE_A_COMPARISON_COUNT, ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT,
+    TARGET_COUNT, TOTAL_ASSERTION_COUNT,
 };
 
 // =================================================================================================
@@ -750,6 +750,12 @@ fn audit_markers() -> MarkerIntegrity {
             )),
         }
 
+        // Authority first, then the citation. The order matters for the reader: a marker whose
+        // authority cannot be established is not improved by having a resolvable locator, so the
+        // audit reports the reason it may not exist before it reports anything about where it points.
+        for defect in authority_violations(marker) {
+            violations.push(MarkerViolation::in_area(&area, defect));
+        }
         for defect in basis_violations(marker) {
             violations.push(MarkerViolation::in_area(&area, defect));
         }
@@ -4292,6 +4298,34 @@ fn conclude(
             .join("\n"),
         digest,
     );
+
+    // The last assertion, and the one no verdict policy can express, because it is not about a
+    // comparison at all: whether this run is still able to account for what it used.
+    //
+    // The harness latches a breach the first time it cannot account for a process it launched, a byte
+    // it retained, or a piece of evidence it read back — and from that moment every further launch is
+    // refused with the recorded reason, so a breach reached mid-matrix already surfaces as failing
+    // cells. Two shapes escape that entirely, and both are exactly the shapes that must not be quiet:
+    //
+    // - a breach latched while the LAST cell of an area was being concluded, after which nothing more
+    //   is launched, so no verdict is ever coloured by it;
+    // - an evidence-integrity refusal, which by construction leaves the cell's decided verdicts alone
+    //   and therefore cannot fail the run through any of them.
+    //
+    // Asserted here, after the divergences, so a reader of a broken area sees the real comparisons
+    // first — and unconditionally, because there is no configuration under which a run that cannot
+    // bound its own process tree, its own build volume, or its own published evidence should report
+    // success. The absence of a group-signalling utility deliberately does not latch, so this cannot
+    // fire on a merely reduced machine.
+    if let Some(breach) = conformance_harness::infrastructure_breach() {
+        panic!(
+            "the feature area {:?} completed its comparisons, but this run can no longer account for \
+             the resources it used, so it is reported as failing rather than passing.\n\n   {}\n\n{}",
+            spec.directory(),
+            conformance_harness::infrastructure_breach_refusal(breach),
+            digest,
+        );
+    }
 }
 
 /// Why any finding this area recorded falls short of being a deliverable, in directory order.
@@ -4462,6 +4496,24 @@ fn matrix_statement(config: &RunConfig) -> String {
     // maintainer who set that variable deliberately has to be told why it was ignored.
     if let Some(rejection) = target_dir_rejection() {
         text.push_str(&format!("  CARGO_TARGET_DIR:  ignored — {rejection}\n"));
+    }
+    // The containment condition of the directory this run is ACTUALLY writing beneath, stated whether
+    // or not it was configured. A configured root whose chain of directories another principal can
+    // write is refused outright above; the default root cannot be refused on the same grounds, because
+    // it is `<package>/target` and the package is wherever the checkout happens to be — refusing it
+    // would refuse the whole matrix over a property of the machine. So the condition is disclosed
+    // here, precisely, and it is not a shrug: every removal this suite performs addresses its entry
+    // through an open handle on the pinned parent, and every publication re-verifies that the path it
+    // will print still designates what was written, so a substituted ancestor makes this run FAIL
+    // rather than silently redirect it. What the disclosure adds is that a reader of a passing run on
+    // such a machine knows which guarantee was in force.
+    if let Some(defect) = build_root_trust_defect() {
+        text.push_str(&format!(
+            "  build root trust:  DETECTED, not prevented — {defect}. Removals are addressed through \
+             an open handle on the pinned parent and publications re-verify the path they print, so a \
+             substitution fails this run rather than redirecting it silently; set CARGO_TARGET_DIR to \
+             a directory whose whole chain this user owns to obtain prevention as well\n"
+        ));
     }
     text
 }
@@ -4780,22 +4832,94 @@ fn register_entry_mismatches(
     mismatches
 }
 
+/// Every way in which a marker's **authority to exist** fails to hold, independently of the parser.
+///
+/// The parser refuses an unauthorised marker outright, so this audit passes for every marker the suite
+/// ships. It is written anyway, and it re-derives its answer from the same immutable table the parser
+/// consults rather than from the parsed value, because the register audit is the artifact a reviewer
+/// reads to decide whether the marker set is trustworthy — and "the parser would have refused it" is a
+/// claim that belongs in a check the reviewer can see run, not only in a comment.
+///
+/// Two tiers, and the audit asks a different question of each:
+///
+/// - **A frozen marker** — one the project specification fixes in advance — is checked against the
+///   compiled-in definition: the class it declares and the document it cites must be the ones the
+///   harness owns for that identifier. Its documenting quotation and captured evidence stay optional,
+///   because the authority is not the record's to supply and demanding it of the record would be
+///   demanding a marker the specification mandates be inexpressible.
+/// - **Every other marker** is checked for the evidence that is its only route in: a documenting
+///   quotation, which [`basis_violations`] then resolves inside the very section the basis cites, and a
+///   structured captured observation. Prose is not accepted in place of either, and in particular the
+///   absence of predictive wording is not accepted as a substitute — a blacklist of phrases
+///   authenticates nothing, and treating it as though it did was the defect this tier replaces.
+fn authority_violations(marker: &manifest::ExpectedDivergence) -> Vec<String> {
+    let mut defects: Vec<String> = Vec::new();
+    match marker.authority() {
+        manifest::MarkerAuthority::Frozen { .. } => {
+            if !marker.authority().permits(marker.class()) {
+                defects.push(format!(
+                    "marker {} is recorded as one of the exceptions the project specification fixes \
+                     in advance, but the class it declares — {} — is not the class that definition \
+                     fixes for it. A frozen identifier may be instantiated and never redefined, \
+                     because a marker that kept the name and changed what it excuses would borrow \
+                     the authority of a mandated exception for a divergence nobody mandated",
+                    marker.id(),
+                    marker.class(),
+                ));
+            }
+        }
+        manifest::MarkerAuthority::Observed => {
+            if marker.documented().trim().is_empty() {
+                defects.push(format!(
+                    "marker {} is not one of the exceptions the project specification fixes in \
+                     advance, so it is admitted on captured evidence alone, and it states no \
+                     documenting quotation. Quote the sentence of the cited section that states the \
+                     limitation, verbatim: the audit resolves that quotation inside the range the \
+                     basis cites, which is what makes the citation and the claim answer to each \
+                     other instead of merely coexisting",
+                    marker.id(),
+                ));
+            }
+            if marker.evidence().trim().is_empty() {
+                defects.push(format!(
+                    "marker {} is not one of the exceptions the project specification fixes in \
+                     advance, so it is admitted on captured evidence alone, and it records no \
+                     captured observation. A marker stops a real failing comparison from failing \
+                     the run; admitting one on an assertion would let any editable record reclassify \
+                     a compiler defect as expected. Record the command, the exit status, the output, \
+                     the toolchain and the capture date, so the next reader can re-run the \
+                     observation and contradict it if it is wrong",
+                    marker.id(),
+                ));
+            }
+        }
+    }
+    defects
+}
+
 /// Every way in which the document a marker cites fails to be a basis a reader can check.
 ///
 /// Four properties are asserted, and each closes a distinct way a basis can be hollow:
 ///
 /// The three together establish that a citation can be FOLLOWED: the document exists inside this
 /// repository, it is readable, and the section the marker names can be located inside it. They do not
-/// establish that the section supports the claim — that is a reviewer's judgement, and the frozen
-/// marker contract deliberately leaves it to one, because one of the two mandated markers rests on an
-/// inventory's silence, which no automated check can weigh. `XD-GCCEXT-CASE-RANGES-001` is that
-/// marker, and the register states its basis's weakness in prose where a reviewer will read it. What the audit guarantees is that the
-/// reviewer has somewhere concrete to look.
+/// establish that the section *supports the claim* — no automated check can weigh that, and this
+/// function does not pretend to.
 ///
-/// The optional `expected_divergence.documented` key exists for an author who can do better than a
-/// citation. When it is written, the quotation must occur INSIDE the region the locator resolved to —
-/// not merely somewhere in the same file, which is a check a marker could satisfy while citing one
-/// section and quoting another. See [`documented_quotation_violation`].
+/// What closes that gap is not this function but [`authority_violations`], which runs first and asks
+/// the prior question: may this marker exist at all? A marker either matches one of the immutable
+/// definitions the project specification fixes, in which case its identifier, class and basis document
+/// are owned by the harness and no record can restate them, or it is admitted only on captured
+/// evidence — and then `expected_divergence.documented` is REQUIRED and must quote the cited section
+/// verbatim, while `expected_divergence.evidence` is REQUIRED and must carry a re-runnable observation.
+/// So a marker reaching this function has already been authorised by one of those two routes, and this
+/// function's contribution is that whichever route it took, the reader has somewhere concrete to look.
+///
+/// When `expected_divergence.documented` is written — always, for an evidence-tier marker, and
+/// optionally for a frozen one whose authority does not come from the record — the quotation must occur
+/// INSIDE the region the locator resolved to, not merely somewhere in the same file, which is a check a
+/// marker could satisfy while citing one section and quoting another. See
+/// [`documented_quotation_violation`].
 ///
 /// - **Containment.** The cited path is resolved and required to lie beneath the package root, so a
 ///   marker cannot reclassify a divergence on the authority of something outside this repository.

@@ -251,14 +251,14 @@ use super::sandbox::{
     claim_ownership, live_foreign_owner_identity, workspace_path, RUN_OWNER_ENTRY,
 };
 use super::{
-    create_directory_chain_below, escape_markdown_inline, posix_quote, read_file_bounded,
-    redact_secrets, remove_entry, report_root, require_directory_chain_below, require_replaceable,
-    resolve_shown_path, run_generation, sanitize_text_for_report, shown_path, stable_digest,
-    AreaSpec, CellKey, DivergenceClass, HarnessError, HarnessResult, OptLevel, Oracle, Outcome,
-    Replaceable, Target, Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT, MAX_INSPECTED_FILE_BYTES,
-    MIN_PROGRAMS_PER_MANDATED_AREA, ORACLE_A_COMPARISON_COUNT, ORACLE_B_COMPARISON_COUNT,
-    ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT, REFERENCE_CROSS_CELL_COUNT_MAX,
-    REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
+    claim_run_namespace, create_directory_chain_below, escape_markdown_inline, posix_quote,
+    read_file_bounded, redact_secrets, report_root, require_directory_chain_below,
+    require_replaceable, resolve_shown_path, run_generation, sanitize_text_for_report, shown_path,
+    stable_digest, AreaSpec, CellKey, DivergenceClass, HarnessError, HarnessResult, OptLevel,
+    Oracle, Outcome, PinnedDirectory, Replaceable, RunClaim, Target, Verdict, AREAS, AREA_COUNT,
+    BCC_CELL_COUNT, MAX_INSPECTED_FILE_BYTES, MIN_PROGRAMS_PER_MANDATED_AREA,
+    ORACLE_A_COMPARISON_COUNT, ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT,
+    REFERENCE_CROSS_CELL_COUNT_MAX, REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
 };
 
 /// Directory beneath [`report_root`] that holds the per-area reports.
@@ -835,14 +835,28 @@ pub fn area_tsv_path(area: &AreaSpec) -> PathBuf {
     areas_dir().join(format!("{}.{TSV_EXTENSION}", area.directory()))
 }
 
+/// File name of the human-readable run summary, as an entry of the report root.
+///
+/// Named separately from [`summary_markdown_path`] because the namespace preparation addresses it as
+/// an **entry of a pinned directory** rather than as a path — a removal aimed at a name inside a
+/// handle this run holds cannot be redirected by replacing a level of the root's name.
+fn summary_markdown_name() -> String {
+    format!("{SUMMARY_STEM}.{MARKDOWN_EXTENSION}")
+}
+
+/// File name of the machine-readable run summary, as an entry of the report root.
+fn summary_tsv_name() -> String {
+    format!("{SUMMARY_STEM}.{TSV_EXTENSION}")
+}
+
 /// Absolute path of the human-readable run summary — the suite's deliverable.
 pub fn summary_markdown_path() -> PathBuf {
-    report_root().join(format!("{SUMMARY_STEM}.{MARKDOWN_EXTENSION}"))
+    report_root().join(summary_markdown_name())
 }
 
 /// Absolute path of the machine-readable run summary.
 pub fn summary_tsv_path() -> PathBuf {
-    report_root().join(format!("{SUMMARY_STEM}.{TSV_EXTENSION}"))
+    report_root().join(summary_tsv_name())
 }
 
 /// Absolute path of the directory holding durable evidence for outcomes whose workspace was discarded.
@@ -1149,9 +1163,21 @@ fn ensure_report_namespace(context: &str) -> HarnessResult<()> {
 
 /// Clear the previous run's report artifacts and claim the directory for this one.
 ///
-/// The order is load-bearing. A **live foreign owner** is detected before anything is removed, so a
-/// run that finds another run working here destroys nothing; the clearing then happens; and only
-/// then is the stamp written, so a crash midway leaves a directory this run will clear again rather
+/// The order is load-bearing, and the **claim comes first**.
+///
+/// The report paths are deterministic so that a row leads straight to a file, which means two
+/// concurrent runs against one build directory address the same ones — and everything below this
+/// point is destructive. Detecting a live foreign owner and *then* clearing cannot establish
+/// exclusivity: the detection and the clearing are two steps, so two runs starting together both find
+/// no owner, both clear, and each destroys the artifacts the other is writing. `claim_run_namespace`
+/// is a single operation only one of two contenders can win, so it decides that before the first
+/// removal, and the claim is held for the life of the process by [`report_namespace_claim`].
+///
+/// The ownership stamp written at the end is not redundant with the claim: the claim answers "may I
+/// clear this now" and exists only while this run does, while the stamp answers "whose reports are
+/// these" and is what a reader of a directory left behind by a finished run has. The live-owner check
+/// is kept for the same reason, and it runs **after** the claim so that its answer cannot change
+/// underneath this run. A crash midway still leaves a directory the next run will clear again rather
 /// than one another run believes is owned.
 ///
 /// Clearing is what makes aggregation honest. `try_finalize` writes the summary once the area file of
@@ -1161,10 +1187,21 @@ fn ensure_report_namespace(context: &str) -> HarnessResult<()> {
 /// therefore easier to complete by accident. A filtered run publishes a summary over the areas it
 /// selected and stamps it **partial**, listing every area that did not contribute; what clearing
 /// guarantees is that those contributions are all this run's own.
+///
+/// Every removal is addressed through **one pinned handle** on the report root rather than by name.
+/// The root's name is predictable and this function removes two summaries, a whole directory tree and
+/// any temporary debris through it, so a name-based sequence would re-resolve the root four times and
+/// leave three windows in which an intermediate level could be replaced — aiming a recursive removal
+/// outside the build tree while every diagnostic still named the report directory.
 fn prepare_report_namespace() -> HarnessResult<()> {
     let context = "preparing the report directory for this run";
     let root = report_root();
     create_directory_chain_below(context, &root, &root)?;
+
+    // Held for the life of the process: the claim is what keeps a second run out of these paths for
+    // as long as this one is writing them, so releasing it at the end of this function would protect
+    // only the clearing and not the fourteen area reports that follow.
+    let claim = claim_run_namespace(context, &root)?;
 
     if let Some((run, pid)) = live_foreign_owner_identity(&root) {
         return Err(HarnessError::new(
@@ -1183,16 +1220,55 @@ fn prepare_report_namespace() -> HarnessResult<()> {
         ));
     }
 
-    for stale in [summary_markdown_path(), summary_tsv_path()] {
-        require_replaceable(context, &stale, Replaceable::RegularFile)?;
-        remove_entry(context, &stale)?;
+    let pinned = PinnedDirectory::pin(context, &root)?;
+    for stale in [summary_markdown_name(), summary_tsv_name()] {
+        require_replaceable(
+            context,
+            &pinned.shown_entry(&stale),
+            Replaceable::RegularFile,
+        )?;
+        pinned.remove_within(context, &stale)?;
     }
-    let areas = areas_dir();
-    require_replaceable(context, &areas, Replaceable::Directory)?;
-    remove_entry(context, &areas)?;
-    purge_stale_temporaries(context, &root)?;
-    create_directory_chain_below(context, &root, &areas)?;
-    claim_ownership(context, &root)
+    require_replaceable(
+        context,
+        &pinned.shown_entry(AREAS_DIR_NAME),
+        Replaceable::Directory,
+    )?;
+    pinned.remove_within(context, AREAS_DIR_NAME)?;
+    purge_stale_temporaries(context, &pinned)?;
+    create_directory_chain_below(context, &root, &areas_dir())?;
+    claim_ownership(context, &root)?;
+    // Stored only now, after everything that could fail has succeeded. A claim recorded before a
+    // failed clearing would be released by the process exit rather than by this run's own accounting,
+    // and a reader of the failure would have no way to tell whether the directory had been claimed.
+    remember_report_claim(claim);
+    Ok(())
+}
+
+/// Keep this run's claim on the report root alive for the life of the process.
+///
+/// A [`RunClaim`] releases itself when it is dropped, which is exactly right for a workspace whose
+/// lifetime is one cell — and exactly wrong for the report root, whose lifetime is the whole run. So
+/// the value is moved somewhere that outlives every area thread. It is never read: holding it *is* the
+/// guarantee.
+///
+/// Rust runs no destructor for such a value at process exit, so the claim entry is still present when
+/// the run ends. That is a designed outcome rather than a leak — no area is "last" in a filtered or a
+/// failing run, so there is nowhere honest to release it from — and [`RunClaim`]'s own documentation
+/// carries the argument: the next run reclaims a claim whose process is provably gone, and still
+/// refuses one whose process is alive.
+fn remember_report_claim(claim: RunClaim) {
+    static HELD: OnceLock<Mutex<Vec<RunClaim>>> = OnceLock::new();
+    let held = HELD.get_or_init(|| Mutex::new(Vec::new()));
+    match held.lock() {
+        Ok(mut held) => held.push(claim),
+        // A poisoned mutex means an area thread panicked while holding it, which cannot happen here —
+        // nothing between the lock and the push can panic — but the claim must not be dropped on the
+        // strength of that reasoning, because dropping it would release the namespace while the run is
+        // still writing into it. Leaking it is the safe direction: the entry is reclaimed as stale by
+        // the next run, whose protocol for exactly that is already exercised.
+        Err(poisoned) => poisoned.into_inner().push(claim),
+    }
 }
 
 /// Remove any temporary file a crashed earlier run left at the report root.
@@ -1201,31 +1277,19 @@ fn prepare_report_namespace() -> HarnessResult<()> {
 /// run, so a leftover can never be reused or collided with; it would simply accumulate. Removing them here keeps the claim that a failed write
 /// leaves no debris true across runs as well as within one. An entry that is not one of ours by name
 /// is left alone, and the ownership stamp is not one of ours by name.
-fn purge_stale_temporaries(context: &str, root: &Path) -> HarnessResult<()> {
-    let entries = fs::read_dir(root).map_err(|error| {
-        HarnessError::new(
-            String::from(context),
-            format!("{} could not be listed: {error}", shown_path(root)),
-        )
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            HarnessError::new(
-                String::from(context),
-                format!(
-                    "an entry of {} could not be inspected: {error}",
-                    shown_path(root)
-                ),
-            )
-        })?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
+///
+/// Takes the report root as a **pinned directory** rather than as a path, so the listing and every
+/// removal that follows from it address the same held object. Listing by name and then removing by
+/// name are two resolutions of one predictable path: between them the root can be replaced, and the
+/// removals — aimed at names this function found in the *previous* directory — would then execute in
+/// the substitute. Since the names it acts on come from the listing, the listing and the removals have
+/// to describe one directory or neither answer means anything.
+fn purge_stale_temporaries(context: &str, root: &PinnedDirectory) -> HarnessResult<()> {
+    for name in root.entry_names(context)? {
         if name == RUN_OWNER_ENTRY || !name.starts_with('.') || !name.ends_with(TEMPORARY_SUFFIX) {
             continue;
         }
-        remove_entry(context, &root.join(name))?;
+        root.remove_within(context, &name)?;
     }
     Ok(())
 }

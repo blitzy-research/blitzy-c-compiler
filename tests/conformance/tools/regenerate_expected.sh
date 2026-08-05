@@ -124,7 +124,8 @@
 #     cp -p --                mv --                      rm -f -- / rm -rf --
 #     mkdir -p -- / mkdir --  sort -- / sort -u          printf
 #     mktemp -d / -d --       sleep N                    command -v / -v --
-#     cd -P / pwd -P          kill -0 / -TERM / -KILL    wait
+#     cd -P / pwd -P          test A -ef B                wait
+#     kill -0 / -TERM / -KILL
 #     du -sk / du -k --       rmdir --                   setsid
 #     env -i NAME=VALUE ...   id -u                      ls -ldn --
 #     ulimit -f BLOCKS
@@ -156,8 +157,9 @@
 # either creates the directory or fails, with no window between a test and a
 # create for a second sweep to slip through.
 #
-# Everything in that list is POSIX WITH EXACTLY THREE EXCEPTIONS, and none is
-# left to chance:
+# Every utility NAME in that list is POSIX WITH EXACTLY THREE EXCEPTIONS, and
+# none is left to chance. The Linux interfaces and `test -ef` primary are
+# accounted for separately below:
 #
 #   * `mktemp` is not a POSIX utility at all, and it IS a hard requirement. The
 #     private working area and each record's staging directory are both created
@@ -179,6 +181,15 @@
 #     leave the real compiler running. Without it the exact child is signalled
 #     instead, and that guarantee is genuinely weaker rather than equivalent, so
 #     it is stated here rather than glossed over. Its absence never fails a run.
+#
+# Two Linux interfaces are now deliberately load-bearing security mechanisms,
+# not accidental portability leaks. `/proc/<pid>/stat` field 22 authenticates a
+# process before every signal, and `/proc/$$/fd/<n>/.` keeps the corpus, work,
+# record and staging directories bound to open descriptors across ancestor
+# renames. The `test A -ef B` primary verifies that a visible cleanup/install
+# name still designates the held object. The script already targets Linux in the
+# tested baseline above; on a host without these interfaces it refuses before
+# compiling rather than silently falling back to numeric PIDs and repeated names.
 #
 # Deliberately NOT dependencies, and never invoked at all: `find` and `sed`
 # (records are enumerated with shell globbing and inspected with awk, so no
@@ -321,17 +332,34 @@ cf_is_excluded_dir() {
 }
 
 # --- Mutable state -----------------------------------------------------------
-CF_WORK=''         # private working area, created by mktemp -d
+CF_WORK=''         # handle-relative private working area, opened on fd 7
+CF_WORK_NAME=''    # physical name mktemp returned, used only for verified cleanup
+CF_WORK_OPEN=0
 # Whatever staging state is in flight, removed on any exit. Under --check that is a
 # candidate FILE inside the private working area; when writing it is the staging
 # DIRECTORY beside the record. One variable and one releaser for both, so no exit
 # path has to know which kind it is looking at.
 CF_STAGING=''
+CF_STAGING_ENTRY=''
+CF_STAGING_HANDLE=''
+CF_STAGING_OPEN=0
+# The current record directory is opened on fd 8. Every record/source read and
+# every staging/install operation goes through this handle, so a renamed ancestor
+# cannot redirect a later path resolution.
+CF_RECORD_DIR_NAME=''
+CF_RECORD_DIR_HANDLE=''
+CF_RECORD_DIR_OPEN=0
+# The corpus root is opened on fd 6 once its physical location is established.
+# Lock acquisition/reclamation/release use this handle so mutable ancestors
+# cannot redirect the coordination namespace.
+CF_CORPUS_HANDLE=''
+CF_CORPUS_OPEN=0
 CF_PROCESSED=0
 # The corpus regeneration lock, and whether this run owns it. Released on any
 # exit path by cf_cleanup, so an interrupted run does not leave a lock behind
 # that the next one has to reclaim.
 CF_LOCK_DIR=''
+CF_LOCK_DIR_NAME=''
 CF_LOCK_HELD=0
 # This run's ownership token, written into the lock's owner file when the lock is
 # taken. Cleanup removes the lock only while the token on disk is still this one:
@@ -343,6 +371,16 @@ CF_LOCK_TOKEN=''
 # empty whenever it was not.
 CF_QUOTA_REASON=''
 CF_CHANGED=0
+
+# The background wrapper that owns one bounded child and its quota supervisor.
+# Signal cleanup reaches this direct child, whose own traps terminate and reap the
+# cell group before the parent releases staging, the corpus lock or the work root.
+CF_ACTIVE_WRAPPER=''
+CF_ACTIVE_WRAPPER_START=''
+CF_ACTIVE_READY=1
+CF_PENDING_SIGNAL=''
+CF_SIGNAL_REASON=''
+CF_SIGNAL_BREACH=0
 
 # The search path this script and every child it starts use, computed from the
 # inherited PATH by cf_sanitize_path and never read from the environment again.
@@ -423,28 +461,130 @@ cf_detail_file() {
 	done < "$1"
 }
 
+# Print Linux's process start-time identity token (`/proc/<pid>/stat` field 22).
+# Field 2 is parenthesized and may itself contain spaces or closing parentheses,
+# so remove through the LAST `) ` and select field 20 of the remaining tail.
+cf_process_start_token() {
+	cf_pst_pid=$1
+	case $cf_pst_pid in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	[ -r "/proc/$cf_pst_pid/stat" ] || return 1
+	cf_pst_stat=$(cat -- "/proc/$cf_pst_pid/stat" 2> /dev/null) || return 1
+	cf_pst_tail=${cf_pst_stat##*) }
+	[ "$cf_pst_tail" != "$cf_pst_stat" ] || return 1
+	cf_pst_token=$(printf '%s\n' "$cf_pst_tail" |
+		awk 'NF >= 20 && $20 ~ /^[0-9]+$/ { print $20; ok=1 } END { if (!ok) exit 1 }') ||
+		return 1
+	[ -n "$cf_pst_token" ] || return 1
+	printf '%s\n' "$cf_pst_token"
+}
+
+# Signal one direct process only while its Linux start token still matches.
+# `env kill` deliberately selects the external utility: dash's builtin rejects
+# the `--` required by the procps-ng utility before a negative group operand.
+CF_SIGNAL_REASON=''
+cf_signal_pid() {
+	# $1 = signal, $2 = pid, $3 = start token
+	CF_SIGNAL_REASON=''
+	CF_SIGNAL_BREACH=0
+	cf_spid_now=$(cf_process_start_token "$2" 2> /dev/null) || cf_spid_now=''
+	if [ -z "$3" ]; then
+		CF_SIGNAL_REASON="process $2 had no start-time identity captured at launch"
+		CF_SIGNAL_BREACH=1
+		return 1
+	fi
+	if [ -z "$cf_spid_now" ]; then
+		CF_SIGNAL_REASON="process $2 no longer has a readable start-time identity"
+		return 1
+	fi
+	if [ "$cf_spid_now" != "$3" ]; then
+		CF_SIGNAL_REASON="process $2 changed start-time identity from $3 to $cf_spid_now"
+		CF_SIGNAL_BREACH=1
+		return 1
+	fi
+	command env kill -"$1" -- "$2" 2> /dev/null
+}
+
+# Stop and reap the direct wrapper that owns the current cell and its supervisor.
+# The wrapper's own TERM trap performs the inner group sweep; waiting for the
+# wrapper is therefore the parent-side proof that no child still owns work files.
+cf_stop_active_wrapper() {
+	if [ -z "$CF_ACTIVE_WRAPPER" ]; then
+		return 0
+	fi
+	if cf_signal_pid TERM "$CF_ACTIVE_WRAPPER" "$CF_ACTIVE_WRAPPER_START"; then
+		:
+	elif [ "$CF_SIGNAL_BREACH" -eq 1 ]; then
+		[ -n "$CF_SIGNAL_REASON" ] && cf_error "refusing to signal active bound wrapper: $CF_SIGNAL_REASON"
+	fi
+	wait "$CF_ACTIVE_WRAPPER" > /dev/null 2>&1 || true
+	CF_ACTIVE_WRAPPER=''
+	CF_ACTIVE_WRAPPER_START=''
+	CF_ACTIVE_READY=1
+}
+
+# Signals landing between `$!` and capture of the wrapper start token are
+# remembered, then delivered once that identity is complete. Further lifecycle
+# signals are ignored during cleanup so the wait/removal sequence cannot re-enter.
+cf_on_signal() {
+	cf_os_signal=$1
+	if [ "$CF_ACTIVE_READY" -ne 1 ]; then
+		[ -n "$CF_PENDING_SIGNAL" ] || CF_PENDING_SIGNAL=$cf_os_signal
+		return 0
+	fi
+	trap '' HUP INT TERM
+	cf_cleanup
+	trap - "$cf_os_signal"
+	kill -"$cf_os_signal" $$ || exit 1
+}
+
 # =============================================================================
 # Cleanup.
 #
-# Cleanup sits on EXIT alone. A handler installed on INT or TERM *alongside*
-# EXIT is a trap for the author: the handler runs, returns, and the shell
-# RESUMES at the next command -- now with the working area already deleted, so
-# every later redirection writes into a path that no longer exists and the
-# script keeps going after it was asked to stop. Each signal handler therefore
-# cleans up, restores the default disposition, and re-raises the same signal at
-# this shell, so the script dies from it and the caller sees the conventional
-# 128 + signal status. This mirrors the pattern `tests/conformance/README.md`
-# publishes under "Reproducing a cell by hand".
+# Cleanup sits on EXIT alone. HUP/INT/TERM first reach the direct bound wrapper,
+# whose own trap identity-checks, terminates and waits for the cell group and
+# quota supervisor. Only after the parent has waited for that wrapper does it
+# release staging, the corpus lock and the work root. Deleting those paths first
+# would leave a compiler or emulator writing through names this run no longer
+# owns.
+#
+# The parent then restores the signal's default disposition and re-raises it, so
+# the caller sees a signal termination rather than a script that resumed after
+# cleanup. Signals arriving between `$!` and start-token capture are deferred,
+# and further lifecycle signals are masked while the ordered cleanup runs.
 # =============================================================================
 
 # Remove whatever staging state is in flight and forget it. `rm -rf` because the
 # path is a directory when writing and a file under --check, and safe to call when
 # there is none.
 cf_release_staging() {
-	if [ -n "$CF_STAGING" ]; then
+	if [ "$CF_STAGING_OPEN" -eq 1 ]; then
+		if [ -n "$CF_STAGING_ENTRY" ] && [ -n "$CF_STAGING_HANDLE" ] &&
+			command test "$CF_STAGING_ENTRY" -ef "$CF_STAGING_HANDLE"; then
+			rm -rf -- "$CF_STAGING_ENTRY"
+		elif [ -n "$CF_STAGING_ENTRY" ] || [ -n "$CF_STAGING_HANDLE" ]; then
+			cf_error 'refusing to remove staging: its directory entry no longer matches the pinned handle'
+		fi
+		exec 9<&-
+		CF_STAGING_OPEN=0
+	elif [ -n "$CF_STAGING" ]; then
 		rm -rf -- "$CF_STAGING"
-		CF_STAGING=''
 	fi
+	CF_STAGING=''
+	CF_STAGING_ENTRY=''
+	CF_STAGING_HANDLE=''
+}
+
+# Close the durable handle for the record directory after any staging child has
+# been retired. Safe to call before the first record and after every return path.
+cf_release_record_dir() {
+	if [ "$CF_RECORD_DIR_OPEN" -eq 1 ]; then
+		exec 8<&-
+		CF_RECORD_DIR_OPEN=0
+	fi
+	CF_RECORD_DIR_NAME=''
+	CF_RECORD_DIR_HANDLE=''
 }
 
 # Give the corpus regeneration lock back, if this run took it AND it is still this
@@ -469,18 +609,33 @@ cf_release_lock() {
 }
 
 cf_cleanup() {
+	cf_stop_active_wrapper
 	cf_release_staging
+	cf_release_record_dir
 	cf_release_lock
-	if [ -n "$CF_WORK" ] && [ -d "$CF_WORK" ]; then
-		rm -rf -- "$CF_WORK"
+	if [ "$CF_WORK_OPEN" -eq 1 ]; then
+		if [ -n "$CF_WORK_NAME" ] && [ -n "$CF_WORK" ] &&
+			command test "$CF_WORK_NAME" -ef "$CF_WORK"; then
+			rm -rf -- "$CF_WORK_NAME"
+		elif [ -n "$CF_WORK_NAME" ] || [ -n "$CF_WORK" ]; then
+			cf_error 'refusing to remove the private working area: its name no longer matches the pinned handle'
+		fi
+		exec 7<&-
+		CF_WORK_OPEN=0
 	fi
 	CF_WORK=''
+	CF_WORK_NAME=''
+	if [ "$CF_CORPUS_OPEN" -eq 1 ]; then
+		exec 6<&-
+		CF_CORPUS_OPEN=0
+	fi
+	CF_CORPUS_HANDLE=''
 }
 
 trap cf_cleanup EXIT
-trap 'cf_cleanup; trap - HUP;  kill -HUP  $$' HUP
-trap 'cf_cleanup; trap - INT;  kill -INT  $$' INT
-trap 'cf_cleanup; trap - TERM; kill -TERM $$' TERM
+trap 'cf_on_signal HUP' HUP
+trap 'cf_on_signal INT' INT
+trap 'cf_on_signal TERM' TERM
 
 # =============================================================================
 # Usage.
@@ -521,6 +676,11 @@ Environment (all optional; the same names the harness uses):
   BCC_QEMU_AARCH64            aarch64 runner    [qemu-aarch64, qemu-aarch64-static]
   BCC_QEMU_RISCV64            riscv64 runner    [qemu-riscv64, qemu-riscv64-static]
   BCC_CONFORMANCE_TIMEOUT_SECS  per-compile and per-run budget [30]
+  TMPDIR                       private-work parent [trusted /tmp, then /var/tmp]
+
+TMPDIR's complete physical ancestry must be owned by this account or root and
+may be group/other writable only where the sticky bit protects this run's
+private entry. An untrusted inherited value is refused rather than followed.
 
 Every reference driver is ATTESTED before it compiles anything, and a driver that
 fails is refused rather than used: the program at the end of its wrapper chain
@@ -856,6 +1016,20 @@ if [ ! -f "$CF_CORPUS_DIR/README.md" ]; then
 	cf_detail 'the corpus contract is tests/conformance/README.md; the layout is expected to be unchanged'
 	exit "$CF_EXIT_ENVIRONMENT"
 fi
+if ! exec 6< "$CF_CORPUS_DIR"; then
+	cf_error 'cannot open the conformance corpus root as a durable directory handle'
+	exit "$CF_EXIT_ENVIRONMENT"
+fi
+CF_CORPUS_HANDLE="/proc/$$/fd/6/."
+if ! command test "$CF_CORPUS_DIR" -ef "$CF_CORPUS_HANDLE"; then
+	cf_error 'the conformance corpus root could not be verified through Linux /proc fd 6'
+	cf_detail 'this script requires /proc/$$/fd directory handles; it will not fall back to'
+	cf_detail 're-resolving mutable path names for lock, staging, install or cleanup'
+	exec 6<&-
+	CF_CORPUS_HANDLE=''
+	exit "$CF_EXIT_ENVIRONMENT"
+fi
+CF_CORPUS_OPEN=1
 
 # =============================================================================
 # Timeout budget.
@@ -965,7 +1139,11 @@ case $CF_EUID in
 esac
 
 # Why directory $1 is writable by an account this script does not trust, printed on
-# stdout; exit status 1 when it is trustworthy.
+# stdout; exit status 1 when it is trustworthy. Optional $2 = runtime permits a
+# sticky group/other-writable level: mktemp's unpredictable child cannot be
+# planted in advance, and the sticky bit prevents another account replacing that
+# child after this script creates it. PATH directories deliberately receive no
+# such exemption because an attacker needs only to create a NEW tool name there.
 #
 # The mode string is read from `ls -ld`, whose first field is the ten characters
 # POSIX defines: type, then user, group and other permissions in that order. So
@@ -990,16 +1168,28 @@ cf_untrusted_dir() {
 	fi
 	cf_ud_mode=${cf_ud_line%% *}
 	cf_ud_owner=${cf_ud_line##* }
+	cf_ud_sticky=0
+	case $cf_ud_mode in
+	*[tT]) cf_ud_sticky=1 ;;
+	esac
 	case $cf_ud_mode in
 	?????w????*)
-		printf '%s\n' 'it is writable by every member of its owning group, which is not a single trusted principal'
-		return 0
+		if [ "${2:-}" = 'runtime' ] && [ "$cf_ud_sticky" -eq 1 ]; then
+			:
+		else
+			printf '%s\n' 'it is writable by every member of its owning group, which is not a single trusted principal'
+			return 0
+		fi
 		;;
 	esac
 	case $cf_ud_mode in
 	????????w*)
-		printf '%s\n' 'it is writable by any account on this machine (the sticky bit is not an exemption: it restrains deleting an entry, not creating one)'
-		return 0
+		if [ "${2:-}" = 'runtime' ] && [ "$cf_ud_sticky" -eq 1 ]; then
+			:
+		else
+			printf '%s\n' 'it is writable by any account on this machine (the sticky bit is not an exemption: it restrains deleting an entry, not creating one)'
+			return 0
+		fi
 		;;
 	esac
 	case $cf_ud_owner in
@@ -1014,6 +1204,31 @@ cf_untrusted_dir() {
 	fi
 	return 1
 }
+
+# Canonicalize a runtime parent only after every PHYSICAL ancestor has passed the
+# ownership/mode rule. The walk uses `cd -P` and `.` so an ancestor name is never
+# resolved a second time while it is being judged. Prints the canonical parent.
+cf_trusted_runtime_parent() (
+	# $1 = candidate, $2 = diagnostic label
+	cf_trp_candidate=$1
+	cf_trp_label=$2
+	CDPATH='' cd -P -- "$cf_trp_candidate" 2> /dev/null || {
+		cf_error "$cf_trp_label \"$cf_trp_candidate\" does not resolve to a directory"
+		exit 1
+	}
+	cf_trp_origin=$(pwd -P) || exit 1
+	while :; do
+		cf_trp_here=$(pwd -P) || exit 1
+		if cf_trp_why=$(cf_untrusted_dir . runtime); then
+			cf_error "$cf_trp_label \"$cf_trp_candidate\" is not a trusted runtime parent"
+			cf_detail "$cf_trp_here: $cf_trp_why"
+			exit 1
+		fi
+		[ "$cf_trp_here" = / ] && break
+		CDPATH='' cd -P -- .. || exit 1
+	done
+	printf '%s\n' "$cf_trp_origin"
+)
 
 # Compute CF_TRUSTED_PATH from the inherited PATH, and report what was refused.
 cf_sanitize_path() {
@@ -1088,20 +1303,63 @@ cf_sanitize_path() {
 cf_sanitize_path
 PATH=$CF_TRUSTED_PATH
 export PATH
+if ! cf_process_start_token $$ > /dev/null; then
+	cf_error 'Linux /proc process start-time identities are unavailable'
+	cf_detail 'numeric PIDs are not identities after a shell may have reaped them, so this'
+	cf_detail 'script refuses to supervise or signal a child without /proc/<pid>/stat field 22'
+	exit "$CF_EXIT_ENVIRONMENT"
+fi
 
 # =============================================================================
-# Private working area. `mktemp -d` honours TMPDIR and creates a directory that
-# did not previously exist, with mode 0700, under an unpredictable name -- so
-# nothing can already be sitting at the paths written below. Deliberately NOT
-# under target/: .gitignore names exactly three paths there, and a fourth would
-# be untracked-but-unignored and would dirty `git status`.
+# Private working area. An inherited TMPDIR is accepted only after its complete
+# physical ancestry passes the runtime-parent owner/mode rule. With no TMPDIR,
+# /tmp is used when trusted and /var/tmp is the fallback; this host's /tmp is
+# intentionally refused because it is world-writable without sticky protection.
+#
+# The directory is opened on fd 7 immediately after mktemp and every later work
+# path goes through `/proc/$$/fd/7/.`. A mutable ancestor can rename the visible
+# entry, but it cannot redirect a write through that already-open handle. The
+# visible name is retained only for identity-checked cleanup.
+#
+# Deliberately NOT under target/: .gitignore names exactly three paths there, and
+# a fourth would be untracked-but-unignored and would dirty `git status`.
 # =============================================================================
 
 umask 077
-CF_WORK=$(mktemp -d) || {
+if [ -n "${TMPDIR:-}" ]; then
+	CF_WORK_PARENT=$(cf_trusted_runtime_parent "$TMPDIR" TMPDIR) || {
+		cf_detail 'unset TMPDIR or point it at a directory owned by this account/root whose'
+		cf_detail 'physical ancestry is not group/other writable without sticky protection'
+		exit "$CF_EXIT_ENVIRONMENT"
+	}
+elif CF_WORK_PARENT=$(cf_trusted_runtime_parent /tmp /tmp 2> /dev/null); then
+	:
+elif CF_WORK_PARENT=$(cf_trusted_runtime_parent /var/tmp /var/tmp 2> /dev/null); then
+	cf_note '/tmp is not a trusted runtime parent; using /var/tmp'
+else
+	cf_error 'neither /tmp nor /var/tmp is a trusted runtime parent'
+	exit "$CF_EXIT_ENVIRONMENT"
+fi
+CF_WORK_NAME=$(mktemp -d -- "$CF_WORK_PARENT/bcc-conformance-regenerate.XXXXXX") || {
 	cf_error 'cannot create a private working directory with mktemp -d'
 	exit "$CF_EXIT_ENVIRONMENT"
 }
+if ! exec 7< "$CF_WORK_NAME"; then
+	cf_error 'cannot open the private working directory as a durable handle'
+	exit "$CF_EXIT_ENVIRONMENT"
+fi
+CF_WORK="/proc/$$/fd/7/."
+if ! command test "$CF_WORK_NAME" -ef "$CF_WORK"; then
+	cf_error 'the private working directory changed identity before its handle was verified'
+	exec 7<&-
+	CF_WORK=''
+	exit "$CF_EXIT_ENVIRONMENT"
+fi
+CF_WORK_OPEN=1
+if cf_work_why=$(cf_untrusted_dir "$CF_WORK"); then
+	cf_error "the private working directory is not private: $cf_work_why"
+	exit "$CF_EXIT_ENVIRONMENT"
+fi
 mkdir -p -- "$CF_WORK/cell"
 
 # =============================================================================
@@ -1140,6 +1398,12 @@ mkdir -p -- "$CF_WORK/cell"
 # `timeout` mode the supervisor leaves time alone, because `timeout` already owns
 # it; in the fallback mode the same loop owns both.
 #
+# One BACKGROUND WRAPPER owns that cell and supervisor together. The parent keeps
+# the wrapper PID plus its Linux start token in trap-visible state. On HUP/INT/TERM
+# the parent signals and waits for the wrapper; the wrapper's own trap
+# identity-checks, terminates and reaps the cell group and supervisor first. Thus
+# work/staging/lock cleanup cannot overtake a still-running compiler.
+#
 # The supervisor is not the only space bound, because a poll cannot outrun a
 # redirection: a cell can write far more than the ceiling between two polls. So
 # every child also carries a HARD per-file limit installed with `ulimit -f`, which
@@ -1168,6 +1432,11 @@ CF_BOUND_OUTER_FILE="$CF_WORK/bound.outer"
 # Out of band for the same reason the bound marker is: a status cannot carry it.
 CF_QUOTA_FIRED_FILE="$CF_WORK/bound.quota"
 CF_QUOTA_REASON_FILE="$CF_WORK/bound.quota.why"
+# Set whenever a numeric PID resolves to a different Linux start token at the
+# moment a supervisor or cleanup path would signal it. This is an infrastructure
+# refusal, never a timeout or quota outcome.
+CF_IDENTITY_FIRED_FILE="$CF_WORK/bound.identity"
+CF_IDENTITY_REASON_FILE="$CF_WORK/bound.identity.why"
 
 # Set by cf_bound_run. Exactly one of the first two is meaningful per call.
 CF_BOUND_STATUS=''  # the child's true exit status, when it completed
@@ -1548,15 +1817,44 @@ else
 	CF_SETSID=''
 fi
 
-# cf_signal_cell <signal> <pid>: signal the cell, its whole group where the cell
-# was started as a session leader. Succeeds if either delivery succeeds, so a
-# caller can still tell "the signal was delivered" from "there was nothing left
-# to signal" -- the distinction the bound marker depends on.
+# cf_signal_cell <signal> <pid> <start-token>: signal the cell, or its whole
+# group where it was started as a session leader, only while the leader still
+# has the identity captured at launch. The external kill utility and `--` are
+# required for a negative group operand on the supported procps-ng host; dash's
+# builtin accepts a different form and is deliberately bypassed.
 cf_signal_cell() {
-	if [ -n "$CF_SETSID" ] && kill -"$1" -- "-$2" 2> /dev/null; then
-		return 0
+	CF_SIGNAL_REASON=''
+	CF_SIGNAL_BREACH=0
+	cf_sc_now=$(cf_process_start_token "$2" 2> /dev/null) || cf_sc_now=''
+	if [ -z "$3" ]; then
+		CF_SIGNAL_REASON="cell process $2 had no start-time identity captured at launch"
+		CF_SIGNAL_BREACH=1
+		return 1
 	fi
-	kill -"$1" "$2" 2> /dev/null
+	if [ -z "$cf_sc_now" ]; then
+		CF_SIGNAL_REASON="cell process $2 no longer has a readable start-time identity"
+		return 1
+	fi
+	if [ "$cf_sc_now" != "$3" ]; then
+		CF_SIGNAL_REASON="cell process $2 changed start-time identity from $3 to $cf_sc_now"
+		CF_SIGNAL_BREACH=1
+		return 1
+	fi
+	if [ -n "$CF_SETSID" ]; then
+		command env kill -"$1" -- "-$2" 2> /dev/null
+	else
+		command env kill -"$1" -- "$2" 2> /dev/null
+	fi
+}
+
+# True only while the visible mktemp name still designates the directory held on
+# fd 7. All work I/O uses the handle regardless; this check makes measurement
+# loss and cleanup substitution explicit rather than silently acting on a name.
+cf_work_identity_current() {
+	[ "$CF_WORK_OPEN" -eq 1 ] &&
+		[ -n "$CF_WORK_NAME" ] &&
+		[ -n "$CF_WORK" ] &&
+		command test "$CF_WORK_NAME" -ef "$CF_WORK"
 }
 
 # Walk the tree beneath $1, counting entries at EVERY depth, following no link, and
@@ -1582,7 +1880,12 @@ cf_signal_cell() {
 # ordinary, dot- and dot-dot-prefixed names without ever matching `.` or `..`.
 CF_WALK_COUNT=0
 CF_WALK_TOO_DEEP=0
+CF_WALK_UNMEASURED=''
 cf_walk_entries() {
+	if [ ! -d "$1" ] || [ ! -r "$1" ] || [ ! -x "$1" ]; then
+		CF_WALK_UNMEASURED="directory $1 could not be traversed completely"
+		return 0
+	fi
 	for cf_walk_entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
 		if [ ! -e "$cf_walk_entry" ] && [ ! -L "$cf_walk_entry" ]; then
 			continue
@@ -1598,11 +1901,15 @@ cf_walk_entries() {
 			fi
 			cf_walk_entries "$cf_walk_entry" $(($2 + 1))
 			if [ "$CF_WALK_COUNT" -gt "$CF_WORK_ENTRIES_MAX" ] ||
-				[ "$CF_WALK_TOO_DEEP" -eq 1 ]; then
+				[ "$CF_WALK_TOO_DEEP" -eq 1 ] ||
+				[ -n "$CF_WALK_UNMEASURED" ]; then
 				return 0
 			fi
 		fi
 	done
+	if [ ! -d "$1" ] || [ ! -r "$1" ] || [ ! -x "$1" ]; then
+		CF_WALK_UNMEASURED="directory $1 changed or became unreadable during traversal"
+	fi
 }
 
 # Count the entries beneath $1 at every depth. Leaves the count in CF_WALK_COUNT and
@@ -1615,36 +1922,55 @@ cf_walk_entries() {
 cf_count_entries() {
 	CF_WALK_COUNT=0
 	CF_WALK_TOO_DEEP=0
+	CF_WALK_UNMEASURED=''
 	cf_walk_entries "$1" 0
 }
 
 # Is the private working area past any live ceiling? Sets CF_QUOTA_REASON to a
-# ready-to-print sentence when it is, and clears it when it is not. `du -sk` is
-# POSIX; a reading that is not a number is treated as zero rather than as a
-# breach, because refusing a cell over an unreadable measurement would turn a
-# missing utility into a corpus defect.
+# ready-to-print sentence when it is, and clears it when it is not. Every lost
+# measurement is itself a breach: a failed `du`, a non-numeric result, an
+# unreadable traversal or a changed root identity can hide an arbitrarily large
+# tree and therefore cannot certify the cell as within quota.
 cf_quota_breach() {
 	CF_QUOTA_REASON=''
-	cf_quota_kb=$(du -sk "$CF_WORK" 2> /dev/null | awk 'NR == 1 { print $1 + 0; exit }')
-	case $cf_quota_kb in
-	'' | *[!0-9]*) cf_quota_kb=0 ;;
-	esac
+	if ! cf_work_identity_current; then
+		CF_QUOTA_REASON='the private working area name no longer designates the pinned work handle'
+		return 0
+	fi
+	if ! cf_quota_line=$(du -sk "$CF_WORK" 2> /dev/null); then
+		CF_QUOTA_REASON='the working-area byte measurement failed, so its live size is unknown'
+		return 0
+	fi
+	if ! cf_quota_kb=$(printf '%s\n' "$cf_quota_line" |
+		awk 'NR == 1 && $1 ~ /^[0-9]+$/ { value=$1; next } { bad=1 }
+		     END { if (!bad && value != "") print value; else exit 1 }'); then
+		CF_QUOTA_REASON='the working-area byte measurement was not one numeric du result'
+		return 0
+	fi
 	if [ "$cf_quota_kb" -gt "$CF_WORK_KB_MAX" ]; then
 		CF_QUOTA_REASON="the working area held ${cf_quota_kb} KiB, past the ${CF_WORK_KB_MAX} KiB live ceiling"
 		return 0
 	fi
 	cf_count_entries "$CF_WORK"
+	if [ -n "$CF_WALK_UNMEASURED" ]; then
+		CF_QUOTA_REASON="the working-area entry measurement was incomplete: $CF_WALK_UNMEASURED"
+		return 0
+	fi
 	if [ "$CF_WALK_TOO_DEEP" -eq 1 ]; then
 		CF_QUOTA_REASON="the working area nested more than ${CF_WALK_DEPTH_MAX} levels deep, which is past the depth this measurement covers"
 		return 0
 	fi
 	if [ "$CF_WALK_COUNT" -gt "$CF_WORK_ENTRIES_MAX" ]; then
 		CF_QUOTA_REASON="the working area held ${CF_WALK_COUNT} entries, past the ${CF_WORK_ENTRIES_MAX}-entry live ceiling"
+		return 0
+	fi
+	if ! cf_work_identity_current; then
+		CF_QUOTA_REASON='the private working area changed identity during live quota measurement'
 	fi
 	return 0
 }
 
-# cf_supervise_cell <pid> <seconds>: watch one running cell until it is gone.
+# cf_supervise_cell <pid> <start-token> <seconds>: watch one running cell until it is gone.
 #
 # ONE supervisor for both bounding mechanisms, which is the whole point: the space
 # ceilings are enforced identically whether or not `timeout` is installed, so the
@@ -1660,17 +1986,34 @@ cf_quota_breach() {
 # Runs in a subshell of its own, so the counters it keeps cannot leak into the caller.
 cf_supervise_cell() {
 	cf_sup_pid=$1
-	cf_sup_secs=$2
+	cf_sup_start=$2
+	cf_sup_secs=$3
 	cf_sup_tick=0
 	while :; do
 		sleep 1
-		kill -0 "$cf_sup_pid" 2> /dev/null || return 0
+		cf_sup_now=$(cf_process_start_token "$cf_sup_pid" 2> /dev/null) || return 0
+		if [ "$cf_sup_now" != "$cf_sup_start" ]; then
+			printf 'cell process %s changed start-time identity from %s to %s\n' \
+				"$cf_sup_pid" "$cf_sup_start" "$cf_sup_now" > "$CF_IDENTITY_REASON_FILE"
+			: > "$CF_IDENTITY_FIRED_FILE"
+			return 0
+		fi
 		if cf_quota_breach && [ -n "$CF_QUOTA_REASON" ]; then
 			printf '%s\n' "$CF_QUOTA_REASON" > "$CF_QUOTA_REASON_FILE"
 			: > "$CF_QUOTA_FIRED_FILE"
-			cf_signal_cell TERM "$cf_sup_pid"
+			if ! cf_signal_cell TERM "$cf_sup_pid" "$cf_sup_start"; then
+				if [ "$CF_SIGNAL_BREACH" -eq 1 ]; then
+					printf '%s\n' "$CF_SIGNAL_REASON" > "$CF_IDENTITY_REASON_FILE"
+					: > "$CF_IDENTITY_FIRED_FILE"
+				fi
+				return 0
+			fi
 			sleep 1
-			cf_signal_cell KILL "$cf_sup_pid"
+			if ! cf_signal_cell KILL "$cf_sup_pid" "$cf_sup_start" &&
+				[ "$CF_SIGNAL_BREACH" -eq 1 ]; then
+				printf '%s\n' "$CF_SIGNAL_REASON" > "$CF_IDENTITY_REASON_FILE"
+				: > "$CF_IDENTITY_FIRED_FILE"
+			fi
 			return 0
 		fi
 		cf_sup_tick=$((cf_sup_tick + 1))
@@ -1679,14 +2022,81 @@ cf_supervise_cell() {
 			# child that finished a moment before the last tick can no longer be
 			# signalled, so it is reported by its own status rather than as a bound it
 			# never reached.
-			if cf_signal_cell TERM "$cf_sup_pid"; then
+			if cf_signal_cell TERM "$cf_sup_pid" "$cf_sup_start"; then
 				: > "$CF_BOUND_FIRED_FILE"
 				sleep 1
-				cf_signal_cell KILL "$cf_sup_pid" || true
+				if ! cf_signal_cell KILL "$cf_sup_pid" "$cf_sup_start" &&
+					[ "$CF_SIGNAL_BREACH" -eq 1 ]; then
+					printf '%s\n' "$CF_SIGNAL_REASON" > "$CF_IDENTITY_REASON_FILE"
+					: > "$CF_IDENTITY_FIRED_FILE"
+				fi
+			elif [ "$CF_SIGNAL_BREACH" -eq 1 ]; then
+				printf '%s\n' "$CF_SIGNAL_REASON" > "$CF_IDENTITY_REASON_FILE"
+				: > "$CF_IDENTITY_FIRED_FILE"
 			fi
 			return 0
 		fi
 	done
+}
+
+# Record one identity refusal for the parent decoder. The first reason wins so a
+# secondary cleanup refusal cannot overwrite the event that made the run unsafe.
+cf_record_identity_refusal() {
+	[ -n "$1" ] || return 0
+	if [ ! -f "$CF_IDENTITY_FIRED_FILE" ]; then
+		printf '%s\n' "$1" > "$CF_IDENTITY_REASON_FILE"
+		: > "$CF_IDENTITY_FIRED_FILE"
+	fi
+}
+
+# Owned by the background wrapper around one bound. It is the only function that
+# may retire the cell and supervisor variables: every signal path calls it, and
+# the normal path clears each variable only after its corresponding wait.
+cf_bound_owned_cleanup() {
+	if [ -n "${cf_bound_child:-}" ]; then
+		cf_boc_now=$(cf_process_start_token "$cf_bound_child" 2> /dev/null) || cf_boc_now=''
+		if [ -n "$cf_boc_now" ]; then
+			if [ "$cf_boc_now" = "${cf_bound_child_start:-}" ]; then
+				if cf_signal_cell TERM "$cf_bound_child" "$cf_bound_child_start"; then
+					sleep 1
+					if ! cf_signal_cell KILL "$cf_bound_child" "$cf_bound_child_start"; then
+						[ "$CF_SIGNAL_BREACH" -eq 0 ] ||
+							cf_record_identity_refusal "$CF_SIGNAL_REASON"
+					fi
+				else
+					[ "$CF_SIGNAL_BREACH" -eq 0 ] ||
+						cf_record_identity_refusal "$CF_SIGNAL_REASON"
+				fi
+			else
+				cf_record_identity_refusal "cell process $cf_bound_child changed start-time identity from ${cf_bound_child_start:-<unavailable>} to $cf_boc_now"
+			fi
+		fi
+		wait "$cf_bound_child" > /dev/null 2>&1 || true
+		cf_bound_child=''
+		cf_bound_child_start=''
+	fi
+	if [ -n "${cf_bound_supervisor:-}" ]; then
+		cf_boc_now=$(cf_process_start_token "$cf_bound_supervisor" 2> /dev/null) || cf_boc_now=''
+		if [ -n "$cf_boc_now" ]; then
+			if [ "$cf_boc_now" = "${cf_bound_supervisor_start:-}" ]; then
+				if ! cf_signal_pid TERM "$cf_bound_supervisor" "$cf_bound_supervisor_start"; then
+					[ "$CF_SIGNAL_BREACH" -eq 0 ] ||
+						cf_record_identity_refusal "$CF_SIGNAL_REASON"
+				fi
+			else
+				cf_record_identity_refusal "quota supervisor $cf_bound_supervisor changed start-time identity from ${cf_bound_supervisor_start:-<unavailable>} to $cf_boc_now"
+			fi
+		fi
+		wait "$cf_bound_supervisor" > /dev/null 2>&1 || true
+		cf_bound_supervisor=''
+		cf_bound_supervisor_start=''
+	fi
+}
+
+cf_bound_wrapper_on_signal() {
+	trap '' HUP INT TERM
+	cf_bound_owned_cleanup
+	exit "$2"
 }
 
 # cf_bound_run <seconds> <workdir> <stdout-file> <stderr-file> <command> [args...]
@@ -1706,7 +2116,8 @@ cf_bound_run() {
 	CF_BOUND_TIMEDOUT=0
 	CF_BOUND_ABORTED=''
 	rm -f -- "$CF_BOUND_STATUS_FILE" "$CF_BOUND_FIRED_FILE" \
-		"$CF_QUOTA_FIRED_FILE" "$CF_QUOTA_REASON_FILE" "$CF_BOUND_OUTER_FILE"
+		"$CF_QUOTA_FIRED_FILE" "$CF_QUOTA_REASON_FILE" "$CF_BOUND_OUTER_FILE" \
+		"$CF_IDENTITY_FIRED_FILE" "$CF_IDENTITY_REASON_FILE"
 	CF_QUOTA_REASON=''
 
 	if [ ! -d "$cf_bound_workdir" ]; then
@@ -1714,7 +2125,18 @@ cf_bound_run() {
 		return 0
 	fi
 
+	CF_ACTIVE_READY=0
+	CF_ACTIVE_WRAPPER=''
+	CF_ACTIVE_WRAPPER_START=''
 	(
+		cf_bound_child=''
+		cf_bound_child_start=''
+		cf_bound_supervisor=''
+		cf_bound_supervisor_start=''
+		trap cf_bound_owned_cleanup EXIT
+		trap 'cf_bound_wrapper_on_signal HUP 129' HUP
+		trap 'cf_bound_wrapper_on_signal INT 130' INT
+		trap 'cf_bound_wrapper_on_signal TERM 143' TERM
 		CDPATH='' cd -P -- "$cf_bound_workdir" || exit 126
 		# The hard per-file backstop, installed on this subshell so every child
 		# inherits it. Attempted rather than required: a host whose hard limit is
@@ -1751,17 +2173,23 @@ cf_bound_run() {
 				< /dev/null > "$cf_bound_out" 2> "$cf_bound_err" &
 		fi
 		cf_bound_child=$!
+		cf_bound_child_start=$(cf_process_start_token "$cf_bound_child" 2> /dev/null) ||
+			cf_bound_child_start=''
 		# The supervisor's own stderr is discarded: it says nothing a caller needs,
 		# and a host where `sleep` is missing would otherwise print one line per tick
 		# ahead of the single precise refusal cf_verify_bound already produces for
 		# exactly that case.
-		cf_supervise_cell "$cf_bound_child" "$cf_bound_secs" 2> /dev/null &
+		cf_supervise_cell "$cf_bound_child" "$cf_bound_child_start" "$cf_bound_secs" 2> /dev/null &
 		cf_bound_supervisor=$!
+		cf_bound_supervisor_start=$(cf_process_start_token "$cf_bound_supervisor" 2> /dev/null) ||
+			cf_bound_supervisor_start=''
 		if wait "$cf_bound_child" > /dev/null 2>&1; then
 			cf_bound_outer=0
 		else
 			cf_bound_outer=$?
 		fi
+		cf_bound_child=''
+		cf_bound_child_start=''
 		printf '%s\n' "$cf_bound_outer" > "$CF_BOUND_OUTER_FILE"
 		# `timeout` reports a bound that fired as 124, and that is the only thing this
 		# branch does with the outer status: it is turned into the same marker the
@@ -1769,10 +2197,21 @@ cf_bound_run() {
 		if [ "$CF_BOUND_MODE" = 'timeout' ] && [ "$cf_bound_outer" -eq 124 ]; then
 			: > "$CF_BOUND_FIRED_FILE"
 		fi
-		kill -TERM "$cf_bound_supervisor" 2> /dev/null || true
-		wait "$cf_bound_supervisor" > /dev/null 2>&1 || true
+		cf_bound_owned_cleanup
 		exit 0
-	)
+	) &
+	CF_ACTIVE_WRAPPER=$!
+	CF_ACTIVE_WRAPPER_START=$(cf_process_start_token "$CF_ACTIVE_WRAPPER" 2> /dev/null) ||
+		CF_ACTIVE_WRAPPER_START=''
+	CF_ACTIVE_READY=1
+	if [ -n "$CF_PENDING_SIGNAL" ]; then
+		cf_bound_pending=$CF_PENDING_SIGNAL
+		CF_PENDING_SIGNAL=''
+		cf_on_signal "$cf_bound_pending"
+	fi
+	wait "$CF_ACTIVE_WRAPPER" > /dev/null 2>&1 || true
+	CF_ACTIVE_WRAPPER=''
+	CF_ACTIVE_WRAPPER_START=''
 	if [ -f "$CF_BOUND_OUTER_FILE" ]; then
 		cf_bound_outer=$(cat -- "$CF_BOUND_OUTER_FILE")
 	else
@@ -1781,6 +2220,17 @@ cf_bound_run() {
 
 	# One decoding, whichever mechanism ran. The status file wins over the marker,
 	# so a child that completed is never reported as a bound it did not reach.
+	# Process-identity refusal is the exception: it is an infrastructure breach,
+	# not a child outcome, and therefore dominates even a status written earlier.
+	if [ -f "$CF_IDENTITY_FIRED_FILE" ]; then
+		if [ -f "$CF_IDENTITY_REASON_FILE" ]; then
+			cf_bound_identity_reason=$(cat -- "$CF_IDENTITY_REASON_FILE")
+		else
+			cf_bound_identity_reason='a process identity could not be verified before signalling'
+		fi
+		CF_BOUND_ABORTED="the bounded run refused a recycled or unverified process identity: $cf_bound_identity_reason"
+		return 0
+	fi
 	if [ -f "$CF_BOUND_STATUS_FILE" ]; then
 		CF_BOUND_STATUS=$(cat -- "$CF_BOUND_STATUS_FILE")
 		case $CF_BOUND_STATUS in
@@ -2311,7 +2761,8 @@ fi
 # covers, so neither ever dirties `git status` and neither can be committed.
 # =============================================================================
 
-CF_LOCK_DIR="$CF_CORPUS_DIR/$CF_LOCK_ENTRY"
+CF_LOCK_DIR_NAME="$CF_CORPUS_DIR/$CF_LOCK_ENTRY"
+CF_LOCK_DIR="$CF_CORPUS_HANDLE/$CF_LOCK_ENTRY"
 
 # How many times acquisition retries while another run is initialising its lock, at
 # one second each. Fifty seconds is far longer than the microseconds between a
@@ -2341,7 +2792,7 @@ cf_lock_owner_field() {
 # other run can produce it, and it is written together with the pid and the working
 # area that make staleness decidable.
 cf_lock_claim() {
-	CF_LOCK_TOKEN="${CF_WORK##*/}.$$"
+	CF_LOCK_TOKEN="${CF_WORK_NAME##*/}.$$"
 	printf 'token=%s\npid=%s\nwork=%s\n' "$CF_LOCK_TOKEN" "$$" "$CF_WORK" > "$CF_LOCK_DIR/owner"
 	CF_LOCK_HELD=1
 }
@@ -2354,7 +2805,7 @@ cf_lock_claim() {
 # contenders reaching this point together, the second finds nothing to move and loses.
 # The quarantined lock is then discarded, so nothing accumulates.
 cf_lock_quarantine_stale() {
-	cf_lock_pen=$(mktemp -d -- "$CF_CORPUS_DIR/$CF_LOCK_STALE_PREFIX""XXXXXX" 2> /dev/null) || return 1
+	cf_lock_pen=$(mktemp -d -- "$CF_CORPUS_HANDLE/$CF_LOCK_STALE_PREFIX""XXXXXX" 2> /dev/null) || return 1
 	if mv -- "$CF_LOCK_DIR" "$cf_lock_pen/lock" 2> /dev/null; then
 		rm -rf -- "$cf_lock_pen"
 		return 0
@@ -2365,7 +2816,7 @@ cf_lock_quarantine_stale() {
 
 cf_acquire_lock() {
 	if [ -L "$CF_LOCK_DIR" ]; then
-		cf_error "the regeneration lock path is a symbolic link: $CF_LOCK_DIR"
+		cf_error "the regeneration lock path is a symbolic link: $CF_LOCK_DIR_NAME"
 		cf_detail 'a link there would make this run read another directory'"'"'s owner file and could'
 		cf_detail 'let two sweeps believe they each hold the lock; remove it and try again'
 		exit "$CF_EXIT_ENVIRONMENT"
@@ -2393,7 +2844,7 @@ cf_acquire_lock() {
 		fi
 		if kill -0 "$cf_lock_pid" 2> /dev/null && [ -d "$cf_lock_work" ]; then
 			cf_error "another regeneration is already running (process $cf_lock_pid)"
-			cf_detail "lock: $CF_LOCK_DIR"
+			cf_detail "lock: $CF_LOCK_DIR_NAME"
 			cf_detail 'two sweeps would each rename records independently, so the corpus could end up'
 			cf_detail 'holding a mixture from both runs'
 			cf_detail 'wait for it to finish, or use --check, which takes no lock and writes nothing'
@@ -2404,10 +2855,10 @@ cf_acquire_lock() {
 		# the next iteration is what decides the winner, so no contender ever adopts a
 		# lock it did not create.
 		if cf_lock_quarantine_stale; then
-			cf_note "reclaimed a stale lock at $CF_LOCK_DIR (owner $cf_lock_pid is gone)"
+			cf_note "reclaimed a stale lock at $CF_LOCK_DIR_NAME (owner $cf_lock_pid is gone)"
 		fi
 	done
-	cf_error "cannot take the regeneration lock at $CF_LOCK_DIR after $CF_LOCK_ATTEMPTS_MAX attempt(s)"
+	cf_error "cannot take the regeneration lock at $CF_LOCK_DIR_NAME after $CF_LOCK_ATTEMPTS_MAX attempt(s)"
 	cf_detail 'the lock exists but names no complete owner, so it is either being taken right now or'
 	cf_detail 'was left half-created; nothing was compiled and nothing was written'
 	cf_detail 'if no other regeneration is running, remove the directory and try again'
@@ -4267,13 +4718,14 @@ cf_rec_abort() {
 }
 
 # =============================================================================
-# Writing through a directory that was resolved ONCE.
+# Writing through directories held open by identity.
 # =============================================================================
 #
 # Every write this script performs inside the corpus goes through one of the three
-# functions below, and all three take the record's PHYSICAL directory -- the
-# fully symlink-resolved path its containment check approved -- and name everything
-# else relative to it.
+# functions below. The record parent is opened on fd 8 after containment and
+# owner/mode validation; the unpredictable staging child is opened on fd 9.
+# Record/source reads, staging writes, the installing rename and cleanup all use
+# `/proc/$$/fd/<n>/.` paths derived from those descriptors.
 #
 # The alternative, which these replace, was to check the resolved path and then
 # write through the path as WRITTEN. That is two resolutions of one name at two
@@ -4283,14 +4735,63 @@ cf_rec_abort() {
 # still displaying a corpus path -- and the file being written is the one the whole
 # suite treats as the definition of correct output.
 #
-# `cd -P` into an already-resolved absolute path lands in the directory that was
-# approved, and from there a bare name has no component left to re-resolve. That is
-# the whole of the mechanism; the value is that there is now exactly ONE resolution
-# per record instead of one per operation.
+# A name is still retained for diagnostics and final removal, but it is never
+# trusted by presence alone: `test -ef` must prove that it still designates the
+# open descriptor. If an ancestor or staging entry changes, install/removal is
+# refused rather than redirected.
 
 # The name a staging file always takes inside its staging directory. A fixed leaf is
 # safe precisely because the DIRECTORY around it is the unpredictable part.
 CF_STAGING_LEAF='record'
+
+# Open one record directory on fd 8 and validate the object reached through the
+# handle, not merely the path that named it. Ancestor substitutions after this
+# point cannot redirect any record/source/staging operation.
+CF_PIN_REASON=''
+cf_pin_record_dir() {
+	# $1 = named physical directory
+	CF_PIN_REASON=''
+	cf_release_staging
+	cf_release_record_dir
+	if ! exec 8< "$1"; then
+		CF_PIN_REASON='the record directory could not be opened as a durable handle'
+		return 1
+	fi
+	CF_RECORD_DIR_NAME=$1
+	CF_RECORD_DIR_HANDLE="/proc/$$/fd/8/."
+	CF_RECORD_DIR_OPEN=1
+	if ! command test "$CF_RECORD_DIR_NAME" -ef "$CF_RECORD_DIR_HANDLE"; then
+		CF_PIN_REASON='the record directory changed identity while its handle was being opened'
+		cf_release_record_dir
+		return 1
+	fi
+	if cf_prd_why=$(cf_untrusted_dir "$CF_RECORD_DIR_HANDLE"); then
+		CF_PIN_REASON="the record directory is not a trusted staging parent: $cf_prd_why"
+		cf_release_record_dir
+		return 1
+	fi
+	return 0
+}
+
+# Open the freshly-created unpredictable staging directory on fd 9. All staging
+# file reads/writes use the handle; the parent entry is used only after `-ef`
+# proves it still names this object.
+cf_pin_staging() {
+	# $1 = staging entry through the fd-8 record parent
+	if ! exec 9< "$1"; then
+		CF_PIN_REASON='the staging directory could not be opened as a durable handle'
+		return 1
+	fi
+	CF_STAGING_ENTRY=$1
+	CF_STAGING_HANDLE="/proc/$$/fd/9/."
+	CF_STAGING_OPEN=1
+	if ! command test "$CF_STAGING_ENTRY" -ef "$CF_STAGING_HANDLE"; then
+		CF_PIN_REASON='the staging directory changed identity while its handle was being opened'
+		cf_release_staging
+		return 1
+	fi
+	return 0
+}
 
 # Create a staging directory inside the pinned directory $1 and copy the record $2
 # into it as CF_STAGING_LEAF. Prints the staging directory's name RELATIVE to $1, so
@@ -4309,15 +4810,15 @@ cf_stage_beside() {
 	)
 }
 
-# Install the staged record: rename $1/$2/CF_STAGING_LEAF onto $1/$3. One rename
-# within one directory, both operands bare names, so the record is either fully
-# updated or byte-identical to what it was.
+# Install the staged record from the fd-9 staging handle onto the fd-8 record
+# parent. Both descriptors refer to directories already verified by identity, so
+# no written ancestor is resolved at install time.
 cf_install_staged() {
-	# $1 = pinned physical directory, $2 = staging directory (relative), $3 = record base
-	(
-		CDPATH='' cd -P -- "$1" || exit 1
-		mv -- "$2/$CF_STAGING_LEAF" "$3" || exit 1
-	)
+	# $1 = record-parent handle, $2 = staging handle, $3 = record base
+	if ! command test "$CF_STAGING_ENTRY" -ef "$2"; then
+		return 1
+	fi
+	mv -- "$2/$CF_STAGING_LEAF" "$1/$3"
 }
 
 # Confirm that the file now at $1/$2 is exactly the bytes retained in $3, still
@@ -4333,15 +4834,15 @@ cf_verify_published() {
 		CF_VERIFY_REASON="after the rename the directory resolves to \"${cf_vp_dir:-<unresolvable>}\" rather than \"$4\""
 		return 1
 	fi
-	if [ -L "$cf_vp_dir/$2" ]; then
+	if [ -L "$1/$2" ]; then
 		CF_VERIFY_REASON='the installed record is a symbolic link; a rename cannot produce one, so the name was replaced'
 		return 1
 	fi
-	if [ ! -f "$cf_vp_dir/$2" ]; then
+	if [ ! -f "$1/$2" ]; then
 		CF_VERIFY_REASON='the installed record is not a regular file'
 		return 1
 	fi
-	if ! cmp -s -- "$3" "$cf_vp_dir/$2"; then
+	if ! cmp -s -- "$3" "$1/$2"; then
 		CF_VERIFY_REASON='the installed record differs byte for byte from what was staged'
 		return 1
 	fi
@@ -4465,7 +4966,12 @@ cf_process_record() {
 		cf_detail "record path: $cf_rec"
 		exit "$CF_EXIT_RECORD"
 	fi
-	cf_rec_real_dir=$(cf_physical_dir "$cf_rec_dir") || cf_rec_real_dir=''
+	if ! cf_pin_record_dir "$cf_rec_dir"; then
+		cf_error "$cf_rec_label: the record directory could not be pinned safely"
+		cf_detail "$CF_PIN_REASON"
+		exit "$CF_EXIT_RECORD"
+	fi
+	cf_rec_real_dir=$(cf_physical_dir "$CF_RECORD_DIR_HANDLE") || cf_rec_real_dir=''
 	if [ "$cf_rec_real_dir" != "$CF_CORPUS_DIR/$cf_rec_area" ]; then
 		cf_error "$cf_rec_label: the record does not physically live in this corpus"
 		cf_detail "named:       $cf_rec"
@@ -4483,12 +4989,11 @@ cf_process_record() {
 	# performed later. Two resolutions of the same name are two different answers
 	# whenever a component of that name changes in between -- and an area directory
 	# replaced by a symbolic link between the check and the rename would have been
-	# checked here and written somewhere else. Resolving once and operating through
-	# that one answer removes the gap rather than narrowing it: `cf_rec_phys_dir` is
-	# fully symlink-resolved, so `cd -P` into it lands in the directory this check
-	# approved, and every mutation below is a BARE NAME inside it with no component
-	# left to re-resolve.
-	cf_rec_phys_dir=$cf_rec_real_dir
+	# checked here and written somewhere else. Opening the resolved directory and
+	# operating through fd 8 removes the gap rather than narrowing it:
+	# `cf_rec_phys_dir` is a durable handle path, and every read and mutation below
+	# is relative to that object even if a written ancestor changes later.
+	cf_rec_phys_dir=$CF_RECORD_DIR_HANDLE
 	cf_rec_phys="$cf_rec_phys_dir/$cf_rec_base"
 	cf_rec_src="$cf_rec_phys_dir/$cf_rec_stem.c"
 
@@ -4684,8 +5189,13 @@ cf_process_record() {
 			exit "$CF_EXIT_ENVIRONMENT"
 		fi
 		cf_rec_staging_dir="$cf_rec_phys_dir/$cf_rec_staging_rel"
+		if ! cf_pin_staging "$cf_rec_staging_dir"; then
+			cf_error "$cf_rec_label: cannot pin the staging directory after creating it"
+			cf_detail "$CF_PIN_REASON"
+			exit "$CF_EXIT_ENVIRONMENT"
+		fi
 		CF_STAGING=$cf_rec_staging_dir
-		cf_rec_staging="$cf_rec_staging_dir/$CF_STAGING_LEAF"
+		cf_rec_staging="$CF_STAGING_HANDLE/$CF_STAGING_LEAF"
 	fi
 
 	if cf_rewrite_record "$cf_rec" "$cf_rec_golden" "$cf_rec_staging" "$cf_rec_bodylines"; then
@@ -4726,7 +5236,7 @@ cf_process_record() {
 	# One rename inside one directory, so the record is either fully updated or
 	# byte-identical to what it was -- never half-written. Performed relative to the
 	# pinned directory, so the rename lands where the containment check looked.
-	if ! cf_install_staged "$cf_rec_phys_dir" "$cf_rec_staging_rel" "$cf_rec_base"; then
+	if ! cf_install_staged "$cf_rec_phys_dir" "$CF_STAGING_HANDLE" "$cf_rec_base"; then
 		cf_error "$cf_rec_label: cannot install the regenerated record"
 		cf_rec_abort
 	fi

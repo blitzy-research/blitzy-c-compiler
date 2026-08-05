@@ -412,19 +412,37 @@ the divergence and the program that provokes it can never drift apart.
 | `expected_divergence.class` | One of the six observational divergence classes above, or `comparison_excluded` when the marker documents an arm on which no comparison is attempted |
 | `expected_divergence.scope` | Which oracles, which targets and which optimization levels it applies to |
 | `expected_divergence.basis` | The exact documenting artifact and locator — a file in this repository and a line or section inside it |
-| `expected_divergence.observed` | The divergence as observed, in the past tense — or, for a `comparison_excluded` marker, an account of what is *not* compared and why, since there is no comparison result to report. The parser refuses anticipatory wording in this field either way |
+| `expected_divergence.observed` | What the marker covers. An evidence-authenticated marker describes the captured divergence in the past tense; a frozen specification exception identifies itself as frozen rather than pretending to be a captured observation; a `comparison_excluded` marker states what is not compared and why |
 
-Two further fields, `expected_divergence.documented` and `expected_divergence.evidence`, are optional
-enrichment. All five required fields must be present together or the block must be absent entirely.
+### Marker authority: two tiers, and no third
+
+Those five fields describe a marker; they do **not** authorize one. Authorization is decided inside
+the harness before an XFAIL-producing path is reachable:
+
+1. **Frozen specification exceptions.** `manifest.rs` contains an immutable `FROZEN_MARKERS` table
+   binding each specification-fixed identifier to its class and basis document. The two entries are
+   the case-range compile refusal and the cross-backend `long double` exclusion. A record borrowing
+   one of those identifiers must match the frozen class and basis exactly. Editing the record and
+   register together cannot create, widen or retarget this tier.
+2. **Captured observations.** Any identifier not in that table must carry both
+   `expected_divergence.documented` and `expected_divergence.evidence`. `documented` is a quotation
+   that must resolve inside the marker's cited locator. `evidence` is structured into command, exit,
+   output, toolchain and capture-date fields. Missing either field refuses the marker.
+
+There is no prose-only third tier. The anticipatory-wording scan remains a useful authoring-hygiene
+check, but it is not an authenticator: wording can be paraphrased, while an immutable table or captured
+evidence cannot.
 
 **Every marker is mirrored in the committed register**
 `tests/conformance/EXPECTED_DIVERGENCES.md`, and the infrastructure test
 `infra_expected_divergence_register` asserts consistency **in both
 directions** — every marker identifier appears in the register, every register entry corresponds to a
 real marker, every field agrees character for character — **and** that every cited basis names a file
-that actually exists in this repository, with its locator resolving inside that file. What the audit
-deliberately does **not** establish is whether the cited passage *supports* the exclusion: that is a
-reviewer's judgement, and the register says so per entry rather than implying otherwise.
+that actually exists in this repository, with its locator resolving inside that file. Authority is
+audited first: a frozen marker is re-checked against the compiled-in definition, while a captured
+marker must supply the locator-bound quotation and structured evidence above. The classifier repeats
+the authority check immediately before each non-failing XFAIL construction, so parser and audit drift
+cannot silently create a pass-producing exception.
 
 **A marked program remains discovered and scheduled. A marker changes classification, never
 participation.** Every phase that applies is attempted in order — compile, link, run, compare —
@@ -442,8 +460,8 @@ decision is as much a part of the design as the two that were minted.
 
 | Candidate | Marker | Program | Documented basis | Verdict if it diverges |
 |---|---|---|---|---|
-| GCC case ranges | `XD-GCCEXT-CASE-RANGES-001` — class `compile_failure`, scope `oracle_a`, all targets, all levels | `08_gcc_extensions/004_case_ranges.c` | `docs/technical-specifications.md` line 761 — the **C11 + GCC Extensions Compliance Rule** states affirmatively which GCC extensions are explicitly required — `__attribute__`, `__builtin_*` intrinsics, inline assembly with operand constraints, statement expressions, `typeof`/`__typeof__`, computed goto, `__extension__` — and case ranges are **not among them**, with line 762 adding that those extensions "are not optional". The identical seven-item list reproduced in `docs/project-guide.md` corroborates the boundary. A **requirement** that stops short of the construct is stronger evidence than an inventory that merely fails to mention it, which is why the citation names the rule rather than the inventory | `XFAIL` on oracle (a) for a `compile_failure`, with oracles (b) and (c) reported as dependent blocked arms of the same root refusal; **`FINDING`** for a wrong answer, which the class does not cover |
-| `long double` across the backends | `XD-TYPE-LONGDOUBLE-001` — class `comparison_excluded`, scope `oracle_b`, all targets, all levels | `13_floating_point/004_long_double_target_restricted.c` | `docs/technical-specifications.md` line 511 — type representation is specified with target-parametric sizes covering the floating types, plus direct measurement with the four pinned reference drivers: `sizeof(long double)` is **16 / 12 / 16 / 16**, the two x86 targets carrying the x87 80-bit extended format inside that storage and the other two IEEE binary128 — **three storage-and-format pairings over two distinct formats**, whose significands are 64 bits against 113 | `XFAIL` on the nine oracle (b) rows the record disables, and the class says why: **no cross-backend value comparison is attempted at all**, so the marker documents an excluded comparison rather than an observed mismatch. **`FINDING`** on oracle (a) or (c), because nothing about representation excuses a same-target disagreement |
+| GCC case ranges | `XD-GCCEXT-CASE-RANGES-001` — **frozen specification exception**, class `compile_failure`, scope `oracle_a`, all targets, all levels | `08_gcc_extensions/004_case_ranges.c` | The immutable authority table binds this identifier and class to `docs/technical-specifications.md`; the record cites line 761, where the **C11 + GCC Extensions Compliance Rule** affirmatively fixes the required extension boundary. The record explicitly states that this is the frozen exception, not independently captured refusal evidence | `XFAIL` on oracle (a) for a `compile_failure`, with oracles (b) and (c) reported as dependent blocked arms of the same root refusal; **`FINDING`** for a wrong answer, which the class does not cover |
+| `long double` across the backends | `XD-TYPE-LONGDOUBLE-001` — **frozen specification exception**, class `comparison_excluded`, scope `oracle_b`, all targets, all levels | `13_floating_point/004_long_double_target_restricted.c` | The immutable authority table binds this identifier and class to `docs/technical-specifications.md`; the record cites line 511's target-parametric type representation. Direct measurement with the four pinned reference drivers gives `sizeof(long double)` **16 / 12 / 16 / 16**, with x87 extended precision on x86 and IEEE binary128 on the other backends | `XFAIL` on the nine oracle (b) rows the record disables, and the class says why: **no cross-backend value comparison is attempted at all**, so the marker documents an excluded comparison rather than an observed mismatch. **`FINDING`** on oracle (a) or (c), because nothing about representation excuses a same-target disagreement |
 | Wide and Unicode literal prefixes | **none, deliberately** | `11_literals_and_strings/003_wide_and_unicode_literals.c` | The documented literal inventory in `docs/technical-specifications.md` does not enumerate the wide, UTF-8, 16-bit or 32-bit prefixes | **`FINDING`** — the correct outcome, not a compromise |
 
 **Why the third candidate carries no marker, which is the instructive part.** The documentation gap is
@@ -1149,17 +1167,38 @@ working directory, so the result is absolute. A value is **refused** when it
   forge a tab-separated column or repaint a line in every artifact the run writes;
 - contains a `.` or `..` component, which would put the build roots at a path no containment guard in
   this suite can describe, making every "beneath the build root" claim unverifiable;
-- has any **existing** level of its directory chain that is not a real directory — a symbolic link
-  planted at a level *above* the build directory relocates every workspace, report and finding, and
-  relocates the ownership-aware purges those roots perform, while the leaf itself looks ordinary. A
-  level that does not exist yet ends the walk and is accepted, so a legitimate first run is not
-  refused; or
+- has any **existing** level of its directory chain that is not a real directory, is owned by neither
+  the effective uid nor root, or is group/other writable without sticky protection. A symbolic link
+  or mutable ancestor above the build directory could otherwise relocate every workspace, report,
+  finding and purge while the leaf itself looked ordinary. A level that does not exist yet ends the
+  walk and is accepted, so a legitimate first run is not refused; or
 - **names, contains or is contained by a committed tree** the suite reads or curates — the package
   root, the corpus, or the curated finding set — because all three roots are created and purged
   wholesale on every run.
 
 A refused value is **never silently honoured**: the build root falls back to the package-relative
 default and the pre-flight capability report states plainly that the setting was ignored and why.
+
+The package-relative default cannot fall back to a different package root, so its trust result is
+reported separately. `build_root_trust_defect()` makes an untrusted existing ancestor a visible
+pre-flight condition — **detected, not prevented** — while the operations below remain pinned and
+handle-relative. This distinction matters on hosts where a system temporary ancestor is writable
+without sticky protection: the suite does not describe that ancestry as trusted merely because it is
+the default.
+
+Once the build root is chosen, every destructive namespace transition is guarded twice:
+
+- a sibling run claim is acquired with exclusive creation **before** any purge. A live foreign claim
+  refuses the run; a stale claim is reclaimed through rename-to-unpredictable-quarantine plus
+  byte-for-byte ownership verification. Workspace claims live for the workspace lifetime, while the
+  report and generated-findings claims are held for the process;
+- directories used for enumeration, evidence reads, publication and removal are pinned as open
+  directory objects. Entry names are resolved through those handles, parent identity is re-verified,
+  and recursive removal is handle-relative rather than a second walk through the original path.
+
+The claim prevents two honest runs from clearing each other's namespace; the pin prevents a mutable
+ancestor from redirecting the one run that legitimately owns it. Neither is treated as a substitute
+for the other.
 
 **The i686 runner is `qemu-i386`, or `qemu-i386-static`, and nothing else.** The emulator's
 architecture name is *i386*, so this is the one runner that is **not** named after its target: do not
@@ -1381,6 +1420,15 @@ default and whatever `CARGO_TARGET_DIR` names when that variable is set to a val
 — see the validation rules above. Every path in the table is therefore written relative to that root
 rather than to a hard-coded `target/`, because a redirected build must not leave the harness writing
 into a directory the build does not own.
+
+The three run namespaces are not cleared on the strength of a name alone. Each workspace takes an
+exclusive sibling claim before purge and holds it for that workspace's lifetime; the report and
+generated-findings roots take equivalent claims before their one-time retirement and hold them for
+the process. Cleanup, evidence reads and publication operate through pinned directory handles and
+re-check those handles around mutation. In particular, a capture enters report evidence only after a
+handle-relative open proves it is a regular file with one hard link and the workspace still has the
+identity that was pinned; an integrity refusal is latched as an infrastructure breach and fails the
+area.
 
 **The split is enforced by `.gitignore` and it matters.** The three run-output directories —
 `conformance-work`, `conformance-report` and `conformance-findings` — are git-ignored beneath the

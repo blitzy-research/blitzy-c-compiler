@@ -193,12 +193,13 @@ use std::time::Duration;
 
 use super::env::RunConfig;
 use super::{
-    build_root, create_directory_chain_below, encode_slug_component, ensure_within, findings_root,
-    measure_tree, must_escape_for_report, publish_bytes_no_follow, read_file_bounded,
-    record_infrastructure_breach, remove_entry, report_root, require_directory_chain_below,
-    require_real_directory_within, require_regular_file, run_generation, run_id,
-    sanitize_text_for_report, shown_path, work_root, write_new_file, Cell, CellKey, HarnessError,
-    HarnessResult, TreeLimits,
+    build_root, claim_run_namespace, create_directory_chain_below, encode_slug_component,
+    ensure_within, findings_root, measure_tree, must_escape_for_report, process_start_token,
+    publish_bytes_no_follow, read_file_bounded, record_infrastructure_breach, remove_entry,
+    report_root, require_directory_chain_below, require_real_directory_within,
+    require_regular_file, run_generation, run_id, sanitize_text_for_report, shown_path, work_root,
+    write_new_file, Cell, CellKey, HarnessError, HarnessResult, PinnedDirectory, RunClaim,
+    TreeLimits,
 };
 
 // The well-known entries of a cell workspace. Named here so that the module which compiles a
@@ -569,34 +570,36 @@ fn initialize_run() -> HarnessResult<()> {
 /// second copy of a recursive removal is a second chance to get one level wrong. It is deliberately
 /// *only* the removal: it asks no ownership question and cannot, because it does not know which root
 /// it is being pointed at or what a foreign owner of that root would mean. Every caller must
-/// therefore have refused a live foreign owner of `directory` before calling, and must claim ownership
-/// afterwards. `findings::prepare_namespace` is the shape to copy.
+/// therefore have refused a live foreign owner of `directory` before calling, and must hold an
+/// exclusive claim on it taken **before** this call. `findings::prepare_namespace` is the shape to copy.
+///
+/// # One pinned handle for the listing and every removal
+///
+/// The directory is opened once and both the listing and the per-entry removals are addressed through
+/// that handle. Both halves are needed, and for a reason specific to this operation: the names removed
+/// here come from the listing, so if the two steps could describe different directories then the
+/// removals would be aimed at names discovered in a directory that is no longer the one being emptied.
+/// A name-based sequence re-resolves `directory` once per entry, which is one window per entry in the
+/// single most destructive loop in the suite. A directory that does not exist is success — there is
+/// nothing to retire — and that is settled before anything is opened.
 pub(super) fn retire_directory_contents(context: &str, directory: &Path) -> HarnessResult<()> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
+    match fs::symlink_metadata(directory) {
+        Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(HarnessError::new(
                 String::from(context),
                 format!(
-                    "{} could not be listed: {error}; a run that cannot retire the previous run's \
+                    "{} could not be inspected: {error}; a run that cannot retire the previous run's \
                      artifacts cannot state which run its own artifacts describe",
-                    directory.display()
+                    shown_path(directory)
                 ),
             ));
         }
-    };
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            HarnessError::new(
-                String::from(context),
-                format!(
-                    "an entry of {} could not be read: {error}",
-                    directory.display()
-                ),
-            )
-        })?;
-        remove_entry(context, &entry.path())?;
+    }
+    let pinned = PinnedDirectory::pin(context, directory)?;
+    for name in pinned.entry_names(context)? {
+        pinned.remove_within(context, &name)?;
     }
     Ok(())
 }
@@ -923,22 +926,51 @@ fn validate_entry_name(context: &str, name: &str) -> HarnessResult<()> {
 /// Every removal in this module funnels through here, and the containment guard is applied
 /// first, so no removal can reach outside the workspace root however the path was derived. That
 /// guard is this function's whole content: the removal itself is the harness's shared
-/// [`remove_entry`], which is where the symbolic-link-versus-directory decision lives and is
-/// documented, so this module, the report module and the findings module cannot drift apart on the
-/// one judgement in a removal that is easy to get subtly wrong.
+/// [`remove_entry`], which is where the symbolic-link-versus-directory decision lives, where the
+/// parent is pinned and the entry is addressed through that pin, and where all of it is documented —
+/// so this module, the report module and the findings module cannot drift apart on the one judgement
+/// in a removal that is easy to get subtly wrong.
+///
+/// The containment guard here is **lexical**, and that is deliberate: it decides the *spelling* of the
+/// path before the filesystem is touched at all, so a path that should never have been derived is
+/// never even opened. It is not, and could not be, what stops a removal reaching outside the work root
+/// through a substituted intermediate directory — a lexical answer says nothing about what the names
+/// currently resolve to. That is [`remove_entry`]'s pinned parent, and the two are complementary
+/// rather than alternative: this one rejects a path this module should not have built, and the pin
+/// makes the removal of a legitimate path independent of name resolution.
 fn purge(context: &str, path: &Path) -> HarnessResult<()> {
     require_beneath_work_root(context, path)?;
     remove_entry(context, path)
 }
 
-/// Allocate one workspace: purge whatever is there, create it, and prove where it landed.
+/// Allocate one workspace: claim it exclusively, purge whatever is there, create it, and prove where
+/// it landed.
 ///
-/// The order is deliberate. The lexical guard runs before anything touches the filesystem, so a
-/// path that should not exist is never created and never removed. The purge follows, which is
-/// what makes allocation idempotent across runs: because the path is deterministic, a second
-/// run finds the first run's directory, and a leftover artifact compared against a freshly
-/// produced one would be a silently wrong result rather than a visible error. Creation then
-/// builds the directory and any intermediate one it needs.
+/// The order is deliberate, and the **first** step is the one the rest rests on.
+///
+/// The lexical guard runs before anything touches the filesystem, so a path that should not exist is
+/// never created and never removed. The directories *above* the workspace are then established, which
+/// is what gives the claim a parent to be created inside.
+///
+/// The **exclusive claim comes next, before anything destructive**. Workspace paths are deterministic
+/// so that a report row leads straight to a directory, which means two concurrent runs against one
+/// build directory address the same path — and the purge below is destructive. Asking "does a live
+/// foreign owner stamp exist?" and then purging cannot establish exclusivity, because the question and
+/// the purge are two steps and two runs starting together both answer "no" before either has written
+/// its own answer: both then proceed and each destroys the other's evidence. [`claim_run_namespace`]
+/// is a single operation only one of two contenders can win, so it settles that before a byte is
+/// removed, and the claim is held for the whole life of the returned [`Workspace`].
+///
+/// The ownership stamp is still written *inside* the directory afterwards, and it is not redundant:
+/// the claim answers "may I clear this now" and lives only as long as this run, while the stamp answers
+/// "whose artifacts are these" and is what a maintainer reads out of a **retained** directory long
+/// after every run has ended. [`live_foreign_owner`] is consulted as well, for the same reason — a
+/// directory left by a run whose claim was lost still names its owner — and it is consulted after the
+/// claim so that its answer cannot change under this run's feet.
+///
+/// The purge is what makes allocation idempotent across runs: because the path is deterministic, a
+/// second run finds the first run's directory, and a leftover artifact compared against a freshly
+/// produced one would be a silently wrong result rather than a visible error.
 ///
 /// The final step re-answers the containment question on disk through [`ensure_within`], which
 /// canonicalizes both sides. The lexical guard cannot see a symbolic link, so a workspace name
@@ -954,6 +986,22 @@ fn allocate(role: &str, root: PathBuf, keep_on_success: bool) -> HarnessResult<W
         shown_path(&root)
     );
     require_beneath_work_root(&context, &root)?;
+    // The claim is a sibling of the workspace, so the workspace's parent has to exist before it can
+    // be created — and it has to be a *verified* chain, which is what this call establishes. The
+    // workspace itself is deliberately not created here: it is purged below, and creating it only to
+    // remove it would leave a reader of this function unable to tell which step owns its existence.
+    let parent = root.parent().ok_or_else(|| {
+        HarnessError::new(
+            context.clone(),
+            format!(
+                "{} has no parent directory, so it names no workspace that could be created inside \
+                 the work root",
+                shown_path(&root)
+            ),
+        )
+    })?;
+    create_directory_chain_below(&context, &work_root(), parent)?;
+    let claim = claim_run_namespace(&context, &root)?;
     if let Some(conflict) = live_foreign_owner(&root) {
         return Err(HarnessError::new(context, conflict));
     }
@@ -964,6 +1012,7 @@ fn allocate(role: &str, root: PathBuf, keep_on_success: bool) -> HarnessResult<W
     Ok(Workspace {
         root,
         keep_on_success,
+        claim,
     })
 }
 
@@ -1032,21 +1081,6 @@ impl RunOwner {
     }
 }
 
-/// A token that identifies one incarnation of a process identifier, or [`None`] if unavailable.
-///
-/// On Linux this is the process's start time in clock ticks, field 22 of `/proc/<pid>/stat`. The
-/// field is read positionally *from the end*, because field 2 is the executable name in parentheses
-/// and may itself contain spaces and parentheses — splitting from the front is the classic way to
-/// misparse this file. Fields 3 onwards contain no spaces, so counting back from the last field is
-/// unambiguous.
-fn process_start_token(pid: u32) -> Option<String> {
-    let raw = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let tail = raw.rsplit_once(')')?.1;
-    let fields: Vec<&str> = tail.split_whitespace().collect();
-    // `tail` begins at field 3, so field 22 is index 19.
-    fields.get(19).map(|value| (*value).to_string())
-}
-
 /// The stamp a directory currently carries, if it has one this module can read.
 fn recorded_owner(root: &Path) -> Option<RunOwner> {
     let path = root.join(RUN_OWNER_ENTRY);
@@ -1111,6 +1145,16 @@ fn live_foreign_owner(root: &Path) -> Option<String> {
 /// report root are both republished in place across runs, and "truncate whatever is at this name"
 /// is exactly the operation a planted link exploits.
 ///
+/// # The precondition every caller must already satisfy
+///
+/// The remove-then-create pair is two operations, so on its own it is not exclusive: two runs could
+/// each remove the other's stamp and each create its own. It is exclusive **here** because every
+/// caller holds a [`RunClaim`] on `root`, taken before the first destructive step and held past this
+/// one, and a claim is granted to exactly one process at a time. That is what makes the stamp a
+/// record of ownership rather than an attempt to acquire it: acquisition is the claim's job, and this
+/// writes down the answer so that a reader of a directory left behind by a finished run — for which no
+/// claim exists any more — can still tell whose artifacts they are.
+///
 /// Shared with `findings.rs` for the same reason as [`live_foreign_owner_identity`]: the claim and
 /// the check must agree on the entry name and the encoding, and they can only be guaranteed to
 /// agree by being the same code.
@@ -1144,6 +1188,12 @@ pub struct Workspace {
     /// Whether [`Workspace::discard`] must keep the directory anyway, because the run was asked
     /// to retain every workspace.
     keep_on_success: bool,
+    /// The exclusive cross-process claim on this directory, held for the whole life of the workspace.
+    ///
+    /// Taken before the allocation's purge and released when this value is dropped, so no other run
+    /// can clear or write this directory while a cell is using it — and so an unwinding panic releases
+    /// it without any call site having to remember to. Never read: holding it *is* the guarantee.
+    claim: RunClaim,
 }
 
 impl Workspace {

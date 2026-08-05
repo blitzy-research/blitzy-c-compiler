@@ -201,13 +201,13 @@ use super::sandbox::{
     claim_ownership, live_foreign_owner_identity, retire_directory_contents, RUN_OWNER_ENTRY,
 };
 use super::{
-    create_directory_chain_below, digest_hex_of_bytes, disclosure_defects, findings_root,
-    is_forbidden_for_side, machine_fingerprint, posix_quote, public_text, publish_bytes_no_follow,
-    read_file_bounded, redact_secrets, remove_entry, require_contained_corpus_file,
+    claim_run_namespace, create_directory_chain_below, digest_hex_of_bytes, disclosure_defects,
+    findings_root, is_forbidden_for_side, machine_fingerprint, posix_quote, public_text,
+    publish_bytes_no_follow, read_file_bounded, redact_secrets, require_contained_corpus_file,
     require_directory_chain_below, require_replaceable, run_generation, sanitize_text_for_report,
     shown_path, stable_digest, CellKey, CompilerSide, DivergenceClass, HarnessError, HarnessResult,
-    MarkerClass, OptLevel, Oracle, Outcome, Replaceable, Target, Verdict,
-    CAPTURE_RETAINED_BYTES_MAX, DIGEST_HEX_DIGITS, MAX_INSPECTED_FILE_BYTES,
+    MarkerClass, OptLevel, Oracle, Outcome, PinnedDirectory, Replaceable, RunClaim, Target,
+    Verdict, CAPTURE_RETAINED_BYTES_MAX, DIGEST_HEX_DIGITS, MAX_INSPECTED_FILE_BYTES,
 };
 
 /// The reproducer: a **verbatim**, byte-for-byte copy of the corpus program.
@@ -2591,6 +2591,16 @@ fn prepare_findings_namespace() -> HarnessResult<()> {
     let root = findings_root();
     create_directory_chain_below(context, &root, &root)?;
 
+    // Taken BEFORE the retirement below, and that ordering is the point. A finding directory is named
+    // from the divergence itself so that a register row leads straight to it, which means two
+    // concurrent runs against one build directory address the same directories — and the retirement is
+    // destructive. Detecting a live foreign owner and then retiring cannot establish exclusivity,
+    // because the detection and the retirement are two steps: two runs starting together both find no
+    // owner, both retire, and each destroys evidence the other has filed. The claim is a single
+    // operation only one of two contenders can win, and it is held for the life of the process, so it
+    // covers every finding filed after this point rather than only the retirement.
+    let claim = claim_run_namespace(context, &root)?;
+
     if let Some((run, pid)) = live_foreign_owner_identity(&root) {
         return Err(HarnessError::new(
             String::from(context),
@@ -2609,7 +2619,35 @@ fn prepare_findings_namespace() -> HarnessResult<()> {
     }
 
     retire_directory_contents(context, &root)?;
-    claim_ownership(context, &root)
+    claim_ownership(context, &root)?;
+    // Recorded only after everything that could fail has succeeded, for the reason the report module's
+    // counterpart gives: a claim remembered before a failed retirement would be released by the process
+    // exit rather than by this run's own accounting.
+    remember_findings_claim(claim);
+    Ok(())
+}
+
+/// Keep this run's claim on the generated-findings root alive for the life of the process.
+///
+/// A [`RunClaim`] releases itself on drop, which suits a workspace whose lifetime is one cell and not
+/// a root that must stay claimed while fourteen concurrent areas file findings into it. The value is
+/// therefore moved somewhere that outlives every area thread. Rust runs no destructor for such a
+/// value at process exit, so the claim entry is still present when the run ends — a designed
+/// outcome rather than a leak, because no area is "last" in a filtered or a failing run and there is
+/// therefore nowhere honest to release it from. `RunClaim`'s own documentation carries the argument:
+/// the next run reclaims a claim whose process is provably gone, and still refuses one whose process
+/// is alive.
+fn remember_findings_claim(claim: RunClaim) {
+    static HELD: OnceLock<Mutex<Vec<RunClaim>>> = OnceLock::new();
+    let held = HELD.get_or_init(|| Mutex::new(Vec::new()));
+    match held.lock() {
+        Ok(mut held) => held.push(claim),
+        // Leaking beats releasing: a poisoned lock cannot arise here, and if it somehow did, dropping
+        // the claim would open the namespace to another run while this one is still filing findings
+        // into it. A leaked entry is reclaimed as stale by the next run through a protocol that already
+        // exists; a released one is not recoverable.
+        Err(poisoned) => poisoned.into_inner().push(claim),
+    }
 }
 
 /// Require that `candidate` lies strictly beneath [`findings_root`], deciding it lexically.
@@ -2873,16 +2911,25 @@ fn prepare_directory(id: &FindingId, fresh: bool) -> HarnessResult<(PathBuf, Pat
     // would leave the directory holding only whichever oracle happened to file last.
     if fresh {
         require_replaceable(&context, &outputs, Replaceable::Directory)?;
-        remove_entry(&context, &outputs).map_err(|error| {
-            HarnessError::new(
-                error.context().to_string(),
-                format!(
-                    "{}; a previous run's captures are replaced rather than merged so that a stale \
-                     capture cannot be mistaken for evidence of the current divergence",
-                    error.cause()
-                ),
-            )
-        })?;
+        // Addressed through a pin on the finding directory rather than by the captures directory's own
+        // name. This is a recursive removal of a whole evidence tree, and its path is derived from the
+        // finding identity, so it is predictable before the run that removes it; a name-based removal
+        // would re-resolve the finding directory and could be redirected by replacing it between the
+        // check above and the removal here, deleting a tree outside the build directory while every
+        // diagnostic still named this finding.
+        let pinned = PinnedDirectory::pin(&context, &directory)?;
+        pinned
+            .remove_within(&context, OUTPUTS_DIR_NAME)
+            .map_err(|error| {
+                HarnessError::new(
+                    error.context().to_string(),
+                    format!(
+                        "{}; a previous run's captures are replaced rather than merged so that a \
+                         stale capture cannot be mistaken for evidence of the current divergence",
+                        error.cause()
+                    ),
+                )
+            })?;
     }
     create_directory(&context, &outputs)?;
 
@@ -3014,6 +3061,45 @@ const VAR_KEEP: &str = "REPRO_KEEP";
 /// removed however the script exits.
 const VAR_WORK_OWNED: &str = "WORK_OWNED";
 
+/// Shell variable holding the PID of the invocation the reproduction script currently owns.
+///
+/// Shell functions do not have local variables portably, which is useful here: the signal traps can
+/// see the child while [`SH_BOUNDED`] is interrupted inside a poll or a `sleep`. An empty value means
+/// there is no child to reap.
+const VAR_ACTIVE_CHILD: &str = "REPRO_ACTIVE_CHILD";
+
+/// Shell variable holding Linux's start-time token for [`VAR_ACTIVE_CHILD`].
+///
+/// A numeric PID is not an identity after a shell has had an opportunity to reap it. The token is
+/// read from `/proc/<pid>/stat` field 22 immediately after launch and compared again before any
+/// signal is sent.
+const VAR_ACTIVE_START: &str = "REPRO_ACTIVE_START";
+
+/// Shell variable recording whether the active child was launched through `setsid`.
+///
+/// When it is `1`, the child is the leader of a process group whose identifier equals its PID and a
+/// signal is sent to the whole group. Otherwise only the direct child can be addressed safely.
+const VAR_ACTIVE_GROUP: &str = "REPRO_ACTIVE_GROUP";
+
+/// Shell variable guarding the launch-to-identity-capture critical section.
+///
+/// A signal arriving after the shell has received `$!` but before the start token is captured is
+/// remembered rather than handled with a half-identified child. [`SH_ON_SIGNAL`] delivers it as soon
+/// as the identity is complete.
+const VAR_ACTIVE_READY: &str = "REPRO_ACTIVE_READY";
+
+/// Shell variable holding a signal deferred while [`VAR_ACTIVE_READY`] was false.
+const VAR_PENDING_SIGNAL: &str = "REPRO_PENDING_SIGNAL";
+
+/// Shell variable through which [`SH_WAIT_ACTIVE`] returns the active child's wait status.
+const VAR_ACTIVE_STATUS: &str = "REPRO_ACTIVE_STATUS";
+
+/// Shell variable reporting whether [`SH_STOP_ACTIVE`] actually issued the terminating signal.
+const VAR_ACTIVE_KILLED: &str = "REPRO_ACTIVE_KILLED";
+
+/// Shell variable reporting that an active PID resolved to a different start token.
+const VAR_ACTIVE_REFUSED: &str = "REPRO_ACTIVE_IDENTITY_REFUSED";
+
 /// The shell function the script defines to refuse a scratch path that is already taken.
 ///
 /// Named rather than repeated inline because it guards every one of the four or five redirection
@@ -3023,15 +3109,29 @@ const SH_REFUSE_EXISTING: &str = "refuse_existing";
 
 /// The shell function the script defines to remove a scratch directory it created.
 ///
-/// Named rather than repeated inline because four traps share it, and because separating the
-/// *removal* from the *disposition of a signal* is what makes the signal handling correct. A single
-/// `trap '<remove>' EXIT HUP INT TERM` looks tidier and is wrong: on a signal the handler runs,
-/// returns, and the shell **resumes at the next command** with the scratch directory already gone,
-/// so every later redirection writes into a path that no longer exists and the script carries on
-/// after the reader asked it to stop. Removal therefore sits on `EXIT`, and each signal handler
-/// removes, restores the signal's default disposition and re-raises it at this shell, so the script
-/// dies from the signal and its caller sees the conventional `128 + signal` status.
+/// Named rather than repeated inline because four traps share it. It first identity-checks, signals
+/// and waits for the trap-visible active child, then verifies that the scratch name still designates
+/// the current-directory pin before removal. Separating cleanup from the disposition of a signal is
+/// what makes the handling correct: a single `trap '<remove>' EXIT HUP INT TERM` returns after the
+/// signal handler and the shell resumes with its scratch directory already gone. Each signal handler
+/// instead calls this function, restores the signal's default disposition and re-raises it at this
+/// shell, so the script dies from the signal and its caller sees the conventional status.
 const SH_CLEANUP: &str = "repro_cleanup";
+
+/// The shell function that validates and canonicalizes a scratch parent and all of its ancestors.
+const SH_TRUSTED_DIRECTORY: &str = "trusted_directory";
+
+/// The shell function that reads Linux's process start-time identity token.
+const SH_PROCESS_START_TOKEN: &str = "process_start_token";
+
+/// The shell function that waits for and forgets the active invocation without signalling it.
+const SH_WAIT_ACTIVE: &str = "repro_wait_active";
+
+/// The shell function that identity-checks, terminates, waits for and forgets the active invocation.
+const SH_STOP_ACTIVE: &str = "repro_stop_active";
+
+/// The shell function shared by the HUP, INT and TERM traps.
+const SH_ON_SIGNAL: &str = "repro_on_signal";
 
 /// Shell variable holding the directory the script itself lives in, so the reproducer beside it can
 /// be found however the script was invoked.
@@ -3111,6 +3211,9 @@ const SCRATCH_TEMPLATE: &str = "bcc-repro.XXXXXX";
 /// which the script neither created nor removes, and the private one inside it, which it did both.
 const VAR_WORK_PARENT: &str = "WORK_PARENT";
 
+/// Shell variable recording whether [`VAR_WORK_PARENT`] came from the reader's `WORK` setting.
+const VAR_WORK_PARENT_SUPPLIED: &str = "WORK_PARENT_SUPPLIED";
+
 /// The phrase the scratch commentary uses for how a private directory is obtained.
 ///
 /// A constant so the explanation in the comment and the diagnostic printed when the utility is absent
@@ -3137,6 +3240,13 @@ const SH_MKTEMP_MSG: &str = "created with `mktemp -d` under a 077 umask";
 /// `command` is included deliberately: unsetting a *function* by that name leaves the built-in
 /// intact, and the built-in is what every other invocation in the script relies on.
 ///
+/// `find` and `id` validate every level of the scratch parent's physical ancestry without parsing
+/// the presentation-oriented output of `ls`. `find` inspects the pinned current directory at each
+/// level for owner and mode, while `id` supplies the effective account the reader invoked the script
+/// as. `awk` selects the start-time field from the already de-parenthesized `/proc/<pid>/stat` tail;
+/// using a field-aware utility avoids an unquoted shell split whose glob expansion could depend on
+/// the scratch directory's contents.
+///
 /// `setsid` is here even though the script never invokes it by name — it is reached through
 /// `"$SETSID"`, whose value comes from a `command -v setsid` probe. That probe is exactly why the
 /// name belongs: `command -v` reports a **function** by that name as though it were the utility, so an
@@ -3149,7 +3259,8 @@ const SH_MKTEMP_MSG: &str = "created with `mktemp -d` under a 077 umask";
 /// conforming shell can define a function that shadows it. A shell that accepts the definition
 /// anyway is covered separately — see [`SH_HELPERS_ODD`] — rather than in this list, whose members
 /// must all be names a `unset -f` cannot object to.
-const SH_HELPERS: &str = "command printf mktemp rm mv env cmp cat diff kill test wc dd \
+const SH_HELPERS: &str =
+    "command printf mktemp rm mv env cmp cat diff kill test find id awk wc dd \
                           cd pwd umask ulimit sleep wait setsid";
 
 /// Helper names a POSIX shell cannot define a function for, unset separately for the shells that can.
@@ -4008,6 +4119,11 @@ pub fn verify_reproduction_scaffolding(context: &str) -> HarnessResult<usize> {
 fn sh_script_functions() -> Vec<&'static str> {
     vec![
         SH_REFUSE_EXISTING,
+        SH_TRUSTED_DIRECTORY,
+        SH_PROCESS_START_TOKEN,
+        SH_WAIT_ACTIVE,
+        SH_STOP_ACTIVE,
+        SH_ON_SIGNAL,
         SH_CLEANUP,
         SH_ISOLATED,
         SH_BOUNDED,
@@ -4314,31 +4430,34 @@ fn sh_trap_action(characters: &[char], from: usize) -> Option<String> {
 /// the damage would be attributed to whoever ran the reproduction rather than to the name that was
 /// planted.
 ///
-/// So three properties are established, in this order:
+/// So four properties are established, in this order:
 ///
 /// 1. **An unpredictable, private, exclusively created root.** `mktemp -d` creates a directory whose
 ///    name is not known in advance and, run under `umask 077`, one that only its owner can enter.
 ///    The umask is set inside the command substitution so it applies to the creation and is gone
 ///    again immediately, rather than silently changing the modes of everything the compilers write
 ///    afterwards.
-/// 2. **A caller-supplied root is used but never created.** If `WORK` is already set, the script
-///    requires it to be an existing real directory and refuses a symbolic link — the one case where
-///    `mkdir -p` would have quietly accepted a link and written through it — and it is never removed,
-///    because the script did not create it.
-/// 3. **Every leaf is refused rather than reused.** `refuse_existing` is called on each redirection
+/// 2. **The parent and every ancestor are trusted.** The physical ancestry is walked from a `cd -P`
+///    current directory. Every level must be owned by the effective uid or root, and group/other
+///    write permission is refused unless the sticky bit protects existing entries. A caller's
+///    `WORK` directory is used but never removed; without `WORK`, the finding directory itself is the
+///    trusted default parent.
+/// 3. **The private directory is held by identity.** The shell enters it physically once and keeps
+///    that current-directory reference for the whole replay. Cleanup requires `"$WORK" -ef .` before
+///    removal, so replacing the name cannot redirect `rm -rf`.
+/// 4. **Every leaf is refused rather than reused.** `refuse_existing` is called on each redirection
 ///    target before it is written, testing `-e` *and* `-L` so that a dangling link, which `-e`
 ///    reports as absent, is caught as well.
 ///
 /// # Cleanup
 ///
 /// A directory the script created is removed on `EXIT`, and on `HUP`, `INT` and `TERM` so an
-/// interrupted reproduction does not leave one behind either — but the two cases are handled
-/// differently on purpose, for the reason given on [`SH_CLEANUP`]: `EXIT` carries the removal, while
-/// each signal handler removes, restores that signal's default disposition and re-raises it, so an
-/// interrupted script **dies from the signal** instead of resuming with its scratch directory
-/// already deleted. The guard is the ownership flag rather than the mere presence of `WORK`, so a
-/// caller's directory is never removed however the script ends, and the removal additionally
-/// re-tests that the path is non-empty before running `rm -rf`.
+/// interrupted reproduction does not leave one behind either. Every path first terminates and waits
+/// for the active child or process group, then verifies the pinned scratch identity, and only then
+/// removes it. The signal handler restores that signal's default disposition and re-raises it, so an
+/// interrupted script **dies from the signal** instead of resuming with a missing scratch directory.
+/// The guard is the ownership flag rather than the mere presence of `WORK`, so a caller's directory
+/// is never removed however the script ends.
 /// Setting `REPRO_KEEP` keeps it, which is how a reader inspects the captured streams after the
 /// script has finished; the path is printed either way, so it can be found without reading the source
 /// of the script.
@@ -4466,21 +4585,218 @@ fn render_scratch_setup() -> String {
     text.push_str("}\n\n");
 
     text.push_str(&comment(&format!(
-        "{SH_CLEANUP} removes a scratch directory this script created, and only such a directory: \
-         the guard is the ownership flag rather than the mere presence of {VAR_WORK}, so a directory \
-         you supplied is never removed, and {VAR_KEEP} suppresses the removal entirely. It is a \
-         function because the traps below share it: removal is installed on EXIT, while each signal \
-         handler removes, restores that signal's default disposition and re-raises it, so an \
-         interrupted script dies from the signal instead of resuming with its scratch directory \
-         already deleted."
+        "{SH_TRUSTED_DIRECTORY} <path> <label> prints the path's physical spelling only after it and \
+         every physical ancestor are trusted. A level is trusted when its owner is this effective \
+         uid or root, and when group/other write permission is absent or protected by the sticky \
+         bit. The walk is performed from a `cd -P` current directory, not by repeatedly resolving \
+         the original name."
+    )));
+    text.push_str(&format!("{SH_TRUSTED_DIRECTORY}() (\n"));
+    text.push_str("    _t_dir=$1\n");
+    text.push_str("    _t_label=$2\n");
+    text.push_str("    if [ -L \"$_t_dir\" ]; then\n");
+    text.push_str(
+        "        command printf 'refusing %s parent %s: it is a symbolic link\\n' \"$_t_label\" \
+         \"$_t_dir\" >&2\n",
+    );
+    text.push_str("        exit 1\n");
+    text.push_str("    fi\n");
+    text.push_str("    if [ ! -d \"$_t_dir\" ]; then\n");
+    text.push_str(
+        "        command printf 'refusing %s parent %s: it is not an existing directory\\n' \
+         \"$_t_label\" \"$_t_dir\" >&2\n",
+    );
+    text.push_str("        exit 1\n");
+    text.push_str("    fi\n");
+    text.push_str("    _t_uid=$(command id -u 2>| /dev/null) || {\n");
+    text.push_str(
+        "        command printf 'refusing %s parent %s: the effective uid could not be measured\\n' \
+         \"$_t_label\" \"$_t_dir\" >&2\n",
+    );
+    text.push_str("        exit 1\n");
+    text.push_str("    }\n");
+    text.push_str("    command cd -P -- \"$_t_dir\" || exit 1\n");
+    text.push_str("    _t_origin=$(command pwd -P) || exit 1\n");
+    text.push_str("    while :; do\n");
+    text.push_str("        _t_here=$(command pwd -P) || exit 1\n");
+    text.push_str(
+        "        _t_owner=$(command find . -prune \\( -user \"$_t_uid\" -o -user 0 \\) -print \
+         2>| /dev/null) || exit 1\n",
+    );
+    text.push_str("        if [ \"$_t_owner\" != . ]; then\n");
+    text.push_str(
+        "            command printf 'refusing %s parent %s: physical ancestor %s is owned by \
+         neither uid %s nor root\\n' \"$_t_label\" \"$_t_dir\" \"$_t_here\" \"$_t_uid\" >&2\n",
+    );
+    text.push_str("            exit 1\n");
+    text.push_str("        fi\n");
+    text.push_str(
+        "        _t_mutable=$(command find . -prune \\( -perm -0020 -o -perm -0002 \\) \
+         ! -perm -1000 -print 2>| /dev/null) || exit 1\n",
+    );
+    text.push_str("        if [ -n \"$_t_mutable\" ]; then\n");
+    text.push_str(
+        "            command printf 'refusing %s parent %s: physical ancestor %s is group/other \
+         writable without the sticky bit\\n' \"$_t_label\" \"$_t_dir\" \"$_t_here\" >&2\n",
+    );
+    text.push_str("            exit 1\n");
+    text.push_str("        fi\n");
+    text.push_str("        [ \"$_t_here\" = / ] && break\n");
+    text.push_str("        command cd -P -- .. || exit 1\n");
+    text.push_str("    done\n");
+    text.push_str("    command printf '%s\\n' \"$_t_origin\"\n");
+    text.push_str(")\n\n");
+
+    text.push_str(&comment(&format!(
+        "{SH_PROCESS_START_TOKEN} <pid> prints Linux `/proc/<pid>/stat` field 22. The process name \
+         in field 2 may contain spaces and closing parentheses, so the prefix is removed through \
+         the LAST `) ` before field 20 of the remaining tail is selected."
+    )));
+    text.push_str(&format!("{SH_PROCESS_START_TOKEN}() {{\n"));
+    text.push_str("    _p_pid=$1\n");
+    text.push_str("    case \"$_p_pid\" in ''|*[!0-9]*) return 1 ;; esac\n");
+    text.push_str("    [ -r \"/proc/$_p_pid/stat\" ] || return 1\n");
+    text.push_str("    _p_stat=$(command cat \"/proc/$_p_pid/stat\" 2>| /dev/null) || return 1\n");
+    text.push_str("    _p_tail=${_p_stat##*) }\n");
+    text.push_str("    [ \"$_p_tail\" != \"$_p_stat\" ] || return 1\n");
+    text.push_str(
+        "    _p_token=$(command printf '%s\\n' \"$_p_tail\" | command awk \
+         'NF >= 20 && $20 ~ /^[0-9]+$/ { print $20; ok=1 } END { if (!ok) exit 1 }') || return 1\n",
+    );
+    text.push_str("    [ -n \"$_p_token\" ] || return 1\n");
+    text.push_str("    command printf '%s\\n' \"$_p_token\"\n");
+    text.push_str("}\n\n");
+
+    text.push_str(&comment(&format!(
+        "{SH_WAIT_ACTIVE} waits for the current invocation and clears the trap-visible ownership \
+         record. The status is returned through ${VAR_ACTIVE_STATUS}, because a non-zero exit is \
+         evidence to record rather than a reason for `set -e` to stop the script."
+    )));
+    text.push_str(&format!("{SH_WAIT_ACTIVE}() {{\n"));
+    text.push_str(&format!("    {VAR_ACTIVE_STATUS}=0\n"));
+    text.push_str(&format!(
+        "    if [ -n \"${{{VAR_ACTIVE_CHILD}:-}}\" ]; then\n"
+    ));
+    text.push_str(&format!(
+        "        command wait \"${VAR_ACTIVE_CHILD}\" || {VAR_ACTIVE_STATUS}=$?\n"
+    ));
+    text.push_str("    fi\n");
+    text.push_str(&format!("    {VAR_ACTIVE_CHILD}=\n"));
+    text.push_str(&format!("    {VAR_ACTIVE_START}=\n"));
+    text.push_str(&format!("    {VAR_ACTIVE_GROUP}=0\n"));
+    text.push_str(&format!("    {VAR_ACTIVE_READY}=1\n"));
+    text.push_str("}\n\n");
+
+    text.push_str(&comment(&format!(
+        "{SH_STOP_ACTIVE} sends KILL only while the active PID still has the start token captured at \
+         launch, then waits through {SH_WAIT_ACTIVE}. With `setsid`, `env kill -- -<pid>` deliberately \
+         selects the external utility and the whole owned group; the shell builtin has incompatible \
+         negative-operand parsing across otherwise supported shells."
+    )));
+    text.push_str(&format!("{SH_STOP_ACTIVE}() {{\n"));
+    text.push_str(&format!("    {VAR_ACTIVE_KILLED}=0\n"));
+    text.push_str(&format!("    {VAR_ACTIVE_REFUSED}=0\n"));
+    text.push_str(&format!(
+        "    if [ -z \"${{{VAR_ACTIVE_CHILD}:-}}\" ]; then\n"
+    ));
+    text.push_str(&format!("        {SH_WAIT_ACTIVE}\n"));
+    text.push_str("        return 0\n");
+    text.push_str("    fi\n");
+    text.push_str(&format!("    _a_pid=${VAR_ACTIVE_CHILD}\n"));
+    text.push_str(&format!("    _a_expected=${{{VAR_ACTIVE_START}:-}}\n"));
+    text.push_str(&format!(
+        "    _a_current=$({SH_PROCESS_START_TOKEN} \"$_a_pid\" 2>| /dev/null || :)\n"
+    ));
+    text.push_str("    if [ -z \"$_a_expected\" ]; then\n");
+    text.push_str(&format!("        {VAR_ACTIVE_REFUSED}=1\n"));
+    text.push_str(
+        "        command printf 'refusing to signal process %s: no start-time identity was captured \
+         when it was launched\\n' \"$_a_pid\" >&2\n",
+    );
+    text.push_str("    elif [ \"$_a_current\" = \"$_a_expected\" ]; then\n");
+    text.push_str(&format!(
+        "        if [ \"${{{VAR_ACTIVE_GROUP}:-0}}\" = 1 ]; then\n"
+    ));
+    text.push_str("            if command env kill -KILL -- \"-$_a_pid\" 2>| /dev/null; then\n");
+    text.push_str(&format!("                {VAR_ACTIVE_KILLED}=1\n"));
+    text.push_str("            fi\n");
+    text.push_str("        else\n");
+    text.push_str("            if command env kill -KILL -- \"$_a_pid\" 2>| /dev/null; then\n");
+    text.push_str(&format!("                {VAR_ACTIVE_KILLED}=1\n"));
+    text.push_str("            fi\n");
+    text.push_str("        fi\n");
+    text.push_str("    elif [ -z \"$_a_current\" ]; then\n");
+    text.push_str(&format!("        {VAR_ACTIVE_REFUSED}=1\n"));
+    text.push_str(
+        "        command printf 'refusing to signal process %s: its start-time identity became \
+         unavailable after launch\\n' \"$_a_pid\" >&2\n",
+    );
+    text.push_str("    else\n");
+    text.push_str(&format!("        {VAR_ACTIVE_REFUSED}=1\n"));
+    text.push_str(
+        "        command printf 'refusing to signal process %s: start-time identity changed from %s \
+         to %s\\n' \"$_a_pid\" \"$_a_expected\" \"$_a_current\" >&2\n",
+    );
+    text.push_str("    fi\n");
+    text.push_str(&format!("    {SH_WAIT_ACTIVE}\n"));
+    text.push_str("}\n\n");
+
+    text.push_str(&comment(&format!(
+        "{SH_ON_SIGNAL} defers a signal that lands in the few instructions between `$!` and capture \
+         of ${VAR_ACTIVE_START}. Once the child is identified, the handler terminates and waits for \
+         it, cleans the pinned scratch directory, restores the signal's default disposition and \
+         re-raises it at this shell. HUP, INT and TERM are ignored during that cleanup so a second \
+         signal cannot re-enter the same wait and removal."
+    )));
+    text.push_str(&format!("{SH_ON_SIGNAL}() {{\n"));
+    text.push_str("    _s_signal=$1\n");
+    text.push_str(&format!(
+        "    if [ \"${{{VAR_ACTIVE_READY}:-1}}\" != 1 ]; then\n"
+    ));
+    text.push_str(&format!(
+        "        if [ -z \"${{{VAR_PENDING_SIGNAL}:-}}\" ]; then\n            \
+         {VAR_PENDING_SIGNAL}=$_s_signal\n        fi\n"
+    ));
+    text.push_str("        return 0\n");
+    text.push_str("    fi\n");
+    text.push_str("    trap '' HUP INT TERM\n");
+    text.push_str(&format!("    {SH_CLEANUP}\n"));
+    text.push_str("    trap - \"$_s_signal\"\n");
+    text.push_str("    command kill \"-$_s_signal\" $$ || exit 1\n");
+    text.push_str("}\n\n");
+
+    text.push_str(&comment(&format!(
+        "{SH_CLEANUP} first terminates and waits for any active invocation, then removes only the \
+         scratch directory this script created. The current directory is the durable pin: `test -ef` \
+         must prove that ${VAR_WORK} still resolves to that same directory immediately before `rm`. \
+         A caller's parent is never removed, and {VAR_KEEP} suppresses only scratch removal — never \
+         child cleanup."
     )));
     text.push_str(&format!("{SH_CLEANUP}() {{\n"));
+    text.push_str(&format!("    {SH_STOP_ACTIVE}\n"));
     text.push_str(&format!(
         "    if [ \"${{{VAR_WORK_OWNED}:-0}}\" = 1 ] && [ -z \"${{{VAR_KEEP}:-}}\" ] && \
          [ -n \"${{{VAR_WORK}:-}}\" ]; then\n"
     ));
-    text.push_str(&format!("        command rm -rf -- \"${VAR_WORK}\"\n"));
+    text.push_str(&format!(
+        "        if ! command test \"${VAR_WORK}\" -ef .; then\n"
+    ));
+    text.push_str(&format!(
+        "            command printf 'refusing to remove scratch directory %s: its name no longer \
+         resolves to the directory pinned as this shell current directory\\n' \"${VAR_WORK}\" >&2\n"
+    ));
+    text.push_str(&format!("            {VAR_WORK_OWNED}=0\n"));
+    text.push_str(&format!(
+        "        elif command rm -rf -- \"${VAR_WORK}\"; then\n            \
+         {VAR_WORK_OWNED}=0\n        else\n"
+    ));
+    text.push_str(&format!(
+        "            command printf 'could not remove verified scratch directory %s\\n' \
+         \"${VAR_WORK}\" >&2\n"
+    ));
+    text.push_str("        fi\n");
     text.push_str("    fi\n");
+    text.push_str("    return 0\n");
     text.push_str("}\n\n");
 
     text.push_str(&comment(&format!(
@@ -4505,47 +4821,68 @@ fn render_scratch_setup() -> String {
     );
     text.push_str("    exit 1\n");
     text.push_str("fi\n");
+    text.push_str(&format!(
+        "if ! {SH_PROCESS_START_TOKEN} $$ >| /dev/null; then\n"
+    ));
+    text.push_str(
+        "    command printf 'this reproduction watchdog requires Linux /proc process start-time \
+         identities; /proc/$$/stat could not be read safely\\n' >&2\n",
+    );
+    text.push_str("    exit 1\n");
+    text.push_str("fi\n");
+    text.push_str(&format!("{VAR_ACTIVE_CHILD}=\n"));
+    text.push_str(&format!("{VAR_ACTIVE_START}=\n"));
+    text.push_str(&format!("{VAR_ACTIVE_GROUP}=0\n"));
+    text.push_str(&format!("{VAR_ACTIVE_READY}=1\n"));
+    text.push_str(&format!("{VAR_PENDING_SIGNAL}=\n"));
+    text.push_str(&format!("{VAR_ACTIVE_STATUS}=0\n"));
+    text.push_str(&format!("{VAR_ACTIVE_KILLED}=0\n"));
+    text.push_str(&format!("{VAR_ACTIVE_REFUSED}=0\n"));
+    text.push_str(&format!("{VAR_WORK_PARENT_SUPPLIED}=0\n"));
     text.push_str(&format!("if [ -n \"${{{VAR_WORK}:-}}\" ]; then\n"));
-    text.push_str(&format!("    if [ -L \"${VAR_WORK}\" ]; then\n"));
     text.push_str(&format!(
-        "        command printf '{VAR_WORK} is a symbolic link (%s); it is refused rather than followed, \
-         because every scratch write would go through it\\n' \"${VAR_WORK}\" >&2\n"
+        "    {VAR_WORK_PARENT}=$({SH_TRUSTED_DIRECTORY} \"${VAR_WORK}\" {VAR_WORK}) || exit 1\n"
     ));
-    text.push_str("        exit 1\n");
-    text.push_str("    fi\n");
-    text.push_str(&format!("    if [ ! -d \"${VAR_WORK}\" ]; then\n"));
-    text.push_str(&format!(
-        "        command printf '{VAR_WORK} is not an existing directory (%s); create it yourself, or unset \
-         {VAR_WORK} to let this script make a private one\\n' \"${VAR_WORK}\" >&2\n"
-    ));
-    text.push_str("        exit 1\n");
-    text.push_str("    fi\n");
-    text.push_str(&format!(
-        "    {VAR_WORK_PARENT}=\"${VAR_WORK}\"\n    {VAR_WORK}=$(command umask 077; command mktemp -d \
-         \"${VAR_WORK_PARENT}/{SCRATCH_TEMPLATE}\") || exit 1\n"
-    ));
+    text.push_str(&format!("    {VAR_WORK_PARENT_SUPPLIED}=1\n"));
     text.push_str("else\n");
     text.push_str(&format!(
-        "    {VAR_WORK}=$(command umask 077; command mktemp -d) || exit 1\n"
+        "    {VAR_WORK_PARENT}=$({SH_TRUSTED_DIRECTORY} \"${VAR_FINDING_DIR}\" \
+         {VAR_FINDING_DIR}) || exit 1\n"
     ));
     text.push_str("fi\n");
+    text.push_str(&format!(
+        "{VAR_WORK}=$(command umask 077; command mktemp -d \
+         \"${VAR_WORK_PARENT}/{SCRATCH_TEMPLATE}\") || exit 1\n"
+    ));
     text.push_str(&format!("if [ -z \"${VAR_WORK}\" ]; then\n"));
     text.push_str(
         "    command printf 'mktemp -d produced no directory, so there is nowhere safe to write\\n' >&2\n",
     );
     text.push_str("    exit 1\n");
     text.push_str("fi\n");
+    text.push_str(&format!(
+        "{VAR_WORK}=$({SH_TRUSTED_DIRECTORY} \"${VAR_WORK}\" 'private scratch') || exit 1\n"
+    ));
+    text.push_str(&format!("command cd -P -- \"${VAR_WORK}\" || exit 1\n"));
+    text.push_str(&format!("{VAR_WORK}=$(command pwd -P) || exit 1\n"));
+    text.push_str(&format!("if ! command test \"${VAR_WORK}\" -ef .; then\n"));
+    text.push_str(
+        "    command printf 'the private scratch directory could not be pinned as the shell current \
+         directory; refusing to continue\\n' >&2\n",
+    );
+    text.push_str("    exit 1\n");
+    text.push_str("fi\n");
     text.push_str(&format!("{VAR_WORK_OWNED}=1\n"));
     text.push_str(&format!("trap {SH_CLEANUP} EXIT\n"));
     for signal in ["HUP", "INT", "TERM"] {
-        text.push_str(&format!(
-            "trap '{SH_CLEANUP}; trap - {signal}; command kill -{signal} $$' {signal}\n"
-        ));
+        text.push_str(&format!("trap '{SH_ON_SIGNAL} {signal}' {signal}\n"));
     }
     text.push_str(&format!(
         "command printf 'scratch directory: %s\\n' \"${VAR_WORK}\"\n"
     ));
-    text.push_str(&format!("if [ -n \"${{{VAR_WORK_PARENT}:-}}\" ]; then\n"));
+    text.push_str(&format!(
+        "if [ \"${VAR_WORK_PARENT_SUPPLIED}\" = 1 ]; then\n"
+    ));
     // The PARENT is what this line is about, so the parent is what it prints. Naming the variable
     // without expanding it — which is what this line used to do — printed the word `WORK` and told a
     // reader nothing about the directory they had supplied, in the one message whose whole purpose is
@@ -4553,6 +4890,11 @@ fn render_scratch_setup() -> String {
     text.push_str(&format!(
         "    command printf 'it was created inside %s, the directory you supplied, which is itself \
          neither created nor removed by this script\\n' \"${VAR_WORK_PARENT}\"\n"
+    ));
+    text.push_str("else\n");
+    text.push_str(&format!(
+        "    command printf 'it was created inside trusted default parent %s\\n' \
+         \"${VAR_WORK_PARENT}\"\n"
     ));
     text.push_str("fi\n");
     text.push_str(&format!(
@@ -4573,10 +4915,10 @@ fn render_scratch_setup() -> String {
 /// matters — its scratch files land outside the scratch directory, which contradicts the hermeticity
 /// this script otherwise establishes.
 ///
-/// `cd` is used once for the whole script rather than per invocation, because the script writes nothing
-/// by relative path: every scratch target it names is `"$WORK"/…` and every input is `"$SRC"`, both
-/// absolute. So the change of directory affects the *children* — which is where it is needed — and
-/// leaves every path the script itself spells unaffected.
+/// [`render_scratch_setup`] already changed into the private directory through `cd -P` and deliberately
+/// keeps that current-directory reference as the durable identity pin used by cleanup. This renderer
+/// therefore verifies `"$WORK" -ef .` instead of resolving the name a second time. Every scratch
+/// target the script names is still absolute, so the current directory affects only the children.
 fn render_working_directory() -> String {
     let mut text = String::new();
     text.push_str(&comment(
@@ -4585,12 +4927,14 @@ fn render_working_directory() -> String {
     text.push_str(&comment(&format!(
         "The run spawned every command with the cell's own workspace as its working directory, so a \
          tool that writes an intermediate file relative to where it started wrote it inside the \
-         workspace. {VAR_WORK} is this script's equivalent. Every path the script itself names is \
-         absolute — ${VAR_WORK}/… or ${VAR_SOURCE} — so this changes where the tools write and \
+         workspace. The scratch setup already entered ${VAR_WORK} physically and keeps that current \
+         directory as its identity pin. Every path the script itself names is absolute — \
+         ${VAR_WORK}/… or ${VAR_SOURCE} — so the current directory changes where the tools write and \
          nothing else."
     )));
     text.push_str(&format!(
-        "CDPATH= command cd -- \"${VAR_WORK}\" || exit 1\n\n"
+        "command test \"${VAR_WORK}\" -ef . || {{ command printf 'scratch identity changed before \
+         the first invocation\\n' >&2; exit 1; }}\n\n"
     ));
     text
 }
@@ -4945,9 +5289,13 @@ fn render_bounded_invocation(
 ///   reader's machine has it, which makes the child a session and process-group leader, so its PGID is
 ///   its PID by definition. That the group is not the script's own needs no `ps` to establish: this
 ///   script's group leader is a live process, so the kernel cannot have reused its PID for a child
-///   just spawned. The group's existence is then confirmed with `kill -0` on the negated PID before
-///   any signal reaches it. Where `setsid` is absent the function kills the direct child and **says
-///   so on stderr**, which is a stated degradation rather than a silent one.
+///   just spawned. Linux's process start token is captured immediately after launch and compared
+///   again immediately before the signal, so a numeric PID the shell has already reaped cannot be
+///   mistaken for an unrelated process or group that later reused it. The group signal is sent
+///   through the external `kill` utility as `kill -KILL -- -<pid>`: dash's builtin and procps-ng's
+///   utility accept incompatible negative-operand forms on the supported host. Where `setsid` is
+///   absent the function kills the identity-checked direct child and **says so on stderr**, which is
+///   a stated degradation rather than a silent one.
 ///
 ///   `setsid` is applied *inside* [`SH_ISOLATED`], in front of the command handed to `env`, and it
 ///   has to be: `setsid` is a program, so it can only exec another program, and a launch of the shape
@@ -4958,9 +5306,11 @@ fn render_bounded_invocation(
 ///   [`SH_ISOLATED`] `exec`s, `env` `exec`s, and `setsid` establishes the session in that same
 ///   process, so the PID the shell backgrounded is still the group leader.
 ///
-///   The direct child is always reaped with `wait`, whichever path was taken, so no zombie is left
-///   behind; descendants killed by the group signal are children of the child and are reaped by the
-///   system, which is not something a script can wait on.
+///   The child identity is visible to the process-wide traps from `$!` until `wait` completes. A
+///   signal in the few instructions before the start token is captured is deferred and delivered
+///   once that critical section closes. The direct child is always reaped, whichever path was taken,
+///   so no zombie is left behind; descendants killed by the group signal are children of the child
+///   and are reaped by the system, which is not something a script can wait on.
 /// - **The outer net keeps its margin.** The utility, when the run used one, is applied at
 ///   `BUDGET_SECS + OUTER_MARGIN_SECS`: behind the watchdog above, never in front of it.
 ///
@@ -5040,8 +5390,11 @@ fn render_bounded_run_function() -> String {
          script's own because this script's group leader is alive and the kernel cannot have reused \
          its PID. It is applied in front of the command inside {SH_ISOLATED} above — a program cannot \
          execute a shell function — and the backgrounded PID is still the leader because that path is \
-         a chain of exec calls in one process. Without `setsid` the fallback kills the direct child \
-         only, and says so on stderr."
+         a chain of exec calls in one process. The Linux start-time identity captured immediately \
+         after launch is re-read immediately before every signal. Group signalling goes through the \
+         external `kill` utility as `kill -KILL -- -<pid>`, the form this host actually applies to a \
+         negative process-group operand. Without `setsid` the fallback kills the identity-checked \
+         direct child only, and says so on stderr."
     )));
     text.push_str(&comment(&format!(
         "Each captured stream is bounded in BYTES as well as in time: ${VAR_CAPTURE_BYTES_MAX} per \
@@ -5122,6 +5475,13 @@ fn render_bounded_run_function() -> String {
     // installs the environment on the one command it spawns, and that command is already the wrapped
     // vector. Isolating only the inner command would leave the utility running under the reader's
     // environment and pass that environment on to the program it bounds.
+    text.push_str(&format!("    {VAR_ACTIVE_READY}=0\n"));
+    text.push_str(&format!("    {VAR_ACTIVE_CHILD}=\n"));
+    text.push_str(&format!("    {VAR_ACTIVE_START}=\n"));
+    text.push_str(&format!(
+        "    if [ -n \"${{{VAR_SETSID}:-}}\" ]; then\n        {VAR_ACTIVE_GROUP}=1\n    else\n        \
+         {VAR_ACTIVE_GROUP}=0\n    fi\n"
+    ));
     text.push_str(&format!("    if [ -n \"${{{VAR_TIMEOUT}:-}}\" ]; then\n"));
     text.push_str(&format!(
         "        {SH_ISOLATED} \"${VAR_TIMEOUT}\" \"$_b_outer\" \"$@\" \
@@ -5132,11 +5492,30 @@ fn render_bounded_run_function() -> String {
         "        {SH_ISOLATED} \"$@\" > \"$_b_stdout\" 2> \"$_b_stderr\" &\n"
     ));
     text.push_str("    fi\n");
-    text.push_str("    _b_child=$!\n");
+    text.push_str(&format!("    {VAR_ACTIVE_CHILD}=$!\n"));
+    text.push_str(&format!("    _b_child=${VAR_ACTIVE_CHILD}\n"));
+    text.push_str(&format!(
+        "    {VAR_ACTIVE_START}=$({SH_PROCESS_START_TOKEN} \"$_b_child\" 2>| /dev/null || :)\n"
+    ));
+    text.push_str(&format!("    _b_start=${{{VAR_ACTIVE_START}:-}}\n"));
+    text.push_str(&format!("    {VAR_ACTIVE_READY}=1\n"));
+    text.push_str(&format!(
+        "    if [ -n \"${{{VAR_PENDING_SIGNAL}:-}}\" ]; then\n"
+    ));
+    text.push_str(&format!("        _b_pending=${VAR_PENDING_SIGNAL}\n"));
+    text.push_str(&format!("        {VAR_PENDING_SIGNAL}=\n"));
+    text.push_str(&format!("        {SH_ON_SIGNAL} \"$_b_pending\"\n"));
+    text.push_str("    fi\n");
     text.push_str("    _b_waited=0\n");
     text.push_str("    _b_killed=0\n");
+    text.push_str("    _b_refused=0\n");
+    text.push_str("    _b_current=$_b_start\n");
     text.push_str("    while [ \"$_b_waited\" -lt \"$_b_budget\" ]; do\n");
-    text.push_str("        command kill -0 \"$_b_child\" 2>| /dev/null || break\n");
+    text.push_str(&format!(
+        "        _b_current=$({SH_PROCESS_START_TOKEN} \"$_b_child\" 2>| /dev/null || :)\n"
+    ));
+    text.push_str("        [ -n \"$_b_start\" ] || break\n");
+    text.push_str("        [ \"$_b_current\" = \"$_b_start\" ] || break\n");
     // The volume check, on the same poll as the liveness check: one `sleep` already paces this loop,
     // so measuring here costs two `wc` invocations per second and no extra waiting. Only reachable
     // when `wc` is present; where it is not, `_b_over` stays 0 and the degradation is printed once,
@@ -5154,34 +5533,44 @@ fn render_bounded_run_function() -> String {
     text.push_str("        command sleep 1\n");
     text.push_str("        _b_waited=$(( _b_waited + 1 ))\n");
     text.push_str("    done\n");
-    // One kill for two reasons, deliberately: a flood and an expiry both mean "this invocation must
-    // stop now", and routing them through the same group signal is what keeps a flooding program from
-    // outliving the script the way a hanging one would. Which of the two happened is decided below,
-    // from `_b_over` and `_b_killed`, never from a status.
-    text.push_str("    if command kill -0 \"$_b_child\" 2>| /dev/null; then\n");
-    text.push_str("        _b_killed=1\n");
-    // The group this script created, confirmed to exist before it is signalled. `setsid` makes the
-    // child a group leader, so the group is the child's PID; `kill -0` on the negated PID proves the
-    // group is there and signallable rather than assuming the launch took that path.
-    text.push_str(&format!(
-        "        if [ -n \"${{{VAR_SETSID}:-}}\" ] && command kill -0 \"-$_b_child\" 2>| /dev/null; then\n"
-    ));
-    text.push_str("            command kill -9 \"-$_b_child\" 2>| /dev/null || :\n");
-    text.push_str("        else\n");
-    text.push_str("            command kill -9 \"$_b_child\" 2>| /dev/null || :\n");
+    // One stop path for two reasons, deliberately: a flood and an expiry both mean "this invocation
+    // must stop now". The helper re-reads the start token immediately before signalling and always
+    // waits, which is also the exact path the process-wide traps use.
+    text.push_str("    if [ \"$_b_over\" -eq 1 ] || [ \"$_b_waited\" -ge \"$_b_budget\" ]; then\n");
+    text.push_str(&format!("        {SH_STOP_ACTIVE}\n"));
+    text.push_str(&format!("        _b_killed=${VAR_ACTIVE_KILLED}\n"));
+    text.push_str(&format!("        _b_refused=${VAR_ACTIVE_REFUSED}\n"));
+    text.push_str("    else\n");
+    text.push_str(
+        "        if [ -n \"$_b_current\" ] && [ \"$_b_current\" != \"$_b_start\" ]; then\n",
+    );
+    text.push_str("            _b_refused=1\n");
+    text.push_str(
+        "            command printf 'refusing process %s result: start-time identity changed from \
+         %s to %s before wait\\n' \"$_b_child\" \"${_b_start:-<unavailable>}\" \"$_b_current\" >&2\n",
+    );
+    text.push_str("        fi\n");
+    text.push_str(&format!("        {SH_WAIT_ACTIVE}\n"));
+    text.push_str("    fi\n");
+    text.push_str(&format!("    status=${VAR_ACTIVE_STATUS}\n"));
+    text.push_str("    if [ \"$_b_refused\" -ne 0 ]; then\n");
+    text.push_str(
+        "        command printf 'the reproduction stopped because it could not prove the active \
+         process still had the identity captured at launch\\n' >&2\n",
+    );
+    text.push_str("        exit 1\n");
+    text.push_str("    fi\n");
     // The stated degradation, printed in the script the reader is running: without a group of its own
     // only the direct child can be signalled safely, so a program behind a timeout utility may outlive
     // the bound. A bound that quietly does less than it claims is worse than none.
     text.push_str(&format!(
-        "            [ -n \"${{{VAR_SETSID}:-}}\" ] || command printf '%s\\n' 'note: setsid is \
-         absent, so only the direct child was killed; a program behind a timeout utility may outlive \
-         the bound' >&2\n"
+        "    if [ \"$_b_killed\" -eq 1 ] && [ -z \"${{{VAR_SETSID}:-}}\" ]; then\n"
     ));
-    text.push_str("        fi\n");
+    text.push_str(
+        "        command printf '%s\\n' 'note: setsid is absent, so only the direct child was killed; \
+         a program behind a timeout utility may outlive the bound' >&2\n",
+    );
     text.push_str("    fi\n");
-    // Reaped whichever path was taken, so the script leaves no zombie behind.
-    text.push_str("    status=0\n");
-    text.push_str("    command wait \"$_b_child\" || status=$?\n");
     // Accounted for after the reap, so nothing is still writing to either file while it is measured
     // and truncated. Both streams are accounted for even when neither breached, because the produced
     // and retained figures are evidence in their own right: a reader comparing two runs needs to know

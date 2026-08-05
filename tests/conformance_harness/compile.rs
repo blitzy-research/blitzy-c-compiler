@@ -161,12 +161,13 @@ use super::sandbox::{
 use super::{
     bcc_requires_explicit_target, bcc_target_arguments, corpus_root, ensure_within,
     infrastructure_breach, infrastructure_breach_refusal, is_bcc_target_selector,
-    is_forbidden_for_side, isolate_child_environment, measure_tree, own_process_group,
+    is_forbidden_for_side, isolate_child_environment, measure_pinned_tree, own_process_group,
     posix_command_line, public_text, reap_bounded, record_infrastructure_breach, redact_secrets,
-    require_regular_file, sanitize_text_for_report, shown_path, terminate_process_group,
-    CaptureIntegrity, CompilerSide, DivergenceClass, GroupTermination, HarnessError, HarnessResult,
-    OptLevel, Provenance, SideRecord, Target, TreeLimits, BCC_TARGET_FLAG, CAPTURE_CHUNK_BYTES,
-    CAPTURE_RETAINED_BYTES_MAX, DIFFERENTIAL_FLAGS_MINIMAL,
+    register_process_group, require_regular_file, sanitize_text_for_report, shown_path,
+    terminate_process_group, CaptureIntegrity, CompilerSide, DivergenceClass, GroupTermination,
+    HarnessError, HarnessResult, OptLevel, PinnedDirectory, Provenance, SideRecord, Target,
+    TreeLimits, BCC_TARGET_FLAG, CAPTURE_CHUNK_BYTES, CAPTURE_RETAINED_BYTES_MAX,
+    DIFFERENTIAL_FLAGS_MINIMAL,
 };
 
 /// The flag that names the artifact, spelled once so the argument builder, the allow-list and
@@ -2347,6 +2348,12 @@ fn spawn_bounded(
     // its identifier is also the group's. Read before anything can fail, so that every path below
     // has a group to sweep.
     let group = child.id();
+    // Owned from this line, so that the group is swept even by an ending this function never reaches
+    // the end of. Everything below can panic — an assertion in a helper, a poisoned lock, an
+    // allocation failure — and a compiler driver's whole tree left running once per failing cell is a
+    // leak multiplied by the matrix. The guard also enrols the group with the external supervisor,
+    // which is what covers the endings this process cannot survive at all.
+    let guard = register_process_group(group);
     let deadline = started + bound;
     let stdout_reader = child.stdout.take().map(spawn_capped_reader);
     let stderr_reader = child.stderr.take().map(spawn_capped_reader);
@@ -2365,6 +2372,11 @@ fn spawn_bounded(
             notes.push(sanitize_text_for_report(&redact_secrets(&detail)));
         }
     }
+    // Released here, and not before: the sweep above is this module's own accounting, and it reports
+    // its outcome on the cell — which a sweep from the guard's destructor could not. Releasing after it
+    // is what tells the guard the work is done and removes the group from the supervisor's live set,
+    // which must happen promptly because an identifier becomes reusable once its leader is reaped.
+    guard.release();
     let harvest_deadline = deadline.max(Instant::now() + CAPTURE_GRACE);
     let stdout = harvest_within_deadline(stdout_reader, harvest_deadline, "standard output");
     let stderr = harvest_within_deadline(stderr_reader, harvest_deadline, "standard error");
@@ -2636,16 +2648,48 @@ fn await_child_within_deadline(
     workspace: &Path,
 ) -> WatchedChild {
     let mut scanned_at = Instant::now();
-    // The first incomplete workspace measurement, if any, and only the first: the scan repeats four
-    // times a second, and one sentence per scan would bury the notes that describe the compilation.
-    let mut unverified: Option<String> = None;
+    // The workspace is pinned for the whole watch, and both halves of that matter.
+    //
+    // The measurement is issued through the handle, so it describes the directory the child is
+    // actually writing into rather than whatever the workspace's name currently resolves to. That
+    // closes a concrete evasion: a child can `rename` its own working directory aside while keeping
+    // its open working directory — every write it makes still lands in the renamed tree — and then
+    // leave an empty replacement at the old name. A name-based scan would measure the replacement,
+    // find it comfortably inside both ceilings, and let the child fill the volume through a directory
+    // the watchdog was no longer looking at.
+    //
+    // And the pin's identity is re-checked on every scan, so that substitution is itself a refusal
+    // rather than something merely worked around: a workspace whose name has stopped designating the
+    // directory this cell was given is not a cell whose artifact can be compared, whatever its size.
+    //
+    // A pin that cannot be established at all does not silently degrade to a name-based scan. It is a
+    // refusal, for the reason the whole of this function now follows: a ceiling that cannot be
+    // enforced must stop the thing it was gating.
+    let pinned = match PinnedDirectory::pin("watching the compiler's workspace", workspace) {
+        Ok(pinned) => pinned,
+        Err(error) => {
+            let mut notes = terminate_and_reap(child);
+            notes.insert(0, sanitize_text_for_report(error.cause()));
+            return WatchedChild {
+                timed_out: false,
+                status: None,
+                notes,
+                overflow: Some(format!(
+                    "the cell workspace could not be held open for the duration of the \
+                     compilation, so neither of the ceilings on a workspace in flight could be \
+                     enforced against the directory the compiler was actually writing into: {}",
+                    sanitize_text_for_report(error.cause())
+                )),
+            };
+        }
+    };
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 return WatchedChild {
                     timed_out: false,
                     status: Some(status),
-                    notes: unverified.into_iter().collect(),
+                    notes: Vec::new(),
                     overflow: None,
                 }
             }
@@ -2658,7 +2702,6 @@ fn await_child_within_deadline(
                      timeout",
                     sanitize_text_for_report(&error.to_string())
                 )];
-                notes.extend(unverified);
                 notes.extend(terminate_and_reap(child));
                 return WatchedChild {
                     timed_out: false,
@@ -2669,8 +2712,7 @@ fn await_child_within_deadline(
             }
         }
         if Instant::now() >= deadline {
-            let mut notes: Vec<String> = unverified.into_iter().collect();
-            notes.extend(terminate_and_reap(child));
+            let notes = terminate_and_reap(child);
             return WatchedChild {
                 timed_out: true,
                 status: None,
@@ -2680,14 +2722,10 @@ fn await_child_within_deadline(
         }
         if scanned_at.elapsed() >= WORKSPACE_SCAN_INTERVAL {
             scanned_at = Instant::now();
-            match scan_workspace(workspace) {
+            match scan_workspace(&pinned) {
                 WorkspaceScan::Within => {}
-                WorkspaceScan::Unverified(detail) => {
-                    unverified.get_or_insert(detail);
-                }
                 WorkspaceScan::Exceeded(detail) => {
-                    let mut notes: Vec<String> = unverified.into_iter().collect();
-                    notes.extend(terminate_and_reap(child));
+                    let notes = terminate_and_reap(child);
                     return WatchedChild {
                         timed_out: false,
                         status: None,
@@ -2702,39 +2740,73 @@ fn await_child_within_deadline(
 }
 
 /// What one live measurement of the cell workspace established.
+///
+/// Two outcomes, not three. There is deliberately no "inside the ceilings as far as anyone could tell"
+/// variant: that reading is what let an unenforceable ceiling be recorded as a note while the
+/// compilation continued, and a ceiling that can be recorded as unenforced is not a ceiling.
 #[derive(Debug)]
 enum WorkspaceScan {
-    /// The workspace was measured whole and is inside both ceilings.
+    /// The workspace was measured **whole** and is inside both ceilings.
     Within,
-    /// The workspace is inside both ceilings *as measured*, but the measurement was not complete, so
-    /// "inside" is a lower bound rather than a fact. Carries a sentence for the outcome's notes.
-    Unverified(String),
-    /// A ceiling was positively exceeded. Carries a sentence naming which and by what.
+    /// The workspace must stop being written to. Carries a sentence naming why.
+    ///
+    /// Three distinct conditions reach this, and they are one decision because the consequence of each
+    /// is the same — the ceilings are no longer known to hold:
+    ///
+    /// - a ceiling was positively exceeded;
+    /// - the measurement could not be completed, so "inside" would be a claim about a lower bound;
+    /// - the workspace's name stopped designating the directory this cell was given.
     Exceeded(String),
 }
 
-/// Measure the cell workspace and say whether a live ceiling has been crossed.
+/// Measure the cell workspace and say whether it may still be written to.
 ///
-/// # Positive evidence only, which is the opposite of the retention accounting's rule
+/// # Fail closed, which is the same rule the retention accounting follows
 ///
-/// A ceiling is enforced here only on what was actually measured. A walk that could not read a
-/// directory, or that stopped at one of its own ceilings, does **not** stop the compilation — even
-/// though the very same incompleteness makes `sandbox.rs`'s retention accounting refuse an entry
-/// outright. The two rules are opposite because the two questions are:
+/// Both ceilings are enforced against a measurement that was **completed**, and a measurement that was
+/// not completed is itself a reason to stop. That is the same rule `sandbox.rs`'s retention accounting
+/// applies, and the two are deliberately no longer opposites: a ceiling tested against a lower bound
+/// is a ceiling that has silently stopped holding, and a compilation allowed to continue past one is
+/// a build volume filling behind an accounting that still claims to bound it. A tree past the walk's
+/// own entry, depth or time limits is the exact case that matters — it is *reported* as a lower bound
+/// precisely because it is large — so treating it as "not yet proven over the ceiling" inverted the
+/// evidence.
 ///
-/// - Retention asks *may I claim this fits inside the run's budget?* An entry nobody could measure
-///   cannot be claimed, so it fails closed, or the ceiling stops meaning anything.
-/// - This asks *is something running away with the disk right now?* A compiler deleting its own
-///   temporary file between the listing and the measurement makes an entry vanish mid-walk, which is
-///   an ordinary race and not a runaway. Failing closed on it would terminate honest compilations on
-///   a busy machine and manufacture findings against a compiler that did nothing wrong.
+/// # Why that is affordable, when it once was not
 ///
-/// A genuine runaway produces positive evidence by definition — bytes on the disk or entries in the
-/// directory — so requiring it costs nothing. What incompleteness does earn is a **note**, once per
-/// invocation, so that a reader is never left to assume the ceiling was checked against a whole
-/// measurement when it was checked against a lower bound.
-fn scan_workspace(workspace: &Path) -> WorkspaceScan {
-    let measured = measure_tree(workspace, WORKSPACE_TREE_LIMITS);
+/// The reason this used to fail open is real and has not been dismissed: a compiler deleting its own
+/// temporary file between the listing and the measurement makes an entry disappear mid-walk, which is
+/// an ordinary race on a busy machine and not a runaway. Failing closed on *that* would terminate
+/// honest invocations and manufacture findings against a compiler that did nothing wrong.
+///
+/// [`measure_tree`] now separates the two conditions that used to look alike. An entry that has ceased
+/// to exist is counted in `vanished` and has been measured exactly, at nothing; only an entry that is
+/// still present and unreadable counts as `unmeasured`. So the ordinary race no longer reads as a
+/// measurement failure, and failing closed on a genuine one costs nothing an honest compilation needed.
+///
+/// # The workspace's identity is part of the measurement
+///
+/// Two things happen here, and neither substitutes for the other. The measurement itself is issued
+/// **through the caller's pinned handle** ([`measure_pinned_tree`]), so what is sized is the directory
+/// this cell was given rather than whatever its name now resolves to — which is what stops a child
+/// that renames its own working directory aside, keeps writing into the renamed tree through the
+/// working directory it already holds, and leaves an empty replacement at the old name. And the pin's
+/// identity is re-verified against the name on every scan, so that substitution is *reported* as well
+/// as sized around: a cell whose workspace path no longer leads to the directory the report will name
+/// has produced nothing this run may compare, whatever its size.
+fn scan_workspace(workspace: &PinnedDirectory) -> WorkspaceScan {
+    if let Err(error) = workspace.require_still_pinned(
+        "watching the compiler's workspace",
+        "during the compilation",
+    ) {
+        return WorkspaceScan::Exceeded(sanitize_text_for_report(&format!(
+            "the cell workspace stopped designating the directory this cell was given while the \
+             compilation was running, so neither ceiling could be enforced against what the compiler \
+             was writing into: {}",
+            error.cause()
+        )));
+    }
+    let measured = measure_pinned_tree(workspace, WORKSPACE_TREE_LIMITS);
     if measured.bytes > WORKSPACE_LIVE_BYTES_MAX {
         return WorkspaceScan::Exceeded(format!(
             "the cell workspace held at least {} byte(s) while the compilation was still running, \
@@ -2752,11 +2824,15 @@ fn scan_workspace(workspace: &Path) -> WorkspaceScan {
     }
     match measured.shortfall() {
         None => WorkspaceScan::Within,
-        Some(shortfall) => WorkspaceScan::Unverified(sanitize_text_for_report(&format!(
-            "the live measurement of the cell workspace was incomplete — {shortfall} — so the \
-             ceilings on a workspace in flight were tested against a lower bound; the compilation \
-             was allowed to continue, because stopping it on the strength of a measurement that \
-             could not be completed would terminate an honest invocation on a busy machine"
+        Some(shortfall) => WorkspaceScan::Exceeded(sanitize_text_for_report(&format!(
+            "the live measurement of the cell workspace could not be completed — {shortfall} — so \
+             the ceilings on a workspace in flight could only have been tested against a lower \
+             bound. The compilation is stopped rather than continued: a tree past the walk's own \
+             entry, depth or time limits is reported as a lower bound precisely BECAUSE it is large, \
+             so continuing would be allowing exactly the runaway the ceiling exists to catch. An \
+             entry that merely ceased to exist during the walk is not counted here — that is the \
+             ordinary race a compiler's own temporary file produces, and it is measured exactly, at \
+             nothing"
         ))),
     }
 }

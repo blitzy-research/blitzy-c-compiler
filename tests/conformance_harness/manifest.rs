@@ -598,15 +598,248 @@ const MARKER_KEYS: &[&str] = &[
     KEY_MARKER_OBSERVED,
 ];
 
-/// The two OPTIONAL marker keys, which enrich a marker without gating it.
+/// The two marker keys whose requirement depends on **which tier admits the marker**.
 ///
-/// Both are genuinely useful — a quoted documenting sentence lets the register audit resolve the
-/// authority against the document's own bytes, and a captured observation records that somebody
-/// actually reproduced the divergence — and both are validated for shape whenever they are written.
-/// Neither is an ACCEPTANCE CONDITION, and that distinction is the whole point of separating the two
-/// lists: requiring both would make the two markers the project specification mandates inexpressible.
-/// Optional enrichment that invalidates the frozen format is not enrichment.
-const OPTIONAL_MARKER_KEYS: &[&str] = &[KEY_MARKER_DOCUMENTED, KEY_MARKER_EVIDENCE];
+/// They are not unconditionally optional, and the earlier shape of this module — in which they were —
+/// is the hole [`MarkerAuthority`] closes. A marker converts a real failing comparison into a
+/// non-failing verdict, so the question "who authorised this?" has exactly two admissible answers, and
+/// these two keys are what the second answer is made of:
+///
+/// * **A frozen marker** ([`FROZEN_MARKERS`]) is authorised by the project specification, which fixes
+///   its identifier, class and basis document in a table this file compiles in and no record can edit.
+///   For those, and only those, both keys stay genuine enrichment: the authority does not come from the
+///   record, so the record cannot be asked to supply it.
+/// * **Any other marker** is authorised only by evidence, and then both keys are REQUIRED — a
+///   locator-bound quotation of the cited section, and a captured observation carrying every sub-field
+///   in [`EVIDENCE_FIELDS`]. See [`MarkerAuthority::resolve`] for why that is the whole of the
+///   difference and what it does and does not claim.
+const TIERED_MARKER_KEYS: &[&str] = &[KEY_MARKER_DOCUMENTED, KEY_MARKER_EVIDENCE];
+
+/// The markers the project specification fixes in advance, defined **here** rather than in a record.
+///
+/// This table is the immutable half of the marker authority. Its entries are compiled into the test
+/// binary, so the identifier, the divergence class and the basis document of a frozen exception are
+/// fixed by this file and an expectation record can neither introduce a new one nor redefine an
+/// existing one. A record may only *instantiate* an entry, and instantiating it means agreeing with
+/// every column: a record that names `XD-GCCEXT-CASE-RANGES-001` with a different class, or cites a
+/// different document for it, is refused rather than believed.
+///
+/// # Why exactly these two, and why not the third the specification names
+///
+/// The specification names three markers in advance. Two of them it fixes unconditionally, and both are
+/// here. The third — `XD-C11-UNICODE-LITERALS-001` — it fixes *conditionally*, stating that the marker
+/// is attached "only if a divergence is actually observed and traceable to that documentation gap". A
+/// conditional-on-observation marker is precisely an evidence-tier marker, so putting it in this table
+/// would grant it the one thing its own definition withholds: admission without an observation. Its
+/// absence here is therefore the specification being followed, not an entry overlooked, and if that
+/// divergence is ever observed the marker is admitted through the evidence tier with the capture that
+/// makes the condition true.
+const FROZEN_MARKERS: &[FrozenMarker] = &[
+    FrozenMarker {
+        id: "XD-GCCEXT-CASE-RANGES-001",
+        class: "compile_failure",
+        basis_document: "docs/technical-specifications.md",
+        authority: "the project specification's advance marker table, which fixes this marker's \
+                    identifier, class and scope for this program and states that the program is \
+                    written and executed regardless, so that a difficult feature stays under test",
+    },
+    FrozenMarker {
+        id: "XD-TYPE-LONGDOUBLE-001",
+        class: COMPARISON_EXCLUDED_LABEL,
+        basis_document: "docs/technical-specifications.md",
+        authority: "the project specification's advance marker table, which fixes this marker for \
+                    this program and directs that cross-backend value equality be disabled with the \
+                    measured reason recorded, while the same-target comparison continues",
+    },
+];
+
+/// One entry of [`FROZEN_MARKERS`]: a marker the specification defines and a record may only match.
+///
+/// Deliberately four plain fields and no behaviour. The whole value of the table is that it is
+/// inspectable at a glance and cannot be constructed anywhere else — the type is private, the
+/// constant is the only instance of it, and nothing in the module builds one from parsed input.
+#[derive(Debug, Clone, Copy)]
+struct FrozenMarker {
+    /// The identifier, matched exactly against a record's `expected_divergence.id`.
+    id: &'static str,
+    /// The canonical class label the specification fixes, matched against [`MarkerClass::label`].
+    class: &'static str,
+    /// The repository-relative document the basis must cite, matched against the parsed basis path.
+    basis_document: &'static str,
+    /// What fixes this marker, phrased for a diagnostic and for the XFAIL detail that cites it.
+    authority: &'static str,
+}
+
+/// What authorises a marker to convert a failing comparison into a non-failing verdict.
+///
+/// Two variants, and there is no third and no "unauthorised" state: the type is only ever produced by
+/// [`MarkerAuthority::resolve`], which returns an error instead of a value when neither tier is
+/// satisfied, so possessing one of these is itself the proof that a tier admitted the marker. That is
+/// the property [`ExpectedDivergence`] relies on — a marker value cannot exist without an authority —
+/// and the classifier re-checks the authority at the point of use anyway, because a trust boundary is
+/// worth two independent gates.
+///
+/// # What this does and does not claim
+///
+/// It does not claim a marker is *true*. No automated check can weigh whether a cited section supports
+/// a claimed limitation, and pretending otherwise would be worse than not checking. What it claims is
+/// narrower and actually enforceable: a marker either matches a definition **this file owns and a
+/// record cannot edit**, or it carries a quotation the register audit resolves inside the very section
+/// it cites *and* a structured capture — command, exit status, output, toolchain, date — that a reader
+/// can re-run to falsify. Forging a marker therefore stops being a matter of writing a plausible
+/// sentence and becomes a matter of fabricating a reproducible observation, which the next run's XPASS
+/// safeguard is positioned to contradict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerAuthority {
+    /// Fixed by the project specification, in [`FROZEN_MARKERS`], which no record can edit.
+    Frozen {
+        /// The allowlist entry's own identifier — the table's primary key, taken from the table and
+        /// never from the record, so [`MarkerAuthority::permits`] can look the definition up again
+        /// unambiguously. Keying the re-check on anything else would be fragile: two entries could
+        /// legitimately share a prose description, and the lookup would then cross-match them.
+        id: &'static str,
+        /// What fixes it, for the diagnostic and for the verdict detail that cites the marker.
+        authority: &'static str,
+    },
+    /// Admitted on captured evidence: a locator-bound quotation and a full structured observation.
+    Observed,
+}
+
+impl MarkerAuthority {
+    /// Decide which tier admits this marker, or refuse it.
+    ///
+    /// The frozen tier is tried first and is exact on all three of identifier, class and basis
+    /// document. A record that names a frozen identifier is held to the whole definition, because a
+    /// half-matched frozen marker is the most dangerous shape available: it borrows the credibility of
+    /// a specification-mandated exception while excusing something the specification never mentioned.
+    ///
+    /// Anything the table does not name falls to the evidence tier, where both keys are required. The
+    /// diagnostic on that path deliberately lists the frozen identifiers, so an author who mistyped one
+    /// is told what the accepted spellings are rather than being sent to gather evidence they already
+    /// have.
+    fn resolve(
+        origin: &Path,
+        anchor_line: usize,
+        id: &str,
+        class: MarkerClass,
+        basis_path: &Path,
+        documented: &str,
+        evidence: &str,
+    ) -> HarnessResult<MarkerAuthority> {
+        if let Some(frozen) = FROZEN_MARKERS.iter().find(|frozen| frozen.id == id) {
+            if class.label() != frozen.class {
+                return Err(key_error(
+                    origin,
+                    anchor_line,
+                    KEY_MARKER_CLASS,
+                    format!(
+                        "marker {id} is fixed by {authority}, which defines its class as \
+                         `{expected}`; this record declares `{found}`. A frozen identifier may be \
+                         instantiated but never redefined: accepting a different class here would \
+                         let a record excuse a divergence the specification never contemplated while \
+                         borrowing the authority of one it did. Either write `{expected}`, or give \
+                         the divergence its own identifier and admit it through captured evidence",
+                        authority = frozen.authority,
+                        expected = frozen.class,
+                        found = class.label(),
+                    ),
+                ));
+            }
+            let cited = basis_path.to_string_lossy().replace('\\', "/");
+            if cited != frozen.basis_document {
+                return Err(key_error(
+                    origin,
+                    anchor_line,
+                    KEY_MARKER_BASIS,
+                    format!(
+                        "marker {id} is fixed by {authority}, whose basis is \
+                         `{expected}`; this record cites `{cited}`. The document is part of the frozen \
+                         definition, because a marker that kept the identifier and moved the citation \
+                         would be a different exception wearing the same name",
+                        authority = frozen.authority,
+                        expected = frozen.basis_document,
+                    ),
+                ));
+            }
+            return Ok(MarkerAuthority::Frozen {
+                id: frozen.id,
+                authority: frozen.authority,
+            });
+        }
+        if documented.trim().is_empty() || evidence.trim().is_empty() {
+            let mut missing: Vec<&str> = Vec::new();
+            if documented.trim().is_empty() {
+                missing.push(KEY_MARKER_DOCUMENTED);
+            }
+            if evidence.trim().is_empty() {
+                missing.push(KEY_MARKER_EVIDENCE);
+            }
+            return Err(key_error(
+                origin,
+                anchor_line,
+                KEY_MARKER_ID,
+                format!(
+                    "marker {id} is not one of the exceptions the project specification fixes in \
+                     advance ({frozen}), so it is admitted only on captured evidence — and {absent} \
+                     absent. A marker stops a real failing comparison from failing the run, so \
+                     admitting one on an author's assertion alone would let any editable record \
+                     reclassify a compiler defect as expected. Write {documented_key} quoting, \
+                     verbatim, the sentence of the cited section that states the limitation — the \
+                     register audit resolves that quotation inside the range the basis cites, not \
+                     merely somewhere in the same file — and write {evidence_key} carrying {fields}, \
+                     so the next reader can re-run the observation and contradict it if it is wrong. \
+                     If instead this divergence belongs to a frozen exception, spell its identifier \
+                     exactly as the table does",
+                    frozen = comma_separated(
+                        &FROZEN_MARKERS
+                            .iter()
+                            .map(|frozen| frozen.id)
+                            .collect::<Vec<&str>>()
+                    ),
+                    absent = match missing.as_slice() {
+                        [one] => format!("{one} is"),
+                        _ => format!("{} are", comma_separated(&missing)),
+                    },
+                    documented_key = KEY_MARKER_DOCUMENTED,
+                    evidence_key = KEY_MARKER_EVIDENCE,
+                    fields = comma_separated(EVIDENCE_FIELDS),
+                ),
+            ));
+        }
+        Ok(MarkerAuthority::Observed)
+    }
+
+    /// Whether this authority permits the marker to excuse `class`, re-checked at the point of use.
+    ///
+    /// The classifier calls this immediately before a marker can produce a non-failing verdict. On the
+    /// frozen path it re-derives the permitted class **from the compiled-in table rather than from the
+    /// marker value**, so the check is genuinely independent of whatever the record said: even a future
+    /// change that loosened parsing could not turn a frozen identifier into an excuse for a class the
+    /// specification did not fix for it. On the evidence path the marker's class is whatever its
+    /// capture attests, so any class it declared is permitted — the gate there was the evidence itself.
+    pub fn permits(self, class: MarkerClass) -> bool {
+        match self {
+            MarkerAuthority::Frozen { id, .. } => FROZEN_MARKERS
+                .iter()
+                .any(|frozen| frozen.id == id && frozen.class == class.label()),
+            MarkerAuthority::Observed => true,
+        }
+    }
+
+    /// How the authority reads in a verdict detail, so an XFAIL row states which tier admitted it.
+    pub fn note(self) -> String {
+        match self {
+            MarkerAuthority::Frozen { authority, .. } => {
+                format!("admitted as a frozen exception: {authority}")
+            }
+            MarkerAuthority::Observed => String::from(
+                "admitted on captured evidence: a documenting quotation resolved inside the cited \
+                 section, and a structured observation recording the command, exit status, output, \
+                 toolchain and capture date",
+            ),
+        }
+    }
+}
 
 /// The sub-fields a captured observation must carry, each as a `name: value` line.
 ///
@@ -647,10 +880,24 @@ const EVIDENCE_FIELDS: &[&str] = &["command", "exit", "output", "toolchain", "ca
 
 /// Wording that betrays an observation that has not actually been made.
 ///
-/// A marker reclassifies a real failure as expected. Doing that on the strength of a prediction
-/// inverts the burden of proof: the run stops reporting the divergence precisely because someone
-/// guessed it would happen. These phrases are the ones an honest author reaches for when writing
-/// down a guess, which is exactly why they are refused rather than tolerated.
+/// # This is a hygiene check, and deliberately no longer an authenticator
+///
+/// It was once the closest thing this module had to a test of whether a marker described something
+/// real, and that was a mistake worth naming plainly: a blacklist of phrases authenticates nothing.
+/// Its premise is that an author who has not made an observation will *say so in one of these words*,
+/// which holds for an honest author writing carelessly and fails completely for a careless author
+/// writing confidently — any synonym, any paraphrase, any flatly declarative sentence walks past it.
+/// Absence of blacklisted wording is therefore evidence of nothing at all, and a marker admitted on
+/// that basis was admitted on a stylistic accident.
+///
+/// Authority now comes from exactly two places, neither of which is prose: [`FROZEN_MARKERS`], a table
+/// this file compiles in and no record can edit, and captured evidence — a locator-bound quotation plus
+/// a structured, re-runnable observation. See [`MarkerAuthority`].
+///
+/// The check is kept, because it still earns its place at a much smaller job: it catches the honest
+/// author who reaches for "is expected to reject" while writing up a genuine capture, and turns a
+/// muddled record into a clear error at the moment it is written rather than a puzzle for the next
+/// reader. What it must never again be mistaken for is the reason a marker is believed.
 const ANTICIPATORY_WORDING: &[&str] = &[
     "is expected to",
     "are expected to",
@@ -1854,6 +2101,7 @@ pub struct ExpectedDivergence {
     documented: String,
     evidence: String,
     observed: String,
+    authority: MarkerAuthority,
     program_path: PathBuf,
 }
 
@@ -1918,6 +2166,18 @@ impl ExpectedDivergence {
     /// the output that were actually seen, rather than a description of them.
     pub fn evidence(&self) -> &str {
         &self.evidence
+    }
+
+    /// Which of the two tiers admitted this marker.
+    ///
+    /// Exposed because the answer belongs in the verdict, not only in the parser: a reader looking at a
+    /// non-failing XFAIL row is entitled to know whether it rests on an exception the project
+    /// specification fixes or on an observation somebody captured and they can re-run. The classifier
+    /// also re-checks it through [`MarkerAuthority::permits`] before the marker may excuse anything,
+    /// which is a second gate on the same boundary rather than a restatement of the first: that check
+    /// derives the permitted class from the compiled-in table instead of from this value.
+    pub fn authority(&self) -> MarkerAuthority {
+        self.authority
     }
 
     /// The divergence as observed, so a reader can recognise it without reproducing the run.
@@ -3970,9 +4230,10 @@ fn parse_basis(origin: &Path, raw: &RawField) -> HarnessResult<(String, PathBuf,
 /// documented authority, and without the observation a reader cannot tell whether what they are
 /// seeing is what was marked.
 ///
-/// [`OPTIONAL_MARKER_KEYS`] may accompany them and are validated for shape whenever they appear.
-/// Neither gates a marker, deliberately: requiring both would make the two markers the specification
-/// mandates inexpressible.
+/// [`TIERED_MARKER_KEYS`] accompany them, are validated for shape whenever they appear, and whether
+/// they may be ABSENT is decided by [`MarkerAuthority::resolve`]: absent is permissible for one of the
+/// exceptions [`FROZEN_MARKERS`] fixes, whose authority does not come from the record and so cannot be
+/// demanded of it, and a refusal for every other marker, which has no other authority to offer.
 ///
 /// # What this function refuses, and why refusing it here is the point
 ///
@@ -3990,9 +4251,12 @@ fn parse_basis(origin: &Path, raw: &RawField) -> HarnessResult<(String, PathBuf,
 ///   reviewer's judgement, and the audit's contribution is to guarantee they can turn to it.
 /// * **The observation is not phrased as a prediction** (see [`ANTICIPATORY_WORDING`]), so a marker
 ///   describes something recognisable rather than something guessed.
-/// * **When the optional keys appear they must be usable**: a documenting quotation long enough to
-///   resolve, and a captured observation carrying every sub-field in [`EVIDENCE_FIELDS`], neither
-///   phrased as a prediction.
+/// * **A tier of authority admits it at all.** Either [`FROZEN_MARKERS`] names the identifier — and
+///   then the class and the basis document must match that immutable definition exactly — or the
+///   marker carries BOTH a documenting quotation the register audit resolves inside the section it
+///   cites AND a structured capture carrying every sub-field in [`EVIDENCE_FIELDS`]. There is no third
+///   way in, and in particular the absence of predictive wording is not one: see
+///   [`MarkerAuthority`] and [`ANTICIPATORY_WORDING`].
 fn parse_marker(
     fields: &[(&'static KeySpec, RawField)],
     origin: &Path,
@@ -4028,10 +4292,11 @@ fn parse_marker(
                  the identifier is what the register cross-check matches, the class and scope are \
                  what decide which cells the marker covers, the basis is the documented authority, \
                  and the observation is what lets a reader recognise the divergence. Required: {}. \
-                 Optional enrichment, validated when written and never required: {}",
+                 Required in addition for every marker the project specification does not fix in \
+                 advance, because such a marker is admitted on evidence alone: {}",
                 comma_separated(&missing),
                 comma_separated(MARKER_KEYS),
-                comma_separated(OPTIONAL_MARKER_KEYS)
+                comma_separated(TIERED_MARKER_KEYS)
             ),
         ));
     }
@@ -4085,9 +4350,9 @@ fn parse_marker(
     let basis_field = required_field(fields, origin, KEY_MARKER_BASIS)?;
     let (basis, basis_path, basis_citation) = parse_basis(origin, basis_field)?;
 
-    // Both optional, and each validated for shape only when it is written. An absent one is not a
-    // defect: the frozen contract is the five keys above, and the two below add evidence a reviewer
-    // is glad of without deciding whether the marker may exist.
+    // Each validated for shape only when it is written, and whether it MAY be absent is decided below
+    // by `MarkerAuthority::resolve`: absent is permissible for a frozen exception, whose authority does
+    // not come from the record, and a refusal for anything else, which has no other authority to offer.
     let documented = match field(fields, KEY_MARKER_DOCUMENTED) {
         Some(documented_field) => {
             require_non_empty(
@@ -4122,6 +4387,19 @@ fn parse_marker(
     )?;
     require_not_anticipatory(origin, observed_field, KEY_MARKER_OBSERVED, id)?;
 
+    // The last thing decided, and the thing that decides whether the marker may exist at all. Every
+    // field it consults has already been parsed and shape-checked, so a failure here is about
+    // AUTHORITY rather than about form — which is what makes its diagnostic worth reading.
+    let authority = MarkerAuthority::resolve(
+        origin,
+        id_field.line,
+        id,
+        class,
+        &basis_path,
+        &documented,
+        &evidence,
+    )?;
+
     Ok(Some(ExpectedDivergence {
         id: String::from(id),
         class,
@@ -4132,6 +4410,7 @@ fn parse_marker(
         documented,
         evidence,
         observed: observed_field.value.clone(),
+        authority,
         program_path: program_path.to_path_buf(),
     }))
 }

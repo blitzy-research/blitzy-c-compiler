@@ -699,7 +699,13 @@ fn judge_verdict(
                 // [`markerless_exclusion_inconsistency`] for why it cannot be reached from a
                 // parsed record and why it must never be reported as XFAIL when it is.
                 return match scope_marker(manifest, key, oracle) {
-                    Some(marker) => xfail_exclusion_outcome(key, oracle, manifest, marker, reason),
+                    // Authority is re-checked here rather than trusted from the parse, because this
+                    // is the boundary where a marker stops a narrowing from being a silent
+                    // exclusion. See [`unauthorised_marker_outcome`].
+                    Some(marker) => match unauthorised_marker_outcome(key, oracle, marker) {
+                        Some(refusal) => refusal,
+                        None => xfail_exclusion_outcome(key, oracle, manifest, marker, reason),
+                    },
                     None => markerless_exclusion_inconsistency(key, oracle, manifest, reason),
                 };
             }
@@ -764,15 +770,22 @@ fn judge_verdict(
     // four are matched strictly. `shape` decides only which account the detail gives. See
     // [`DivergenceShape`] for why a refusal is no exception, and what an author writes instead.
     match (covering_marker(manifest, key, oracle, class), root) {
-        // Step 4: a marker documents this divergence on this arm.
-        (Some(marker), _) => xfail_divergence_outcome(key, oracle, class, marker, evidence, shape),
+        // Step 4: a marker documents this divergence on this arm. Its authority is re-checked
+        // immediately before it is allowed to excuse anything.
+        (Some(marker), _) => match unauthorised_marker_outcome(key, oracle, marker) {
+            Some(refusal) => refusal,
+            None => xfail_divergence_outcome(key, oracle, class, marker, evidence, shape),
+        },
         // Step 4, dependent form: no marker names this arm, but the refusal that denied it its
         // subject is one root event and another arm's marker documents that event. Reported as an
         // expected divergence citing the root, stating that no comparison was attempted here —
         // never as an independent finding, which would file one event as three defects. Only a
         // refusal can reach here, because only [`Observation::Build`] carries a root.
         (None, Some(root)) if root.oracle() != oracle => {
-            dependent_refusal_outcome(key, oracle, class, &root, evidence)
+            match unauthorised_marker_outcome(key, oracle, root.marker()) {
+                Some(refusal) => refusal,
+                None => dependent_refusal_outcome(key, oracle, class, &root, evidence),
+            }
         }
         // Step 5: no marker covers it and no marked root explains it, so it is an undocumented
         // divergence — a finding.
@@ -1677,6 +1690,68 @@ fn xfail_exclusion_outcome(
 ///
 /// The remedy named in the detail is the two-line one: write the marker in the program's own
 /// record and mirror it in the register. Nothing about the narrowing itself has to change.
+/// Refuse a marker at the boundary where it would become a non-failing verdict, or `None` to proceed.
+///
+/// This is the second of the two gates on marker authority, and it is placed here — not in
+/// [`scope_marker`], [`covering_marker`] or [`refusal_root`] — for a reason worth stating, because
+/// putting it in any of those three would have introduced the exact defect it exists to prevent.
+/// [`scope_marker`] is consulted twice with **opposite** meanings: once where a covering marker yields
+/// the non-failing [`Verdict::XFail`], and once where a covering marker yields the *failing*
+/// [`Verdict::XPass`] because the divergence it claims has disappeared. A filter inside the lookup
+/// would suppress the marker on both paths at once, and on the second path suppressing it turns a
+/// run-failing unexpected success into an ordinary pass. So the gate is applied per *outcome*, at each
+/// of the three places a marker excuses something, and nowhere that a marker accuses something.
+///
+/// # Why it is checked at all when the parser already refused
+///
+/// [`MarkerAuthority`] is only ever produced by its own resolver, which returns an error rather than a
+/// value when neither tier admits the marker, so a marker parsed from a record is authorised by
+/// construction and this function returns `None` for every marker the suite ships. That makes it a
+/// trust-boundary invariant rather than a routine check, and the shape is deliberately the same one
+/// [`markerless_exclusion_inconsistency`] uses for the same reason: the property is guaranteed
+/// upstream, this is the single place where its failure would be *profitable*, and a guarantee worth
+/// having is worth confirming where it is spent. The re-check is also genuinely independent rather
+/// than a restatement — [`MarkerAuthority::permits`] re-derives the permitted class from the
+/// compiled-in frozen table instead of from the marker value — so a future change that loosened
+/// parsing would be caught here rather than silently widening what a frozen identifier can excuse.
+///
+/// The verdict is [`Verdict::Fail`] and never a quieter one. A marker whose authority cannot be
+/// established is the one case where reporting *anything* softer would be reporting a possible
+/// compiler defect as expected, which is the precise failure the whole marker contract exists to
+/// prevent.
+fn unauthorised_marker_outcome(
+    key: &CellKey,
+    oracle: Oracle,
+    marker: &ExpectedDivergence,
+) -> Option<Outcome> {
+    if marker.authority().permits(marker.class()) {
+        return None;
+    }
+    Some(fail_outcome(
+        key,
+        oracle,
+        &format!(
+            "checking the authority of marker {} before letting it excuse a divergence",
+            marker.id()
+        ),
+        &format!(
+            "marker {id} declares class {class}, and its recorded authority does not permit it to \
+             excuse that class. A marker is admitted either as one of the exceptions the project \
+             specification fixes in advance — in which case the class is fixed with it and cannot be \
+             restated by a record — or on captured evidence, and neither holds here. Nothing was \
+             excused: the divergence is reported as a failure, because a marker whose authority \
+             cannot be established is indistinguishable from an undocumented compiler defect \
+             wearing a documented name. The record parser refuses such a marker outright, so \
+             reaching this point means the record did not come through the parser, or that the \
+             parser and this classifier disagree about the contract. The marker's recorded \
+             authority reads: {authority}",
+            id = marker.id(),
+            class = marker.class(),
+            authority = marker.authority().note(),
+        ),
+    ))
+}
+
 fn markerless_exclusion_inconsistency(
     key: &CellKey,
     oracle: Oracle,
@@ -1815,11 +1890,16 @@ fn fail_outcome(key: &CellKey, oracle: Oracle, context: &str, cause: &str) -> Ou
 /// every reader to a second file to learn what the identifier means.
 fn marker_reference(marker: &ExpectedDivergence) -> String {
     format!(
-        "marker {id} (class {class}, scope {scope}, documented basis: {basis})",
+        "marker {id} (class {class}, scope {scope}, documented basis: {basis}, {authority})",
         id = marker.id(),
         class = marker.class(),
         scope = marker.scope(),
-        basis = inline_reason(marker.basis())
+        basis = inline_reason(marker.basis()),
+        // The tier belongs in the row, not only in the parser. A reader looking at a comparison that
+        // differed and did not fail the run is entitled to know, without opening any other file,
+        // whether it was excused by an exception the project specification fixes or by an observation
+        // somebody captured — and in the second case that the capture is there to be re-run.
+        authority = marker.authority().note(),
     )
 }
 
