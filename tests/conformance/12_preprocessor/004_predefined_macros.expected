@@ -128,31 +128,28 @@ defining exactly one of the four, and both are satisfied by a compiler defining 
 that contradicts itself fails either, which is what makes a difference on these lines evidence about
 the compiler rather than about a naming convention.
 
-PRESENCE IS DELIBERATELY NOT ASSERTED, AND THIS IS THE RECORD OF THE WITHDRAWAL AND ITS REASON. An
-earlier form of this program printed a third line, `arch_id_defined`, asserting that AT LEAST ONE of
-the four spellings is defined, and this record carried `arch_id_defined=1` as golden output. The
-observation that motivated it was correct: without such a line, a compiler predefining no
-architecture macro produces output byte-identical to one predefining exactly the right macro, since
-the sum is zero, zero is no more than one, and the implication is vacuously satisfied. The conclusion
-drawn from it was not. Those two compilers agree because both are CORRECT. No clause of the standard
-requires any of these four spellings; the search recorded in the next paragraph finds no repository
-document that requires them of the compiler under test either; and this record itself conceded as
-much while enforcing the opposite. An assertion no authority supports does not become sound by being
-labelled a report: every one of this program's twelve cells would have reported a compiler which
-spells its architecture macro otherwise, or which leaves the choice to a target header, as a
-difference under all three oracles at once, and each of those differences would have been filed as an
-undocumented FINDING. That is a false oracle, and a false oracle is worse than the blind spot it was
-introduced to close, because it spends a maintainer's attention on permitted behaviour and teaches a
-reader to distrust the finding set. Nor could such a difference have been reclassified as expected:
+PRESENCE IS DELIBERATELY NOT ASSERTED, AND THIS IS THE RECORD OF WHY. A third line -- asserting that
+AT LEAST ONE of the four spellings is defined -- would close a real gap: without such a line, a
+compiler predefining no architecture macro produces output byte-identical to one predefining exactly
+the right macro, since the sum is zero, zero is no more than one, and the implication is vacuously
+satisfied. But those two compilers agree because both are CORRECT. No clause of the standard requires
+any of these four spellings, and the search recorded in the next paragraph finds no repository document
+that requires them of the compiler under test either. An assertion no authority supports does not
+become sound by being labelled a report: every one of this program's twelve cells would report a
+compiler which spells its architecture macro otherwise, or which leaves the choice to a target header,
+as a difference under all three oracles at once, and each of those differences would be filed as an
+undocumented FINDING. That is a false oracle, and a false oracle is worse than the blind spot it would
+be introduced to close, because it spends a maintainer's attention on permitted behaviour and teaches a
+reader to distrust the finding set. Nor could such a difference be reclassified as expected:
 requirement 5 makes a marker's documented basis mandatory, and silence is not a basis.
 
-WHAT THE WITHDRAWAL DOES NOT GIVE UP, since C3 forbids dropping a feature. All four architecture
-macros are still read, all four conditional blocks are still exercised, both surviving relations are
-still printed and compared, and this program still sweeps all four targets, all three optimization
-levels and all three oracles: nothing is narrowed here, and no marker is attached. One unfounded
-equality was withdrawn, not one line of coverage. The narrow alternative the review offered --
-printing presence as capability metadata that no oracle compares -- is genuinely unavailable in this
-suite rather than merely unattractive: comparison is byte-exact over the whole of standard output,
+WHAT IS NOT GIVEN UP BY LEAVING PRESENCE UNASSERTED, since C3 forbids dropping a feature. All four
+architecture macros are read, all four conditional blocks are exercised, both relations are printed and
+compared, and this program sweeps all four targets, all three optimization levels and all three
+oracles: nothing is narrowed here, and no marker is attached. What is left unasserted is one unfounded
+equality, not one line of coverage. The narrow alternative -- printing presence as capability metadata
+that no oracle compares -- is genuinely unavailable in this suite rather than merely unattractive:
+comparison is byte-exact over the whole of standard output,
 plus the raw wait status, so there is no uncompared channel a program can print into, and inventing
 one would weaken the comparison for all 108 programs in order to describe one. What remains
 observable about presence is observable where it belongs: the pre-flight capability report records
@@ -170,9 +167,8 @@ gives for its own scoped searches: two of the eight spellings do occur elsewhere
 this suite's own methodology page `docs/testing/differential-conformance.md`, which discusses this
 very design decision and therefore cannot be evidence for it. There is consequently no documented
 authority stating which predefined macros bcc defines or what values they take. That is
-the direct reason this program asserts relations rather than literals, and it is the same reason the
-presence assertion was withdrawn above: a relation is asserted here only where every correct compiler
-must satisfy it. The gap has one further consequence. An expected-divergence marker requires a
+the direct reason this program asserts relations rather than literals, and the same reason presence goes
+unasserted above: a relation is asserted here only where every correct compiler must satisfy it. The gap has one further consequence. An expected-divergence marker requires a
 documented basis, and a documented basis cannot be manufactured out of silence, so no marker could
 legitimately be attached to this program even if a per-target difference were observed -- which is
 precisely why the relations must be sound in the first place. A difference on a sound relation is

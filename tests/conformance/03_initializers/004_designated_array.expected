@@ -235,9 +235,9 @@ the largest designator, constant-expression indices, two-dimensional row-then-el
 element-then-row and element-only designators, array-of-struct designators in both member and brace
 form, and overlapping designators in the flat, nested-both-directions, struct-member and
 automatic-duration forms. Nothing is dropped for difficulty, and nothing is replaced by prose
-describing why it is absent. The distinction the earlier form of this record recorded as an open gap
--- that no program separated "the last initializer to name a subobject wins" from "any explicitly
-named subobject survives" -- is closed here by the discriminating pair.
+describing why it is absent. The discriminating pair is what separates "the last initializer to name a
+subobject wins" from the weaker "any explicitly named subobject survives", so neither rule can satisfy
+this program by accident.
 
 No expected-divergence marker is carried and none would be right. A marker classifies a divergence
 against a documented limitation of the compiler under test; nothing above cites one, and the

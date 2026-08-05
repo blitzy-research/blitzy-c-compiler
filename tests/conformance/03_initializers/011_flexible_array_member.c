@@ -21,12 +21,12 @@
  * with n == FAM_CAP, so every subscript in FAM_LIVE_MAX range is inside the
  * replacement array by the standard's own account rather than by inference.
  *
- * An earlier form of this program instead aimed a `struct fam *` at a union arm whose
- * declared size was four bytes -- the header alone -- and subscripted that.  Under the
- * rule above the replacement array there has no elements, so every one of those
- * subscripts was undefined, and the exclusion of element access that replaced them
- * was recorded rather than silently dropped.  Neither compromise is needed: the
- * allocated object removes the undefined behaviour AND restores the coverage.
+ * WHY THE ALLOCATION RATHER THAN A UNION ARM.  Aiming a `struct fam *` at a union arm
+ * whose declared size is four bytes -- the header alone -- and subscripting that would be
+ * undefined: under the rule above the replacement array there has no elements, so every
+ * such subscript is out of bounds, and the only way to keep it would be to exclude
+ * element access altogether.  The allocated object needs neither compromise -- it avoids
+ * the undefined behaviour AND keeps the coverage.
  *
  * WHY AN ALLOCATOR CAN BE DECLARED HERE WITHOUT A HEADER AND WITHOUT LOSING A TARGET.
  * The corpus rule is that a program includes no header and hand-declares the libc

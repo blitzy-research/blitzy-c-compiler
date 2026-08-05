@@ -915,13 +915,13 @@ checkout carries no `bcc` and the compiler under test forwards to the reference 
 agreement from it measures the environment rather than the compiler; the marker discloses that in its own
 `observed` field, `evidence` is unwritten, and `XPASS` fails the run while the construct works. And the
 long-double `oracle_b` narrowing is **recorded and machine-checked, not adjudicated**. Its governing
-program and record have **completed their review**, which re-measured the exclusion's reason onto the
-significand widths, 64 bits against 113, after the claim that the exponent ranges differ was withdrawn,
-and the driver's pending declaration is empty — so for triage purposes the nine `XFAIL` arms are
-settled: a divergence on oracle (a) or (c) over that program is a **FINDING**, exactly as the table says.
-What the review did not and could not close is whether the cited basis *semantically supports* switching
-that oracle off — a reviewer's judgement that [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §2.4.1
-leaves to the reader for every marker, permanently. If you disagree with the citation, §3.2 there is the
+program and record have **completed their review**, the recorded reason rests on the significand widths
+of 64 bits against 113 rather than on exponent range, and the driver's pending declaration is empty — so
+for triage purposes the nine `XFAIL` arms are settled: a divergence on oracle (a) or (c) over that
+program is a **FINDING**, exactly as the table says. What no review can close is whether the cited basis
+*semantically supports* switching that oracle off — a reviewer's judgement that
+[`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §2.4.1 leaves to the reader for every marker,
+permanently. If you disagree with the citation, §3.2 there is the
 retirement procedure; what you must not do is refile one of those nine arms as a finding, because a
 not-attempted comparison observed nothing.
 
@@ -978,15 +978,13 @@ recorded `UNPERFORMED` for the whole corpus, not merely for that one program.
 **Do not read a performed gate as a statement about substantiation.** The two answer different
 questions: this gate is satisfied by all 108 programs, and it would still be satisfied by a program
 whose record's prose had not been re-checked, because a record's prose not yet having been re-checked is
-a different thing from its program failing a gate. **All 108 records** have now been authored or
-re-substantiated in the checkpoint sequence that produced this state; the last one outstanding was
-[`13_floating_point/004_long_double_target_restricted.expected`](13_floating_point/004_long_double_target_restricted.expected),
-and what remained in it was a **wording** correction — the loose *"three different formats"* claim in
-its `observed` field, now *"three storage-and-format pairings over two distinct formats"* — which had to
-be made in the same edit as the matching `Observed` row in
-[`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.2, because the register audit compares the two
-character-for-character and correcting either one alone would fail the audit. The count framing this
-distinction feeds is published in the enumerable matrix in §7.2 below.
+a different thing from its program failing a gate. **All 108 records** are substantiated: each
+one's written argument, implementation-defined notes and any marker it carries have been read and found
+to describe what its program actually does. One coupling is worth knowing before editing any of them: a
+marker's `observed` field and the matching `Observed` row in
+[`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.2 are compared character-for-character by the
+register audit, so the two must always be changed in the same edit. The count framing this distinction
+feeds is published in the enumerable matrix in §7.2 below.
 
 That distinction is what to check, and it is not a historical footnote: while the audit is
 unperformed, **no area completes**, and a divergence observed under those conditions is arithmetic

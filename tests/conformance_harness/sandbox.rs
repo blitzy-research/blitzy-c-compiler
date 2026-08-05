@@ -1701,12 +1701,12 @@ struct RetainedEntry {
 /// is being concluded, and a measurement problem must not become a verdict.
 ///
 /// An entry whose size could not be established carries its own [`RetainedEntry::shortfall`] rather
-/// than being scored as zero bytes. That is a reversal of an earlier rule, and the reason is worth
-/// stating: leaving such an entry in place *and* counting it as nothing preserved evidence at the
-/// cost of making every ceiling above it unenforceable, while the accounting went on reporting that
-/// each one held. Between two failure directions — losing one entry of one failing cell's evidence,
-/// or filling the machine's build volume behind a report that says it is bounded — the first is a
-/// recoverable inconvenience and the second is not.
+/// than being scored as zero bytes, and the reason is worth stating: leaving such an entry in place
+/// *and* counting it as nothing would preserve evidence at the cost of making every ceiling above it
+/// unenforceable, while the accounting went on reporting that each one held. Between two failure
+/// directions — losing one entry of one failing cell's evidence, or filling the machine's build volume
+/// behind a report that says it is bounded — the first is a recoverable inconvenience and the second is
+/// not.
 fn collect_entries(root: &Path, notes: &mut Vec<String>) -> Vec<RetainedEntry> {
     let listing = match fs::read_dir(root) {
         Ok(listing) => listing,

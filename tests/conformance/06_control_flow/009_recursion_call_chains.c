@@ -23,7 +23,8 @@ static int fib(int n)
     return fib(n - 1) + fib(n - 2);
 }
 
-/* Tail-shaped recursion, depth 30 -- the deepest chain here. */
+/* Tail-shaped recursion: sum_to(30) takes 30 recursive steps and occupies 31
+ * frames including the base case -- the deepest chain here. */
 static int sum_to(int n)
 {
     if (n <= 0)

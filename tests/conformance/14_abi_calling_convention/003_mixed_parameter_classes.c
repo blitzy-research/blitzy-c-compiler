@@ -79,10 +79,10 @@
  * callee may legally be inlined at -O1 and -O2, and an inlined callee marshals
  * nothing: the interleaved allocator advance this program exists to exercise
  * would then never happen, and its assertions would describe code that was never
- * emitted.  Measured with gcc 13.4.0 at -O2 across this area before the
- * indirection was added: whole groups of callees vanished into their callers, and
- * the survivors survived only by exceeding the inliner's size budget - an
- * accident of a heuristic rather than a property of the test.  ISO C requires a
+ * emitted.  That is not hypothetical: measured with gcc 13.4.0 at -O2, a by-name
+ * callee in this area is inlined into its caller unless it happens to exceed the
+ * inliner's size budget, so survival by name would be an accident of a heuristic
+ * rather than a property of the test.  ISO C requires a
  * volatile pointer to be re-read at each point of call and control to go to
  * whatever function that load produced (C11 5.1.2.3p2 and p6, 6.7.3p7), so the
  * designated function is opaque to the optimizer and the call is genuinely

@@ -1585,9 +1585,9 @@ CF_TSAN_OPTIONS='halt_on_error=1:exitcode=1'
 # are removed first, so prose and format strings can discuss anything, and only an
 # identifier that is actually CALLED counts, so a local variable named `time` is not
 # a finding. What it is not is a sandbox: it is the mechanical half of an authoring
-# rule that was previously only written down, and a determined author can still defeat
-# it through a function pointer or a macro. It closes the accidental case, which is
-# the case that actually occurs.
+# rule whose other half is prose, and a determined author can still defeat it through
+# a function pointer or a macro. It closes the accidental case, which is the case that
+# actually occurs.
 
 # Interfaces a test program may not call, by the reason it may not. One group per
 # variable so the refusal can say which guarantee the call would break.
@@ -2731,8 +2731,8 @@ fi
 #
 # `mkdir` is the primitive because it is atomic: one operation either creates the
 # directory or fails because it already exists, with no window between the test
-# and the creation. But atomic creation alone is not a lock protocol, and the three
-# places it is not are where two writers used to get in:
+# and the creation. But atomic creation alone is not a lock protocol, and these are
+# the three places where two writers would otherwise both proceed:
 #
 #   * A LOCK BEING TAKEN IS NOT A STALE LOCK. The winner of `mkdir` writes its owner
 #     file a moment later, so a contender that read the directory in between saw no
@@ -4996,13 +4996,13 @@ cf_process_record() {
 	# From here on the RESOLVED directory is the one every read and every write goes
 	# through, and the name the record arrived under is used only in messages.
 	#
-	# The containment check above resolves a path; the staging and the installing
-	# rename used to act on the path as WRITTEN, which is a second resolution
-	# performed later. Two resolutions of the same name are two different answers
-	# whenever a component of that name changes in between -- and an area directory
-	# replaced by a symbolic link between the check and the rename would have been
-	# checked here and written somewhere else. Opening the resolved directory and
-	# operating through fd 8 removes the gap rather than narrowing it:
+	# The containment check above resolves a path; acting on the path as WRITTEN in the
+	# staging and the installing rename would be a second resolution performed later.
+	# Two resolutions of the same name are two different answers whenever a component
+	# of that name changes in between -- and an area directory replaced by a symbolic
+	# link between the check and the rename would be checked here and written somewhere
+	# else. Opening the resolved directory and operating through fd 8 removes the gap
+	# rather than narrowing it:
 	# `cf_rec_phys_dir` is a durable handle path, and every read and mutation below
 	# is relative to that object even if a written ancestor changes later.
 	cf_rec_phys_dir=$CF_RECORD_DIR_HANDLE

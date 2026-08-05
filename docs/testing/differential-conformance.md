@@ -209,10 +209,10 @@ Two figures are published here, and the distinction between them matters more th
 startup, from **36 pairs** completed in 2.612 s. That is a *limited sample of one narrow operation* —
 one program, a surrogate compiler under test, a warm page cache, nothing else competing — and it is
 recorded because it bounds the per-pair cost, not because it predicts a run. **It must not be
-multiplied out into a suite estimate**, which is exactly the mistake an earlier revision of this page
-made: the matrix also pays for 324 undefined-behaviour audit children, 62 flag-probe children, the
-runner attestations, the tool-discovery probes, the process-group verification after each child, and
-the filesystem and report work, none of which appears in a pair. The reference driver's own cost is
+multiplied out into a suite estimate**: the matrix also pays for 324 undefined-behaviour audit
+children, 62 flag-probe children, the runner attestations, the tool-discovery probes, the
+process-group verification after each child, and the filesystem and report work, none of which
+appears in a pair. The reference driver's own cost is
 also nothing like 72.5 ms — measured directly at `-O2 -static` on the machine below, one reference
 compile takes **300 ms** for x86-64, **436 ms** for i686, **416 ms** for AArch64 and **795 ms** for
 RISC-V 64.
@@ -359,15 +359,14 @@ text.
 |---|---|
 | `comparison_excluded` | **No comparison is attempted** on the arm the marker scopes, because the program's own record disables that oracle for a reason written into its `impl_defined_notes`. It is a coverage restriction carrying an identifier and a resolved basis, not an observation. |
 
-**Why it has to exist**, which the suite learned the hard way. A marker that narrows an oracle used to
-be written with an observational class — `stdout_mismatch` was the natural choice for a *value*
-comparison that had been switched off — and that spelling asserted, in the one field a report row
-quotes, that two completed runs had disagreed on bytes. Nothing had run. Every automated check still
-passed, and necessarily so: a class is only ever *matched against* an observation, and the arm in
-question produces none, so a false statement sat in a machine-checked field that no machine could
-contradict.
+**Why it has to exist.** Writing a marker that narrows an oracle with an observational class —
+`stdout_mismatch` is the natural choice for a *value* comparison that has been switched off — asserts,
+in the one field a report row quotes, that two completed runs disagreed on bytes. Nothing ran. Every
+automated check would still pass, and necessarily so: a class is only ever *matched against* an
+observation, and the arm in question produces none, so the false statement would sit in a
+machine-checked field that no machine could contradict.
 
-**What the parser now enforces, in both directions.** A marker scoped to *any* oracle its record
+**What the parser enforces, in both directions.** A marker scoped to *any* oracle its record
 disables **must** carry this class; a marker carrying this class **must** scope only oracles its record
 disables. A mixed scope is inexpressible, which is intended — a marker either explains what a
 comparison saw or explains why a comparison is not made, and one marker cannot honestly do both.

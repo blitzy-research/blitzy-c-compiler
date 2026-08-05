@@ -209,16 +209,16 @@ observation will say so in one of a listed set of phrases — holds for an hones
 and fails completely for a careless author writing confidently, because any synonym, any paraphrase and
 any flatly declarative sentence walks past it. Absence of blacklisted wording is evidence of nothing.
 
-**Why the two mandated markers are frozen rather than evidenced, which is the case that forced the two
-tiers to exist.** Neither can satisfy the observed tier, and not because their authors were lazy. One
-rests on an inventory's *silence*, which no sentence can quote. The other documents a type whose
-cross-backend comparison the same specification switches **off**, so no arm exists that could ever produce
-a captured observation for it. An earlier revision of this suite required both keys of every marker, which
-did not raise the standard: it made the two mandated markers inexpressible, and the exclusions they
-document were then reported `XFAIL` with no identifier, no register entry and no resolved basis behind
-them — strictly less auditable than the markers it had refused. The next revision made both keys
-unconditionally optional, which made every marker as weak as the weakest one. Tiering them is what lets a
-mandated exception be expressible *and* a new exception be expensive.
+**Why the two mandated markers are frozen rather than evidenced, which is the case the two tiers exist
+for.** Neither can satisfy the observed tier, and not because their authors were lazy. One rests on an
+inventory's *silence*, which no sentence can quote. The other documents a type whose cross-backend
+comparison the same specification switches **off**, so no arm exists that could ever produce a captured
+observation for it. Requiring both keys of every marker would therefore not raise the standard: it would
+make the two mandated markers inexpressible, and the exclusions they document would then be reported
+`XFAIL` with no identifier, no register entry and no resolved basis behind them — strictly less auditable
+than the markers such a rule refused. Making both keys unconditionally optional fails the other way, by
+making every marker as weak as the weakest one. Tiering them is what lets a mandated exception be
+expressible *and* a new exception be expensive.
 
 **The specification names a third marker in advance, and it is deliberately not in the allowlist.** The
 wide-and-Unicode-literal candidate of §4.3 — whose identifier this register does not spell, because §1.1's
@@ -274,15 +274,14 @@ produce a flood of divergences that say nothing about code correctness.
 |---|---|
 | `comparison_excluded` | **No comparison is attempted** on the arm this marker scopes, because the program's own record disables that oracle for a reason recorded in its `impl_defined_notes` (§3.3). It is a coverage restriction with an identifier and a resolved basis, not an observation. |
 
-**Why it has to exist, which is a defect this register learned the hard way.** A narrowing marker used
-to be written with an observational class — `stdout_mismatch` was the natural choice for a *value*
-comparison that had been switched off — and that spelling asserted, in the one field a report row
-quotes, that two completed runs had disagreed on bytes. Nothing had run. Every automated check passed
-anyway, and necessarily so: a class is only ever *matched* against an observation, and the arm in
-question produces none, so the false statement sat in a machine-checked field that no machine could
-contradict. A reader auditing this register was told an observation had been made.
+**Why it has to exist.** Spelling a narrowing marker with an observational class — `stdout_mismatch` is
+the natural choice for a *value* comparison that has been switched off — asserts, in the one field a
+report row quotes, that two completed runs disagreed on bytes. Nothing ran. Every automated check would
+pass anyway, and necessarily so: a class is only ever *matched* against an observation, and the arm in
+question produces none, so the false statement would sit in a machine-checked field that no machine
+could contradict, and a reader auditing this register would be told an observation had been made.
 
-**What the parser now enforces, in both directions.** A marker scoped to *any* oracle its record
+**What the parser enforces, in both directions.** A marker scoped to *any* oracle its record
 disables **must** carry this class; a marker carrying this class **must** scope only oracles its record
 disables. A mixed scope is therefore inexpressible, and that is intended — a marker either explains
 what a comparison saw or explains why a comparison is not made, and one marker cannot honestly do
@@ -448,25 +447,23 @@ document the harness owns, or on captured evidence that includes a quotation res
 section this check locates. So the latitude described below is latitude about *strength of citation*
 within an already-authorised marker — never latitude about whether an unauthorised one gets in.
 
-That division is deliberate, and an earlier revision got it wrong in an instructive way. It refused
-any basis whose wording rested on what a document does *not* say — "omits", "absent from", "does not
-list" and their kin — reasoning that an omission from an inventory is evidence only that nobody wrote
-something down. As an argument about **strength** that is correct, and §4.1 states it plainly about the
-very marker it applies to. As an **admission rule** it was wrong twice over: it refused a marker the
-project specification mandates, whose basis was exactly such an omission at the time; and by
-refusing it, the
-exclusion the marker documented ended up reported `XFAIL` with no identifier, no register entry and no
-resolved citation behind it, which is less auditable than the marker it rejected. A format that
-cannot express its own specification's markers is the thing that needs changing. Admission is not
-endorsement, and the two must not be confused: §4.1 records in as many words that its basis is the
-weakest of the three analysed here and that no `bcc` verdict has been captured against it, so a
-reviewer weighing that citation is given the material to weigh rather than a verdict to accept.
+That division is deliberate, and the tempting alternative is wrong in an instructive way. Refusing any
+basis whose wording rests on what a document does *not* say — "omits", "absent from", "does not list" and
+their kin — reasons that an omission from an inventory is evidence only that nobody wrote something down.
+As an argument about **strength** that is correct, and §4.1 states it plainly about the very marker it
+applies to. As an **admission rule** it fails twice over: it refuses a marker the project specification
+mandates, whose basis can be exactly such an omission; and by refusing it, the exclusion that marker
+documents ends up reported `XFAIL` with no identifier, no register entry and no resolved citation behind
+it, which is less auditable than the marker that was rejected. A format that cannot express its own
+specification's markers is the thing that would need changing. Admission is not endorsement, and the two
+must not be confused: §4.1 records in as many words that its basis is the weakest of the three analysed
+here and that no `bcc` verdict has been captured against it, so a reviewer weighing that citation is given
+the material to weigh rather than a verdict to accept.
 
 So the rules that remain *for the basis* are the mechanical ones, and they are the ones a machine can
 actually decide: a repository-relative path, a document that reads, and at least one locator that
 resolves. They are not the whole of what a marker must satisfy — §2.1.1 is — and reading them as though
-they were is what made an earlier revision of this register describe a weaker contract than the suite
-actually enforced. What a
+they were would describe a weaker contract than the suite actually enforces. What a
 reader does with the section they are sent to is their business, and every marker's entry in §4 states
 in prose exactly how strong its own basis is, so nobody has to infer it.
 
@@ -627,13 +624,13 @@ one — which is the exact outcome requirement 5 forbids. The two halves now do 
 marker supplies the identifier, the class, the scope and the resolved basis; the reason supplies the
 prose that explains why the comparison would be meaningless.
 
-The third rule closed what the second left open. With a marker required, the narrowing became
-auditable — but the `class` field still had to be filled from the six observational values, and the
-one that fitted a suppressed *value* comparison was `stdout_mismatch`. So the marker documented the
-arm the record switches off as though two completed runs had disagreed on bytes, and no check could
-catch it, because a class is matched only against an observation and that arm makes none.
-`comparison_excluded` is the value that states what is actually true, and the parser now requires it
-exactly where an observation is impossible.
+The third rule closes what the second leaves open. A required marker makes the narrowing auditable —
+but if the `class` field had to be filled from the six observational values, the one that fits a
+suppressed *value* comparison would be `stdout_mismatch`, and the marker would then document the arm the
+record switches off as though two completed runs had disagreed on bytes. No check could catch that,
+because a class is matched only against an observation and that arm makes none. `comparison_excluded` is
+the value that states what is actually true, and the parser requires it exactly where an observation is
+impossible.
 
 A narrowed cell is still classified and still reported; it is never a silent skip:
 
@@ -806,13 +803,13 @@ because §2.4.1 leaves the weighing of a basis to a reviewer and this is the rev
   traceable to it rather than being unexplained — which is the distinction requirement 5 draws, and
   the ambiguity the project specification flagged for a maintainer to resolve. It is a pointer to an
   open question, never an assertion that the question is closed.
-- **This is a strictly stronger footing than the marker's earlier one.** The basis previously cited the
-  project guide's inventory row and rested on that inventory's **silence** about the construct, which
-  is compatible with the feature working and the inventory being incomplete, with the feature not
-  working, and with nobody having considered the question — and which could not be *corrected away*,
-  so a marker resting on it could outlive its reason. Citing the requirement instead replaces an
-  inference from silence with a statement the document makes. Silence remains what the four
-  corroborating inventories add, and they are recorded above as corroboration rather than as authority.
+- **The basis is a compliance rule rather than an inventory, and that is what gives it its footing.**
+  An inventory row supplies only the inventory's **silence** about the construct, which is compatible
+  with the feature working and the inventory being incomplete, with the feature not working, and with
+  nobody having considered the question — and which cannot be *corrected away*, so a marker resting on
+  it could outlive its reason. Citing the requirement replaces an inference from silence with a
+  statement the document makes. Silence is what the four corroborating inventories add, and they are
+  recorded above as corroboration rather than as authority.
 - **The citation is followable**, at `docs/technical-specifications.md` line 761, and the record's
   optional `documented` key quotes that line's own requirement sentence, which §1.1 resolves inside the
   cited range on every run. A reader can turn to the compliance rule and weigh it in one click, which
@@ -918,26 +915,23 @@ exclusion *with a followable basis and a re-measured reason*, and a reader who n
 should read the program and its record and form their own.
 
 **The review of that program and record has completed, and this section is published on the far side of
-it** — §8.2's substantiation column and the driver's now-empty `PENDING_RECORDS` declaration say the
-same thing, and all three are meant to be read together. Three defects that review found were corrected
-in the record rather than merely noted, and each bore directly on this entry:
+it** — §8.2's substantiation column and the driver's empty `PENDING_RECORDS` declaration say the same
+thing, and all three are meant to be read together. Three facts the review settled bear directly on this
+entry, and each is stated here as it now stands:
 
-- the record's written undefined-behaviour argument claimed that character-type access to this type's
-  **object representation** would be undefined behaviour. It would not — C11 6.2.6.1p4 and 6.5p7 permit
-  it — and the true objection is that the padding bytes are unspecified (6.2.6.1p6) and that both the
-  padding's extent and the significant bytes' encoding are target-dependent, so a byte image is not a
-  portable oracle. The record now says that, and the program inspects no representation either way;
-- the measured reason for disabling oracle (b) was **re-measured**, which withdrew the unsupportable
-  claim that the formats' exponent ranges differ and put the significand widths, 64 bits against 113,
-  in its place. The record now states the non-difference explicitly — the normal exponent range and the
-  finite maximum measured identical on all four targets, at -16381 to 16384 and 1.189731e+4932 — so the
-  exclusion rests on the significand and the rounding that follows from it. The measured reason below is
-  that re-measurement, not the claim it replaced;
-- this marker's class was `stdout_mismatch`, an observational class, on an arm the record **switches
-  off**. It now reads `comparison_excluded` (§2.2.1), and the parser requires that class exactly where
-  no comparison is attempted.
+- **the type's object representation is not this exclusion's ground.** Character-type access to it is
+  permitted (C11 6.2.6.1p4 and 6.5p7); what makes a byte image an unusable oracle is that the padding
+  bytes are unspecified (6.2.6.1p6) and that both the padding's extent and the significant bytes'
+  encoding are target-dependent. The program inspects no representation either way;
+- **the exclusion rests on the significand widths, 64 bits against 113, and on the rounding that
+  follows from them — not on exponent range.** The normal exponent range and the finite maximum measure
+  identical on all four targets, at -16381 to 16384 and 1.189731e+4932, and the record states that
+  non-difference explicitly. The measured reason below is that measurement;
+- **the class is `comparison_excluded` (§2.2.1), which is the only honest class on an arm the record
+  switches off.** The parser requires that class exactly where no comparison is attempted, and refuses
+  it wherever the arm is compared.
 
-Nothing about the exclusion itself changed: the same oracle, the same nine cells, the same basis.
+The exclusion itself is unaffected by any of that: one oracle, the same nine cells, the same basis.
 
 | Field | Value |
 |---|---|
@@ -970,8 +964,9 @@ Measured directly in this environment:
 | AArch64 | 16 bytes | IEEE binary128 |
 | RISC-V 64 | 16 bytes | IEEE binary128 |
 
-Three sizes and two formats: a 64-bit significand on the two x86 targets against a 113-bit
-significand on the other two. Cross-backend **value** equality is therefore not merely hard to
+Three storage-and-format pairings over two distinct formats — two distinct sizes and two distinct
+encodings — with a 64-bit significand on the two x86 targets against a 113-bit significand on the
+other two. Cross-backend **value** equality is therefore not merely hard to
 achieve for this type — it is meaningless. Two backends printing different digits for the same
 `long double` computation are both correct for their own target, so a cross-backend difference here
 is *not* evidence of a defect in either. That is precisely the implementation-defined carve-out the
@@ -1436,23 +1431,16 @@ genuinely different dimensions** that must never be collapsed into one another:
   record.
 - **Substantiated at this checkpoint** — the narrower, milestone figure, which now stands at **all
   108 records**. The last one outstanding,
-  `13_floating_point/004_long_double_target_restricted.expected`, has completed its review: its
-  written undefined-behaviour argument now carries the excess-intermediate-precision, conversion,
-  literal, printing, characteristic-macro and magnitude obligations it had previously left to the
-  program's own comments; its measured reason for disabling oracle (b) was re-measured, which
-  withdrew the unsupportable claim that the exponent ranges differ — `LDBL_MAX_EXP`, `LDBL_MIN_EXP`,
-  `LDBL_MAX` and `LDBL_MIN` measure identically on all four targets — in favour of the significand
-  widths, 64 bits against 113, that the exclusion actually rests on; and the loose *"three different
-  formats"* wording was corrected to *"three storage-and-format pairings over two distinct formats"*
-  in its `observed` field and in §4.2's matching `Observed` row, in the single edit §1.1's
-  character-for-character forward check requires. Two further defects that review found were then
-  corrected in the same record: its claim that character-type access to the type's **object
-  representation** would be undefined behaviour was withdrawn as false — such access is permitted, and
-  the real objection is that the padding bytes are unspecified and that padding and encoding are both
-  target-dependent — and its marker's class moved from the observational `stdout_mismatch` to
-  `comparison_excluded` (§2.2.1, §4.2), because the arm that marker scopes is the one the record
-  switches off. The driver's `PENDING_RECORDS` declaration is
-  therefore **empty**, and the record-substantiation preflight gate now reports that every record the
+  `13_floating_point/004_long_double_target_restricted.expected`, has completed its review. What
+  substantiation means for it, and for every other record, is that its written
+  undefined-behaviour argument, its implementation-defined notes and any marker it carries have been
+  read and found to describe what the program actually does — for that record, the
+  excess-intermediate-precision, conversion, literal, printing, characteristic-macro and magnitude
+  obligations in the argument; the exclusion resting on the significand widths, 64 bits against 113,
+  rather than on exponent range, which measures identically on all four targets; and a
+  `comparison_excluded` marker whose `observed` field matches §4.2's `Observed` row character for
+  character, as §1.1's forward check requires. The driver's `PENDING_RECORDS` declaration is
+  therefore **empty**, and the record-substantiation preflight gate reports that every record the
   corpus holds is entitled to be read as evidence rather than withholding a feature area. The gate
   and this column are kept, because they are the mechanism rather than the instance: any record whose
   review has not completed is declared here, withheld before its first compile, and its area fails

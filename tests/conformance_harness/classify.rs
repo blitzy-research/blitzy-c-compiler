@@ -563,15 +563,15 @@ pub fn judge(
     // One wrapper around the whole policy, for one purpose: whatever verdict the policy reaches, the
     // structured account of the executions it was reached from travels with it.
     //
-    // Classification used to flatten an observation to a single line -- `comparison.summary` -- before
-    // handing it on, so the exact commands, both terminations, both raw wait statuses and the located
-    // first difference were discarded HERE, one step before the report that needed them. Rendering a
-    // summary is a job for an output sink, which can choose how much to show; a classifier deciding
-    // how much of the evidence survives is a decision made in the wrong place, and it was made
-    // irreversibly.
+    // Classification does not flatten an observation to `comparison.summary` before handing it on.
+    // Rendering a summary is a job for an output sink, which can choose how much to show; a
+    // classifier deciding how much of the evidence survives would be making that decision in the
+    // wrong place and making it irreversibly -- the exact commands, both terminations, both raw wait
+    // statuses and the located first difference would be gone one step before the report that needs
+    // them.
     //
-    // The summary keeps its job -- it is still what the verdict table prints -- and the fields travel
-    // alongside it instead of being replaced by it.
+    // So the summary keeps its own job -- it is what the verdict table prints -- and the structured
+    // fields travel alongside it rather than being replaced by it.
     let outcome = judge_verdict(observation, manifest, key, oracle);
     match observation_provenance(observation) {
         Some(provenance) => outcome.with_provenance(provenance),

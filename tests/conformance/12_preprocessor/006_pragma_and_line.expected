@@ -6,7 +6,7 @@
 
 program            = 006_pragma_and_line
 area               = 12_preprocessor
-description        = Pragma acceptance observed through properties the standard fixes -- a pushed pragma region must leave the state it found when it is popped, and the C11 _Pragma operator must behave as the directive spelling does -- asserted only as relations so no implementation-defined layout value reaches stdout, together with the effect of a line directive on the source-position macros, including a virtual file name
+description        = Pragma acceptance observed as relations only, so no implementation-defined layout value reaches stdout: a pushed packing region leaves the state it found when it is popped, which C11 6.10.6p1 makes trivially true of an implementation that ignores the request and the GCC-compatible pack convention makes true of one that honours it, and the C11 6.10.9 _Pragma operator behaves as the directive spelling does, which the standard alone fixes -- together with the effect of a line directive on the source-position macros, including a virtual file name
 targets            = x86_64, i686, aarch64, riscv64
 opt_levels         = -O0, -O1, -O2
 shared_flags       = -static
@@ -46,20 +46,23 @@ file-name macros themselves, all of which point into string literals of static s
 address-of operator appears, no pointer is stored in an object, and no pointer value is printed. No
 aliasing rule is stressed anywhere either: there is no cast between object types and no union.
 
-NO PRAGMA HERE CAN AFFECT WHAT THE PROGRAM PRINTS, and that is what makes the seven assertions about
-them sound under every conforming implementation. Each is a RELATION between two identically declared
-structures, never a layout value, and each holds under both readings the standard permits. If the
-implementation RECOGNISES the packing request, its behaviour is implementation-defined (C11 6.10.6p1)
-and the inner structure may be laid out differently, but the pop must restore the state the push saved,
-so pack_size_restored and pack_align_restored still read 1. If it IGNORES the request -- which the same
-paragraph requires for a pragma it does not recognise -- all three structures are laid out alike and the
-same two relations read 1 trivially. pack_size_not_larger and pack_align_not_larger are 1 from the other
-side, because packing may shrink a structure or leave it alone and no reading of the request licenses
-GROWING one. The three operator relations follow from C11 6.10.9: the _Pragma operator destringizes its
-argument and the result is processed as if it were a pragma directive, so whatever an implementation
-does with one spelling it must do with the other, which is what pragma_op_matches_directive asserts.
-Every relation therefore falls to 0 only for a genuine defect -- a push that is not undone by its pop,
-a packing request that enlarges an aggregate, or two spellings of one pragma that disagree.
+NO PRAGMA HERE CAN AFFECT WHAT THE PROGRAM PRINTS, which is why none of them can introduce undefined
+or unspecified behaviour. Each of the seven assertions is a RELATION between two identically declared
+structures, never a layout value. Their authority is split, and the split is stated rather than glossed
+because it decides how a 0 must be read. If the implementation IGNORES the packing request -- which C11
+6.10.6p1 REQUIRES for a pragma it does not recognise -- all three structures are laid out alike, so
+pack_size_restored, pack_align_restored, pack_size_not_larger and pack_align_not_larger read 1
+trivially, on the standard's authority alone. If the implementation RECOGNISES the request, those same
+four relations rest on the GCC-COMPATIBLE PACK CONVENTION instead: under that convention a push saves
+the state the matching pop restores, and a packing request may shrink an aggregate or leave it alone but
+never enlarge one. C11 fixes no meaning for pack, so the convention -- not the standard -- is what makes
+those four relations the right thing to compare, and both compilers compared here target it. The three
+operator relations do follow from the standard, at C11 6.10.9: the _Pragma operator destringizes its
+argument and the result is processed as if it were a pragma directive, so whatever an implementation does
+with one spelling it must do with the other, which is what pragma_op_matches_directive asserts. A 0 on
+any of the seven is therefore worth investigating on either side -- a push not undone by its pop, a
+packing request that enlarges an aggregate, or two spellings of one pragma that disagree -- but only the
+last of those is a conformance defect; the first two are departures from the convention.
 
 NO DIAGNOSTIC DIRECTIVE AND NO DIAGNOSTIC-CONTROL PRAGMA APPEARS ON ANY PATH. The file contains exactly
 four directives -- two packing pragmas and two line directives -- plus two uses of the operator
@@ -67,10 +70,9 @@ spelling, and neither an error directive nor a warning directive is among them, 
 the file has no conditional compilation at all. An error directive would make translation fail by
 design, and a warning directive would write to standard error, which this suite captures into finding
 artifacts but never compares; either one would therefore be untestable noise rather than a comparison.
-Nothing in the translation unit switches a diagnostic off, either: an earlier form of this program wrote
-a diagnostic-control pragma into the source to silence the unknown-pragma diagnostic around the
-construct it was testing, which meant the audit gate no longer inspected that construct, and that
-suppression has been removed with no replacement anywhere in the file. Measured: every one of the twelve
+Nothing in the translation unit switches a diagnostic off, either. A diagnostic-control pragma silencing
+the unknown-pragma diagnostic around a construct under test would leave the audit gate not inspecting
+that construct, so no such directive appears anywhere in this file. Measured: every one of the twelve
 cells produced zero bytes on standard error.
 
 A line directive numbers the line that FOLLOWS it, so every printing call that reads the line-number
@@ -132,42 +134,51 @@ gate, and the diagnostic in question is implied by -Wall rather than being a mem
 it would mean dropping -Wall entire -- dozens of unrelated checks -- and the suite's contract sanctions
 only two reductions in any case, the extension area's -pedantic and the narrowing-conversion program's
 conversion diagnostics, neither of which is this. Suppressing the diagnostic FROM INSIDE the source with
-a diagnostic-control pragma is worse still, and an earlier form of this program did exactly that: it
-wrote a push / ignored / pop trio around the invented pragma, which meant the gate no longer inspected
-the very construct under test. The gate is what establishes this program's freedom from undefined
-behaviour, and a source that neutralises one of its members locally has not satisfied the gate there --
-it has stepped outside it. That suppression is removed and nothing replaces it: no directive anywhere in
-the file switches a diagnostic off.
+a diagnostic-control pragma is worse still: a push / ignored / pop trio around the invented pragma would
+leave the gate not inspecting the very construct under test. The gate is what establishes this program's
+freedom from undefined behaviour, and a source that neutralises one of its members locally has not
+satisfied the gate there -- it has stepped outside it. So no directive anywhere in the file switches a
+diagnostic off.
 
 WHAT IS EXCLUDED IS THEREFORE ONE ASSERTION SHAPE, NOT THE FEATURE. Pragmas are still exercised on all
-twelve cells, in BOTH of their spellings, and what is asserted instead are relations a conforming
-implementation cannot fail whichever choice C11 6.10.6p1 leaves it. The subject is the packing region's
-push/pop LIFECYCLE, with three identically declared structures -- one before the region, one inside it,
-one after the pop -- and the same region written a second time with the C11 6.10.9 _Pragma operator,
-whose result "is then processed as if it were a #pragma directive". Seven relations follow, and the
-reasoning for each is in this program's own header comment and in ub_notes above; the summary is that a
-recognised request must be undone by its pop, an ignored request changes nothing, packing may never
-GROW an aggregate, and the two spellings of one pragma must agree. NEITHER SIZE NOR ALIGNMENT IS PRINTED
+twelve cells, in BOTH of their spellings, and what is asserted instead are relations that hold whichever
+choice C11 6.10.6p1 leaves the implementation. The subject is the packing region's push/pop LIFECYCLE,
+with three identically declared structures -- one before the region, one inside it, one after the pop --
+and the same region written a second time with the C11 6.10.9 _Pragma operator, whose result "is then
+processed as if it were a #pragma directive". Seven relations follow, and the reasoning for each is in
+this program's own header comment and in ub_notes above; the summary is that an ignored request changes
+nothing, a request honoured under the GCC-compatible pack convention is undone by its pop and never
+enlarges an aggregate, and the two spellings of one pragma agree. NEITHER SIZE NOR ALIGNMENT IS PRINTED
 AS AN ABSOLUTE VALUE anywhere -- only relations between two of them -- so no implementation-defined
 layout choice can reach the output.
 
-WHAT THE RELATIONS DO AND DO NOT REPORT, recorded because it decides how a future divergence must be
-read, and because it is what stops a maintainer "improving" this program by printing the sizes
-themselves. An implementation that recognises the packing request and one that discards it both pass;
-the relations fall to 0 only for one that honoured a push without undoing it at the pop, one that
-enlarged an aggregate under a packing request, or one whose directive and operator spellings disagree.
-An implementation that instead REJECTS one of these pragmas outright does not fail a relation at all:
-it fails to translate, and that compile failure is reported as a finding with its reproducer. This is
-also why the record carries no expected-divergence marker: both directives in this program are
-documented as supported by the compiler under test -- its preprocessor directive handler names pragma
-and line among the directives it processes, and its source map tracks line-directive overrides -- so
-there is no documented limitation available to cite, and a divergence here must be delivered as a
-finding instead of being classified away as expected.
+WHICH AUTHORITY EACH RELATION RESTS ON, RECORDED BECAUSE IT DECIDES HOW A FUTURE DIVERGENCE MUST BE
+READ. Only the three operator relations are backed by the standard: C11 6.10.9 makes the two spellings
+equivalent, so two spellings that disagree is a conformance defect. The four packing relations are NOT
+backed by the standard in the branch where the request is honoured, because C11 fixes no meaning for
+pack -- it is the GCC-compatible convention that says a push is undone by its matching pop and that a
+packing request never enlarges an aggregate. The repository documents only that a pragma is DISPATCHED
+(docs/technical-specifications.md line 91 and line 490) and names no required pack behaviour, so no
+project requirement supplies that authority either. Both compilers compared here target the convention,
+which is what makes the four relations worth comparing at all; a 0 from either side is a departure from
+the convention and must be reported as that rather than as a nonconformance.
+
+WHAT THE RELATIONS DO AND DO NOT REPORT, recorded because it is what stops a maintainer "improving" this
+program by printing the sizes themselves. An implementation that recognises the packing request and one
+that discards it both pass; the relations fall to 0 only for one that honoured a push without undoing it
+at the pop, one that enlarged an aggregate under a packing request, or one whose directive and operator
+spellings disagree. An implementation that instead REJECTS one of these pragmas outright does not fail a
+relation at all: it fails to translate, and that compile failure is reported as a finding with its
+reproducer. This is also why the record carries no expected-divergence marker: both directives in this
+program are documented as supported by the compiler under test -- its preprocessor directive handler
+names pragma and line among the directives it processes, and its source map tracks line-directive
+overrides -- so there is no documented limitation available to cite, and a divergence here must be
+delivered as a finding instead of being classified away as expected.
 
 The absolute layout effect of PACKING ITSELF is still not asserted here, and it is not lost from the
 corpus: it is exercised by 08_gcc_extensions/005_attribute_packed_aligned.c, whose subject is the packed
 and aligned attributes that the repository's own extension inventory does name as supported, which is a
-materially stronger authority than a pragma no document mentions.
+materially stronger authority than a pragma convention no project document mentions.
 
 THE FILE-NAME MACRO IS PATH-DEPENDENT AND IS NEVER PRINTED RAW. The harness copies each program into
 its own per-cell workspace, so the real source path differs between cells and between targets, and

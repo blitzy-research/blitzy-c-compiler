@@ -1111,12 +1111,12 @@ pub const COMPARISON_EXCLUDED_LABEL: &str = "comparison_excluded";
 ///
 /// # Why the second shape has to exist rather than borrowing one of the first six
 ///
-/// A narrowing marker used to be written with an observational class — `stdout_mismatch` was the
-/// natural choice for a value comparison switched off — and that spelling asserted something untrue
-/// in the one field a report row quotes: that two completed runs disagreed on bytes. Nothing ran.
-/// The register's own §3.3 already describes such a marker as *dormant by construction*, explaining
-/// **why a comparison is not made** rather than what a comparison saw; this type gives that reading
-/// a name in the grammar, so a coverage restriction can no longer be spelled as an observation.
+/// Spelling a narrowing marker with an observational class — `stdout_mismatch` is the natural choice
+/// for a value comparison switched off — asserts something untrue in the one field a report row
+/// quotes: that two completed runs disagreed on bytes, when nothing ran at all. The register's own
+/// §3.3 describes such a marker as *dormant by construction*, explaining **why a comparison is not
+/// made** rather than what a comparison saw; this type gives that reading a name in the grammar, so a
+/// coverage restriction cannot be spelled as an observation.
 ///
 /// The **six divergence classes stay six**. This is deliberately not a seventh member of
 /// [`DivergenceClass`]: `classify.rs` maps observed shapes to verdicts and must never be able to
@@ -1996,16 +1996,15 @@ impl fmt::Display for Cell {
 ///
 /// Everything a reader needs in order to act on a row without re-running it — who produced the
 /// artifact, the exact command that produced or ran it, how the process ended, and where the
-/// captured streams were written — used to reach a report only inside [`Outcome::detail`], a single
-/// free-text string. That worked for a divergence, because a diverging comparison builds a full
-/// account, and failed silently for an agreement, because an agreement built a shorter one. A
-/// consumer therefore could not rely on any particular fact being present: it had to parse prose,
-/// and the prose differed by verdict.
+/// captured streams were written — travels in these fields rather than inside [`Outcome::detail`].
+/// `detail` is a single free-text string whose content varies by verdict: a diverging comparison
+/// builds a full account and an agreement builds a shorter one, so a consumer reading prose could
+/// rely on no particular fact being present.
 ///
-/// Fields fix that at the source. Every comparison, agreeing or not, fills the same shape, so the
+/// Fields close that at the source. Every comparison, agreeing or not, fills the same shape, so the
 /// machine-readable report can carry a `subject_command` column that is populated on a PASS row for
 /// the same reason it is populated on a FAIL row, and a documentation claim about what a row
-/// contains becomes a property of the type rather than a hope about the sentence.
+/// contains is a property of the type rather than a hope about the sentence.
 ///
 /// Every field is already report-safe: values are passed through [`sanitize_text_for_report`],
 /// [`redact_secrets`] and [`symbolize_roots`] on construction, at the one place a record comes into
@@ -2276,14 +2275,15 @@ impl Outcome {
     /// on any particular fact being in it.** A divergence carries the located first difference, both
     /// terminations and both command lines, because that is what a reader acting on a failure needs.
     /// An agreement carries a shorter confirmation, because the interesting thing about a PASS is
-    /// that there is nothing to act on. That asymmetry was previously documented here as a guarantee
-    /// — "the first divergent line and byte offset, both exit statuses, and the command lines" — and
-    /// it was not one: the PASS paths never satisfied it, so a consumer written against the promise
-    /// would have found the fields missing on exactly the rows that make up most of a run.
+    /// that there is nothing to act on. That asymmetry is deliberate and is **not** a guarantee about
+    /// content: documenting it as one — "the first divergent line and byte offset, both exit statuses,
+    /// and the command lines" — would promise something the PASS paths do not satisfy, and a consumer
+    /// written against the promise would find the fields missing on exactly the rows that make up most
+    /// of a run.
     ///
     /// The facts a consumer may rely on are in [`Outcome::provenance`] instead, in fields, present on
-    /// every verdict that had an execution behind it. This remains the human half and is what the
-    /// verdict table and the failure message print.
+    /// every verdict that had an execution behind it. This is the human half and is what the verdict
+    /// table and the failure message print.
     ///
     /// Already sanitized for single-line rendering by [`Outcome::new`], so this is safe to
     /// write into a report row, a summary column or a diagnostic without further treatment.
@@ -3598,8 +3598,8 @@ fn snapshot_regular_file(path: &Path) -> Option<Vec<u8>> {
 ///
 /// # What staging alone does not give, and where the rest lives
 ///
-/// It used to be claimed here that staging "removes every failure mode that could leave the pair
-/// permanently mismatched." That was wrong, and wrong in the direction that matters: staging bounds the
+/// Staging does **not** remove every failure mode that could leave the pair permanently mismatched,
+/// and reading it that way would be wrong in the direction that matters: staging bounds the
 /// *transient* window, but if the **second** commit fails the first is already claimed, and the
 /// directory then keeps a new document beside a stale sibling indefinitely — precisely the artifact a
 /// continuous-integration upload that runs regardless of outcome would publish. Committing is
@@ -5086,16 +5086,16 @@ pub fn write_new_file(context: &str, path: &Path, bytes: &[u8]) -> HarnessResult
 ///
 /// # Why the parent is pinned, and why a containment check above could not substitute for it
 ///
-/// The three judgements above are made about a **name**, and so was the removal that used to follow
-/// them: `symlink_metadata(path)` and then `remove_dir_all(path)` are two independent resolutions of
-/// the same components, and every path this suite removes is deterministic and therefore predictable
-/// before the run that removes it. Between the two resolutions, any principal who can write a
-/// directory on the chain can rename an intermediate level aside and put a symbolic link in its
-/// place; the inspection reports an ordinary directory of this run's and the recursive removal
-/// executes inside the link's target, while every diagnostic still names the path that was asked for.
-/// A caller's containment check cannot close it, because that check is one more resolution of the
-/// same name with one more window after it — and the recursive removal is the single most destructive
-/// operation in the suite, so it is the last place a window may be left open.
+/// The three judgements above are made about a **name**, and a removal that followed them by name
+/// would reopen the window they close: `symlink_metadata(path)` and then `remove_dir_all(path)` are two
+/// independent resolutions of the same components, and every path this suite removes is deterministic
+/// and therefore predictable before the run that removes it. Between the two resolutions, any principal
+/// who can write a directory on the chain can rename an intermediate level aside and put a symbolic
+/// link in its place; the inspection would report an ordinary directory of this run's while the
+/// recursive removal executed inside the link's target, and every diagnostic would still name the path
+/// that was asked for. A caller's containment check cannot close it, because that check is one more
+/// resolution of the same name with one more window after it — and the recursive removal is the single
+/// most destructive operation in the suite, so it is the last place a window may be left open.
 ///
 /// So the parent is opened once and held ([`PinnedDirectory`]), and both the inspection and the
 /// removal address the entry **through that handle** rather than through the parent's name. On Linux
@@ -7804,9 +7804,10 @@ pub struct TreeMeasurement {
     ///
     /// The distinction is what lets a ceiling be enforced fail-closed without manufacturing failures.
     /// A compiler driver deleting its own temporary file between the listing and the measurement is an
-    /// ordinary race that happens constantly on a busy machine, and it is the case that used to force
-    /// the live workspace ceiling to fail *open* to avoid terminating honest compilations. Counted and
-    /// reported rather than dropped, so a reader can see how much churn a walk observed.
+    /// ordinary race that happens constantly on a busy machine, and it is the one case that would
+    /// otherwise force the live workspace ceiling to fail *open* to avoid terminating honest
+    /// compilations. Counted and reported rather than dropped, so a reader can see how much churn a
+    /// walk observed.
     pub vanished: u64,
 }
 
@@ -7944,8 +7945,7 @@ fn walk_tree(
             Ok(metadata) => metadata,
             // Gone: measured exactly, at nothing. This is the ordinary race — a tool removing its own
             // temporary between the listing that found it and the read that would have sized it — and
-            // reading it as a measurement failure is what used to make a fail-closed ceiling
-            // unusable.
+            // reading it as a measurement failure is what would make a fail-closed ceiling unusable.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 vanished = vanished.saturating_add(1);
                 continue;

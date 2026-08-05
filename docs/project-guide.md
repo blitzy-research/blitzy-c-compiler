@@ -33,7 +33,7 @@ pie title Project Completion — 92.4%
   baseline**: the figure counts the compiler package's own Rust unit and integration tests as they
   stood before the differential conformance suite, and it has not been recomputed across the merge
 - ✅ **Differential conformance suite** added on top of that baseline and counted separately, across
-  **241 files** and **113,561 lines**. Its **18 integration tests are defined**; no package-complete
+  **241 files** and **114,346 lines**. Its **18 integration tests are defined**; no package-complete
   `bcc` run is admitted as evidence on this branch, so no pass count is claimed for them.
   - **The inclusion rule, stated once and applied without exception:** every file the suite ships or
     changes, and nothing of the compiler's. That is the **235 files under `tests/`** plus **6 outside
@@ -43,8 +43,8 @@ pie title Project Completion — 92.4%
     235 files under `tests/` and that one added documentation page. The **five additively edited
     files are counted in the file total and not in the line total**, because a line count of a file
     the suite shares with the rest of the project would not be a figure about the suite.
-  - **The components:** 63,617 driver and harness Rust (`tests/conformance.rs` plus 12 modules) +
-    19,896 across 108 C programs + 16,104 across 108 expectation records + 6,777 of suite contract
+  - **The components:** 64,305 driver and harness Rust (`tests/conformance.rs` plus 12 modules) +
+    19,915 across 108 C programs + 16,126 across 108 expectation records + 6,833 of suite contract
     and the two registers + 5,447 of maintenance script and fixture header + 1,720 of methodology
     page. `tests/conformance/findings/.gitkeep` contributes 0 lines and is the 241st file; the file
     accounting is reconciled against the plan's own 240-file arithmetic under *The file count,
@@ -68,10 +68,10 @@ pie title Project Completion — 92.4%
 Re-deriving the differential conformance suite's line components:
 
 ```bash
-cat tests/conformance.rs tests/conformance_harness/*.rs                  | wc -l   # 63,617
-cat $(find tests/conformance -name '*.c'        | sort)                   | wc -l   # 19,896
-cat $(find tests/conformance -name '*.expected' | sort)                   | wc -l   # 16,104
-cat tests/conformance/{README.md,EXPECTED_DIVERGENCES.md,FINDINGS.md}     | wc -l   #  6,777
+cat tests/conformance.rs tests/conformance_harness/*.rs                  | wc -l   # 64,305
+cat $(find tests/conformance -name '*.c'        | sort)                   | wc -l   # 19,915
+cat $(find tests/conformance -name '*.expected' | sort)                   | wc -l   # 16,126
+cat tests/conformance/{README.md,EXPECTED_DIVERGENCES.md,FINDINGS.md}     | wc -l   #  6,833
 cat tests/conformance/tools/regenerate_expected.sh \
     tests/conformance/support/include/probe_header.h                      | wc -l   #  5,447
 wc -l < docs/testing/differential-conformance.md                                    #  1,720
@@ -374,24 +374,53 @@ The compiler is **feature-complete** for all AAP-specified capabilities. All sou
 | libc6-dev-i386-cross | System package | i686 CRT objects (cross-compilation) |
 | libc6-dev-arm64-cross | System package | AArch64 CRT objects (cross-compilation) |
 | libc6-dev-riscv64-cross | System package | RISC-V 64 CRT objects (cross-compilation) |
-| qemu-user-static | System package | Cross-architecture binary execution |
+| qemu-user **or** qemu-user-static | System package | Cross-architecture binary execution. Which of the two exists is release-dependent — resolve it with `apt-cache policy qemu-user-static` rather than assuming, and see the note below |
 
 ### Environment Setup
 
 ```bash
-# Install Rust stable toolchain
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source $HOME/.cargo/env
+# Install the Rust stable toolchain. The installer is DOWNLOADED, AUTHENTICATED AND THEN RUN as
+# three separate steps: piping a network fetch straight into a shell executes whatever the endpoint
+# serves at that moment, and TLS authenticates the host, not a fixed revision of the script.
+# Substitute the SHA-256 published for the release being installed at
+# https://forge.rust-lang.org/infra/other-installation-methods.html
+RUSTUP_INIT_SHA256='<sha256-published-for-this-release>'   # substitute the published digest
+curl --proto '=https' --tlsv1.2 -fsSLo rustup-init \
+    https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+printf '%s  rustup-init\n' "$RUSTUP_INIT_SHA256" | sha256sum --check --strict
+chmod +x ./rustup-init
+./rustup-init -y --default-toolchain 1.93.1 --profile minimal
+rm -f ./rustup-init
+. "$HOME/.cargo/env"
 
-# Install cross-compilation system dependencies
+# A distribution-packaged toolchain is equally acceptable where one meeting the documented 1.70+
+# minimum is available (for example `apt-get install -y rustc cargo`), and needs no verification
+# step of its own because the package manager already authenticates what it installs.
+
+# Install cross-compilation system dependencies. The emulator package name is release-dependent, so
+# ASK apt rather than assuming: where `qemu-user-static` has no candidate — Ubuntu 25.10 and later —
+# the emulators come from `qemu-user` instead. `.github/workflows/ci.yml` resolves this with the same
+# `apt-cache policy` test, and tests/conformance/README.md, under "Reference compilers, emulators and
+# cross C runtimes", is the authoritative per-release package matrix.
 sudo apt-get update
+case $(apt-cache policy qemu-user-static 2>/dev/null) in
+*'Candidate: (none)'*) emulator_package=qemu-user ;;
+*)                     emulator_package=qemu-user-static ;;
+esac
 sudo apt-get install -y \
     libc6-dev \
     libc6-dev-i386-cross \
     libc6-dev-arm64-cross \
     libc6-dev-riscv64-cross \
-    qemu-user-static
+    "$emulator_package"
 ```
+
+Both packages provide the same three emulators, under **two different spellings**: `qemu-user`
+installs `qemu-i386`, `qemu-aarch64` and `qemu-riscv64`, while `qemu-user-static` installs
+`qemu-i386-static`, `qemu-aarch64-static` and `qemu-riscv64-static`. Either set works. The
+conformance harness probes both spellings for each architecture and accepts an explicit override
+through `BCC_QEMU_I386`, `BCC_QEMU_AARCH64` and `BCC_QEMU_RISCV64`; the examples below use the plain
+spelling, so append `-static` to each runner name on a host carrying that package instead.
 
 ### Build
 
@@ -455,15 +484,15 @@ cargo fmt -- --check
 
 # Cross-compilation to AArch64
 ./target/release/bcc --target aarch64-linux-gnu hello.c -o hello_arm64
-qemu-aarch64-static ./hello_arm64
+qemu-aarch64 ./hello_arm64
 
 # Cross-compilation to i686
 ./target/release/bcc --target i686-linux-gnu hello.c -o hello_i686
-qemu-i386-static ./hello_i686
+qemu-i386 ./hello_i686
 
 # Cross-compilation to RISC-V 64
 ./target/release/bcc --target riscv64-linux-gnu hello.c -o hello_riscv64
-qemu-riscv64-static ./hello_riscv64
+qemu-riscv64 ./hello_riscv64
 
 # Cross-compilation with sysroot
 ./target/release/bcc --target aarch64-linux-gnu \
@@ -524,7 +553,7 @@ echo 'int main() { return 42; }' > /tmp/test.c
 |---|---|---|
 | `error: linker 'cc' not found` | Building bcc itself requires system C linker | `sudo apt-get install build-essential` |
 | `CRT object not found` | Missing cross-compilation sysroot | `sudo apt-get install libc6-dev-<arch>-cross` |
-| `QEMU: Exec format error` | QEMU not installed or wrong architecture | `sudo apt-get install qemu-user-static` |
+| `QEMU: Exec format error` | QEMU not installed or wrong architecture | Install whichever emulator package this release carries — `qemu-user-static` where `apt-cache policy` reports a candidate for it, `qemu-user` otherwise — then invoke the runner under the spelling that package installs |
 | `Permission denied` on binary | Output binary not marked executable | `chmod +x <binary>` (should be automatic) |
 | Validation tests skipped | Tests require internet for source download | Run with `cargo test -- --ignored` |
 | Stack overflow on deeply nested code | Parser has configurable nesting depth limit | Increase limit or simplify input |
@@ -609,7 +638,7 @@ This project is a command-line compiler and does not use any network ports.
 | readelf | `readelf -a <binary>` | ELF output inspection |
 | objdump | `objdump -d <binary>` | Disassembly inspection |
 | gdb | `gdb ./output` | Debugging (DWARF v4 verification) |
-| qemu-user | `qemu-<arch>-static ./binary` | Cross-architecture execution |
+| qemu-user | `qemu-<arch> ./binary`, or `qemu-<arch>-static ./binary` on a host carrying the `qemu-user-static` package | Cross-architecture execution |
 
 ### G. Glossary
 

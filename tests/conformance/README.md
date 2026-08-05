@@ -706,10 +706,10 @@ program's cells are not run rather than being quietly excused.
 **The frozen tier is unreachable by editing files, and that is its entire value.** The allowlist is
 source, not data: no expectation record and no edit to `EXPECTED_DIVERGENCES.md` can add to it or change
 an entry. A record may only *instantiate* an entry — name a frozen identifier while declaring a different
-class, or cite a different document, and the record is refused rather than believed. So the shape that
-used to be sufficient is no longer sufficient: adding a marker to a program's record, mirroring it in the
-register, and letting the bidirectional audit certify that the two agree authenticates nothing, because
-two documents agreeing with each other was only ever evidence that one author wrote both.
+class, or cite a different document, and the record is refused rather than believed. The shape that is
+deliberately **not** sufficient is the obvious one: adding a marker to a program's record, mirroring it in
+the register, and letting the bidirectional audit certify that the two agree authenticates nothing,
+because two documents agreeing with each other is only evidence that one author wrote both.
 
 **The observed tier is the only way a new exception enters, and it costs an observation.** Both keys are
 required, and each is checked for something prose cannot supply: `documented` must quote the cited
@@ -1494,24 +1494,12 @@ is the single easiest way to overstate this suite, so each is defined before it 
 - **Present on this branch (structural)** — what a reader can count in this directory with a shell.
   It equals the planned target in every row: the corpus is structurally complete.
 - **Substantiated at this checkpoint** — the narrower figure that matters for the current milestone,
-  and it now stands at **all 108 expectation records**. The last one outstanding,
-  [`13_floating_point/004_long_double_target_restricted.expected`](13_floating_point/004_long_double_target_restricted.expected),
-  has completed its review: its written undefined-behaviour argument now carries the
-  excess-intermediate-precision, conversion, literal, printing, characteristic-macro and magnitude
-  obligations it had left to the program's own comments; its measured reason for disabling oracle (b)
-  was re-measured, withdrawing the unsupportable claim that the exponent ranges differ — `LDBL_MAX_EXP`,
-  `LDBL_MIN_EXP`, `LDBL_MAX` and `LDBL_MIN` measure identically on all four targets — in favour of the
-  significand widths, 64 bits against 113, that the exclusion actually rests on; and the loose "three
-  different formats" wording was corrected to "three storage-and-format pairings over two distinct
-  formats" in its `observed` field and in the register's matching `Observed` row, in the one edit the
-  character-for-character audit requires. Two further defects that review found were then corrected in
-  the same record: its claim that character-type access to the type's **object representation** would be
-  undefined behaviour was withdrawn as false — such access is permitted, and the real objection is that
-  the padding bytes are unspecified and that padding and encoding are both target-dependent — and its
-  marker's class moved from the observational `stdout_mismatch` to `comparison_excluded`, the value
-  reserved for an arm nothing is compared on. The driver's pending declaration is therefore **empty**, and
-  the record-substantiation preflight gate now reports that every record the corpus holds is entitled
-  to be read as evidence (see
+  and it stands at **all 108 expectation records**. Substantiation is a review state rather than a
+  machine one: a record counts here once its written undefined-behaviour argument, its
+  implementation-defined notes and any marker it carries have been read and found to say what the
+  program actually does. The driver's pending declaration is therefore **empty**, and the
+  record-substantiation preflight gate reports that every record the corpus holds is entitled to be
+  read as evidence (see
   [What every report says about the gates](#what-every-report-says-about-the-gates)). The column and
   the gate are kept because they are the mechanism rather than the instance: a record whose review has
   not completed is declared, **withheld before its first compile**, and its feature area **fails,
@@ -3075,7 +3063,7 @@ business rather than the repository's.
 | `target/conformance-report/summary.md` | The deliverable summary |
 | `target/conformance-report/summary.tsv` | The same data, machine-readable. Its **first line** is the same generation preamble, for the same reason and in the same shape as an area report's; the column header is line two |
 | `target/conformance-report/evidence/<cell-slug>+oracle_<x>.txt` | Durable, sanitized evidence for an outcome that was **reported without failing** and whose cell workspace was therefore discarded — an expected divergence, or a permissive run's absent oracle. Holds the cell's identity, the verdict, the marker, both sides' exact commands and terminations, the detail, and the archived content of the capture files the cell persisted. See [what survives a run](#what-survives-a-run--a-retained-workspace-an-evidence-document-or-a-findings-review-copy) |
-| `target/conformance-report/findings/F-<digest>-<cell-slug>-<class>/` | The **review copy** of every finding this run recorded: all seven artifact classes, rendered to the same grade as everything else in the report — redacted, sanitized, bounded, with a capture that is not text described rather than transcribed — plus a `BUNDLE.txt` naming what the copy is, what it is not, the generated directory holding the exact bytes, the two curation attestations copied from the finding's own manifest, and the carriage state of every entry. It exists because a `FINDING` does not fail the run: the cell keeps its workspace and publishes no evidence document, and the generated root below is beneath the build directory rather than inside the report, so a passing run used to name a finding whose evidence nobody could open. Two ceilings bound it — 384 KiB on one artifact and 64 MiB across the run — and exceeding either **refuses the copy and reports the refusal in the summary** rather than failing the cell, because the generated directory still holds all of it |
+| `target/conformance-report/findings/F-<digest>-<cell-slug>-<class>/` | The **review copy** of every finding this run recorded: all seven artifact classes, rendered to the same grade as everything else in the report — redacted, sanitized, bounded, with a capture that is not text described rather than transcribed — plus a `BUNDLE.txt` naming what the copy is, what it is not, the generated directory holding the exact bytes, the two curation attestations copied from the finding's own manifest, and the carriage state of every entry. It exists because a `FINDING` does not fail the run: the cell keeps its workspace and publishes no evidence document, and the generated root below is beneath the build directory rather than inside the report, so without this copy a passing run would name a finding whose evidence nobody could open. Two ceilings bound it — 384 KiB on one artifact and 64 MiB across the run — and exceeding either **refuses the copy and reports the refusal in the summary** rather than failing the cell, because the generated directory still holds all of it |
 | `target/conformance-findings/F-<digest>-<cell-slug>-<class>/` | Auto-generated finding artifacts from the current run — the **exact bytes and the runnable commands**, unredacted, which is why it is git-ignored and, in continuous integration, released only behind an explicit opt-in. One directory per divergence, **not** per oracle: every oracle that observed the same divergence at the same cell contributes to this one directory and is indexed in its `MANIFEST.txt` `observed_by` line. Four ceilings bound what a run may publish here — 8 MiB on one artifact, 16 MiB on one directory, 1 GiB and 1,536 directories across the run — and exhausting any of them fails the run loudly rather than filling the disk |
 
 **`findings.rs` never writes into `tests/conformance/`.** The curated finding set and both registers
@@ -3341,29 +3329,29 @@ readable, so every one of them contributes its own bytes.
 ### What survives a run — a retained workspace, an evidence document, or a finding's review copy
 
 Every cell writes its captures into its own workspace, and a workspace is removed once the cell has
-nothing left to investigate. Both halves of that sentence needed fixing, and the two fixes together
-are what make a reported outcome's evidence reach a reader. A third route exists for the one verdict
-the requirements call a **deliverable** — see
+nothing left to investigate. Three routes therefore exist for evidence that must outlive that removal,
+and together they are what make a reported outcome's evidence reach a reader. The third serves the one
+verdict the requirements call a **deliverable** — see
 [a finding's review copy](#a-findings-review-copy-inside-the-report), below — because retention and
-evidence documents between them still left a finding's artifacts outside everything an archive of a run
+evidence documents between them leave a finding's artifacts outside everything an archive of a run
 carries.
 
-**Retention now asks the run's own policy rather than a fixed list of verdicts.** It used to keep
-`FAIL`, `XPASS` and `FINDING` and remove everything else. That list and the policy the run asserts on
-disagreed in one specific, serious way: under `BCC_CONFORMANCE_STRICT` — the setting continuous
-integration uses — an `UNAVAILABLE` **fails the run**, and its workspace was deleted anyway. A run
-that fails on an outcome and then destroys that outcome's evidence is the worst combination available:
-the failure is reported and cannot be investigated. Retention therefore asks the same predicate the
-driver asserts on, so the two answers cannot drift apart, and adds one clause for `FINDING` — which
-does not fail the run, and whose reproducer is a deliverable precisely in the runs that pass.
+**Retention asks the run's own policy rather than a fixed list of verdicts.** A fixed list — `FAIL`,
+`XPASS`, `FINDING`, remove everything else — disagrees with the policy the run asserts on in one
+specific, serious way: under `BCC_CONFORMANCE_STRICT`, the setting continuous integration uses, an
+`UNAVAILABLE` **fails the run**, so its workspace would be deleted anyway. A run that fails on an
+outcome and then destroys that outcome's evidence is the worst combination available: the failure is
+reported and cannot be investigated. Retention therefore asks the same predicate the driver asserts on,
+so the two answers cannot drift apart, and adds one clause for `FINDING` — which does not fail the run,
+and whose reproducer is a deliverable precisely in the runs that pass.
 
 **Every non-`PASS` outcome of a discarded cell publishes a durable evidence document first.** That
 covers the class the retention rule cannot: an expected divergence, a permissive run's absent oracle,
 and an unexpected success the escape hatch downgraded. Their compiler diagnostics and termination
-records lived only in the workspace, so they were deleted the moment the cell concluded — and the
-report row that named the workspace as their location was published pointing at a directory that no
-longer existed. In continuous integration the effect was sharper: the report root is uploaded and the
-workspace root is not, so their evidence reached nobody at all.
+records exist only in the workspace, so without a document they would be deleted the moment the cell
+concluded and the report row naming the workspace as their location would point at a directory that no
+longer existed. In continuous integration the gap is sharper: the report root is uploaded and the
+workspace root is not, so their evidence would reach nobody at all.
 
 A document is written to `evidence/<cell-slug>+oracle_<x>.txt` beneath the report root — the **same**
 slug the cell's workspace uses, so a reader holding a row can compute either path — and holds:
@@ -3827,23 +3815,22 @@ produced either:
   is switched off, so it is consulted on exactly the not-attempted cells and can never excuse a
   comparison that was made. That is the point of it — a narrowing justified by prose alone was
   invisible to the audit, which is a silent exclusion in the clothes of a documented one. Its class is
-  the value reserved for exactly this shape and it **names no observation**: an earlier revision wrote
-  `stdout_mismatch` there, which asserted that two completed runs had disagreed on bytes on an arm
-  nothing runs on, and no automated check could contradict it because a class is only ever matched
-  against an observation. The parser now requires `comparison_excluded` wherever a marker scopes a
-  disabled oracle, and refuses it wherever the arm is compared.
+  the value reserved for exactly this shape and it **names no observation**. An observational class such
+  as `stdout_mismatch` would assert that two completed runs had disagreed on bytes on an arm nothing runs
+  on, and no automated check could contradict it, because a class is only ever matched against an
+  observation. The parser therefore requires `comparison_excluded` wherever a marker scopes a disabled
+  oracle, and refuses it wherever the arm is compared.
   **What is established about this narrowing, and what is not.** That it is recorded in both required
   places, that the marker is registered in both directions, that its eight fields match the record, and
-  that its citation resolves are all machine-checked on every run. The governing program and record
-  have also **completed their review**, and that review is what the recorded reason now rests on: it
-  re-measured the exclusion, withdrew the unsupportable claim that the exponent ranges differ — they
-  measure identically on all four targets — and put the significand widths, 64 bits against 113, in its
-  place. So the exclusion is stated here as **recorded with a followable basis and a re-measured
-  reason, reviewed**. What is *still* not machine-decided is one thing, and by design rather than by
-  backlog: whether the cited passage *semantically supports* switching an oracle off for this type is a
-  reviewer's judgement ([`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §2.4.1), which that
-  register leaves to whoever reads the citation — on every marker, permanently, and not as a state this
-  checkpoint or any later one clears.
+  that its citation resolves are all machine-checked on every run. The governing program and record have
+  **completed their review**, and the recorded reason rests on that review's measurement: the exclusion
+  is grounded in the significand widths, 64 bits against 113, and not in the exponent ranges, which
+  measure identically on all four targets. So the exclusion is stated here as **recorded with a
+  followable basis and a measured reason, reviewed**. What is *not* machine-decided is one thing, and by
+  design rather than by backlog: whether the cited passage *semantically supports* switching an oracle off
+  for this type is a reviewer's judgement ([`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §2.4.1),
+  which that register leaves to whoever reads the citation — on every marker, permanently, and not as a
+  state this checkpoint or any later one clears.
 
 Two other measured differences are handled **by construction** rather than by marker, because a
 marker implies a test that diverges and these do not: plain-`char` signedness is avoided by using

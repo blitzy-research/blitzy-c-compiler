@@ -66,10 +66,10 @@
  * volatile-qualified function pointer rather than by name.  An ordinary static
  * callee may legally be inlined at -O1 and -O2, and an inlined callee neither
  * saves nor restores anything: the nested chain would collapse into one frame and
- * there would be no call for a value to be live across.  Measured with gcc 13.4.0
- * at -O2 before the indirection was added: only level1 survived in each variant -
- * levels 2 through 8 and the leaf were all inlined, so a nine-frame chain was
- * testing a single frame.  ISO C requires a volatile pointer to be re-read at each
+ * there would be no call for a value to be live across.  That is not hypothetical:
+ * measured with gcc 13.4.0 at -O2, a by-name chain here keeps only level1 - levels
+ * 2 through 8 and the leaf are all inlined - so a nine-frame chain would be testing
+ * a single frame.  ISO C requires a volatile pointer to be re-read at each
  * point of call and control to go to whatever function that load produced
  * (C11 5.1.2.3p2 and p6, 6.7.3p7), so the designated function is opaque to the
  * optimizer and the call is genuinely indirect.  It does NOT forbid a specialised

@@ -104,12 +104,10 @@
  * byte-identical across all twelve cells.  That is deliberate rather than incidental - the
  * four calling conventions differ by design and that difference is what is under test,
  * while the OBSERVABLE RESULTS must agree, so a cross-backend difference here is a genuine
- * finding rather than an implementation-defined one.  The register at
- * tests/conformance/EXPECTED_DIVERGENCES.md holds two active markers -
- * XD-GCCEXT-CASE-RANGES-001, scoped to oracle (a) on one program in area 08, and
- * XD-TYPE-LONGDOUBLE-001, scoped to oracle (b) on one program in area 13 - and NEITHER is
- * scoped to this area, this program or any oracle it uses, so nothing anywhere excuses a
- * divergence here.
+ * finding rather than an implementation-defined one.  No marker in
+ * tests/conformance/EXPECTED_DIVERGENCES.md - which is the authoritative register and the
+ * only place a marker may be read from - is scoped to this area, this program or any oracle
+ * it uses, so nothing anywhere excuses a divergence here.
  *
  * THE CALL BOUNDARY IS MADE HARD TO OPTIMIZE AWAY, WHICH IS NOT THE SAME AS
  * BEING GUARANTEED BY THE LANGUAGE.  Both callees are reached through a
@@ -117,11 +115,11 @@
  * callee may legally be inlined at -O1 and -O2, and an inlined callee marshals
  * nothing at all: the floating-point argument path this program exists to
  * exercise would then never be crossed, and the register assignments argued
- * above would be assertions about code that was never emitted.  Measured with
- * gcc 13.4.0 at -O2 across this area before the indirection was added: whole
- * groups of callees vanished into their callers, and the survivors survived only
- * by exceeding the inliner's size budget - an accident of a heuristic rather
- * than a property of the test.
+ * above would be assertions about code that was never emitted.  That is not
+ * hypothetical: measured with gcc 13.4.0 at -O2, a by-name callee in this area is
+ * inlined into its caller unless it happens to exceed the inliner's size budget,
+ * so survival by name would be an accident of a heuristic rather than a property
+ * of the test.
  *
  * What ISO C requires of the volatile pointer is that it be RE-READ at each
  * point of call and that control go to whatever function that particular load

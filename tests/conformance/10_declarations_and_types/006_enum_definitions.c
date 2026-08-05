@@ -1,5 +1,8 @@
-/* Every enumerator value is kept inside the int range, because an enumeration's
- * underlying type is otherwise implementation-defined. */
+/* Every enumerator value is representable as int, as C11 6.7.2.2p2 requires of an
+ * enumeration constant.  The enumerated type's own compatible integer type stays
+ * implementation-defined regardless (6.7.2.2p4), so no enum width is printed - only the
+ * relation sizeof(enum color) == sizeof(int), whose soundness the sibling record
+ * argues per target. */
 
 int printf(const char *, ...);
 

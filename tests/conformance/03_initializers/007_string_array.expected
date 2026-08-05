@@ -108,19 +108,17 @@ spelled both here and in the assertion's own message so that the claim can be ch
 list rather than trusted. The seventeen are a, b, c, d, e from g_exact_u, g_room_u, g_extra_u,
 g_braced, g_concat and g_desig; x, y, z from g_exact_s and g_room_s; h, i from g_plain; h, e, l, o,
 w, r, d from the two grids; l, i, t through g_ptr; d, e, f from l_exact_u; and g, h from l_room.
-'f' (102) and 'g' (103) are the two an author is most likely to miss, and an earlier form of this
-program did miss them: they occur ONLY in the two automatic-duration twins declared inside main,
-l_exact_u from "def" at index 2 and l_room from "gh" at index 0, and nowhere in the file-scope
-literals. Neither is implied by its neighbours: C11 5.2.1 guarantees contiguity only for the digits,
-so 'e' == 101 and 'h' == 104 pin nothing between them and each had to be named explicitly. Adding
-them altered no output at all, because a _Static_assert emits none, so the golden block below is
-unchanged by the correction; what changed is that the two golden lines l_exact_u[2]=102 and
-l_room[0]=103 are now backed by a translation-time guarantee instead of resting on the measured fact
-that all four targets are ASCII. The assertion's message was corrected in the same edit, from a claim
-about "every letter this program prints" that the fifteen-letter conjunction did not deliver to the
-counted claim the seventeen-letter conjunction does, so the message, this paragraph and the
-conjunction now say the same thing. There is no residual: no printed character's value is
-unpinned, and any literal added later must extend the conjunction and its count together.
+'f' (102) and 'g' (103) are the two an author is most likely to miss, because they occur ONLY in the
+two automatic-duration twins declared inside main -- l_exact_u from "def" at index 2 and l_room from
+"gh" at index 0 -- and nowhere in the file-scope literals. Neither is implied by its neighbours: C11
+5.2.1 guarantees contiguity only for the digits, so 'e' == 101 and 'h' == 104 pin nothing between them
+and each is named explicitly. Naming all seventeen costs no output, because a _Static_assert emits
+none, and it is what backs the two golden lines l_exact_u[2]=102 and l_room[0]=103 with a
+translation-time guarantee instead of resting on the measured fact that all four targets are ASCII.
+The assertion's own message states the counted claim the seventeen-letter conjunction delivers rather
+than a broader claim about "every letter this program prints", so the message, this paragraph and the
+conjunction say the same thing. There is no residual: no printed character's value is unpinned, and any
+literal added later must extend the conjunction and its count together.
 The two NUMERIC escapes in g_escapes need no assertion -- C11 6.4.4.4p7 fixes \x41 and \102 at 65
 and 66 by their numeric value regardless of charset, which is precisely why they are spelled
 numerically -- whereas the simple escape \n does need one, because 6.4.4.4p4 gives it a

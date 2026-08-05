@@ -196,17 +196,16 @@ authority of a documented exclusion that no identifier and no resolved basis sto
 format now refuses that state: a record that disables an oracle without a marker scoping it is
 rejected at parse time.
 
-THE MARKER'S CLASS IS `comparison_excluded`, AND THAT IS THE HALF OF THIS RECORD MOST RECENTLY
-CORRECTED. It used to read `stdout_mismatch`, which is one of the six classes a real comparison can
-produce, and writing it here asserted in the one field a report row quotes that two completed runs had
-disagreed on bytes. Nothing ran: the comparison this marker scopes is the one the record above
-switches off. Every automated check passed anyway, because a class is only ever matched against an
-observation and this arm produces none -- so the false statement sat in a machine-checked field that
-no machine could contradict. `comparison_excluded` is the class that says what is true, it is accepted
-only on an arm the record disables, and an observational class is now refused on such an arm and this
-one refused on an arm that is compared: the parser holds both directions, so the class and the oracle
-toggle can no longer drift apart. Keeping the identifier, the scope and the resolved basis unchanged
-is deliberate -- what needed fixing was the kind of thing the marker claimed, not its authority.
+THE MARKER'S CLASS IS `comparison_excluded`, AND NO OBSERVATIONAL CLASS WOULD BE HONEST HERE. One of
+the six classes a real comparison can produce -- `stdout_mismatch`, say -- would assert in the one
+field a report row quotes that two completed runs had disagreed on bytes. Nothing runs: the comparison
+this marker scopes is the one the record above switches off. Every automated check would pass anyway,
+because a class is only ever matched against an observation and this arm produces none, so the false
+statement would sit in a machine-checked field that no machine could contradict. `comparison_excluded`
+is the class that says what is true, and it is accepted only on an arm the record disables: the parser
+refuses an observational class on such an arm and refuses this class on an arm that is compared, so the
+class and the oracle toggle cannot drift apart. The identifier, the scope and the resolved basis are
+independent of that choice -- the class states the KIND of thing the marker claims, not its authority.
 
 WHAT THE MARKER CLAIMS, PRECISELY. Not that the four backends disagree today -- they do not; all
 twelve cells print these bytes, because every printed value was chosen to be exact in all three

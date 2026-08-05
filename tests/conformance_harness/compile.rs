@@ -1239,13 +1239,14 @@ impl CompileOutcome {
     ///
     /// # Why the build layer supplies this rather than the report layer deriving it
     ///
-    /// Everything here is already held in this type — the exact argument vector, the termination, the
-    /// entry names its captured diagnostics were written under — and none of it used to reach a
-    /// report. A refused build was reduced to a single `summary` line at the classifier boundary, so a
-    /// row reading `XFAIL` or `FINDING` for a compile refusal named the shape of the refusal and not
-    /// one fact a maintainer could act on: not the command, not how the compiler ended, not where its
-    /// diagnostics were kept. Deriving it here rather than at the sink keeps the knowledge of this
-    /// type's shape inside this file, which is the only place that shape can change.
+    /// Everything a report needs about a build is already held in this type — the exact argument
+    /// vector, the termination, the entry names its captured diagnostics were written under — so this
+    /// type is what hands it on. Reducing a refused build to a single `summary` line at the classifier
+    /// boundary would leave a row reading `XFAIL` or `FINDING` for a compile refusal naming the shape
+    /// of the refusal and not one fact a maintainer could act on: not the command, not how the
+    /// compiler ended, not where its diagnostics were kept. Deriving the fields here rather than at
+    /// the sink also keeps the knowledge of this type's shape inside this file, which is the only
+    /// place that shape can change.
     ///
     /// A refused build has a subject and no authority: no artifact was produced, so nothing was judged
     /// against anything. That is why this returns a one-sided provenance rather than an empty pair.
@@ -2765,24 +2766,25 @@ enum WorkspaceScan {
 ///
 /// Both ceilings are enforced against a measurement that was **completed**, and a measurement that was
 /// not completed is itself a reason to stop. That is the same rule `sandbox.rs`'s retention accounting
-/// applies, and the two are deliberately no longer opposites: a ceiling tested against a lower bound
-/// is a ceiling that has silently stopped holding, and a compilation allowed to continue past one is
-/// a build volume filling behind an accounting that still claims to bound it. A tree past the walk's
+/// applies, and the two are deliberately identical: a ceiling tested against a lower bound is a
+/// ceiling that has silently stopped holding, and a compilation allowed to continue past one is a
+/// build volume filling behind an accounting that still claims to bound it. A tree past the walk's
 /// own entry, depth or time limits is the exact case that matters — it is *reported* as a lower bound
-/// precisely because it is large — so treating it as "not yet proven over the ceiling" inverted the
-/// evidence.
+/// precisely because it is large — so treating it as "not yet proven over the ceiling" would invert
+/// the evidence.
 ///
-/// # Why that is affordable, when it once was not
+/// # Why failing closed is affordable here
 ///
-/// The reason this used to fail open is real and has not been dismissed: a compiler deleting its own
-/// temporary file between the listing and the measurement makes an entry disappear mid-walk, which is
-/// an ordinary race on a busy machine and not a runaway. Failing closed on *that* would terminate
-/// honest invocations and manufacture findings against a compiler that did nothing wrong.
+/// One argument for failing open is real and is not dismissed: a compiler deleting its own temporary
+/// file between the listing and the measurement makes an entry disappear mid-walk, which is an
+/// ordinary race on a busy machine and not a runaway. Failing closed on *that* would terminate honest
+/// invocations and manufacture findings against a compiler that did nothing wrong.
 ///
-/// [`measure_tree`] now separates the two conditions that used to look alike. An entry that has ceased
-/// to exist is counted in `vanished` and has been measured exactly, at nothing; only an entry that is
-/// still present and unreadable counts as `unmeasured`. So the ordinary race no longer reads as a
-/// measurement failure, and failing closed on a genuine one costs nothing an honest compilation needed.
+/// [`measure_tree`] separates the two conditions that look alike in the code and mean opposite things.
+/// An entry that has ceased to exist is counted in `vanished` and has been measured exactly, at
+/// nothing; only an entry that is still present and unreadable counts as `unmeasured`. The ordinary
+/// race therefore does not read as a measurement failure, and failing closed on a genuine one costs
+/// nothing an honest compilation needed.
 ///
 /// # The workspace's identity is part of the measurement
 ///

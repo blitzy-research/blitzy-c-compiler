@@ -116,10 +116,10 @@ it designates, and control must be transferred to whatever function that load pr
 ISO C DOES NOT REQUIRE: that the transfer reaches the callee's original entry point. A
 conforming implementation may introduce a specialised clone, scalarise the returned aggregate,
 or perform guarded devirtualization, and still honour the loaded value, because the observable
-behaviour is unchanged. An earlier form of this paragraph said the callee "can neither be
-inlined nor cloned", which is stronger than anything the standard says and is withdrawn -- the
-same withdrawal the ub_notes bullet above records, so that both halves of this record now
-describe the barrier the same way rather than contradicting each other. The barrier is
+behaviour is unchanged. So the barrier must NOT be described as making the callee "neither
+inlinable nor cloneable": that claims more than anything the standard says, and the ub_notes bullet
+above states the same bound in the same terms so that both halves of this record describe the
+barrier alike. The barrier is
 therefore an optimization OBSTACLE whose effect is measured on named artifacts, never a
 language guarantee. This is plain standard C rather than a
 compiler attribute, so both sides of oracle (a) honour it for the same reason and neither needs

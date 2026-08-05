@@ -39,34 +39,33 @@
  * compiler that contradicts ITSELF fails them, by claiming two architectures at once or by
  * claiming one its own back end does not implement.
  *
- * PRESENCE IS DELIBERATELY NOT ASSERTED, AND THIS PARAGRAPH IS THE RECORD OF WHY.  An earlier
- * form of this program printed a third line, arch_id_defined, asserting that AT LEAST ONE of the
- * four spellings is defined, on the reasoning that without it a compiler predefining no
- * architecture macro produces output byte-identical to one predefining exactly the right macro.
- * That observation is true and it is not a defect.  The two compilers agree because both are
- * CORRECT: no clause of the standard requires any of these spellings, and a search of the two
- * authoritative implementation documents - docs/project-guide.md and docs/technical-specifications.md
- * - for "predefined", "__x86_64__", "__i386__", "__aarch64__" and "__riscv" finds no match in either
- * file, so the repository states no contract for the compiler under test either.  The search is
- * scoped to those two rather than to docs/ as a whole because one of the five spellings does occur
- * elsewhere under docs/, in this suite's own methodology page, which cannot be evidence for a
- * conclusion it states.  Asserting presence therefore made a compiler-family convention into a
- * conformance requirement that no authority imposes, and every one of this program's twelve
- * cells would have reported a compiler which spells its architecture macro otherwise - or leaves
- * the choice to a target header - as a divergence under all three oracles at once.  A divergence
- * this suite cannot trace to an obligation is not a finding worth delivering; it is a false
- * oracle, and a false oracle costs more than a blind spot because it spends a maintainer's
- * attention on permitted behaviour.  Nor could the difference have been dressed as an expected
- * divergence: a marker requires a documented basis, and silence is not a basis.
+ * PRESENCE IS DELIBERATELY NOT ASSERTED, AND THIS PARAGRAPH IS THE RECORD OF WHY.  A third
+ * line asserting that AT LEAST ONE of the four spellings is defined would follow from a real
+ * observation - without it, a compiler predefining no architecture macro produces output
+ * byte-identical to one predefining exactly the right macro - but that agreement is not a defect.
+ * The two compilers agree because both are CORRECT: no clause of the standard requires any of these
+ * spellings, and a search of the two authoritative implementation documents -
+ * docs/project-guide.md and docs/technical-specifications.md - for "predefined", "__x86_64__",
+ * "__i386__", "__aarch64__" and "__riscv" finds no match in either file, so the repository states no
+ * contract for the compiler under test either.  The search is scoped to those two rather than to
+ * docs/ as a whole because one of the five spellings does occur elsewhere under docs/, in this
+ * suite's own methodology page, which cannot be evidence for a conclusion it states.  Asserting
+ * presence would therefore make a compiler-family convention into a conformance requirement that no
+ * authority imposes, and every one of this program's twelve cells would report a compiler which
+ * spells its architecture macro otherwise - or leaves the choice to a target header - as a
+ * divergence under all three oracles at once.  A divergence this suite cannot trace to an
+ * obligation is not a finding worth delivering; it is a false oracle, and a false oracle costs more
+ * than a blind spot because it spends a maintainer's attention on permitted behaviour.  Nor could
+ * the difference be dressed as an expected divergence: a marker requires a documented basis, and
+ * silence is not a basis.
  *
- * The feature is not thereby dropped, which C3 forbids.  All four architecture macros are still
- * read, all four conditional blocks are still exercised, and both surviving relations are still
- * printed and compared on every one of the twelve cells; what was withdrawn is one unfounded
- * equality, not the coverage.  The narrow, scoped alternative - printing presence as capability
- * metadata that no oracle compares - is not available here: comparison in this suite is
- * byte-exact over the whole of standard output, so there is no uncompared channel a program can
- * print to, and inventing one would weaken the comparison for all 108 programs to describe one.
- * The zero-fallback arms below are retained regardless, because they are what keep a macro gap a
+ * The feature is not thereby dropped, which C3 forbids.  All four architecture macros are read, all
+ * four conditional blocks are exercised, and both relations are printed and compared on every one of
+ * the twelve cells; what is left unasserted is one unfounded equality, not the coverage.  The narrow,
+ * scoped alternative - printing presence as capability metadata that no oracle compares - is not
+ * available here: comparison in this suite is byte-exact over the whole of standard output, so there
+ * is no uncompared channel a program can print to, and inventing one would weaken the comparison for
+ * all 108 programs to describe one.  The zero-fallback arms below are what keep a macro gap a
  * comparable output difference rather than a compile failure.
  *
  * The strict-conformance macro is handled the same way, and for the same reason.  __STRICT_ANSI__

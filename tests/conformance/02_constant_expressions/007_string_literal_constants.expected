@@ -201,9 +201,8 @@ recorded field is written verbatim into a report row, into a tab-separated summa
 into a findings manifest, where a tab forges a column boundary and makes the record say
 something other than what was measured. The line feed is the only control character the format
 admits, and there it is the format's own joiner. A program whose stdout carried a tab therefore
-could not have a conforming record at all -- and this was the one program in the corpus whose
-stdout did, which is exactly why its record was the one that could not be written until the
-array was corrected.
+could not have a conforming record at all, which is why no rendered byte this program prints is a
+tab and why the array below carries the question-mark escape in the tab's place.
 THE QUESTION-MARK ESCAPE STANDS IN THE TAB'S PLACE THERE, so the rendered array still holds six
 escape-produced bytes and its size and length lines are unaffected -- sizeof reads 7 and the
 walked length 6 -- and the substitution ADDS a spelling to the coverage rather than removing

@@ -123,9 +123,9 @@ is detected there. The chain's returned total of 192 is printed as well, and it 
 witness rather than a duplicate of the first: each frame returns inner + a + b + c + d + e + f, so
 only the SIX INTS of a frame feed the total. A lost int therefore shows up twice, once in its
 frame's line and once in the total; a lost double or a lost pointer shows up once, in its frame's
-line alone, because neither x, y, z nor *p is summed into the return value. Both are caught; only
-the redundancy differs, and an earlier form of this paragraph wrongly claimed all ten appeared in
-the total.
+line alone, because neither x, y, z nor *p is summed into the return value. Both are caught; only the
+redundancy differs. The total therefore covers six of a frame's ten live values, not all ten, and
+saying otherwise would overstate what the second witness establishes.
 
 THE TWO LIVE POINTERS, AND WHY THEIR WIDTH IS THE ONE THING ABOUT THEM THAT DIFFERS. Each
 pressure frame holds two pointers across its nested call: the const char *tag it was handed,
@@ -152,10 +152,10 @@ function that particular load produced. WHAT ISO C DOES NOT REQUIRE: that the tr
 the callee's original entry point, nor that a frame survives as a frame. A conforming
 implementation may introduce a specialised clone or perform guarded devirtualization that
 elides a frame on the matching path, and still honour the loaded value, because the observable
-behaviour is unchanged. An earlier form of this paragraph said the callee "can neither be
-inlined nor cloned", which is stronger than anything the standard says and is withdrawn. The
-barrier is therefore an optimization OBSTACLE whose effect is measured on named artifacts,
-never a language guarantee, and the residual risk that leaves is real: a compiler under test
+behaviour is unchanged. So the barrier must NOT be described as making the callee "neither
+inlinable nor cloneable": that claims more than anything the standard says. It is an optimization
+OBSTACLE whose effect is measured on named artifacts, never a language guarantee, and the residual
+risk that leaves is real: a compiler under test
 that devirtualized through a specialised entry could collapse a frame while still printing the
 same bytes, and this program would not detect it. Closing that would take a per-cell STATIC
 check of the artifact the compiler under test emitted -- nine frames present, ten indirect

@@ -267,10 +267,9 @@ sizeof(intptr_t) to equal sizeof(void *), nor _Alignof(intptr_t) to equal _Align
 conforming implementation could satisfy the round trip with a wider type. So the two lines this
 record does print about pointers -- ptr_width_exact, which pins sizeof(void *) exactly per target,
 and alignof_ptr_is_ptr_width, which ties the pointer's alignment to that width -- say nothing about
-intptr_t, and an earlier form of this paragraph was wrong to present equal width as "a fact about
-the language" that made a separate probe unnecessary. Equal width is a MEASURED property of these
-four ABIs, not a language rule, and it is measured only OF POINTERS: 8 bytes on x86_64, aarch64 and
-riscv64 and 4 on i686.
+intptr_t. Equal width must not be presented as "a fact about the language" that makes a separate
+probe unnecessary: it is a MEASURED property of these four ABIs, not a language rule, and it is
+measured only OF POINTERS: 8 bytes on x86_64, aarch64 and riscv64 and 4 on i686.
 Nor is the gap closed elsewhere. 05_pointers/007_casts_roundtrip.c does exercise round-tripping an
 object pointer through an integer, and it does so through BUILT-IN integer types with two
 _Static_assert declarations establishing that the carrier is wide enough; its own commentary records

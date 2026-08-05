@@ -60,19 +60,37 @@ identical on all four targets. The six width-varying quantities are still exerci
 is dropped for being awkward -- but each is asserted as an EQUALITY against the one number the
 target must use, selected by the architecture macro the compiler predefines. EXPECTED_WIDE_ALIGN
 is 8 for __x86_64__, 4 for __i386__, 8 for __aarch64__ and 8 for __riscv, so every printed
-predicate is 1 on every target and stdout stays byte-identical. The unrecognised-architecture
-branch is an #error rather than a silent default, so a fifth target cannot acquire an unchecked
-expectation. Because the difference is neutralized inside the program, no target restriction is
-applied and all four targets run.
+predicate is 1 on every target and stdout stays byte-identical. Because the difference is
+neutralized inside the program, no target restriction is applied and all four targets run.
+
+THE UNRECOGNISED-ARCHITECTURE BRANCH DEGRADES RATHER THAN REFUSING, AND THE COST IS RECORDED
+HERE BECAUSE IT IS EVIDENTIARY. The selection chain has five arms: the four architecture macros
+above, then __SIZEOF_POINTER__, then sizeof(void *). It is deliberately not an #error. Nothing in
+C and nothing this repository documents obliges an implementation to predefine __x86_64__,
+__i386__, __aarch64__ or __riscv -- they are spellings of one compiler FAMILY -- so a compiler
+that names its target some other way is not defective, and refusing to translate would charge a
+macro-naming difference to the compiler under test as a compile failure. What the fallback costs
+is the STRENGTH of two lines, not their presence: on an architecture arm the expectation is an
+independent number and the width and alignment predicates are an independent check, whereas on
+either fallback arm the expectation is derived from the compiler's own declaration, so those two
+predicates become a self-consistency check between two of its claims rather than a check against
+an outside authority. Every arm still prints 1 for a self-consistent compiler, so no arm can
+manufacture a divergence out of a naming difference; and the alignment RELATIONS printed alongside
+them do not depend on the chain at all. On the four supported targets the first four arms are what
+actually select, which is why the reduced arms cost this suite nothing today: a fifth target would
+inherit the weaker check, and that is the fact this paragraph exists to disclose.
 
 A PERMISSIVE RANGE IS DELIBERATELY NOT USED. A bounded relation such as "at least 4 and at most 8"
 would also print 1 on all four targets, but it accepts an alignment of 5, 6 or 7 and it accepts
 the wrong choice between 4 and 8, so a real code-generation defect would still print 1 and
 oracle (a), oracle (b) and the golden record would all agree with it. Exact equality is what makes
-the line discriminating. The expectation is keyed to the ARCHITECTURE macro rather than to
+the line discriminating. The expectation is keyed FIRST to the ARCHITECTURE macro rather than to
 __SIZEOF_POINTER__ or any other width macro, because the architecture is a categorical fact the
 harness fixes with --target, whereas a width macro is a numeric claim by the compiler under test,
-and asserting that claim against itself would be circular.
+and asserting that claim against itself is circular. That is precisely why the width macro sits
+below all four architecture arms and not above them: it is reached only where no architecture is
+recognised, and on that arm the circularity is accepted knowingly and disclosed above rather than
+being mistaken for an independent check. On the four supported targets it is never reached.
 
 SIZES PINNED ALONGSIDE ALIGNMENTS. sizeof(void *) and sizeof(long) are pinned to the same
 architecture-selected number, and sizeof(double) and sizeof(long long) to 8 outright, because a

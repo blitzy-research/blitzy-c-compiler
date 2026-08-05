@@ -96,9 +96,10 @@ control goes to whatever function that load produced. What the standard does NOT
 the transfer arrives at the callee's original entry. A conforming implementation may introduce a
 specialised clone, scalarise a copy of the body, or guard-devirtualize -- test the loaded pointer
 against a known function and take a specialised path when it matches -- and still honour the
-loaded value, since the observable behaviour is identical. An earlier form of this paragraph said
-the signature "may not be cloned or scalarised either"; that is stronger than the standard
-allows and is withdrawn.
+loaded value, since the observable behaviour is identical. So the indirection must NOT be described
+as making the signature uncloneable or unscalarisable: that would claim more than the standard
+allows. It is an optimization OBSTACLE whose effect is measured on named artifacts, never a language
+guarantee.
 WHAT IS ACTUALLY VERIFIED, ON NAMED ARTIFACTS. Measured on the committed source with gcc 13.4.0
 at -O2 on all four reference drivers: take_double15 and take_float15 are each still emitted out
 of line under their own labels; no specialised clone appears anywhere, zero symbols carrying

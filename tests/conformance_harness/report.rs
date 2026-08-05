@@ -373,13 +373,13 @@ const SEVERITY_REPORTED: &str = "reported";
 /// provenance is not this run's, which is what stops an earlier run's outcomes from being aggregated
 /// into this run's totals.
 ///
-/// The thirteen columns after them carry the provenance of the OUTCOME, and they exist because the row
-/// schema previously carried none. A row named the cell, the verdict and the class, and then handed
-/// everything else to `detail` — one unbounded free-text field whose content varies by verdict. An
-/// aggregator could therefore not answer "what command produced this", "how did the process end",
-/// "where are the captured streams", "which source and which record is this about", "does this row
-/// fail the run" or "is this the same cell configuration as that one" for any row at all, and for a
-/// PASS row the facts were not merely unstructured but absent. The columns are:
+/// The thirteen columns after them carry the provenance of the OUTCOME, and they exist so that an
+/// aggregator never has to read `detail` to learn a fact. Without them a row would name the cell, the
+/// verdict and the class and hand everything else to `detail` — one unbounded free-text field whose
+/// content varies by verdict — so "what command produced this", "how did the process end", "where are
+/// the captured streams", "which source and which record is this about", "does this row fail the run"
+/// and "is this the same cell configuration as that one" would be unanswerable for any row, and on a
+/// PASS row the facts would not merely be unstructured but absent. The columns are:
 ///
 /// | Column | What it carries |
 /// |---|---|
@@ -3704,14 +3704,14 @@ impl MatrixDimension {
     ///
     /// # Why an excess is a warning rather than a success
     ///
-    /// It used to render as `✅ complete`, on the reading that recording more than was planned cannot
-    /// be a coverage gap. That reading is right about coverage and wrong about the report: nothing in
-    /// this suite plans to record more comparisons than the matrix contains, so an excess is always
-    /// one of a small number of defects — a duplicated comparison, which inflates every tally it
-    /// touches; a synthetic row counted as though a cell had run; or a corpus that has grown past the
-    /// count the tables still declare. Every one of those makes the recorded number untrustworthy,
-    /// and a tick beside it told a reader the opposite. The count states are therefore three rather
-    /// than two, and the excess is named with the same prominence as a shortfall.
+    /// Rendering an excess as `✅ complete` — on the reading that recording more than was planned
+    /// cannot be a coverage gap — is right about coverage and wrong about the report: nothing in this
+    /// suite plans to record more comparisons than the matrix contains, so an excess is always one of a
+    /// small number of defects — a duplicated comparison, which inflates every tally it touches; a
+    /// synthetic row counted as though a cell had run; or a corpus that has grown past the count the
+    /// tables still declare. Every one of those makes the recorded number untrustworthy, and a tick
+    /// beside it would tell a reader the opposite. The count states are therefore three rather than
+    /// two, and the excess is named with the same prominence as a shortfall.
     ///
     /// A [`PlanKind::Floor`] dimension has no excess at all, by definition: its planned number is a
     /// minimum, so exceeding it is the plan being met with room to spare rather than a count that
@@ -3808,11 +3808,11 @@ fn run_matrix(run: &RunReport, caps: &Capabilities) -> Vec<MatrixDimension> {
             run.areas.len(),
             "nine mandated by the coverage requirement, five supplementary",
         ),
-        // Five program-and-cell dimensions where there used to be two, because "the corpus holds
-        // 108 programs", "108 of them have a readable record" and "108 of them were swept" are three
-        // different claims and only the last is evidence about the compiler. Reporting the last as
-        // though it followed from the first is what let a summary claim the full corpus while a sixth
-        // of it had no expectation record at all.
+        // Five program-and-cell dimensions rather than two, because "the corpus holds 108 programs",
+        // "108 of them have a readable record" and "108 of them were swept" are three different claims
+        // and only the last is evidence about the compiler. Reporting the last as though it followed
+        // from the first is what lets a summary claim the full corpus while part of it has no
+        // expectation record at all.
         MatrixDimension::new(
             "programs_discovered",
             "Programs (sources discovered)",
@@ -4834,12 +4834,12 @@ fn true_false(value: bool) -> &'static str {
 ///
 /// Delegates to [`findings::artifact_defect`], which is the **writer's own** completeness check: the
 /// same list of required artifacts, the same refusal to follow a final symbolic link, and the same
-/// requirement that the reproducer pair genuinely load. Sharing it is the point. This function
-/// previously asked a narrower question — is the directory there, and is `commands.sh` in it — so a
-/// finding that had lost its reproducer, its record, its manifest, its environment fingerprint, its
-/// computed difference or its whole `outputs/` directory was still rendered as `present`. A row that
-/// reads as a recorded observation with the observation missing is the one shape of report that is
-/// actively misleading, and two implementations of "complete" is how that shape comes back.
+/// requirement that the reproducer pair genuinely load. Sharing it is the point. A narrower question
+/// here — is the directory there, and is `commands.sh` in it — would render a finding that had lost its
+/// reproducer, its record, its manifest, its environment fingerprint, its computed difference or its
+/// whole `outputs/` directory as `present`. A row that reads as a recorded observation with the
+/// observation missing is the one shape of report that is actively misleading, and two implementations
+/// of "complete" is how that shape arrives.
 fn finding_artifact_defect(directory: &Path) -> Option<String> {
     findings::artifact_defect(directory)
 }
@@ -4928,18 +4928,17 @@ fn finding_artifact_shortfalls(rows: &[Row]) -> Vec<String> {
 /// its token rather than as an absolute location. A reader substitutes their own build directory for
 /// the token — which they know, because it is theirs — and the line then runs verbatim.
 ///
-/// # Why this is elided rather than exact, having once been the other way round
+/// # Why this is elided rather than exact
 ///
-/// An earlier form of this function was the module's one deliberate exception: it emitted the
-/// absolute path on the reasoning that a command a reader pastes has to name the directory exactly,
-/// and that a per-run report under the build directory is never committed. The second half of that is
-/// true and the first half does not follow from it. A per-run report is **uploaded** — the continuous
-/// integration job publishes the whole report tree as a build artifact, which is the point of writing
-/// it — so this line travelled to wherever those artifacts are read, carrying the absolute location of
-/// a package root that names the machine and the account that built it: a continuous-integration
-/// workspace identifier, an agent clone directory, a maintainer's home. That is the disclosure
-/// [`shown_path`] exists to prevent, and the sibling column of the very same table was already
-/// eliding it, so the row disclosed through one cell what it withheld in another.
+/// The case for an absolute path here is that a command a reader pastes has to name the directory
+/// exactly, and that a per-run report under the build directory is never committed. The second half of
+/// that is true and the first half does not follow from it. A per-run report is **uploaded** — the
+/// continuous integration job publishes the whole report tree as a build artifact, which is the point
+/// of writing it — so an absolute line travels to wherever those artifacts are read, carrying the
+/// location of a package root that names the machine and the account that built it: a
+/// continuous-integration workspace identifier, an agent clone directory, a maintainer's home. That is
+/// the disclosure [`shown_path`] exists to prevent, and the sibling column of the very same table
+/// elides it, so an exact path here would disclose through one cell what the row withholds in another.
 ///
 /// What is given up is one substitution by the reader, and nothing else: the directory beneath the
 /// token, the script's name and every argument are unchanged. Exactness where it cannot be
@@ -7147,10 +7146,10 @@ fn render_summary_tsv(
 
     let mut lines = Vec::with_capacity(rows.len() + 2);
     // The same generation preamble the per-area files carry, and for the same reason it is FIRST
-    // there. The `reduced` and `partial` facts are also published below as `meta` records, and that
-    // was previously the only place they appeared — which meant a machine consumer had to parse and
-    // scan an unbounded number of records before it could learn whether the totals it was about to
-    // aggregate described a full run. A reader that stops after one line now knows.
+    // there. The `reduced` and `partial` facts are published below as `meta` records too, but the
+    // preamble is what makes them reachable in one line: a consumer whose only source was those
+    // records would have to parse and scan an unbounded number of rows before it could learn whether
+    // the totals it was about to aggregate described a full run.
     lines.push(generation.preamble(coverage));
     lines.push(tsv_header(SUMMARY_TSV_COLUMNS));
     lines.extend(rows.iter().map(SummaryRow::render));
@@ -8085,17 +8084,16 @@ fn deferral_reason(
 ///
 /// # Answered from the registry, not from the report directory
 ///
-/// This used to re-derive its answer by reading every area report on disk, which was work performed
-/// to rediscover a conclusion that had already been reached moments earlier: the completeness test
-/// lives inside [`claim_finalization`]'s critical section, so by the time a caller is asking *why*
+/// The answer comes from memory, and **artifact reads belong to the single finalizer**. Re-deriving it
+/// by reading every area report would rediscover a conclusion reached moments earlier: the completeness
+/// test lives inside [`claim_finalization`]'s critical section, so by the time a caller is asking *why*
 /// nothing was written, the registry already knows which selected areas have published. In a
-/// fourteen-area run the thirteen non-final callers each re-parsed the whole set — quadratic in the
-/// number of areas, against files that grow with the matrix — to learn something memory could answer
-/// for nothing.
+/// fourteen-area run the thirteen non-final callers would each re-parse the whole set — quadratic in the
+/// number of areas, against files that grow with the matrix — to learn something memory answers for
+/// nothing.
 ///
-/// So the answer now comes from memory, and **artifact reads belong to the single finalizer**. The one
-/// thing memory cannot know is a disk-derived refusal, because only the finalizer looks at the files;
-/// that is why [`finalize`] records its reason through [`record_finalization_deferral`] when it
+/// The one thing memory cannot know is a disk-derived refusal, because only the finalizer looks at the
+/// files; that is why [`finalize`] records its reason through [`record_finalization_deferral`] when it
 /// declines, and why this reports that recorded reason verbatim. Nothing is lost and nothing is
 /// guessed: every sentence below is either a fact the registry holds or a fact the finalizer
 /// established by reading.

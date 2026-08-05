@@ -155,10 +155,10 @@ function that particular load produced. WHAT ISO C DOES NOT REQUIRE: that the tr
 the callee's original entry point. A conforming implementation may introduce a specialised
 clone, scalarise a copy of the body -- which is exactly what would dissolve a by-value
 aggregate parameter into scalars -- or perform guarded devirtualization, and still honour the
-loaded value, because the observable behaviour is unchanged. An earlier form of this paragraph
-said the callee "can neither be inlined nor cloned", which is stronger than anything the
-standard says and is withdrawn. The barrier is therefore an optimization OBSTACLE whose effect
-is measured on named artifacts, never a language guarantee. This is plain standard C rather
+loaded value, because the observable behaviour is unchanged. So the barrier must NOT be described
+as making the callee "neither inlinable nor cloneable": that claims more than anything the standard
+says. It is an optimization OBSTACLE whose effect is measured on named artifacts, never a language
+guarantee. This is plain standard C rather
 than a compiler attribute, so both sides of oracle (a) honour it for the same reason and
 neither needs to support an extension for the barrier to hold. It also makes the
 function-pointer load the ONLY volatile access in each call expression, which is what

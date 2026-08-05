@@ -103,9 +103,9 @@ undefined behaviour cannot arise here rather than merely being avoided.
   callee's original entry point. An implementation may legally introduce a specialised clone,
   scalarise a copy of the body, or perform guarded devirtualization -- compare the loaded
   pointer against a known function and call a specialised entry on the matching path -- and
-  still honour the loaded value, because the observable behaviour is unchanged. An earlier
-  form of this paragraph asserted that the signature "may not be cloned or scalarised", which
-  is stronger than anything the standard says and is withdrawn.
+  still honour the loaded value, because the observable behaviour is unchanged. So the
+  indirection must NOT be described as making the signature uncloneable or unscalarisable:
+  that would claim more than anything the standard says.
 - SO THE BOUNDARY IS AN OPTIMIZATION OBSTACLE, VERIFIED ON NAMED ARTIFACTS RATHER THAN
   ASSERTED AS A LANGUAGE RULE. Measured on the committed source with gcc 13.4.0 at -O2 on all
   four reference drivers: both callees are still emitted out of line under their own labels;

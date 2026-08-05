@@ -154,8 +154,9 @@ four targets rather than assumed:
   and 16 across x86_64, i686, aarch64 and riscv64, while __LDBL_MANT_DIG__ is 64, 64, 113 and
   113 -- so the two x86 targets differ from each other only in storage padding and agree on the
   significand, and it is the 64-against-113 difference that makes the value comparison
-  meaningless. (An earlier form of this bullet attributed x87 to i686 alone and binary128 to
-  everything else, which misdescribed x86_64.) That is the one property in this area which
+  meaningless. The split is worth stating precisely, because describing it by size -- x87 on
+  i686 alone, binary128 everywhere else -- misdescribes x86_64, which is x87 in 16 bytes. That
+  is the one property in this area which
   genuinely cannot be compared for value across backends. The type is NOT dropped on that
   account, which constraint C3 would forbid: it is the subject of
   004_long_double_target_restricted.c in this area, the only record in the corpus permitted to

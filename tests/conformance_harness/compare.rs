@@ -1127,12 +1127,11 @@ fn compare_executions(
     );
     let stdout = locate_stdout_divergence(expected.stdout(), actual.stdout());
 
-    // Both sides' full execution record, on BOTH paths. An agreement used to carry the side label,
-    // the termination and a byte count and to stop there, which made a passing row unreproducible:
-    // the one thing a reader needs in order to re-run a cell by hand is the command line, and it was
-    // present only when the cell had already failed. There is no reason for the asymmetry — the
-    // record is already in hand either way — and its cost was that most rows of a run could not be
-    // acted on at all.
+    // Both sides' full execution record, on BOTH paths. An agreement carries the same fields as a
+    // divergence, because the one thing a reader needs in order to re-run a cell by hand is the
+    // command line, and most rows of a run are agreements. Carrying it only on the failing path would
+    // leave those rows unreproducible for no saving whatever: the record is already in hand either
+    // way, so the asymmetry would cost information and buy nothing.
     let context = vec![
         row("expected side", &sanitize_text_for_report(expected_label)),
         row("expected execution", &expected.describe()),
@@ -1322,9 +1321,9 @@ pub fn oracle_c(actual: &RunOutcome, manifest: &Manifest, key: &CellKey) -> Comp
     );
 
     // The record's own row, then the cell's FULL execution record, on both paths. An agreement here
-    // used to print the termination and a byte count and omit both the command line and the raw wait
-    // status -- so a golden PASS could not be re-run by hand, and could not distinguish a normal exit
-    // from a signal that happened to carry the same number.
+    // carries the command line and the raw wait status for two distinct reasons: without the command
+    // line a golden PASS could not be re-run by hand, and without the raw wait status a normal exit
+    // could not be distinguished from a signal that happened to carry the same number.
     let context = vec![record_row, row("actual execution", &actual.describe())];
 
     let mut comparison = if status.is_none() && stdout.is_none() {

@@ -32,20 +32,22 @@ unspecified evaluation order cannot affect the output. There is no aliasing viol
 padding byte is read.
 END
 impl_defined_notes <<END
-ENUMERATOR VALUES ARE ALL WITHIN INT RANGE, BY REQUIREMENT. C11 permits an implementation to
-choose any integer type capable of representing all of an enumeration's values as that
-enumeration's compatible type. Once an enumerator exceeds int range that choice becomes
-implementation-defined, and the four backends could then legitimately differ -- which would
-produce a cross-backend divergence that is not a defect and would poison oracle (b). Every
-enumerator in this program is therefore kept strictly inside int range. The extremes are
-exactly the int minimum (B_LOW) and the int maximum (B_HIGH), and no other enumerator comes
-near either.
+EVERY ENUMERATOR IS REPRESENTABLE AS INT, WHICH THE STANDARD REQUIRES RATHER THAN MERELY
+FAVOURS. C11 6.7.2.2p2 constrains the expression defining an enumeration constant to an integer
+constant expression whose value is representable as an int, so an enumerator outside that range
+is a constraint violation and not a portability preference: a conforming implementation must
+diagnose it, and a program containing one is outside what a differential oracle can compare
+because the two sides are free to differ on what they do after diagnosing. Every enumerator in
+this program is therefore inside int range by construction. The extremes are exactly the int
+minimum (B_LOW) and the int maximum (B_HIGH), and no other enumerator comes near either, so the
+constraint is satisfied at both edges rather than merely somewhere in the middle.
 
 THE ONE IMPLEMENTATION-DEFINED RELATION THAT IS PRINTED, AND WHY PRINTING IT IS SOUND. No raw
 enum size ever reaches stdout: the program prints sizeof(enum color) == sizeof(int) as a 0 or 1
-value only. Even so, the compatible type of an enumeration is implementation-defined for values
-within int range as well as beyond it, so that relation is an implementation-defined observation
-rather than a language guarantee, and printing it needs a justification instead of an assumption.
+value only. Even so, C11 6.7.2.2p4 leaves an enumerated type's compatible type
+implementation-defined -- for values within int range exactly as much as beyond it -- so that
+relation is an implementation-defined observation rather than a language guarantee, and printing it
+needs a justification instead of an assumption.
 
 Three things together supply one. First, it is a RELATION and not a width, so no byte count
 enters the golden record and the measured i686 width difference cannot surface through it.

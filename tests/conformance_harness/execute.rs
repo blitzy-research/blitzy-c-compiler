@@ -103,7 +103,7 @@
 //! So `--signal=KILL` and `--kill-after` are deliberately **not** passed. Uncatchable
 //! termination is guaranteed by this module instead.
 //!
-//! One further measured property of that implementation is why the wrapper is no longer applied
+//! One further measured property of that implementation is why the wrapper is not applied
 //! unconditionally: it charges roughly **103 ms per invocation whatever the budget**, because it
 //! polls its child on a 100 ms granularity. A trivial artifact costs 0.5 ms bare, 103 ms under the
 //! utility, and 108 ms through this module — so the supervision added here is under 5 ms and the
@@ -2495,14 +2495,14 @@ fn termination_of(
 // the *only* place they exist, and that is the gap this section closes.
 //
 // A workspace is discarded once a cell has nothing left to investigate, and the set of cells with
-// nothing to investigate is decided by the run's policy — so an outcome that is reported but does not
-// fail, an expected divergence or a permissive run's absent oracle, used to have its raw compiler
-// diagnostics and its termination record deleted the moment the cell concluded. The report row named
-// the workspace as where the captures lived, and by the time anyone read the row they were gone. In
-// continuous integration the effect is sharper still: the report directory is uploaded and the
-// workspace root is not, so the evidence for every reported-but-not-failing outcome reached nobody.
+// nothing to investigate is decided by the run's policy. That leaves one class exposed: an outcome
+// that is REPORTED BUT DOES NOT FAIL — an expected divergence, or a permissive run's absent oracle —
+// whose raw compiler diagnostics and termination record live in a workspace the run is entitled to
+// delete the moment the cell concludes. Without an archive its report row would name a workspace that
+// no longer exists, and in continuous integration the gap is sharper still: the report directory is
+// uploaded and the workspace root is not, so that evidence would reach nobody at all.
 //
-// The archive read back here is what the report publishes in their place. It reads the entries the
+// The archive read back here is what the report publishes for those outcomes. It reads the entries the
 // cell actually persisted rather than re-rendering them from memory, so what is archived is what was
 // written; it is bounded per entry and in total, because an artifact that can grow without limit is
 // one a run can be made to fill a disk with; and it is sanitized, because it is published.

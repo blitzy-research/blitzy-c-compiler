@@ -33,8 +33,9 @@ tests/conformance/.regen-lock-stale.*/
 #
 # The script stages into an unpredictably named `.regen.XXXXXX` DIRECTORY created
 # by `mktemp -d` in the record's own directory — atomic creation is what makes the
-# name safe to use — so the directory form is what has to be ignored. The file form
-# is listed beside it because a staging file beside the record is the other shape
-# this has taken, and ignoring both costs nothing and cannot go stale.
+# name safe to use — so the directory form is the one the script produces today and
+# the one that must be ignored. The sibling file form is listed beside it to cover a
+# staging file written next to the record instead: ignoring both costs nothing, and
+# it means a change of staging shape cannot start dirtying `git status`.
 tests/conformance/**/.regen.*/
 tests/conformance/**/*.expected.regen.*

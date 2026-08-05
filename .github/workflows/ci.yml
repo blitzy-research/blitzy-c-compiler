@@ -40,19 +40,19 @@
 # - Everything after it — the pre-flight and the matrix — is Cargo-dependent and is reached only
 #   once the package is there.
 #
-# ## What this file is on the branch that introduced it
+# ## What this file is, and how it is written to be merged
 #
-# The action plan describes this path as an edit to the repository's existing workflow, adding this
-# one job beside the build, unit, integration, lint, format and cross-architecture jobs already
-# defined there and reusing their action pins. On the branch that introduced this suite there is no
-# such workflow to edit: that branch carries the project documentation and this suite, while the
-# compiler crate, its manifest, its `src/**` tree and its existing continuous-integration
-# definition live on the project's open pull request. This file is therefore a new file there and
-# is stated as one rather than presented as an edit — and it is written to be merged as an addition:
-# it declares one job, restates no gate the other workflow owns, and pins every action by digest so
-# that merging it changes nothing about the jobs already present. Whoever merges it onto the
-# package-complete tree should move this single job into that workflow and adopt its pins if they
-# differ from the digests below.
+# The action plan describes this path as an edit to the repository's existing workflow, adding one
+# job beside the build, unit, integration, lint, format and cross-architecture jobs and reusing
+# their action pins. This branch carries the project documentation and this suite; the compiler
+# crate, its manifest, its `src/**` tree and its existing continuous-integration definition live on
+# the project's open pull request, so there is no such workflow here to edit and this is a new file
+# rather than an edit to one.
+#
+# It is written so that merging it is purely additive: it declares exactly one job, restates no gate
+# another workflow owns, and pins every action by digest, so nothing about the jobs already present
+# changes. On a package-complete tree this single job belongs inside that workflow, adopting its pins
+# wherever they differ from the digests below.
 name: CI
 
 # WHY THERE IS NO `pull_request` TRIGGER, WHICH IS A DELIBERATE OMISSION RATHER THAN A GAP.
@@ -451,23 +451,24 @@ jobs:
       #
       # ## Why a finding nevertheless always reaches this artifact
       #
-      # Naming a finding is not delivering one, and for a while this job did only the first. A FINDING
-      # does not fail the run — requirement 6 makes it a deliverable rather than a defect — so a run
-      # carrying findings PASSES; the harness keeps that cell's workspace instead of publishing an
-      # evidence document for it; and `target/conformance-findings/` is not what the step below
-      # uploads. The report therefore named an identifier and a directory, this job finished green, the
-      # runner was destroyed, and the reproducer, the expectation record, the exact commands, both
-      # sides' captures, the environment fingerprint and the computed diff went with it. The one
-      # verdict class the requirements call a deliverable was the one class this job could lose.
+      # Naming a finding is not delivering one, and everything about this job's defaults conspires to
+      # name without delivering. A FINDING does not fail the run — requirement 6 makes it a deliverable
+      # rather than a defect — so a run carrying findings PASSES; the harness keeps that cell's
+      # workspace instead of publishing an evidence document for it; and `target/conformance-findings/`
+      # is not what the step below uploads. On its own, that combination would leave the report naming
+      # an identifier and a directory, this job finishing green, and the runner being destroyed with
+      # the reproducer, the expectation record, the exact commands, both sides' captures, the
+      # environment fingerprint and the computed diff inside it — the one verdict class the
+      # requirements call a deliverable would be the one class this job could lose.
       #
-      # So the harness now publishes a REVIEW COPY of every finding inside the report root —
+      # So the harness publishes a REVIEW COPY of every finding inside the report root —
       # `conformance-report/findings/<finding-id>/`, all seven artifact classes plus a `BUNDLE.txt`
       # that states what the copy is — and the unconditional upload below carries it. That closes the
-      # loss without touching the gate above, because the two copies are different things: the review
-      # copy is rendered to exactly the grade this artifact already claims for itself (redacted,
-      # sanitized, bounded, and a capture that is not text described rather than transcribed), while
-      # the generated directory keeps the exact bytes and the runnable commands and stays behind the
-      # opt-in. Neither copy performs the §5.3 review or stands in for it: both manifests still record
+      # gap without touching the gate above, because the two copies are different things: the review
+      # copy is rendered to exactly the grade this artifact claims for itself (redacted, sanitized,
+      # bounded, and a capture that is not text described rather than transcribed), while the generated
+      # directory keeps the exact bytes and the runnable commands and stays behind the opt-in. Neither
+      # copy performs the §5.3 review or stands in for it: both manifests record
       # `disclosure_review = not-performed`, and only a person promoting a finding into
       # `tests/conformance/findings/` can change that.
       #

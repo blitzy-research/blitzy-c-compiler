@@ -1,9 +1,11 @@
 /* Area 12 / program 006 - pragma acceptance and the observable EFFECT of a line directive.
-   Both subjects are chosen so that the standard, rather than any implementation's
-   documentation, fixes what must happen: a pragma region that is pushed and then popped
-   must leave the state it found, the operator spelling of a pragma must behave as the
-   directive spelling does, and a line directive renumbers the line that follows it and may
-   supply a virtual file name.  The file-name macro is never printed raw: before the first
+   Two of the three subjects are fixed by the standard alone: the operator spelling of a
+   pragma must behave as the directive spelling does (C11 6.10.9), and a line directive
+   renumbers the line that follows it and may supply a virtual file name (C11 6.10.4).  The
+   third - that a packing region pushed and then popped leaves the state it found - is fixed
+   by the GCC-COMPATIBLE PACK CONVENTION rather than by the standard, which defines no
+   `pack' semantics at all; see WHAT IS ASSERTED INSTEAD below for which authority carries
+   which relation.  The file-name macro is never printed raw: before the first
    line directive only a path-independent relation is printed, and afterwards only the
    virtual name the directive itself supplied.  Self-contained: no header is included; printf
    is hand-declared because bcc ships no <stdio.h>.
@@ -17,16 +19,16 @@
    well.  The operator spelling appears twice more, in the two places that matter for it.
 
    NOTHING IN THIS TRANSLATION UNIT SUPPRESSES A DIAGNOSTIC, AND THAT IS A PROPERTY TO
-   PRESERVE.  An earlier form of this program asserted the one pragma property C11 states
-   NORMATIVELY - 6.10.6p1's closing sentence, "Any such pragma that is not recognized by the
-   implementation is ignored" - by placing a pragma whose name was reserved to the program by
-   construction between two identical declarations.  That assertion cannot be made inside the
-   mandatory audit gate, and the earlier form got around it by writing a diagnostic-control
-   pragma into the source to switch off the very diagnostic the gate raises.  That is worse
-   than not making the assertion at all: the gate is what establishes this program's freedom
-   from undefined behaviour, and a source that neutralises one of its members around the exact
-   construct under test is a source the gate no longer inspects there.  The suppression is
-   gone, and no replacement for it is written anywhere in this file.
+   PRESERVE.  The one pragma property C11 states NORMATIVELY - 6.10.6p1's closing sentence,
+   "Any such pragma that is not recognized by the implementation is ignored" - could only be
+   asserted by placing a pragma whose name is reserved to the program by construction between
+   two identical declarations, and that assertion cannot be made inside the mandatory audit
+   gate.  The only way to make it there would be to write a diagnostic-control pragma into the
+   source to switch off the very diagnostic the gate raises, and that is worse than not making
+   the assertion at all: the gate is what establishes this program's freedom from undefined
+   behaviour, and a source that neutralises one of its members around the exact construct under
+   test is a source the gate no longer inspects there.  So no directive anywhere in this file
+   switches a diagnostic off.
 
    WHY THE NORMATIVE ASSERTION CANNOT BE MADE HERE, stated explicitly rather than left as a
    silent omission, because constraint C3 requires the reason for anything not tested.  The
@@ -44,22 +46,35 @@
    properties asserted instead are the ones a conforming implementation cannot fail whichever
    choice it makes.
 
-   WHAT IS ASSERTED INSTEAD, AND WHY EVERY RELATION IS SOUND WHETHER THE PRAGMA IS HONOURED OR
-   IGNORED.  The subject is the packing region's push/pop LIFECYCLE, which is the property the
-   standard's own rules make checkable without naming a layout.  Three structures are declared
-   identically: one before the region, one inside it, one after the pop.
+   WHAT IS ASSERTED INSTEAD, AND WHICH AUTHORITY CARRIES EACH RELATION.  The subject is the
+   packing region's push/pop LIFECYCLE, asserted only as relations so that no layout value is
+   needed to compare them.  Three structures are declared identically: one before the region,
+   one inside it, one after the pop.
 
+     - If the implementation IGNORES the request, all three are laid out alike, so
+       pack_size_restored and pack_align_restored hold trivially.  This branch rests on the
+       STANDARD: 6.10.6p1 requires an unrecognised pragma to be ignored.
      - If the implementation RECOGNISES the request, the inner structure may be laid out
-       differently, and the pop must restore the state the push saved, so the first and third
-       agree again.
-     - If the implementation IGNORES the request - which 6.10.6p1 permits for a pragma it does
-       not recognise - all three are laid out alike, so the first and third agree trivially.
+       differently, and the pop restores the state the push saved, so the first and third agree
+       again.  This branch rests on the GCC-COMPATIBLE PACK CONVENTION, not on C11: the
+       standard fixes no meaning for `pack', so an implementation that recognises the pragma
+       and gives push/pop some other meaning is not thereby non-conforming.
 
-   Either way pack_size_restored and pack_align_restored are 1, and they fall to 0 only for an
-   implementation that honoured a push and failed to undo it at the pop, which is a real defect
-   under both readings.  pack_size_not_larger and pack_align_not_larger are 1 for the same
-   reason from the other side: packing may shrink a structure or leave it alone, and an
-   implementation that GREW one under a packing request is wrong however it read the request.
+   pack_size_not_larger and pack_align_not_larger have the same split authority from the other
+   side: trivial for an implementation that ignores the request, and grounded in the same
+   convention - under which a packing request may shrink an aggregate or leave it alone but
+   never enlarge one - for an implementation that honours it.
+
+   WHAT THAT MEANS FOR A DIVERGENCE, WHICH IS THE POINT OF SEPARATING THE TWO AUTHORITIES.
+   Both compilers this program is compared against target the GCC-compatible convention, so
+   the relations are the right thing to compare and a 0 is worth investigating on either side.
+   But a 0 must be read as a departure from that convention rather than as a conformance
+   defect, because the repository documents only that a pragma is DISPATCHED
+   (docs/technical-specifications.md line 91 and line 490) and names no `pack' behaviour that
+   an implementation is required to provide.  The absolute layout effect of packing is
+   therefore tested where a documented authority does exist - see the paragraph on
+   08_gcc_extensions/005_attribute_packed_aligned.c below.
+
    No size and no alignment is ever printed as an absolute value, so no implementation-defined
    layout choice reaches the output.
 
@@ -191,8 +206,9 @@ int main(void)
 
     /* Pragma acceptance and the push/pop lifecycle, stated as seven relations so that no
        implementation-defined layout value reaches the output.  Every one is 1 whether the
-       implementation honours the packing request or discards it, and each falls to 0 for its
-       own distinct failure -- see the header comment for the case analysis. */
+       implementation honours the packing request under the GCC-compatible pack convention or
+       discards it, and each falls to 0 for its own distinct failure -- see the header comment
+       for the case analysis and for which authority carries which relation. */
     printf("pack_size_restored=%d\n",
            (int)(sizeof(struct LayoutBefore) == sizeof(struct LayoutAfterPop)));
     printf("pack_align_restored=%d\n",

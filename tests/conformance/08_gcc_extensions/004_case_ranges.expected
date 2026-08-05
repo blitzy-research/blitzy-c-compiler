@@ -104,11 +104,12 @@ refuses them -- a construct outside the required set may still be implemented, a
 repository says whether this one is. So the marker is not a claim that bcc must reject case ranges. It
 is a claim that IF bcc rejects them, the rejection falls outside the documented obligation and is
 traceable to it rather than being an unexplained divergence -- exactly the distinction requirement 5
-draws, and exactly the ambiguity the plan flagged for a maintainer to resolve. This is a strictly
-stronger footing than the marker's earlier one, which cited the project guide's inventory and rested
-on the inventory's SILENCE about the construct; a reviewer had to weigh an omission, which is
-compatible with the feature working, with it not working, and with nobody having considered the
-question. The register records the same qualification, and the citation is machine-resolved against
+draws, and exactly the ambiguity the plan flagged for a maintainer to resolve. The basis is a
+COMPLIANCE RULE rather than an inventory, and that choice is what gives the marker its footing: an
+inventory would supply only SILENCE about the construct, and silence is compatible with the feature
+working, with it not working, and with nobody having considered the question, so a reviewer would be
+weighing an omission instead of a statement. The register records the same qualification, and the
+citation is machine-resolved against
 line 761 of the cited document on every run -- with the quoted requirement sentence resolved inside
 that line -- so a reader can turn to the compliance rule and judge it.
 

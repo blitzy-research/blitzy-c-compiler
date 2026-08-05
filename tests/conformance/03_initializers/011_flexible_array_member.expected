@@ -142,27 +142,25 @@ This record narrows ONE thing and records the reason below, as the suite require
 initializer. It narrows no target, no optimization level and no oracle, it carries no
 expected-divergence marker, and no `ub_audit_flags` key appears because the program passes the suite's
 full default warning gate unmodified.
-ELEMENT ACCESS THROUGH THE FLEXIBLE MEMBER IS NO LONGER EXCLUDED, AND THIS PARAGRAPH RECORDS WHAT
-CHANGED, BECAUSE AN EARLIER FORM OF THIS RECORD EXCLUDED IT. The exclusion rested on two claims. The
-first was sound and still is: a `struct fam *` aimed at a UNION arm designates a four-byte object, so
-under C11 6.7.2.1p18 its replacement array has no elements and subscripting it would be undefined --
-which is why the union's elements are still reached only through the sized arm. The second claim was
-that the construction the standard does support, an allocated object genuinely larger than the header,
-was out of reach for this corpus, because a declaration of an allocation function needs size_t, which
-is `unsigned int` on i686 and `unsigned long` on the other three targets, so no single spelling serves
-all four, and because an unprototyped declaration was MEASURED to be rejected by the reference compiler
-and the alternate reference compiler alike (-Werror=builtin-declaration-mismatch and
--Werror=strict-prototypes respectively). That second claim is now superseded by measurement: the size
-type does not have to be one spelling. Selecting it with the architecture macro the compiler
-predefines -- the same idiom 12_preprocessor/004_predefined_macros.c and
-10_declarations_and_types/007_alignof_alignas.c already rely on, with an #error on the unrecognised
-branch -- yields a prototype that matches each target's own size_t exactly, and it was MEASURED clean
-under the full default gate with all four reference drivers at -O0, -O1 and -O2, with no
-built-in-declaration-mismatch diagnostic and with the sanitizer gate, leak check included, silent. So
-the program now performs the C11 6.7.2.1p20 EXAMPLE-2 construction and subscripts the flexible member
-on an object large enough for it, which is what the plan's entry for this program asks for when it
-prescribes "declaration, sizing, and access". Nothing was traded away to get it: the union pair is
-kept, at both storage durations, because it tests the common-initial-sequence access C11 6.5.2.3p6
+ELEMENT ACCESS THROUGH THE FLEXIBLE MEMBER IS EXERCISED, AND THIS PARAGRAPH RECORDS WHAT MAKES IT
+SAFE TO EXERCISE. Two facts decide it. The first bounds where access may NOT go: a `struct fam *`
+aimed at a UNION arm designates a four-byte object, so under C11 6.7.2.1p18 its replacement array has
+no elements and subscripting it would be undefined -- which is why the union's elements are reached
+only through the sized arm. The second is what makes access through the member itself reachable at all
+in a corpus that includes no header: the size type does not have to be one spelling. Declaring an
+allocation function needs size_t, which is `unsigned int` on i686 and `unsigned long` on the other
+three targets, so no single spelling serves all four, and an unprototyped declaration was MEASURED to
+be rejected by the reference compiler and the alternate reference compiler alike
+(-Werror=builtin-declaration-mismatch and -Werror=strict-prototypes respectively). Selecting the size
+type with the architecture macro the compiler predefines -- the same idiom
+12_preprocessor/004_predefined_macros.c and 10_declarations_and_types/007_alignof_alignas.c rely on,
+with an #error on the unrecognised branch -- yields a prototype that matches each target's own size_t
+exactly, and it was MEASURED clean under the full default gate with all four reference drivers at -O0,
+-O1 and -O2, with no built-in-declaration-mismatch diagnostic and with the sanitizer gate, leak check
+included, silent. So the program performs the C11 6.7.2.1p20 EXAMPLE-2 construction and subscripts the
+flexible member on an object large enough for it, which is what the plan's entry for this program asks
+for when it prescribes "declaration, sizing, and access". Nothing is traded away for it: the union pair
+is kept, at both storage durations, because it tests the common-initial-sequence access C11 6.5.2.3p6
 sanctions, which an allocated object cannot.
 ONE SPELLING OF THIS CONSTRUCT IS EXCLUDED, NARROWLY AND ON AN EXPLICIT PLAN BASIS RATHER THAN ON
 DIFFICULTY. Direct initialization -- `static struct fam d = { 3, {1,2,3} };` -- was probed against

@@ -34,8 +34,10 @@
        AArch64    16 bytes    IEEE binary128
        RISC-V 64  16 bytes    IEEE binary128
 
-   Three sizes and two radically different formats: a 64-bit significand on the two x86 targets
-   against a 113-bit significand on the other two.  Two backends printing different digits for
+   Three storage-and-format pairings over two radically different formats - 16 bytes of x87,
+   12 bytes of x87, 16 bytes of binary128 - which is two distinct sizes and two distinct
+   encodings: a 64-bit significand on the two x86 targets against a 113-bit significand on the
+   other two.  Two backends printing different digits for
    the same `long double` computation are therefore BOTH correct for their own target, so a
    cross-backend difference here is not evidence of a defect in either.  That is exactly the
    implementation-defined carve-out the brief reserves.  The repository documents the principle

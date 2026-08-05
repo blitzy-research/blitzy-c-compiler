@@ -278,16 +278,14 @@ const FLAGS_WITHOUT_EXECUTABLE: &[&str] = &["-c", "-S", "-E"];
 ///
 /// # The figures are measured on every run rather than maintained by hand
 ///
-/// An earlier form of this comment stated its measurements as exact prose figures dated to the
-/// corpus, with a note asking the next reader to re-measure. They went stale exactly as that note
-/// predicted: expanding one `impl_defined_notes` block moved the largest record and the largest
-/// heredoc to a different file, and nothing noticed, because a comment cannot observe the tree it
-/// describes. So the numbers now live in [`RECORD_BYTES_OBSERVED_MAX`],
-/// [`FIELD_BYTES_OBSERVED_MAX`] and [`GOLDEN_BYTES_OBSERVED_MAX`], [`measure_corpus`] re-derives
-/// them from the tree on every run, and the pre-flight prints what it found beside what is declared
-/// here. A figure that drifts is therefore visible in the output of the next run rather than
-/// discovered by a reviewer, and the headroom claim above is asserted at compile time rather than
-/// asserted in prose.
+/// Stating these measurements as prose figures in this comment would guarantee they went stale:
+/// expanding one `impl_defined_notes` block moves the largest record and the largest heredoc to a
+/// different file, and nothing notices, because a comment cannot observe the tree it describes. So the
+/// numbers live in [`RECORD_BYTES_OBSERVED_MAX`], [`FIELD_BYTES_OBSERVED_MAX`] and
+/// [`GOLDEN_BYTES_OBSERVED_MAX`], [`measure_corpus`] re-derives them from the tree on every run, and
+/// the pre-flight prints what it found beside what is declared here. A figure that drifts is therefore
+/// visible in the output of the next run rather than discovered by a reviewer, and the headroom claim
+/// above is asserted at compile time rather than asserted in prose.
 const RECORD_BYTES_MAX: u64 = 256 * 1024;
 
 /// Largest whole expectation record observed in the committed corpus, in bytes.
@@ -304,25 +302,25 @@ const RECORD_BYTES_MAX: u64 = 256 * 1024;
 /// this figure is a one-line edit here, not a defect.
 ///
 /// The headroom this figure leaves against the compile-time assertion below is by far the smallest
-/// of the three, at **239 bytes** of `RECORD_BYTES_MAX / RECORD_HEADROOM_DIVISOR` — 32,529 against
+/// of the three, at **284 bytes** of `RECORD_BYTES_MAX / RECORD_HEADROOM_DIVISOR` — 32,484 against
 /// 32,768. That is deliberate rather than overlooked: the next substantial addition to this record's
 /// notes will fail the build instead of silently eroding the headroom the comment on
 /// [`RECORD_BYTES_MAX`] claims, and the correct response then is to raise the bound and the divisor
 /// together, as a decision about the format rather than an accident of one record's prose. Raising
 /// only this figure would not be that decision, because this figure is documentation and the bound is
 /// what the parser enforces.
-const RECORD_BYTES_OBSERVED_MAX: u64 = 32_529;
+const RECORD_BYTES_OBSERVED_MAX: u64 = 32_484;
 
 /// Largest single heredoc field observed in the committed corpus, in bytes, and its line count.
 ///
-/// An `impl_defined_notes` block of 20,357 bytes over 223 lines, in the same record as
+/// An `impl_defined_notes` block of 20,312 bytes over 222 lines, in the same record as
 /// [`RECORD_BYTES_OBSERVED_MAX`]. Notes are the field that grows, because a note is where a program
 /// records why a comparison is sound — which is why this figure, and not the golden's, is the one
 /// that went stale first.
-const FIELD_BYTES_OBSERVED_MAX: usize = 20_357;
+const FIELD_BYTES_OBSERVED_MAX: usize = 20_312;
 
 /// Lines in the largest observed heredoc field, stated beside its byte count.
-const FIELD_LINES_OBSERVED_MAX: usize = 223;
+const FIELD_LINES_OBSERVED_MAX: usize = 222;
 
 /// Largest golden stdout observed in the committed corpus, in bytes, and its line count.
 ///
@@ -354,9 +352,9 @@ const RECORD_HEADROOM_DIVISOR: u64 = 8;
 /// governs memory in any case: this one exists for the single shape the whole-file bound does not
 /// cover, a heredoc of individually acceptable lines accumulating into one enormous value.
 ///
-/// Writing the factor down is the point. The relation between these numbers used to live only in a
-/// comment claiming "an order of magnitude" for all of them, which was true of the record bound and
-/// false of this one, and nothing could tell the difference.
+/// Writing the factor down is the point. A comment claiming "an order of magnitude" for all of these
+/// bounds would be true of the record bound and false of this one, and nothing could tell the
+/// difference; a named divisor per bound is checked by the assertion below instead.
 const FIELD_HEADROOM_DIVISOR: usize = 2;
 
 // The headroom claims, asserted at compile time. A `const` block rather than a runtime check because
@@ -1360,9 +1358,10 @@ fn parse_fields(text: &str, origin: &Path) -> HarnessResult<Vec<(&'static KeySpe
                     open.spec.name,
                     format!(
                         "the heredoc body has reached {HEREDOC_LINES_MAX} lines without a closing \
-                         `{HEREDOC_TERMINATOR}`; the longest heredoc body in the corpus is 126 \
-                         lines, so a body more than an order of magnitude longer is an \
-                         unterminated heredoc swallowing the rest of the file rather than a value"
+                         `{HEREDOC_TERMINATOR}`; the longest heredoc body in the corpus is \
+                         {FIELD_LINES_OBSERVED_MAX} lines, so a body more than an order of magnitude \
+                         longer is an unterminated heredoc swallowing the rest of the file rather \
+                         than a value"
                     ),
                 ));
             }
@@ -3953,12 +3952,12 @@ fn require_marker_for_narrowed_oracle(
 ///
 /// # The defect this closes
 ///
-/// A narrowing marker was previously written with an observational class — `stdout_mismatch`, for a
-/// value comparison that had been switched off — and every automated check passed, because the class
-/// is only ever *matched* on an arm that produced a comparison and this arm produces none. What the
-/// checks could not see is that the field asserted something untrue in the one place a report row
-/// quotes it: that two completed runs disagreed on bytes, when nothing had run. A reader auditing the
-/// register was told an observation had been made.
+/// An observational class on a narrowing marker — `stdout_mismatch`, say, for a value comparison the
+/// record switches off — is a false statement that no other check can catch. Every automated check
+/// still passes, necessarily so: a class is only ever *matched* on an arm that produced a comparison,
+/// and this arm produces none. What those checks cannot see is that the field asserts something untrue
+/// in the one place a report row quotes it — that two completed runs disagreed on bytes, when nothing
+/// ran — so a reader auditing the register would be told an observation had been made.
 ///
 /// # The rule, in both directions
 ///
@@ -4722,11 +4721,11 @@ fn validate_build_template(
         }
         if !token.starts_with('-') {
             // Everything that is not a flag must be one of the four things a build line
-            // substitutes. Falling through here instead — which an earlier form of this function
-            // did — accepted any literal that merely avoided the shell characters and the leading
-            // dash, so a record could append a response-file reference, an absolute path, or a
-            // second translation unit to an otherwise canonical line. See
-            // [`build_template_literal_defect`] for why that mattered and for the diagnostic.
+            // substitutes. Falling through here without the check below would accept any literal
+            // that merely avoided the shell characters and the leading dash, so a record could
+            // append a response-file reference, an absolute path, or a second translation unit to an
+            // otherwise canonical line. See [`build_template_literal_defect`] for why that matters
+            // and for the diagnostic.
             if let Some(defect) = build_template_literal_defect(token) {
                 return Err(key_error(origin, raw.line, key, defect));
             }

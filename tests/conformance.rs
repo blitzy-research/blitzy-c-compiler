@@ -193,15 +193,15 @@
 //! some arm, so an *undocumented* refusal is still a finding on every applicable arm, delivered with
 //! the refusal's own artifacts.
 //!
-//! **Which markers are live is deliberately not stated here.** An earlier form of this comment named
-//! the corpus's marker inventory outright and drew a conclusion from it — that no refusal-class marker
-//! was live, so the path above was a mechanism with no instance. That is the same defect as a stale
-//! measurement: a claim about the tree, maintained where it cannot observe the tree, in a corpus that
-//! is still being completed program by program. The inventory is therefore reported rather than
-//! asserted. [`infra_expected_divergence_register`] enumerates every marker it finds, prints each one
-//! with its class, scope, program and basis, and states how many expectation records it was able to
-//! read out of how many the plan calls for — so a reader learns what is live from the run that just
-//! examined the corpus, and this comment cannot be wrong about it.
+//! **Which markers are live is deliberately not stated here.** Naming the corpus's marker inventory in
+//! this comment — and drawing a conclusion from it, such as that no refusal-class marker is live and
+//! the path above is a mechanism with no instance — would be the same defect as a stale measurement: a
+//! claim about the tree, maintained where it cannot observe the tree, in a corpus that grows program by
+//! program. The inventory is therefore reported rather than asserted.
+//! [`infra_expected_divergence_register`] enumerates every marker it finds, prints each one with its
+//! class, scope, program and basis, and states how many expectation records it was able to read out of
+//! how many the plan calls for — so a reader learns what is live from the run that just examined the
+//! corpus, and this comment cannot be wrong about it.
 //!
 //! Neither marker is presented here as an adjudicated result, and the distinction matters because a
 //! marker is the one mechanism that turns a failure into a pass. What the run establishes is that each
@@ -850,11 +850,11 @@ fn audit_markers() -> MarkerIntegrity {
         ));
     }
 
-    // The inventory, and then how much of the corpus it was drawn from. Both halves are needed and
-    // the second used to be missing: "1 marker(s) in the corpus" is a count of what was found, and a
-    // reader takes it for a description of the whole corpus unless the line says which records were
-    // actually read. On a corpus still being completed those are different numbers, and the
-    // difference is exactly one program's markers.
+    // The inventory, and then how much of the corpus it was drawn from. Both halves are needed:
+    // "1 marker(s) in the corpus" is a count of what was found, and a reader takes it for a
+    // description of the whole corpus unless the line says which records were actually read. On a
+    // corpus still being completed those are different numbers, and the difference is exactly the
+    // markers of whichever programs went unread.
     let inventory = corpus_inventory();
     violations.extend(
         inventory
@@ -1475,8 +1475,8 @@ enum ReferenceArm {
         /// Carried here rather than re-derived because the [`CompileOutcome`] does not outlive the
         /// match that produced this variant, and the command, the termination and the capture
         /// reference are exactly what a maintainer needs in order to reproduce the refusal. Reducing
-        /// this arm to `class` and `summary` alone is what previously made a reference-arm refusal
-        /// unactionable in the report.
+        /// this arm to `class` and `summary` alone would leave a reference-arm refusal unactionable in
+        /// the report.
         ///
         /// Boxed because this variant would otherwise be several times the size of every other, and
         /// every `ReferenceArm` value in the run would carry that size whether it held a refusal or not.
@@ -2636,13 +2636,13 @@ fn finding_identifiers(outcomes: &[Outcome]) -> Vec<findings::FindingId> {
 
 /// Whether this outcome makes its cell's workspace evidence that must be kept.
 ///
-/// Two clauses, and the first is the one that changed. Retention used to test a **fixed** verdict set,
-/// `FAIL | XPASS | FINDING`, which disagreed with the policy the run actually asserts on: under
-/// `BCC_CONFORMANCE_STRICT` an `UNAVAILABLE` *fails the run*, and its workspace — holding the
-/// diagnosis, the compiler's own stderr and the termination record — was deleted anyway. A run that
-/// fails on an outcome and then destroys that outcome's evidence is the worst combination available:
-/// the failure is reported and cannot be investigated. Asking [`classify::fails_run`] means the two
-/// answers cannot drift, because they are now one answer.
+/// Two clauses, and the first asks the run's own policy rather than a fixed verdict set. A fixed set —
+/// `FAIL | XPASS | FINDING` — would disagree with the policy the run asserts on: under
+/// `BCC_CONFORMANCE_STRICT` an `UNAVAILABLE` *fails the run*, so its workspace, holding the diagnosis,
+/// the compiler's own stderr and the termination record, would be deleted anyway. A run that fails on
+/// an outcome and then destroys that outcome's evidence is the worst combination available: the failure
+/// is reported and cannot be investigated. Asking [`classify::fails_run`] means the two answers cannot
+/// drift, because they are one answer.
 ///
 /// The second clause keeps a `FINDING` regardless. A finding does **not** fail the run — it is a
 /// deliverable, and requirement 6 asks for the reproducer, both sides' output and the exact commands —
@@ -3682,32 +3682,15 @@ struct PendingRecord {
 /// once its review completes**: delete the row, and the area it named is admitted again on the next
 /// run with no other change anywhere.
 ///
-/// The set is **empty**, and it is kept rather than deleted because it is the mechanism, not the
-/// instance: the one record it held,
-/// `13_floating_point/004_long_double_target_restricted.expected`, has completed its review, and the
-/// defects that review found have been corrected in the record itself rather than merely noted.
-/// Four corrections, in the order they were made:
+/// The set is **empty**: every record the corpus holds is substantiated, so no area is withheld and
+/// the gate below reports the whole corpus as entitled to be read as evidence.
 ///
-/// - its written undefined-behaviour argument now carries the excess-intermediate-precision,
-///   conversion, literal, printing, characteristic-macro and magnitude obligations it had left to
-///   the program's own comments;
-/// - its measured reason for disabling oracle (b) was re-measured, dropping the unsupportable
-///   exponent-range claim in favour of the significand widths — 64 bits against 113 — that the
-///   exclusion actually rests on, with the loose "three different formats" wording corrected to
-///   "three storage-and-format pairings over two distinct formats";
-/// - the argument's claim that character-type access to the type's object representation would be
-///   **undefined behaviour** was withdrawn as false. Such access is permitted; what makes a byte
-///   image unusable here is that the padding bytes are unspecified and that both the padding and
-///   the encoding are target-dependent, and the record now says that instead — the program inspects
-///   no representation either way;
-/// - the marker's class was changed from `stdout_mismatch` to `comparison_excluded`. The old value
-///   described the arm the record **switches off** as though two completed runs had disagreed on
-///   bytes, which no machine check could contradict precisely because nothing runs on that arm. The
-///   parser now requires the narrowing class there and refuses it on an arm that is compared, so
-///   the class and the oracle toggle cannot drift apart again.
-///
-/// Every record the corpus holds is therefore substantiated, and the gate below now reports that
-/// rather than withholding an area.
+/// It is kept rather than deleted because it is the mechanism, not the instance. A record whose
+/// review has not completed is declared here, **withheld before its first compile**, and its feature
+/// area fails loudly with an explicit non-evidence report — which is what stops verdicts being drawn
+/// from a record whose own authority is still under review. Keeping an empty declaration costs one
+/// line and keeps that failure mode closed; deleting it would mean the next unsubstantiated record
+/// had nowhere to be declared and would silently produce evidence instead.
 const PENDING_RECORDS: [PendingRecord; 0] = [];
 
 /// What the record-substantiation audit found.
@@ -4623,8 +4606,8 @@ fn matrix_statement(config: &RunConfig) -> String {
     ));
     text.push_str(&format!("  feature areas:     {AREA_COUNT}\n"));
     // "planned", and the corpus inventory printed immediately after this block states how many
-    // programs and records are actually present. The two were previously one number in one place,
-    // which is how a declared count came to be read as a description of the tree.
+    // programs and records are actually present. They are two numbers in two places on purpose:
+    // collapsing them into one is how a declared count comes to be read as a description of the tree.
     text.push_str(&format!(
         "  programs planned:  {PROGRAM_COUNT} (the plan; the corpus inventory below states what is \
          present)\n"
@@ -5184,13 +5167,13 @@ fn basis_violations(marker: &manifest::ExpectedDivergence) -> Vec<String> {
 ///
 /// # Why the search is bounded to the cited range rather than to the whole document
 ///
-/// This check previously searched the entire file, and that made it possible to satisfy while
-/// defeating its own purpose: a marker could cite one section, quote a sentence from a completely
-/// unrelated part of the same document, and pass — so the audit certified that the words were the
-/// document's own while establishing nothing about the section a reader was sent to. Since the basis
-/// must carry a locator anyway, and the locator resolves to concrete positions, the quotation is now
-/// required to occur INSIDE the union of those positions. The two halves of a citation then have to
-/// agree with each other, which is the whole point of asking for both.
+/// Searching the entire file would make the check satisfiable while defeating its own purpose: a marker
+/// could cite one section, quote a sentence from a completely unrelated part of the same document, and
+/// pass — so the audit would certify that the words were the document's own while establishing nothing
+/// about the section a reader was sent to. Since the basis must carry a locator anyway, and the locator
+/// resolves to concrete positions, the quotation is required to occur INSIDE the union of those
+/// positions. The two halves of a citation then have to agree with each other, which is the whole point
+/// of asking for both.
 ///
 /// A citation may resolve to several positions — a line, a range, a section, a quoted phrase — and any
 /// one of them satisfying the search is enough: an author who cites two sections is not required to

@@ -1631,13 +1631,13 @@ impl FindingId {
     ///
     /// # Why the oracle is not part of the identity
     ///
-    /// It used to be, and that is what made a single divergence file itself three times. One cell
-    /// whose build was refused is refused for oracle (a), for oracle (b) and for oracle (c) alike —
-    /// one root cause, observed through three windows — and an oracle-keyed identity gave each window
-    /// its own directory holding its own copy of the same reproducer, the same record, the same
-    /// commands, the same fingerprint and the same captured compiler diagnostics. Measured on one
-    /// program of twelve cells against a compiler that refuses everything: **33 directories for 12
-    /// divergences.**
+    /// Including it would make a single divergence file itself three times. One cell whose build was
+    /// refused is refused for oracle (a), for oracle (b) and for oracle (c) alike — one root cause,
+    /// observed through three windows — and an oracle-keyed identity gives each window its own
+    /// directory holding its own copy of the same reproducer, the same record, the same commands, the
+    /// same fingerprint and the same captured compiler diagnostics. Measured on one program of twelve
+    /// cells against a compiler that refuses everything, an oracle-keyed identity yields **33
+    /// directories for 12 divergences.**
     ///
     /// Keying on the **root cause** instead — the cell and the class of what went wrong — files it
     /// once, and the oracles that observed it are recorded *inside* the manifest, where a set belongs.
@@ -3984,12 +3984,12 @@ fn sh_word_is_unshadowable(word: &str) -> bool {
 /// # Why the check is over the rendered text rather than at each call site
 ///
 /// The preamble tells the reader, in the script they are about to run, that an inherited exported
-/// shell function cannot stand in for any helper it uses. That is a claim about the **whole** file,
-/// and it was previously kept true by hand: a helper list written in one place and three dozen
-/// invocations written in a dozen renderers, with nothing tying the two together. The failure mode is
-/// not hypothetical — it is a later edit adding one `sleep` or one `cat` and the claim quietly
-/// becoming false, with no diagnostic anywhere, because a bare invocation works perfectly on a
-/// machine that exports no such function.
+/// shell function cannot stand in for any helper it uses. That is a claim about the **whole** file, and
+/// it cannot be kept true by hand: the helpers are named in one place while three dozen invocations are
+/// written across a dozen renderers, with nothing tying the two together. The failure mode is not
+/// hypothetical — it is a later edit adding one `sleep` or one `cat` and the claim quietly becoming
+/// false, with no diagnostic anywhere, because a bare invocation works perfectly on a machine that
+/// exports no such function.
 ///
 /// So the invariant is checked where it can actually be checked: over the text, once assembled. Every
 /// word at a command position must be one of
@@ -4889,10 +4889,10 @@ fn render_scratch_setup() -> String {
     text.push_str(&format!(
         "if [ \"${VAR_WORK_PARENT_SUPPLIED}\" = 1 ]; then\n"
     ));
-    // The PARENT is what this line is about, so the parent is what it prints. Naming the variable
-    // without expanding it — which is what this line used to do — printed the word `WORK` and told a
-    // reader nothing about the directory they had supplied, in the one message whose whole purpose is
-    // to distinguish the directory the script created from the one it did not.
+    // The PARENT is what this line is about, so the parent is what it prints, EXPANDED. Naming the
+    // variable without expanding it would print the word `WORK` and tell a reader nothing about the
+    // directory they had supplied, in the one message whose whole purpose is to distinguish the
+    // directory the script created from the one it did not.
     text.push_str(&format!(
         "    command printf 'it was created inside %s, the directory you supplied, which is itself \
          neither created nor removed by this script\\n' \"${VAR_WORK_PARENT}\"\n"
