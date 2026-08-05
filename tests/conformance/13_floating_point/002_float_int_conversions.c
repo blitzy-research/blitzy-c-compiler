@@ -162,11 +162,14 @@
  * oracle-(b) exclusion AND an active expected-divergence marker.  That program's
  * record disables the cross-backend arm alone -- oracle (a) and oracle (c) stay
  * enabled on all four targets at all three levels -- and carries the marker
- * XD-TYPE-LONGDOUBLE-001, class stdout_mismatch, scoped to oracle_b across all
- * targets and all optimization levels, whose basis is the target-parametric type
- * representation documented at docs/technical-specifications.md line 511.  The
- * marker is registered in EXPECTED_DIVERGENCES.md, which is the mechanism that
- * keeps a disabled arm auditable rather than silent.
+ * XD-TYPE-LONGDOUBLE-001, class comparison_excluded, scoped to oracle_b across
+ * all targets and all optimization levels, whose basis is the target-parametric
+ * type representation documented at docs/technical-specifications.md line 511.
+ * `comparison_excluded` is the one class that names no observation, and it is the
+ * class that arm requires: no cross-backend value comparison is attempted for that
+ * program, so a class describing a comparison result would claim a disagreement
+ * nothing measured.  The marker is registered in EXPECTED_DIVERGENCES.md, which is
+ * the mechanism that keeps a disabled arm auditable rather than silent.
  * Plain char never appears as a CONVERSION destination either, its signedness being
  * signed on x86-64 and i686 and unsigned on AArch64 and RISC-V 64, so the two
  * character conversions here name signed char and unsigned char explicitly; the

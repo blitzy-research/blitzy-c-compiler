@@ -90,16 +90,22 @@
 //! # The identifier, and why it is derived rather than counted
 //!
 //! ```text
-//! F-<16 hex digits>-<cell slug>-<oracle letter>-<divergence class>
+//! F-<16 hex digits>-<cell slug>-<divergence class>
 //! ```
 //!
 //! The **cell slug** is [`CellKey::slug`]: the area, program, target and optimization level with
 //! every byte outside `[A-Za-z0-9_]` escaped as `%XX` and the four parts joined with `+`. It is
 //! **injective** — two different cells cannot produce the same slug — and nothing in it is
-//! abbreviated or truncated. The **oracle letter** and the kebab-cased **divergence class** complete
-//! the identity, and the leading **digest** is [`super::stable_digest`] over exactly those same
-//! components, giving a short fixed-width handle to quote without it being the thing that
-//! distinguishes two findings.
+//! abbreviated or truncated. The kebab-cased **divergence class** completes the identity, and the
+//! leading **digest** is [`super::stable_digest`] over exactly those same components, giving a short
+//! fixed-width handle to quote without it being the thing that distinguishes two findings.
+//!
+//! No oracle appears in the identity, and that is a decision rather than an omission.
+//! [`FindingId::derive`] takes a cell and a divergence class and nothing else, because one directory
+//! is the artifact for one divergence at one cell and the contributions of the several oracles that
+//! observed it are **merged into that one directory** — each captured under its own `outputs/` name,
+//! which is where the oracle is recorded. Keying the directory on the oracle instead would split one
+//! divergence across three directories and lose the fact that they are one.
 //!
 //! Every part is present in full, which is the property that matters: **two different divergences
 //! can never name the same directory**, so one can never overwrite another's evidence. Abbreviating
@@ -1011,18 +1017,18 @@ fn build_contribution(
 //   `[A-Za-z0-9_]` into a `%`-introduced hexadecimal pair and separates components with `+`, which
 //   escaping guarantees cannot appear inside one. So a slug recovers exactly the components that
 //   produced it.
-// - A slug therefore contains no hyphen, and neither does a hexadecimal digest nor a single oracle
-//   letter. The identifier's hyphens are consequently unambiguous separators, and the string
-//   decomposes back into digest, slug, oracle letter and class with no parsing rule beyond
-//   splitting.
-// - The oracle letters are pairwise distinct, and the six divergence-class labels remain pairwise
-//   distinct after kebab-casing, because each is already lower-case ASCII with underscores.
+// - A slug therefore contains no hyphen, and neither does a hexadecimal digest. The identifier's
+//   leading hyphens are consequently unambiguous separators, and the string decomposes from the left
+//   into `F`, the digest, the slug and the class with no parsing rule beyond splitting.
+// - The six divergence-class labels remain pairwise distinct after kebab-casing, because each is
+//   already lower-case ASCII with underscores, so the trailing field can neither absorb nor be
+//   confused with the slug before it even though kebab-casing introduces hyphens of its own.
 //
 // The digest is retained, in full width rather than reduced to four decimal digits, and it is now a
 // label rather than a discriminator: it gives a stable short prefix a maintainer can grep for and
-// keeps the documented `F-<digits>-<slug>` shape. It is deliberately produced by the harness's
-// shared `stable_digest` rather than by a private hash, so that a digest written here means the
-// same thing as a digest written by a report.
+// keeps the documented `F-<digits>-<slug>-<class>` shape. It is deliberately produced by the
+// harness's shared `stable_digest` rather than by a private hash, so that a digest written here
+// means the same thing as a digest written by a report.
 
 /// Render text as a kebab-case token: lower-case ASCII alphanumerics, single hyphens between
 /// runs of anything else, and no leading or trailing hyphen.
@@ -1707,11 +1713,11 @@ impl FindingId {
     /// The area and program names are ones [`CellKey`] has already refused to accept unless they are
     /// canonical stems, and every part of the identifier draws on an alphabet that excludes the path
     /// separator. The digest is hexadecimal; [`CellKey::slug`] emits only `[A-Za-z0-9_]`, `+` and
-    /// `%`-introduced hexadecimal pairs; the oracle letter is one ASCII letter; and [`kebab`] emits
-    /// only lower-case ASCII alphanumerics and hyphens. The identifier can therefore contain no path
-    /// separator and can be neither `.` nor `..`, so joining it onto the findings root always
-    /// yields a direct child of that root. [`guarded_path`] re-establishes that on every write
-    /// regardless.
+    /// `%`-introduced hexadecimal pairs; and [`kebab`] emits only lower-case ASCII alphanumerics and
+    /// hyphens. Together with the literal `F` and the hyphens joining those three fields, that is the
+    /// whole alphabet. The identifier can therefore contain no path separator and can be neither `.`
+    /// nor `..`, so joining it onto the findings root always yields a direct child of that root.
+    /// [`guarded_path`] re-establishes that on every write regardless.
     pub fn directory(&self) -> PathBuf {
         findings_root().join(&self.text)
     }

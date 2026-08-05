@@ -1095,6 +1095,14 @@ description. No entry names an identifier that does not correspond to a director
 is a promise that the evidence exists. Editorial changes to this document's own prose belong in
 version control rather than here — a changelog of wording is not evidence about a compiler.
 
+**A row states what was true on its own date and is never rewritten afterwards**, which is what makes
+a dated log worth keeping. So a marker's class, scope or status as quoted in a row below is that
+row's date's answer and not necessarily today's — [§6.2](#62-repository-open-items-a-finding-may-substantiate)
+carries the current marker set, and the marker blocks in the records plus
+[`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4 are the authority the register's bidirectional
+audit re-establishes on every run. Where a later row supersedes an earlier one, the earlier row is
+left standing and the later one says so.
+
 **The curated findings set is empty, so this log is empty.** The suite has recorded no undocumented
 divergence, [`findings/`](findings/) holds only its placeholder, and §2's table has no row.
 

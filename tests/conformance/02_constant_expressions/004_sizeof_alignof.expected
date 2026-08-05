@@ -176,12 +176,14 @@ double, and its size is a whole multiple of its alignment. The type is therefore
 rather than dropped for being awkward. Cross-backend VALUE equality for long double is the
 subject of 13_floating_point/004_long_double_target_restricted.c, where it is a RECORDED
 EXCLUSION -- oracle_b disabled with the measured representations as its recorded reason -- carrying
-the marker XD-TYPE-LONGDOUBLE-001, class stdout_mismatch, scope oracle_b. That marker is REQUIRED
-rather than optional: a disabled oracle is reported XFAIL, which claims the authority of a
+the marker XD-TYPE-LONGDOUBLE-001, class comparison_excluded, scope oracle_b. That marker is
+REQUIRED rather than optional: a disabled oracle is reported XFAIL, which claims the authority of a
 documented limitation, so the format makes the marker the thing that carries that claim while the
-recorded reason explains it. It excuses the cross-backend arm alone, and a same-target disagreement
-there is still a FINDING. Here nothing is excluded at all, because nothing representation-dependent
-is printed.
+recorded reason explains it. Its class is comparison_excluded rather than any of the five
+observational ones because NO CROSS-BACKEND VALUE COMPARISON IS ATTEMPTED there: the record
+switches that arm off, so a class naming a comparison result would report a disagreement nothing
+measured. It excuses the cross-backend arm alone, and a same-target disagreement there is still a
+FINDING. Here nothing is excluded at all, because nothing representation-dependent is printed.
 THE TARGET-KEYED ANCHOR PREFERS THE ARCHITECTURE OVER A WIDTH MACRO, AND DEGRADES RATHER THAN
 REFUSING WHEN NEITHER IS AVAILABLE. The architecture is a categorical fact the harness fixes when
 it selects the cell's target, whereas a width macro such as __SIZEOF_POINTER__ is a numeric claim

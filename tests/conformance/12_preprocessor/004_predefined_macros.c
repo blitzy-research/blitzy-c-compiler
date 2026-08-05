@@ -44,10 +44,13 @@
  * four spellings is defined, on the reasoning that without it a compiler predefining no
  * architecture macro produces output byte-identical to one predefining exactly the right macro.
  * That observation is true and it is not a defect.  The two compilers agree because both are
- * CORRECT: no clause of the standard requires any of these spellings, and a search of docs/ for
- * "predefined", "__x86_64__", "__i386__", "__aarch64__" and "__riscv" finds no match in any of
- * the three documents the directory holds, so the repository states no contract for the compiler
- * under test either.  Asserting presence therefore made a compiler-family convention into a
+ * CORRECT: no clause of the standard requires any of these spellings, and a search of the two
+ * authoritative implementation documents - docs/project-guide.md and docs/technical-specifications.md
+ * - for "predefined", "__x86_64__", "__i386__", "__aarch64__" and "__riscv" finds no match in either
+ * file, so the repository states no contract for the compiler under test either.  The search is
+ * scoped to those two rather than to docs/ as a whole because one of the five spellings does occur
+ * elsewhere under docs/, in this suite's own methodology page, which cannot be evidence for a
+ * conclusion it states.  Asserting presence therefore made a compiler-family convention into a
  * conformance requirement that no authority imposes, and every one of this program's twelve
  * cells would have reported a compiler which spells its architecture macro otherwise - or leaves
  * the choice to a target header - as a divergence under all three oracles at once.  A divergence

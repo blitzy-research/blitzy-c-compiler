@@ -1,17 +1,23 @@
 # Continuous integration for bcc.
 #
-# This workflow defines the differential conformance gates: it establishes the checks that hold on
-# any checkout carrying the suite, installs the reference compilers and emulators the suite's
-# oracles compare against, proves that toolchain really is the one the corpus is judged against,
-# pre-flights the discovered oracle inventory, runs the suite in strict mode, and publishes the
-# report as a build artifact.
+# This workflow adds ONE job, `differential-conformance`. It checks the suite's own formatting and
+# type-checking, installs the reference compilers and emulators the suite's oracles compare
+# against, proves that toolchain really is the one the corpus is judged against, establishes the
+# Cargo package every later command depends on, pre-flights the discovered oracle inventory, runs
+# the suite in strict mode, and publishes the report as a build artifact.
 #
-# The jobs are purely additive and stand alone: they depend on no other job, no other job depends
-# on them, and they restate none of the repository's other gates — build, unit tests, integration
-# tests, clippy and rustfmt keep their own single definition, because a second definition of a
-# gate is a second answer to the same question.
+# ## One job, and why exactly one
 #
-# ## Why there are two jobs rather than one
+# The project's action plan authorises a single added job for this suite and requires that every
+# other gate the repository already defines — build, unit tests, integration tests, clippy and
+# rustfmt over the whole crate — keep its own single definition and stay byte-identical. A second
+# job restating a subset of those gates would be a second answer to the same question, so there
+# is not one. The suite's two file-scoped static checks live here as STEPS of this job rather than
+# as a job of their own: nothing is dropped, and nothing is duplicated at job level.
+#
+# The job is purely additive: it depends on no other job and no other job depends on it.
+#
+# ## The Cargo precondition, and how this job handles it in one place
 #
 # `tests/conformance/README.md` §"The Cargo integration precondition" is explicit that every Cargo
 # command this suite is measured by presupposes the repository's own manifest, its `bcc` binary
@@ -20,20 +26,33 @@
 # suite must never add one: C1 makes `Cargo.toml` read-only, and creating one here would satisfy a
 # gate by violating the constraint the gate exists to protect.
 #
-# A checkout can therefore be in one of two states, and a single job cannot honestly serve both. So
-# the checks split exactly where the precondition does:
+# So the steps are ordered by what they need, and the precondition is asserted exactly once, in the
+# middle:
 #
-# - `conformance-static` runs the two gates that need no manifest — formatting and a full
-#   type-check of the suite — and therefore runs on every checkout, including one that carries the
-#   suite ahead of the compiler tree. That job is where a manifest-less checkout earns its green.
-# - `differential-conformance` runs the Cargo-dependent gates and the matrix itself, and it
-#   REQUIRES the package. Its first step establishes the manifest and the `bcc` binary target and
-#   FAILS the job when either is missing, so an absent package is a failed prerequisite rather than
-#   a successful non-execution path. The distinction is the whole point: this job exists to judge
-#   `bcc`, and a run that completed without judging it must not report success, because a green
-#   check that established nothing about the compiler is worse than a red one that says so. There
-#   is deliberately no fallback here — the manifest-less subset already has its own job, and
-#   restating it inside this one would let this job pass while the matrix never ran.
+# - The two suite-scoped static gates — `rustfmt --check` over the driver and every harness module,
+#   and a `rustc --test` type-check of the whole suite with warnings denied — need no manifest and
+#   therefore run first, on any checkout.
+# - The prerequisite step then establishes the manifest and the `bcc` binary target and FAILS the
+#   job when either is missing. An absent package is a failed prerequisite, never a skip, a warning
+#   or a fallback: this job exists to judge `bcc`, and a run that completed without judging it must
+#   not report success, because a green check that established nothing about the compiler is worse
+#   than a red one that says why.
+# - Everything after it — the pre-flight and the matrix — is Cargo-dependent and is reached only
+#   once the package is there.
+#
+# ## What this file is on the branch that introduced it
+#
+# The action plan describes this path as an edit to the repository's existing workflow, adding this
+# one job beside the build, unit, integration, lint, format and cross-architecture jobs already
+# defined there and reusing their action pins. On the branch that introduced this suite there is no
+# such workflow to edit: that branch carries the project documentation and this suite, while the
+# compiler crate, its manifest, its `src/**` tree and its existing continuous-integration
+# definition live on the project's open pull request. This file is therefore a new file there and
+# is stated as one rather than presented as an edit — and it is written to be merged as an addition:
+# it declares one job, restates no gate the other workflow owns, and pins every action by digest so
+# that merging it changes nothing about the jobs already present. Whoever merges it onto the
+# package-complete tree should move this single job into that workflow and adopt its pins if they
+# differ from the digests below.
 name: CI
 
 # WHY THERE IS NO `pull_request` TRIGGER, WHICH IS A DELIBERATE OMISSION RATHER THAN A GAP.
@@ -104,60 +123,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The gates that hold on any checkout carrying this suite, with or without the Cargo package.
-  #
-  # Both commands are the ones tests/conformance/README.md documents for a manifest-less checkout,
-  # copied exactly — including the `CARGO_MANIFEST_DIR` the direct `rustc` invocation needs,
-  # because `conformance_harness/mod.rs` resolves the package root through `env!` at compile time
-  # and the shorter form fails in a way that looks like the suite is broken when it is not.
-  #
-  # These are not a substitute for the Cargo gates and are not presented as one. They establish the
-  # properties that do not depend on packaging — that every file parses, type-checks and is
-  # correctly formatted — which is exactly the subset a manifest-less checkout can honestly claim.
-  conformance-static:
-    name: Conformance suite static gates
-    # Pinned like the matrix job below rather than left on `ubuntu-latest`, which moves to a new
-    # major image without any change to this file.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      # The checkout credential is not persisted, here as in the matrix job below: no step in
-      # either job pushes, tags or otherwise talks back to the repository, so leaving a usable
-      # token in `.git/config` for the rest of the job would grant reach nothing needs — and this
-      # job then compiles and type-checks the checkout, which is repository-controlled input.
-      # Every checkout in this workflow disables it, so there is no shape in which a token
-      # outlives the step that fetched the tree.
-      - name: Check out the repository
-        # Pinned by digest, not by tag: a tag is mutable, so `@v4` is a promise the action's owner
-        # can rewrite under this workflow without any change to this file.
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-
-      # Pinned to the exact supported version rather than to a channel. `stable` moves without any
-      # change to this file, which makes a green run unreproducible and a red one hard to
-      # attribute; the repository builds against 1.93.1, so this installs that. Using rustup
-      # directly also removes a third-party action from the trust surface of a job that already
-      # has rustup available to it. `rustfmt` is requested explicitly because the minimal profile
-      # does not carry it and the formatting gate below invokes it directly.
-      - name: Install the pinned Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install 1.93.1 --profile minimal --no-self-update --component rustfmt,clippy
-          rustup default 1.93.1
-          rustc --version
-          cargo --version
-          rustfmt --version
-
-      - name: Check the formatting of the suite
-        run: rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs
-
-      - name: Type-check the whole suite with warnings denied
-        run: |
-          mkdir -p target/conformance-typecheck
-          CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata \
-            -D warnings --out-dir target/conformance-typecheck tests/conformance.rs
-
   # Judge bcc's observable program behaviour — stdout bytes and exit status, nothing else —
   # against three independent oracles: (a) an external reference C compiler at the same target
   # and optimization level, (b) bcc's own other backends against the x86-64 baseline, and
@@ -218,6 +183,28 @@ jobs:
           rustc --version
           cargo --version
           rustfmt --version
+
+      # The two suite-scoped static gates, placed here because they need NO manifest and can
+      # therefore be established before the package prerequisite below is asserted. Both commands
+      # are the ones tests/conformance/README.md documents for a manifest-less checkout, copied
+      # exactly — including the `CARGO_MANIFEST_DIR` the direct `rustc` invocation needs, because
+      # `conformance_harness/mod.rs` resolves the package root through `env!` at compile time and
+      # the shorter form fails in a way that looks like the suite is broken when it is not.
+      #
+      # These are steps of this job rather than a job of their own, and they are scoped to this
+      # suite's own files rather than to the crate: the repository's own format and lint jobs keep
+      # their single definition over the whole crate, and this workflow adds no second one. They
+      # are not a substitute for the matrix and are not presented as one — they establish only that
+      # every file of the suite parses, type-checks with warnings denied, and is correctly
+      # formatted, which is exactly the subset that does not depend on packaging.
+      - name: Check the formatting of the suite
+        run: rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs
+
+      - name: Type-check the whole suite with warnings denied
+        run: |
+          mkdir -p target/conformance-typecheck
+          CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata \
+            -D warnings --out-dir target/conformance-typecheck tests/conformance.rs
 
       # Everything installed here serves the test oracles and nothing else. bcc invokes no
       # external assembler, linker or compiler of its own: it preprocesses, analyses, generates
@@ -328,7 +315,18 @@ jobs:
               status=1
               continue
             fi
-            echo "$target: $driver — $("$driver" --version | head -n 1) — __STDC_VERSION__ ${version}L, GNU extensions enabled"
+            # Captured in full FIRST, then reduced to its first line by a reader that consumes all
+            # of its input, fed from a here-string rather than from a pipe. `--version | head -n 1`
+            # has `head` close the pipe after one line, which delivers SIGPIPE to the driver, and
+            # under `pipefail` that becomes the pipeline's status — so a driver which reported its
+            # version perfectly well could fail this step. `sed -n 1p` reads to end of input and
+            # never closes early, and a here-string is not a pipeline at all, so neither half of
+            # that failure mode exists here. Same rule as the previous step's `case` and this
+            # step's other two here-strings, which is why nothing in this workflow pipes into an
+            # early-exiting reader.
+            banner=$("$driver" --version 2> /dev/null || true)
+            banner=$(sed -n '1p' <<< "$banner")
+            echo "$target: $driver — $banner — __STDC_VERSION__ ${version}L, GNU extensions enabled"
           done
           for runner in qemu-i386 qemu-aarch64 qemu-riscv64; do
             if command -v "$runner" > /dev/null 2>&1; then
@@ -352,10 +350,13 @@ jobs:
       # fallback, and the reasoning is worth stating because the opposite shape is the tempting one:
       # this job exists to establish something about the compiler, so a run that finished without
       # establishing it must not report success. A green check that judged nothing is worse than a
-      # red one that says why, because the green one is what a reader trusts. The manifest-less
-      # subset of the checks has its own job above and earns its own green there, so nothing is lost
-      # by refusing to restate it here — and restating it here is precisely what would let this job
-      # pass while the matrix never ran.
+      # red one that says why, because the green one is what a reader trusts.
+      #
+      # The two manifest-less static gates ran BEFORE this step precisely so that they are
+      # established on any checkout and are unaffected by a failure here — which is why nothing is
+      # lost by refusing any fallback at this point. There is deliberately no `if:` guard and no
+      # alternative path below: either shape would let this job finish green while the matrix never
+      # ran, which is the one outcome this step exists to prevent.
       #
       # The suite adds no manifest and must never add one (C1 makes `Cargo.toml` read-only), so the
       # remedy is never a change to this workflow or to the suite: it is to run this job on a
@@ -388,8 +389,8 @@ jobs:
               echo
               echo "The manifest-less subset — \`rustfmt --check\` on the driver and every harness"
               echo "module, and a \`rustc --test\` type-check of the whole suite with warnings denied —"
-              echo "is established by the **Conformance suite static gates** job, which runs on every"
-              echo "checkout and is unaffected by this failure."
+              echo "ran in the steps **before** this one and is therefore already established for this"
+              echo "checkout, unaffected by this failure."
               echo
               echo "See **The Cargo integration precondition** in \`tests/conformance/README.md\`."
             } >> "$GITHUB_STEP_SUMMARY"

@@ -32,12 +32,26 @@ pie title Project Completion — 92.4%
 - ✅ **32,952 lines** of test code with **3,924 tests passing**, 0 failures — a **pre-suite
   baseline**: the figure counts the compiler package's own Rust unit and integration tests as they
   stood before the differential conformance suite, and it has not been recomputed across the merge
-- ✅ **Differential conformance suite** added on top of that baseline and counted separately under
-  its own inclusion rule — every file the suite ships, none of the compiler's: **99,131 lines** =
-  55,907 harness and driver Rust + 19,862 across 108 C programs + 15,916 across 108 expectation
-  records + 5,999 of contract and registers + 1,447 of maintenance script and fixture header. Its
-  **18 integration tests are defined**; no package-complete `bcc` run is admitted as evidence on
-  this branch, so no pass count is claimed for them
+- ✅ **Differential conformance suite** added on top of that baseline and counted separately, across
+  **241 files** and **113,561 lines**. Its **18 integration tests are defined**; no package-complete
+  `bcc` run is admitted as evidence on this branch, so no pass count is claimed for them.
+  - **The inclusion rule, stated once and applied without exception:** every file the suite ships or
+    changes, and nothing of the compiler's. That is the **235 files under `tests/`** plus **6 outside
+    it** — one the suite adds, `docs/testing/differential-conformance.md`, and five it edits
+    additively: `.github/workflows/ci.yml`, `.gitignore`, `README.md`, `mkdocs.yml` and this guide.
+    The **line** total covers the suite's own material only, which is the six components below — the
+    235 files under `tests/` and that one added documentation page. The **five additively edited
+    files are counted in the file total and not in the line total**, because a line count of a file
+    the suite shares with the rest of the project would not be a figure about the suite.
+  - **The components:** 63,617 driver and harness Rust (`tests/conformance.rs` plus 12 modules) +
+    19,896 across 108 C programs + 16,104 across 108 expectation records + 6,777 of suite contract
+    and the two registers + 5,447 of maintenance script and fixture header + 1,720 of methodology
+    page. `tests/conformance/findings/.gitkeep` contributes 0 lines and is the 241st file; the file
+    accounting is reconciled against the plan's own 240-file arithmetic under *The file count,
+    reconciled against the plan's own arithmetic* in `tests/conformance/README.md`.
+  - **A measurement, not an invariant.** Every figure above is re-derivable from the tree, and any
+    later edit to a suite file moves it. Re-derive rather than trust, with the six commands below —
+    one per component, in the order the components are listed.
 - ✅ **Zero compilation errors**, zero warnings, clippy clean, rustfmt clean
 - ✅ **Four architecture backends** (x86-64, i686, AArch64, RISC-V 64) with runtime-verified correctness via QEMU
 - ✅ **Complete C11 frontend** with GCC extensions: preprocessor, lexer, recursive-descent parser
@@ -50,6 +64,18 @@ pie title Project Completion — 92.4%
 - ✅ **GCC-compatible CLI** with 14+ flags including `--target` and `--sysroot`
 - ✅ **SQLite benchmark**: 0.43s compile time (threshold: <60s), 180MB RSS (threshold: <2GB)
 - ✅ **CI/CD pipelines** with cross-architecture testing
+
+Re-deriving the differential conformance suite's line components:
+
+```bash
+cat tests/conformance.rs tests/conformance_harness/*.rs                  | wc -l   # 63,617
+cat $(find tests/conformance -name '*.c'        | sort)                   | wc -l   # 19,896
+cat $(find tests/conformance -name '*.expected' | sort)                   | wc -l   # 16,104
+cat tests/conformance/{README.md,EXPECTED_DIVERGENCES.md,FINDINGS.md}     | wc -l   #  6,777
+cat tests/conformance/tools/regenerate_expected.sh \
+    tests/conformance/support/include/probe_header.h                      | wc -l   #  5,447
+wc -l < docs/testing/differential-conformance.md                                    #  1,720
+```
 
 ### 1.4 Critical Unresolved Issues
 

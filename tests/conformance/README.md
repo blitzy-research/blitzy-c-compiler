@@ -1102,10 +1102,14 @@ program, and `_Noreturn void exit(int);` as well in `10_declarations_and_types/0
 The reason is not obvious, so it is worth stating plainly. `bcc` bundles only nine freestanding
 headers — `stddef.h`, `stdint.h`, `stdarg.h`, `stdbool.h`, `limits.h`, `float.h`, `stdalign.h`,
 `stdnoreturn.h`, `iso646.h` (plus a bonus `stdatomic.h`) — and ships **no `stdio.h`**. See
-`docs/technical-specifications.md` line 19 and lines 202–214; a grep for "stdio" across `docs/`
-returns **zero** matches. An `#include <stdio.h>` would therefore **fail against `bcc` while
-succeeding against the reference compiler** — a spurious divergence caused by the test, not the
-compiler.
+`docs/technical-specifications.md` line 19 and lines 202–214; a grep for "stdio" across the two
+authoritative implementation documents — `docs/project-guide.md` and
+`docs/technical-specifications.md` — returns **zero** matches. Scoped to those two deliberately, and
+for the same reason [`EXPECTED_DIVERGENCES.md`](EXPECTED_DIVERGENCES.md) §4.3 scopes its own
+searches: the term does appear elsewhere under `docs/`, in this suite's methodology page
+`docs/testing/differential-conformance.md`, which states this very conclusion and therefore cannot
+be evidence for it. An `#include <stdio.h>` would therefore **fail against `bcc` while succeeding
+against the reference compiler** — a spurious divergence caused by the test, not the compiler.
 
 Independent corroboration: published output-comparison experience identifies a missing `printf`
 prototype or header as the **most common** portability problem in this class of suite.
@@ -3010,6 +3014,46 @@ One thing beneath `findings/` is not yet present, and it is named as plain text 
 under [the layout tree](#corpus-discovery):
 
 - every curated finding directory beneath `findings/`, none having been curated yet.
+
+### The file count, reconciled against the plan's own arithmetic
+
+The committed suite and the project metadata it touches come to **241 files**. The project plan's
+exhaustive file map enumerates **240** — 235 created plus 5 updated — and the difference is exactly
+one file: [`findings/.gitkeep`](findings/.gitkeep).
+
+It is recorded here rather than left to be rediscovered, because the plan's numeric total and the
+tree's are not the same number and presenting either as matching the other would be wrong. The
+reconciliation:
+
+| | Count |
+| --- | ---: |
+| Created by the plan's map (harness 13, corpus 216, registers and contract 3, fixture 1, tool 1, methodology page 1) | 235 |
+| Updated by the plan's map (`.github/workflows/ci.yml`, `mkdocs.yml`, `README.md`, `docs/project-guide.md`, `.gitignore`) | 5 |
+| **The plan's arithmetic** | **240** |
+| `tests/conformance/findings/.gitkeep` | 1 |
+| **Files actually committed** | **241** |
+
+`.gitkeep` is **in scope and not an extra**: the plan puts all of `tests/conformance/findings/**/*`
+in scope by glob, and this file is inside that glob. What it is missing from is the plan's *numbered*
+enumeration, which lists the 216 corpus files and the six registers, fixture and tool files
+individually and does not name it. That is an omission in the arithmetic, not a file outside the
+boundary.
+
+It is also **load-bearing rather than decorative**, which is why the answer is to reconcile the
+count and not to delete the file. Four committed things depend on it:
+
+- Git tracks no empty directory, so without it `findings/` would not exist in a fresh clone, and the
+  first curated finding would have no tracked home to land in.
+- `conformance_harness/manifest.rs` whitelists it by name in `AREA_PLACEHOLDER_NAMES`, so corpus
+  discovery ignores it instead of faulting on an unpaired file.
+- [`tools/regenerate_expected.sh`](tools/regenerate_expected.sh) whitelists it by name in
+  `CF_KEPT_DOT_ENTRY`, and refuses *any other* dot-prefixed entry as a hard error rather than
+  skipping it.
+- This contract, [`FINDINGS.md`](FINDINGS.md) and the methodology page each describe the directory as
+  holding only this file, which is the accurate statement that nothing has been curated.
+
+Removing it would therefore break a fresh clone's layout and falsify four documented statements, to
+save a zero-byte file that is already inside the plan's scope glob.
 
 **Transient and git-ignored — elsewhere entirely, beneath the build directory:**
 

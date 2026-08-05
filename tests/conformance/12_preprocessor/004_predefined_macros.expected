@@ -84,9 +84,13 @@ allocated, so a cell is reproducible from this source and this record alone and 
 outside its own workspace.
 
 NO HEADER IS INCLUDED, and that is why `printf` is declared by hand. bcc bundles only freestanding
-headers and ships no hosted standard input/output header -- a search of `docs/` for `stdio` returns
-no match -- so naming one would fail on the bcc side of oracle (a) while succeeding on the reference
-side: a spurious divergence caused by the test rather than by a compiler.
+headers and ships no hosted standard input/output header -- a search of the two authoritative
+implementation documents, `docs/project-guide.md` and `docs/technical-specifications.md`, for `stdio`
+returns no match, the claim being scoped to those two because the term does appear elsewhere under
+`docs/`, in this suite's own methodology page `docs/testing/differential-conformance.md`, which
+states this conclusion and therefore cannot be evidence for it. So naming a hosted header would fail
+on the bcc side of oracle (a) while succeeding on the reference side: a spurious divergence caused by
+the test rather than by a compiler.
 
 GATE. The default warning gate applies unmodified and no `ub_audit_flags` key appears, because none
 is needed: -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. The program is
@@ -156,11 +160,16 @@ what each compiler is, and a maintainer curious about a compiler's predefined-ma
 directly with that compiler's own dump-macros switch, which is a capability question rather than a
 conformance one.
 
-THE DOCUMENTATION GAP, AND WHY IT DECIDES THE DESIGN. The repository documentation nowhere enumerates
-the macros any compiler predefines. A search across `docs/` for `predefined`, `__STDC`, `__x86_64__`,
-`__i386__`, `__aarch64__`, `__riscv`, `__GNUC` and `__STDC_HOSTED` returns no match for any of the
-eight spellings, in any of the three documents the directory contains. There is consequently no
-documented authority stating which predefined macros bcc defines or what values they take. That is
+THE DOCUMENTATION GAP, AND WHY IT DECIDES THE DESIGN. The repository's implementation documentation
+nowhere enumerates the macros any compiler predefines. A search of the two authoritative
+implementation documents, `docs/project-guide.md` and `docs/technical-specifications.md`, for
+`predefined`, `__STDC`, `__x86_64__`, `__i386__`, `__aarch64__`, `__riscv`, `__GNUC` and
+`__STDC_HOSTED` returns no match for any of the eight spellings in either file. The claim is scoped
+to those two rather than to `docs/` as a whole, and the reason is the same one the divergence register
+gives for its own scoped searches: two of the eight spellings do occur elsewhere under `docs/`, in
+this suite's own methodology page `docs/testing/differential-conformance.md`, which discusses this
+very design decision and therefore cannot be evidence for it. There is consequently no documented
+authority stating which predefined macros bcc defines or what values they take. That is
 the direct reason this program asserts relations rather than literals, and it is the same reason the
 presence assertion was withdrawn above: a relation is asserted here only where every correct compiler
 must satisfy it. The gap has one further consequence. An expected-divergence marker requires a

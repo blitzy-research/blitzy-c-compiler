@@ -1175,8 +1175,13 @@ cross-backend divergence caused by the test rather than by the compiler.
 ### 5.3 The underlying type of the wide and Unicode character types
 
 The signedness and width of `wchar_t`, `char16_t` and `char32_t` are **implementation-defined**, and
-this repository fixes them for no supported target: recursive, case-insensitive searches of `docs/`
-for `wchar`, `char16`, `char32` and `unicode` return **zero** matches. No per-target table is given
+this repository fixes them for no supported target: recursive, case-insensitive searches of the two
+authoritative implementation documents — `docs/project-guide.md` and
+`docs/technical-specifications.md` — for `wchar`, `char16`, `char32` and `unicode` return **zero**
+matches in either file. Scoped to those two exactly as §4.3 scopes its own searches, and for the same
+reason: two of those four terms do occur elsewhere under `docs/`, in this suite's own methodology page
+`docs/testing/differential-conformance.md`, which discusses this very question and so cannot be
+evidence for its own conclusion. No per-target table is given
 here for exactly that reason. One measured on this machine would describe the reference toolchain
 installed today rather than any contract `bcc` documents, and citing it would make the corpus depend
 on a property no repository artifact settles — which is a stronger argument for removing the

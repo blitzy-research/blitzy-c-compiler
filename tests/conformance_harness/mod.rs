@@ -7085,14 +7085,45 @@ fn is_path_value(value: &str) -> bool {
 /// which is what the reporting module's determinism claim rests on.
 ///
 /// Ordered by **descending value length**, then by name, because the replacements are applied in
-/// sequence and [`std::env::vars`] yields no defined order. Where one secret's value is a prefix of
-/// another's, replacing the shorter first would leave the tail of the longer one exposed —
+/// sequence and [`std::env::vars_os`] yields no defined order. Where one secret's value is a prefix
+/// of another's, replacing the shorter first would leave the tail of the longer one exposed —
 /// `abc` redacted before `abcdef` yields `[redacted]def`. Longest-first cannot do that, and fixing
 /// the order also makes the output a function of the environment rather than of iteration order.
+///
+/// # Why [`std::env::vars_os`] and not [`std::env::vars`]
+///
+/// `vars` **panics** when any entry of the process environment is not valid Unicode, and on Unix an
+/// environment entry is an arbitrary byte string that need not be. This function is on the path to
+/// every report row, every printed line and every finding's environment fingerprint, so a panic here
+/// would abort the run before a single outcome could be reported — and it would do so on input the
+/// suite does not control, since the environment is whatever the invoking process handed down. A
+/// redactor that dies on malformed input is worse than one that redacts a little conservatively: the
+/// former loses the whole report, the latter loses nothing.
+///
+/// So the walk is over the OS strings and every conversion failure is handled rather than propagated,
+/// in the direction that keeps redacting:
+///
+/// - A NAME that is not valid Unicode is converted lossily and still tested against the markers, so a
+///   credential-bearing name with one malformed byte is still recognised as one. It cannot be matched
+///   exactly against report text anyway, and the value is what the bare rule actually replaces.
+/// - A VALUE that is not valid Unicode is converted lossily too, and the lossy form is what is
+///   redacted. This is deliberately conservative in the safe direction: the replacement may fail to
+///   match text that carried the original bytes, but it can never *reveal* anything, and the
+///   `NAME=value` rule still elides the association. Skipping such an entry instead would be the one
+///   choice that loses protection, so it is not made.
+///
+/// Lossy conversion is idempotent for the ordinary case — an entry that is already valid Unicode is
+/// returned unchanged — so every environment without a malformed entry is redacted exactly as before.
 fn secret_variables() -> &'static [(String, String)] {
     static SECRETS: OnceLock<Vec<(String, String)>> = OnceLock::new();
     SECRETS.get_or_init(|| {
-        let mut found: Vec<(String, String)> = std::env::vars()
+        let mut found: Vec<(String, String)> = std::env::vars_os()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
             .filter(|(name, value)| !value.is_empty() && secret_bearing_variable(name))
             .collect();
         found.sort_by(|left, right| {

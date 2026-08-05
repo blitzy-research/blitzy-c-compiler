@@ -4793,16 +4793,28 @@ cf_pin_staging() {
 	return 0
 }
 
-# Create a staging directory inside the pinned directory $1 and copy the record $2
-# into it as CF_STAGING_LEAF. Prints the staging directory's name RELATIVE to $1, so
-# the caller can neither be handed nor act on an absolute path built elsewhere.
+# Create a staging directory inside the pinned directory $1 and seed it with $2 as
+# CF_STAGING_LEAF. Prints the staging directory's name RELATIVE to $1, so the caller
+# can neither be handed nor act on an absolute path built elsewhere.
+#
+# $2 is the caller's already-read SNAPSHOT of the record, not the corpus entry's
+# name. The seed exists only to give the staging file the record's own permissions --
+# the rewriter truncates and replaces its content immediately afterwards -- and
+# taking it from the snapshot means the corpus record is read exactly once per
+# record, so the mode that ends up published cannot come from an entry substituted
+# after the record was validated.
 cf_stage_beside() {
-	# $1 = pinned physical directory, $2 = record base name
+	# $1 = pinned physical directory, $2 = path of the snapshot to seed from
+	cf_sb_seed=$2
 	(
 		CDPATH='' cd -P -- "$1" || exit 1
 		cf_sb_dir=$(mktemp -d -- './.regen.XXXXXX' 2> /dev/null) || exit 1
 		cf_sb_dir=${cf_sb_dir#./}
-		cp -p -- "$2" "$cf_sb_dir/$CF_STAGING_LEAF" || {
+		# The seed is named absolutely and is resolved after the `cd`, which is why it
+		# is read into a variable first: `$CF_WORK` is a `/proc/$$/fd` handle path and
+		# `$$` is the invoking shell's identifier in this subshell too, so the handle
+		# still designates the private working directory here.
+		cp -p -- "$cf_sb_seed" "$cf_sb_dir/$CF_STAGING_LEAF" || {
 			rm -rf -- "$cf_sb_dir"
 			exit 1
 		}
@@ -5001,6 +5013,59 @@ cf_process_record() {
 		cf_error "$cf_rec_label: the record is not a regular file (a symbolic link is refused)"
 		exit "$CF_EXIT_RECORD"
 	fi
+
+	# --- ONE READ OF THE CORPUS RECORD, AND ONE ONLY --------------------------
+	# Taken here, immediately after the leaf has been checked and while the
+	# directory is pinned, into the private working area -- which is itself an
+	# fd-backed handle this run created and validated as private. Everything that
+	# reads the OLD record from this point on reads this snapshot: the validator,
+	# the staging seed that carries the record's mode, the rewriter that copies
+	# every line outside expected_stdout through, and the comparison that decides
+	# whether anything changed. The corpus entry itself is read exactly once, by
+	# the `cp` below.
+	#
+	# WHY, PRECISELY. The predecessor validated `cf_rec_phys` and then re-opened
+	# the record for the rewrite -- and re-opened it under the name the record
+	# ARRIVED under rather than through the pinned directory. That is two reads of
+	# one name at two moments, and they return the same bytes only while nothing
+	# replaces the entry in between. A substitution in that window produced a
+	# candidate whose non-golden lines came from a DIFFERENT file while the
+	# installation still targeted the pinned corpus entry, so a record could be
+	# rewritten to carry another file's targets, oracle switches, marker or command
+	# templates -- and every message in the run would still have displayed the
+	# corpus path. The file being written is the one the whole suite treats as the
+	# definition of correct output, so a second read of it is not a detail.
+	#
+	# A snapshot rather than merely a pinned path, because pinning the DIRECTORY
+	# closes the ancestor window and not the leaf one: the entry inside the pinned
+	# directory can still be replaced between two reads. `cp` opens the source
+	# once, so these bytes are one inode's contents and cannot be a splice of two.
+	#
+	# `-p` because the staging seed derives the published record's mode from this
+	# file, so the snapshot has to carry the record's own permissions rather than
+	# whatever this run's umask would produce.
+	#
+	# What deliberately does NOT move to the snapshot: the installing rename and
+	# the verification that follows it. Those must act on the corpus, through the
+	# pinned directory, because their whole purpose is to change and then re-read
+	# what is actually on disk.
+	cf_rec_snapshot="$CF_WORK/record.snapshot"
+	rm -f -- "$cf_rec_snapshot"
+	if ! cp -p -- "$cf_rec_phys" "$cf_rec_snapshot"; then
+		cf_error "$cf_rec_label: the record could not be read into a snapshot"
+		cf_detail "named:    $cf_rec"
+		cf_detail "resolved: $cf_rec_phys"
+		cf_detail 'the record is read exactly once, and every later decision is made from that'
+		cf_detail 'one snapshot, so a failure here is refused rather than retried by re-reading'
+		exit "$CF_EXIT_ENVIRONMENT"
+	fi
+	if [ ! -f "$cf_rec_snapshot" ] || [ -L "$cf_rec_snapshot" ]; then
+		cf_error "$cf_rec_label: the record snapshot is not a regular file"
+		cf_detail 'the private working area is this run''s own fd-backed handle, so this cannot'
+		cf_detail 'happen without the working area having been tampered with mid-run'
+		exit "$CF_EXIT_ENVIRONMENT"
+	fi
+
 	if [ ! -f "$cf_rec_src" ] || [ -L "$cf_rec_src" ]; then
 		cf_error "$cf_rec_label: no sibling program \"$cf_rec_stem.c\" beside the record"
 		cf_detail 'the corpus pairs every record 1:1 with the program it describes; a record'
@@ -5015,7 +5080,11 @@ cf_process_record() {
 	# switches, the shared-flag set and the three command templates. It stores
 	# every value the rest of this function needs, so there is exactly ONE reader
 	# of the record format here and no second one to disagree with it.
-	cf_validate_record "$cf_rec_phys" "$cf_rec_label" "$cf_rec_stem" "$cf_rec_area"
+	#
+	# Read from the SNAPSHOT, so that what is validated and what is rewritten are
+	# the same bytes rather than two reads that happen to agree. Every diagnostic
+	# it prints is keyed on the label, so nothing about the message changes.
+	cf_validate_record "$cf_rec_snapshot" "$cf_rec_label" "$cf_rec_stem" "$cf_rec_area"
 
 	# --- What the program itself reaches for, before it is compiled ------------
 	# The record has been validated; this validates the other half of the pair. A
@@ -5141,10 +5210,16 @@ cf_process_record() {
 	if [ "$CF_CHECK" -eq 1 ]; then
 		# --check writes nothing at all inside the corpus, not even a staging
 		# file: the candidate is built in the private working area instead.
+		#
+		# Seeded from the snapshot rather than from the corpus entry. The seed
+		# exists to give the candidate the record's own mode -- the rewriter
+		# truncates and replaces its content immediately -- and re-reading the
+		# corpus for it would be one more read of a mutable leaf for a property
+		# the snapshot already carries.
 		cf_rec_staging="$CF_WORK/candidate.expected"
 		rm -f -- "$cf_rec_staging"
 		CF_STAGING=$cf_rec_staging
-		if ! cp -p -- "$cf_rec_phys" "$cf_rec_staging"; then
+		if ! cp -p -- "$cf_rec_snapshot" "$cf_rec_staging"; then
 			cf_error "$cf_rec_label: cannot stage a candidate in the working area"
 			exit "$CF_EXIT_ENVIRONMENT"
 		fi
@@ -5178,10 +5253,14 @@ cf_process_record() {
 		#     lands in is the directory that was verified and not a second
 		#     resolution of the same name taken later.
 		#
-		# The permissions still come from the record itself, by copying it in as the
-		# staging file's first content, so the private umask cannot leak into the
-		# corpus and a regenerated record keeps the mode it had.
-		if ! cf_rec_staging_rel=$(cf_stage_beside "$cf_rec_phys_dir" "$cf_rec_base"); then
+		# The permissions still come from the record itself, by copying the SNAPSHOT
+		# in as the staging file's first content, so the private umask cannot leak
+		# into the corpus and a regenerated record keeps the mode it had. From the
+		# snapshot rather than from the corpus entry because the snapshot already
+		# carries that mode, and re-reading the entry for it would be a second read of
+		# a mutable leaf -- one that could substitute the mode the published record
+		# ends up with.
+		if ! cf_rec_staging_rel=$(cf_stage_beside "$cf_rec_phys_dir" "$cf_rec_snapshot"); then
 			cf_error "$cf_rec_label: cannot stage the record beside it"
 			cf_detail "in: $cf_rec_phys_dir"
 			cf_detail 'the corpus directory must be writable to regenerate a record; use --check'
@@ -5198,7 +5277,10 @@ cf_process_record() {
 		cf_rec_staging="$CF_STAGING_HANDLE/$CF_STAGING_LEAF"
 	fi
 
-	if cf_rewrite_record "$cf_rec" "$cf_rec_golden" "$cf_rec_staging" "$cf_rec_bodylines"; then
+	# The OLD record comes from the snapshot, never from a name that could have been
+	# replaced since it was validated. The name the record arrived under is used
+	# from here on for messages only.
+	if cf_rewrite_record "$cf_rec_snapshot" "$cf_rec_golden" "$cf_rec_staging" "$cf_rec_bodylines"; then
 		cf_rec_rc=0
 	else
 		cf_rec_rc=$?
@@ -5215,7 +5297,12 @@ cf_process_record() {
 
 	# --- Install, or report ---------------------------------------------------
 	CF_PROCESSED=$((CF_PROCESSED + 1))
-	if cmp -s -- "$cf_rec_phys" "$cf_rec_staging"; then
+	# Compared against the snapshot, which is the record this candidate was built
+	# from. Comparing against the corpus entry instead would ask a different
+	# question -- whether the candidate matches whatever is there NOW -- and would
+	# answer "unchanged" for a record that had been replaced since it was read,
+	# leaving the substituted bytes in place and reporting agreement.
+	if cmp -s -- "$cf_rec_snapshot" "$cf_rec_staging"; then
 		cf_release_staging
 		cf_note "$cf_rec_label: $cf_rec_cells cell(s) agree; unchanged"
 		return 0

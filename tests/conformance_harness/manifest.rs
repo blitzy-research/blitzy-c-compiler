@@ -303,24 +303,26 @@ const RECORD_BYTES_MAX: u64 = 256 * 1024;
 /// **not** the enforced limit — [`RECORD_BYTES_MAX`] is — so a corpus that legitimately grows past
 /// this figure is a one-line edit here, not a defect.
 ///
-/// The headroom this figure leaves against the compile-time assertion below is now the smallest of
-/// the three, at a few hundred bytes of `RECORD_BYTES_MAX / RECORD_HEADROOM_DIVISOR`. That is
-/// deliberate rather than overlooked: the next substantial addition to this record's notes will
-/// fail the build instead of silently eroding the headroom the comment on [`RECORD_BYTES_MAX`]
-/// claims, and the correct response then is to raise the bound and the divisor together, as a
-/// decision about the format rather than an accident of one record's prose.
-const RECORD_BYTES_OBSERVED_MAX: u64 = 32_265;
+/// The headroom this figure leaves against the compile-time assertion below is by far the smallest
+/// of the three, at **239 bytes** of `RECORD_BYTES_MAX / RECORD_HEADROOM_DIVISOR` — 32,529 against
+/// 32,768. That is deliberate rather than overlooked: the next substantial addition to this record's
+/// notes will fail the build instead of silently eroding the headroom the comment on
+/// [`RECORD_BYTES_MAX`] claims, and the correct response then is to raise the bound and the divisor
+/// together, as a decision about the format rather than an accident of one record's prose. Raising
+/// only this figure would not be that decision, because this figure is documentation and the bound is
+/// what the parser enforces.
+const RECORD_BYTES_OBSERVED_MAX: u64 = 32_529;
 
 /// Largest single heredoc field observed in the committed corpus, in bytes, and its line count.
 ///
-/// An `impl_defined_notes` block of 20,093 bytes over 221 lines, in the same record as
+/// An `impl_defined_notes` block of 20,357 bytes over 223 lines, in the same record as
 /// [`RECORD_BYTES_OBSERVED_MAX`]. Notes are the field that grows, because a note is where a program
 /// records why a comparison is sound — which is why this figure, and not the golden's, is the one
 /// that went stale first.
-const FIELD_BYTES_OBSERVED_MAX: usize = 20_093;
+const FIELD_BYTES_OBSERVED_MAX: usize = 20_357;
 
 /// Lines in the largest observed heredoc field, stated beside its byte count.
-const FIELD_LINES_OBSERVED_MAX: usize = 221;
+const FIELD_LINES_OBSERVED_MAX: usize = 223;
 
 /// Largest golden stdout observed in the committed corpus, in bytes, and its line count.
 ///

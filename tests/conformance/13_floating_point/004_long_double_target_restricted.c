@@ -5,9 +5,17 @@
    `oracle_a` and `oracle_c` are enabled, `oracle_b` alone is disabled with its measured reason
    recorded, and a single golden stdout - byte-identical across all twelve cells - is what
    oracle (c) holds every cell to.  The record also carries the active expected-divergence
-   marker XD-TYPE-LONGDOUBLE-001, class stdout_mismatch, scoped to oracle_b across all targets
-   and all optimization levels, which is what keeps the one disabled arm auditable in
-   EXPECTED_DIVERGENCES.md rather than silent.
+   marker XD-TYPE-LONGDOUBLE-001, class comparison_excluded, scoped to oracle_b across all
+   targets and all optimization levels, which is what keeps the one disabled arm auditable in
+   EXPECTED_DIVERGENCES.md rather than silent.  `comparison_excluded` is the one class that
+   names NO observation, and it is the class this marker must carry: NO CROSS-BACKEND VALUE
+   COMPARISON IS ATTEMPTED for this program, so a class describing a comparison result -- a
+   stdout mismatch, say -- would assert in the one field a report row quotes that two completed
+   runs had disagreed on bytes, when nothing ran at all.  The record parser now holds both
+   directions of that rule: an observational class is refused on an arm the record disables, and
+   `comparison_excluded` is refused on an arm that is compared, so the class and the oracle
+   toggle cannot drift apart.  It also means this marker can never reach XPASS, because nothing
+   is compared on the arm it scopes and no divergence can therefore disappear from it.
 
    WHY THIS PROGRAM EXISTS.  Constraint C3 of the suite's brief forbids dropping a language
    feature because testing it is difficult, and requires that where a feature genuinely cannot

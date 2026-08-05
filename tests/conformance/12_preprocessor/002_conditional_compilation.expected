@@ -69,11 +69,14 @@ keeps each call a single well-formed expression. printf is hand-declared with a 
 matching its use and every %d receives an int.
 
 No header is included, and printf is hand-declared for that reason. bcc bundles only the
-required freestanding headers and ships no <stdio.h> -- a search for "stdio" across docs/
-returns no match -- so an #include <stdio.h> would succeed under the reference compiler and
-fail under bcc, a spurious divergence caused by the test rather than by the compiler. The one
-sanctioned header exception in this area is program 003, the dedicated bundled-header probe,
-and this is not it.
+required freestanding headers and ships no <stdio.h> -- a search for "stdio" across the two
+authoritative implementation documents, docs/project-guide.md and docs/technical-specifications.md,
+returns no match. The claim is scoped to those two on purpose: the term does appear elsewhere
+under docs/, in this suite's own methodology page docs/testing/differential-conformance.md,
+which states this very conclusion and so cannot be evidence for it. So an #include <stdio.h>
+would succeed under the reference compiler and fail under bcc, a spurious divergence caused by
+the test rather than by the compiler. The one sanctioned header exception in this area is program
+003, the dedicated bundled-header probe, and this is not it.
 
 Determinism. Output is a fixed seven-line sequence, one line per preprocessing property
 claimed, so a single divergent line localizes the defect to one construct. Only int values are

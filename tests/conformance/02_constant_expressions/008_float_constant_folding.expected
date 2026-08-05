@@ -157,12 +157,15 @@ binary128 -- so it is the one floating type whose value-level cross-backend comp
 sound, and a printed value of that type could not be compared across backends at all. That
 comparison is owned by 13_floating_point/004_long_double_target_restricted.c, which carries a
 RECORDED EXCLUSION for it -- oracle_b disabled, with the measured representations as its recorded
-reason -- together with the marker XD-TYPE-LONGDOUBLE-001, class stdout_mismatch, scope oracle_b,
-which the format REQUIRES beside such a narrowing: a disabled oracle is reported XFAIL, which claims
-the authority of a documented limitation, so the marker is what carries that claim while the recorded
-reason explains it. It excuses the cross-backend arm alone, and a same-target disagreement there is
-still a FINDING -- so nothing is lost by keeping the type out of a program whose subject is the
-constant folder. No
+reason -- together with the marker XD-TYPE-LONGDOUBLE-001, class comparison_excluded, scope oracle_b,
+which the format REQUIRES beside such a narrowing: a disabled oracle is reported XFAIL,
+which claims the authority of a documented limitation, so the marker is what carries that claim
+while the recorded reason explains it. That class is the one value naming no observation, and it is
+the value that arm requires, because no cross-backend value comparison is attempted for that program
+-- the record switches the arm off, so a class describing a comparison result would assert a
+disagreement nothing measured. It excuses the cross-backend arm alone, and a same-target
+disagreement there is still a FINDING -- so nothing is lost by keeping the type out of a program
+whose subject is the constant folder. No
 feature is dropped here for being awkward: the type is tested where its awkwardness can be
 accounted for, and this paragraph is the explicit statement of why it is absent from this
 program. Also deliberately elsewhere, so this program does not duplicate them: general float

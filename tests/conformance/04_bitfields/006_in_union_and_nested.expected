@@ -45,9 +45,38 @@ initializer and the rest are zero-initialized, and in every case each member is 
 it is read.  No object is modified twice between sequence points.  No pointer value, address,
 timestamp, random value or locale-dependent format is printed.
 
-Every property is computed twice, once from literal constants and once from volatile-qualified
-storage, so the constant folder's answer cannot stand in for the one the backend computes at run
-time.
+The two-variant rule is applied to the properties this program OWNS, and this paragraph states
+exactly which those are rather than claiming the whole output twice.  Each of the four aggregates
+this program exists to test is read back a second time from volatile-qualified storage, so the
+constant folder's answer cannot stand in for the one the backend computes at run time for any of
+them: the three-view union (volatile_views_packed, volatile_views_halves), the nested struct of
+sub-structs and arrays of sub-structs (volatile_outer, which mirrors outer_head, outer_r,
+outer_tail0, outer_tail1 and outer_s in one line), and the struct holding a union whose body is
+either a flat field or a pair sub-struct (volatile_tagged_flat, volatile_tagged_pair).  That is the
+whole of what "bitfields in unions and in nested aggregates" means, which is this program's subject.
+
+Five of the printed lines are NOT mirrored, and none of the five could be.  size_views,
+size_onebit, size_inner, size_outer and size_tagged, with their alignments, are sizeof and
+_Alignof: constant expressions by definition, with no run-time form for a backend to compute
+differently.  Reading them through volatile storage would not produce a runtime variant of them,
+because the operand of sizeof is not evaluated.
+
+The remaining unmirrored lines are deliberately left to the programs that own them, so the area
+covers each property in both variants without every program duplicating every other.
+views_packed_after_c and views_halves_after_lo (truncation when an over-wide constant is assigned
+through a union view), views_whole (the whole storage unit read through the union's covering
+member) and tagged_flat_max (a flat union body at its maximum) are folded-only here;
+002_read_write.c carries the folded and volatile read/write pair, and 001_layout_and_size.c carries
+volatile_packed3_readback, volatile_oneword_readback, volatile_oneword_image,
+volatile_covered32_readback and volatile_covered32_image beside their folded twins.  The four
+onebit_* lines -- the two members of a union of one 5-bit unsigned and one 5-bit signed field, read
+at u5's maximum 31 and a mid value 17 and at s5's minimum -16 and maximum 15 -- are folded-only here
+because 004_signed_unsigned.c mirrors exactly those values in full, printing folded_smin s5=-16,
+folded_smax s5=15 and folded_umax u5=31 against runtime_smin, runtime_smax and runtime_umax over
+field widths from 1 to 32.  And
+outer_modified, the re-read after a second round of stores, is folded-only because
+003_compound_assignment.c is the program whose subject is modification, and it carries its own
+volatile mirror.
 
 No header is included and printf is declared by hand, so nothing here depends on a
 standard-library header bcc does not ship.

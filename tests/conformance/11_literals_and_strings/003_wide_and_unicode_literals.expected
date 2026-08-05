@@ -46,7 +46,11 @@ than by a divergence marker:
 
 1. The wide character type's signedness and width are implementation-defined, and
    this repository fixes them for no supported target: recursive, case-insensitive
-   searches of docs/ for wchar, char16, char32 and unicode return zero matches. No
+   searches of the two authoritative implementation documents, docs/project-guide.md
+   and docs/technical-specifications.md, for wchar, char16, char32 and unicode return
+   zero matches in either file. Scoped to those two, because two of the four terms do
+   occur elsewhere under docs/, in this suite's own methodology page, which cannot be
+   evidence for a conclusion it states. No
    per-target table is given here, and that omission is deliberate. One measured on
    this machine would describe the reference toolchain installed today rather than
    any contract bcc documents, and citing it would make this program depend on a
@@ -127,8 +131,14 @@ literal prefixes is not enumerated in the documented literal inventory.
 docs/technical-specifications.md line 99 and line 498 list numeric and string or
 character literal parsing with escape sequences and the u, l, ll and f suffixes, but
 none of the four prefixes; line 497's 44-keyword C11 list contains neither the
-16-bit nor the 32-bit character type name; and recursive searches of docs/ for
-unicode, char16, char32 and wchar return no matches.
+16-bit nor the 32-bit character type name; and recursive, case-insensitive searches
+of the two authoritative implementation documents -- docs/project-guide.md and
+docs/technical-specifications.md -- for unicode, char16, char32 and wchar return zero
+matches in either file. As EXPECTED_DIVERGENCES.md says of the same searches, the
+claim is scoped to those two on purpose: two of those four terms do appear elsewhere
+under docs/, in this suite's own methodology page
+docs/testing/differential-conformance.md, which discusses this very question and so
+cannot be evidence for its own conclusion.
 
 That is an INVENTORY OMISSION, and an inventory omission is not a documented
 limitation. No marker is attached, and none may be minted on this basis alone, for

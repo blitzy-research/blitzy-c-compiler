@@ -151,10 +151,13 @@ the suffix's type-selection behaviour is fully cross-comparable. The type is the
 here rather than dropped for being awkward, and cross-backend value comparison for it is owned by
 13_floating_point/004_long_double_target_restricted.c as a RECORDED EXCLUSION -- oracle_b
 disabled, with the measured representations as its recorded reason -- beside which that record
-carries the marker XD-TYPE-LONGDOUBLE-001, class stdout_mismatch, scope oracle_b. The marker is
+carries the marker XD-TYPE-LONGDOUBLE-001, class comparison_excluded, scope oracle_b. The marker is
 REQUIRED rather than optional there: a disabled oracle is reported XFAIL, which claims the authority
 of a documented limitation, so the format makes the marker carry that claim while the recorded reason
-explains it. It excuses the cross-backend arm alone; a same-target disagreement is still a FINDING.
+explains it. Its class is comparison_excluded, the one value that names no observation, because no
+cross-backend value comparison is attempted for that program at all -- the record switches that arm
+off, so an observational class would claim a byte disagreement nothing ran to find. It excuses the
+cross-backend arm alone; a same-target disagreement is still a FINDING.
 WIDTH NORMALIZATION IN THE OUTPUT ITSELF. Every printed value is an int printed with %d -- a
 _Generic result or a comparison result, cast where needed -- except the two long long products
 printed with %lld, and long long is 64 bits on all four targets. No plain long, no size_t, no

@@ -126,22 +126,35 @@
 //! self-contained in pure `std` for exactly this reason, so the suite is complete either way.
 //!
 //! Which case holds is not left to a reader's inspection of this comment. It is **checked
-//! mechanically** on every run by [`infra_oracle_capability_report`], which puts the helper module's
-//! state in its pre-flight output and enforces two things about it. If the file is present while this
-//! driver does not declare it, the run fails. And if it is declared while nothing reaches into it, the
-//! run also fails — because a declaration alone compiles the helper and reuses nothing, which would
-//! satisfy a presence check while leaving the harness's duplicate compile, run, assertion and
+//! mechanically** on every run by [`infra_oracle_capability_report`], from one read of the tree, and
+//! three things are enforced about what that read finds. If a named delegation site cannot be read,
+//! the run fails, because the search that decides the next two questions would otherwise be performed
+//! over an incomplete list and pass on an empty one. If the file is present while this driver does not
+//! declare it, the run fails. And if it is declared while nothing reaches into it, the run also fails
+//! — because a declaration alone compiles the helper and reuses nothing, which would satisfy a
+//! presence check while leaving the harness's duplicate compile, run, assertion and
 //! temporary-directory paths exactly where they were. Reuse, not presence, is what the convention
 //! asks for, so reuse is what is asserted.
 //!
-//! While the file is absent the pre-flight output states the integration as **outstanding** and names
-//! the remaining work in full, rather than reporting the situation as settled. It is not settled: the
-//! obligation is real and undischarged, and the reason it cannot be discharged here is that
-//! `tests/common/mod.rs` is an existing-system contract shared by every one of the repository's
-//! existing suites — authoring a stand-in for it would be a change to their shared dependency rather
-//! than an integration with it. Prose describing an integration cannot notice when it stops being
-//! true, and prose describing an open item cannot insist on itself; those assertions and that
-//! pre-flight line can.
+//! While the file is absent the pre-flight states the integration as **outstanding** and names the
+//! remaining work in full, rather than reporting the situation as settled. It is not settled: the
+//! obligation is real and undischarged. The reason it cannot be discharged here is not that it is
+//! awkward — it is that the project's action plan places `tests/common/**` outside the set of files
+//! this work may create or modify and records that module as read-only reference material, "read and
+//! reused, never edited", because it is the shared dependency of every one of the repository's
+//! existing integration suites and any change to it carries risk for tests this work is forbidden to
+//! disturb. Authoring a stand-in would therefore not discharge the obligation; it would breach the
+//! constraint the obligation is subject to, and hand the package-complete tree a second definition of
+//! a module that already has one. The deferral is the plan's, on that authority, and not this suite's
+//! discretion.
+//!
+//! That outstanding line is shown wherever this test's output is — on failure, and on any run made
+//! with `--nocapture`, including the documented pre-flight
+//! `cargo test --test conformance infra_oracle_capability_report -- --nocapture` that the
+//! continuous-integration job runs before the matrix. It is not claimed to appear in a plain
+//! `cargo test`, because the built-in harness captures a passing test's output and it would not.
+//! Nothing that matters rests on it being read, though: prose describing an integration cannot notice
+//! when it stops being true, and the three assertions above do not need to be read to fail a run.
 //!
 //! What the suite adds rather than delegates is the material no existing helper has: the three
 //! oracles, the expectation-record format, the six-verdict classification, the expected-divergence
@@ -1083,6 +1096,96 @@ fn delegates_to_shared_helper(source: &str) -> bool {
         .any(|line| line.contains(&needle))
 }
 
+/// Everything the tree says about this suite's integration with the shared helper module.
+///
+/// One value, produced by one read in [`read_shared_helper_integration`], because the assertions
+/// below and the sentences they print have to describe the same tree. Determining the state twice —
+/// once to decide and once to explain — is how a message ends up naming a condition the decision was
+/// not made on, which is precisely the class of defect this section exists to prevent elsewhere.
+struct SharedHelperIntegration {
+    /// Absolute path of `tests/common/mod.rs`, whether or not it exists.
+    module: PathBuf,
+    /// Absolute path of this driver's own source, which is where the declaration would be written.
+    driver: PathBuf,
+    /// Whether `tests/common/mod.rs` is a regular file in this checkout.
+    present: bool,
+    /// Whether this driver declares the module outside a comment.
+    declared: bool,
+    /// The files that reach into the shared module, as repository-relative paths.
+    delegating: Vec<String>,
+    /// Named delegation sites that could not be read, each with the reason.
+    ///
+    /// Carried rather than discarded. A site this check cannot read is a site it cannot clear, and
+    /// treating an unreadable one as "not delegating" would let the search set shrink without
+    /// anything saying so — a renamed harness module would quietly narrow the scan until the
+    /// delegation assertion had nothing left to look at and passed on an empty search.
+    unreadable: Vec<String>,
+}
+
+/// Read the tree once and report what it says about the shared-helper integration.
+///
+/// Reads this driver's own source rather than inspecting the compiled module tree: whether the
+/// declaration is present is a property of the text, and there is no run-time reflection that could
+/// answer it. Comment lines are discarded first so that a `mod common;` mentioned in prose — as it is
+/// in this file's own documentation — cannot satisfy the check.
+fn read_shared_helper_integration() -> SharedHelperIntegration {
+    let module = SHARED_HELPER_RELATIVE
+        .iter()
+        .fold(manifest_dir(), |path, part| path.join(part))
+        .join("mod.rs");
+    let driver = manifest_dir().join("tests").join("conformance.rs");
+    let source = fs::read_to_string(&driver).unwrap_or_else(|error| {
+        panic!(
+            "the driver source {} could not be read, so this suite cannot confirm whether it \
+             integrates with the repository's shared test helper: {error}",
+            driver.display()
+        )
+    });
+    let declared = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//"))
+        .any(|line| line == "mod common;" || line == "pub mod common;");
+
+    let mut delegating: Vec<String> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    if delegates_to_shared_helper(&source) {
+        delegating.push(String::from("tests/conformance.rs"));
+    }
+    for site in DELEGATION_SITES {
+        let path = manifest_dir()
+            .join("tests")
+            .join("conformance_harness")
+            .join(site);
+        match fs::read_to_string(&path) {
+            Ok(text) => {
+                if delegates_to_shared_helper(&text) {
+                    delegating.push(format!("tests/conformance_harness/{site}"));
+                }
+            }
+            Err(error) => unreadable.push(format!("tests/conformance_harness/{site} ({error})")),
+        }
+    }
+
+    // Determined before the value is assembled, because `is_file` is the question the presence
+    // branch turns on and asking it here keeps every field of this value derived from one pass over
+    // the tree. A symbolic link to a regular file is accepted: `mod common;` resolves through it and
+    // the compiler would compile what it points at, so refusing one here would report a state the
+    // build does not have.
+    let present = fs::metadata(&module)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false);
+
+    SharedHelperIntegration {
+        module,
+        driver,
+        present,
+        declared,
+        delegating,
+        unreadable,
+    }
+}
+
 /// Report how this suite integrates with the repository's shared helper module, and fail if the
 /// stated integration is no longer true.
 ///
@@ -1092,65 +1195,99 @@ fn delegates_to_shared_helper(source: &str) -> bool {
 /// this branch, that paragraph becomes false and nothing about the build would change to say so —
 /// the suite would keep passing while quietly duplicating helpers it was required to reuse.
 ///
-/// This closes that gap. It reads the tree rather than trusting the comment, prints which case
-/// holds so every pre-flight run puts it on the record, and fails when the file is present while
-/// this driver does not declare it.
+/// This closes that gap. It reads the tree rather than trusting the comment, states which case holds
+/// in this test's output, and fails when the file is present while this driver does not declare it or
+/// declares it without reaching into it.
+///
+/// # Where the line it prints is actually seen
+///
+/// In this test's captured output, which the built-in harness shows on failure and on any run made
+/// with `--nocapture` — including
+/// `cargo test --test conformance infra_oracle_capability_report -- --nocapture`, the pre-flight
+/// command `tests/conformance/README.md` documents and the one the continuous-integration job runs
+/// before the matrix. It is deliberately **not** claimed to appear in a plain `cargo test`, because
+/// the harness captures the output of a passing test and it would not. What does not depend on
+/// anyone reading a line is the pair of assertions below: they fail the run, which no capture hides.
 ///
 /// The check is folded into the pre-flight test rather than given a `#[test]` of its own on purpose.
 /// The suite's test count is one of the mechanical guarantees that no pre-existing test was skipped
 /// or weakened, so adding a nineteenth test to verify a comment would falsify the very count that
 /// makes the guarantee checkable.
 fn assert_shared_helper_integration() {
-    let root = SHARED_HELPER_RELATIVE
-        .iter()
-        .fold(manifest_dir(), |path, part| path.join(part));
-    let module = root.join("mod.rs");
-    if !module.is_file() {
+    let integration = read_shared_helper_integration();
+    let SharedHelperIntegration {
+        module,
+        driver,
+        present,
+        declared,
+        delegating,
+        unreadable,
+    } = integration;
+
+    // Asserted before anything is concluded from the search, and asserted in BOTH branches, because
+    // an unreadable site is the one failure that would make every later conclusion here unsound
+    // rather than merely wrong. The delegation check below is a search over a fixed list of named
+    // files; a name on that list which cannot be read is not evidence that it does not delegate, and
+    // silently reading it as such is how the search set shrinks to nothing while still reporting a
+    // result. Renaming a harness module is exactly how that happens, and it is a plausible edit.
+    assert!(
+        unreadable.is_empty(),
+        "{} of the {} delegation site(s) this check searches could not be read, so the search that \
+         decides whether this suite reuses the repository's shared test helper was performed over an \
+         incomplete list: {}.\n\nEvery name in that list is a harness module this suite ships, so an \
+         unreadable one means the list and the tree have diverged — most likely a module was renamed \
+         without DELEGATION_SITES being updated beside it. That is refused rather than skipped: an \
+         unreadable site cannot be cleared, and treating it as \"not delegating\" would let the \
+         search narrow silently until it had nothing left to look at and passed on an empty set.\n\n\
+         To resolve: restore the named file, or update DELEGATION_SITES in {} to the modules that \
+         actually own the shared helper's compile, run, assertion and temporary-directory duties.",
+        unreadable.len(),
+        DELEGATION_SITES.len(),
+        unreadable.join("; "),
+        driver.display(),
+    );
+
+    if !present {
         // Reported as an OUTSTANDING obligation, not as a settled state. The suite is complete and
         // runnable without the helper, but "integrate with the repository's existing test
-        // conventions" is a requirement rather than a preference, and it is not yet discharged. Saying
-        // so here puts the open item in the pre-flight output of every run, which is where somebody
-        // will actually see it, instead of leaving it to live only in a review.
+        // conventions" is a requirement rather than a preference, and it is not yet discharged.
+        //
+        // Why it cannot be discharged here, precisely, rather than as a matter of taste: the
+        // project's own action plan places `tests/common/**` outside the set of files this work may
+        // create or modify, and lists that module as read-only reference material — "read and
+        // reused, never edited", on the ground that it is the shared dependency of every one of the
+        // repository's existing integration suites and any change to it carries risk for tests this
+        // work is forbidden to disturb. So authoring a stand-in would not discharge the obligation;
+        // it would breach the constraint the obligation is subject to, and would additionally hand
+        // the package-complete tree a second definition of a module that already has one. The
+        // deferral is therefore the plan's decision, with that section as its authority, and not
+        // this suite's discretion.
         println!(
             "shared helper module: ABSENT at {}. Integration with it is therefore OUTSTANDING, not \
              satisfied: `mod common;` is a compile-time assertion that the file exists, so declaring \
-             it against nothing would fail the build rather than degrade, and the file cannot be \
-             created here — it is an existing-system contract consumed by every one of the \
-             repository's existing integration suites, so authoring a stand-in would be a change to \
-             their shared dependency rather than an integration with it. `conformance_harness` \
-             therefore stands alone in pure std, which is what makes this suite complete and runnable \
-             in the meantime. What remains, in full, for whoever merges this suite onto the \
-             package-complete tree: declare `mod common;` beside `mod conformance_harness;`; replace \
-             the harness's own compile, run, assertion and temporary-directory helpers with the \
-             shared ones at every call site in {}; and update this driver's integration section to \
-             describe what is delegated. The two assertions below demand exactly that, and they \
-             activate the moment the file appears.",
+             it against nothing would fail the build rather than degrade, and the file may not be \
+             created here — the project's action plan places `tests/common/**` outside the files this \
+             work may create or modify and records it as read-only reference material, because it is \
+             an existing-system contract consumed by every one of the repository's existing \
+             integration suites. Authoring a stand-in would be a change to their shared dependency \
+             rather than an integration with it. `conformance_harness` therefore stands alone in pure \
+             std, which is what makes this suite complete and runnable in the meantime. What remains, \
+             in full, for whoever merges this suite onto the package-complete tree: declare \
+             `mod common;` beside `mod conformance_harness;`; replace the harness's own compile, run, \
+             assertion and temporary-directory helpers with the shared ones at every call site in {}; \
+             and update this driver's integration section to describe what is delegated. The two \
+             assertions below demand exactly that, and they activate the moment the file appears — \
+             all {} delegation site(s) were read to establish this, so the search they will perform \
+             is over a complete list.",
             module.display(),
             DELEGATION_SITES.join(", "),
+            DELEGATION_SITES.len(),
         );
         return;
     }
 
-    // Read this driver's own source rather than inspect the compiled module tree: whether the
-    // declaration is present is a property of the text, and there is no run-time reflection that
-    // could answer it. Comment lines are discarded first so that a `mod common;` mentioned in prose
-    // — as it is in this file's own documentation — cannot satisfy the check.
-    let driver = manifest_dir().join("tests").join("conformance.rs");
-    let source = fs::read_to_string(&driver).unwrap_or_else(|error| {
-        panic!(
-            "the driver source {} could not be read, so this suite cannot confirm whether it \
-             integrates with the repository's shared test helper: {error}",
-            driver.display()
-        )
-    });
-    let declares_common = source
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.starts_with("//"))
-        .any(|line| line == "mod common;" || line == "pub mod common;");
-
     assert!(
-        declares_common,
+        declared,
         "the repository's shared integration-test helper module exists at {} but this suite does \
          not declare it.\n\nEvery one of the repository's existing integration suites reaches that \
          module with `mod common;` and reuses its compile helper, run helper, assertion macros and \
@@ -1172,23 +1309,8 @@ fn assert_shared_helper_integration() {
     // would satisfy a presence check while leaving the harness's duplicate compile, run, assertion and
     // temporary-directory paths exactly where they were — the state this assertion exists to end. So
     // the delegation is required too: at least one non-comment path into the shared module, in this
-    // driver or in the harness module that owns the corresponding duty.
-    let mut delegating: Vec<String> = Vec::new();
-    if delegates_to_shared_helper(&source) {
-        delegating.push(String::from("tests/conformance.rs"));
-    }
-    for site in DELEGATION_SITES {
-        let path = manifest_dir()
-            .join("tests")
-            .join("conformance_harness")
-            .join(site);
-        if let Ok(text) = fs::read_to_string(&path) {
-            if delegates_to_shared_helper(&text) {
-                delegating.push(format!("tests/conformance_harness/{site}"));
-            }
-        }
-    }
-
+    // driver or in the harness module that owns the corresponding duty. The search was performed over
+    // the complete named list, which the assertion at the top of this function established.
     assert!(
         !delegating.is_empty(),
         "this suite declares `mod common;` but reaches nothing in it, so the shared helper is \
