@@ -1193,7 +1193,12 @@ programs in area `07_variadics` may include `<stdarg.h>` and nothing else, and t
 bundled-header probe `12_preprocessor/003_bundled_header_inclusion.c` may include the nine required
 bundled freestanding headers, with the bonus `stdatomic.h` deliberately excluded from both. Every
 other program — `11_literals_and_strings/003_wide_and_unicode_literals.c` included — includes no
-header at all and hand-declares the single libc prototype it needs.
+header at all and hand-declares the libc prototypes it needs, which is `printf` alone in this
+program's case and in all but two of the corpus: `10_declarations_and_types/008_noreturn.c` also
+declares `exit`, and `03_initializers/011_flexible_array_member.c` also declares `malloc` and `free`
+for the run-time-sized object a flexible array member exists to hold. Both are enumerated, with the
+argument for the allocation, under "Headers: hand-declare, do not include" in
+`tests/conformance/README.md`.
 
 Wide and Unicode literals are therefore **indexed in place**, and each element is cast explicitly to
 `long long` or `unsigned long long` before printing, with every code point restricted to the range

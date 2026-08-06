@@ -33,7 +33,7 @@ pie title Project Completion — 92.4%
   baseline**: the figure counts the compiler package's own Rust unit and integration tests as they
   stood before the differential conformance suite, and it has not been recomputed across the merge
 - ✅ **Differential conformance suite** added on top of that baseline and counted separately, across
-  **241 files** and **114,346 lines**. Its **18 integration tests are defined**; no package-complete
+  **241 files** and **116,304 lines**. Its **18 integration tests are defined**; no package-complete
   `bcc` run is admitted as evidence on this branch, so no pass count is claimed for them.
   - **The inclusion rule, stated once and applied without exception:** every file the suite ships or
     changes, and nothing of the compiler's. That is the **235 files under `tests/`** plus **6 outside
@@ -43,9 +43,9 @@ pie title Project Completion — 92.4%
     235 files under `tests/` and that one added documentation page. The **five additively edited
     files are counted in the file total and not in the line total**, because a line count of a file
     the suite shares with the rest of the project would not be a figure about the suite.
-  - **The components:** 64,305 driver and harness Rust (`tests/conformance.rs` plus 12 modules) +
-    19,915 across 108 C programs + 16,126 across 108 expectation records + 6,833 of suite contract
-    and the two registers + 5,447 of maintenance script and fixture header + 1,720 of methodology
+  - **The components:** 65,495 driver and harness Rust (`tests/conformance.rs` plus 12 modules) +
+    19,915 across 108 C programs + 16,126 across 108 expectation records + 7,056 of suite contract
+    and the two registers + 5,957 of maintenance script and fixture header + 1,755 of methodology
     page. `tests/conformance/findings/.gitkeep` contributes 0 lines and is the 241st file; the file
     accounting is reconciled against the plan's own 240-file arithmetic under *The file count,
     reconciled against the plan's own arithmetic* in `tests/conformance/README.md`.
@@ -68,13 +68,13 @@ pie title Project Completion — 92.4%
 Re-deriving the differential conformance suite's line components:
 
 ```bash
-cat tests/conformance.rs tests/conformance_harness/*.rs                  | wc -l   # 64,305
+cat tests/conformance.rs tests/conformance_harness/*.rs                  | wc -l   # 65,495
 cat $(find tests/conformance -name '*.c'        | sort)                   | wc -l   # 19,915
 cat $(find tests/conformance -name '*.expected' | sort)                   | wc -l   # 16,126
-cat tests/conformance/{README.md,EXPECTED_DIVERGENCES.md,FINDINGS.md}     | wc -l   #  6,833
+cat tests/conformance/{README.md,EXPECTED_DIVERGENCES.md,FINDINGS.md}     | wc -l   #  7,056
 cat tests/conformance/tools/regenerate_expected.sh \
-    tests/conformance/support/include/probe_header.h                      | wc -l   #  5,447
-wc -l < docs/testing/differential-conformance.md                                    #  1,720
+    tests/conformance/support/include/probe_header.h                      | wc -l   #  5,957
+wc -l < docs/testing/differential-conformance.md                                    #  1,755
 ```
 
 ### 1.4 Critical Unresolved Issues
@@ -184,13 +184,18 @@ wc -l < docs/testing/differential-conformance.md                                
 | Integration — CLI | Rust #[test] | 43 | 43 | 0 | N/A | Flag parsing, error exit codes, output naming |
 | Integration — Multi-arch | Rust #[test] | 24 | 24 | 0 | N/A | Cross-arch hello world and factorial on all 4 targets |
 | Integration — Hello World | Rust #[test] | 12 | 12 | 0 | N/A | End-to-end smoke tests on all 4 architectures |
-| Integration — Differential Conformance | Rust #[test] | 18 | — | — | N/A | **Defined, not yet executed.** 14 feature-area tests + 4 infrastructure tests over 108 C programs × 4 targets × -O0/-O1/-O2, oracle-based differential/cross-backend/golden comparison. No package-complete `bcc` run is admitted as evidence, so no pass or fail count is claimed |
+| Integration — Differential Conformance | Rust #[test] | 18 † | — | — | N/A | **Defined, not yet executed.** 14 feature-area tests + 4 infrastructure tests over 108 C programs × 4 targets × -O0/-O1/-O2, oracle-based differential/cross-backend/golden comparison. No package-complete `bcc` run is admitted as evidence, so no pass or fail count is claimed |
 | Validation — SQLite/Lua/zlib/Redis | Rust #[test] | 68 | 55 | 0 | N/A | 13 tests ignored (require external source download) |
-| **Totals** | | **3,955 defined** | **3,924 measured** | **0** | | **13 ignored by design. The 18 differential conformance tests are counted in the defined total and deliberately not in the measured pass count** |
+| **Totals** | | **3,955 defined †** | **3,924 measured †** | **0** | | **13 ignored by design. The 18 differential conformance tests are counted in the defined total and deliberately not in the measured pass count** |
 
 All test results originate from Blitzy's autonomous validation execution, with one deliberate exception: the Differential Conformance row is **structural**. Its 18 tests are defined and statically verified — the suite compiles as a Cargo integration target, is clippy-clean and rustfmt-clean, all 108 expectation records parse, its four infrastructure tests audit the corpus, the markers and the registers, and its whole 1,296-cell matrix has been driven end to end — but judging `bcc` with it requires the package-complete compiler tree, so the row records **no result** and the measured pass count above is unchanged by it. The matrix was driven against a **documented stand-in** compiler on a branch that carries the suite ahead of the compiler tree, and a stand-in that forwards to the reference toolchain compares one toolchain with itself: that is evidence about the environment, not about `bcc`. What has been established about `bcc` by this suite is therefore **nothing at all**, and the suite's own registers say the same. The 13 ignored tests are SQLite validation tests that download the SQLite amalgamation from the internet — gated by `#[ignore]` by design — and the suite adds no ignored test, so that count stays exactly 13.
 
 **Acceptance criterion for replacing this row with a measurement — the whole of it, in one place.** In a checkout carrying the compiler's own `Cargo.toml` and `src/**`, run `BCC_CONFORMANCE_STRICT=1 cargo test --test conformance` and then `cargo test --no-fail-fast`; the row may be filled in when, and only when, **every** `test result:` line reads `ok` with `0 failed`, the `ignored` counts sum to **exactly 13**, and the `passed` counts sum to **3,942** — 3,924 existing plus these 18 — against a **3,955** defined total. Any `FAIL` or `XPASS` must be resolved and any `FINDING` curated into `tests/conformance/FINDINGS.md` first, because both are outcomes the suite is designed to report rather than reasons to relax the criterion. Read `3,955 / 3,942 / 0 / 13` as *the figures a package-complete run must print*, never as figures this branch has printed; the three-condition gate is stated in full under [Running the suite](testing/differential-conformance.md#running-the-suite), and the packaging precondition under [Cargo integration without a manifest change](testing/differential-conformance.md#cargo-integration-without-a-manifest-change) and — with a per-check table of what each checkout shape can and cannot establish — in the suite's own contract at `tests/conformance/README.md` under "The Cargo integration precondition". That second reference is deliberately named rather than linked: this page is published as a documentation site rooted at `docs/`, so a relative link climbing out of it would resolve on a checkout and 404 on the site. The other 3,937 tests are unaffected: they are the compiler's own suites, measured by its own validation execution.
+
+**† The 18 differential-conformance figures are PLANNED and STATICALLY VALIDATED, not a measured `bcc` result, and the two totals carry the same qualification for as long as that holds.** The suite is committed complete — 108 programs, 108 expectation records, the harness, the registers — and what has been established about it is exactly this: it is rustfmt-clean, it type-checks with warnings denied, it is clippy-clean, and its whole 1,296-cell matrix has been driven end to end. But it was driven against a **documented stand-in** compiler on a branch that carries the suite ahead of the compiler tree, and a stand-in that forwards to the reference toolchain compares one toolchain with itself, which is evidence about the environment rather than about `bcc`. The suite's own registers state the same thing: what has been established about `bcc` is nothing at all. Read the `18` in the defined column as *the shape the suite will report*, and replace the row's empty result cells with a measurement with a measurement once `cargo test --test conformance` has run against the real binary — the precondition for which is set out under "The Cargo integration precondition" in `tests/conformance/README.md`, named here rather than linked because `tests/` sits outside the documentation root and a relative link climbing out of `docs/` resolves to nothing once the site is published. The other 3,937 tests are unaffected: they are the compiler's own suites, measured by its own validation execution.
+
+**One further qualification on the two totals, and it predates this suite.** Summing the table's own columns gives 3,956 defined and 3,925 passed, one more in each case than the Totals row states. The discrepancy is inherited: at the pre-suite baseline the columns already summed to 3,938 and 3,925 against a recorded 3,937 and 3,924, and it lives in the compiler's own rows rather than in the differential-conformance row, which contributes exactly 18 to the defined column and nothing to the passed column. The recorded totals are left as they stand — they are the figures the project's own validation execution produced, and this suite's obligation is to add 18 to them rather than to restate a measurement it did not take — but the off-by-one is stated here so that a reader who adds the columns up is not left wondering which number to trust.
+
 
 ---
 

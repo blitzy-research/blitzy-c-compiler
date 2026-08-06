@@ -240,9 +240,9 @@ use conformance_harness::sandbox::{self, Workspace};
 use conformance_harness::ubaudit;
 use conformance_harness::{
     build_root_trust_defect, corpus_root, findings_root, manifest_dir, redact_secrets, report_root,
-    shown_path, target_dir_rejection, work_root, AreaSpec, Cell, CellKey, DivergenceClass,
-    HarnessError, MarkerClass, OptLevel, Oracle, Outcome, Provenance, Target, Verdict, AREAS,
-    AREA_COUNT, BCC_CELL_COUNT, MIN_PROGRAMS_PER_MANDATED_AREA, OPT_LEVEL_COUNT,
+    shown_path, target_dir_acceptance, target_dir_rejection, work_root, AreaSpec, Cell, CellKey,
+    DivergenceClass, HarnessError, MarkerClass, OptLevel, Oracle, Outcome, Provenance, Target,
+    Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT, MIN_PROGRAMS_PER_MANDATED_AREA, OPT_LEVEL_COUNT,
     ORACLE_A_COMPARISON_COUNT, ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT,
     TARGET_COUNT, TOTAL_ASSERTION_COUNT,
 };
@@ -2107,6 +2107,18 @@ impl<'a> CellPlan<'a> {
     /// path and cause, or from the assembly step, whose own refusals name the precondition that was
     /// violated. Both fail the run, which is the correct answer: a divergence nobody can reproduce
     /// is an unexplained result, not a delivered one.
+    ///
+    /// # Why the judged outcome travels into the artifact writer
+    ///
+    /// The verdict reached by `classify.rs` carries two things nothing downstream can reconstruct: the
+    /// structured provenance of the observation — both sides' commands, terminations, capture
+    /// locations and the located first difference — and, when the program holds a marker that does not
+    /// cover what was observed, the sentence naming which dimension failed to match. Handing the
+    /// artifact writer only the comparison meant it built a fresh outcome and both were lost, so the
+    /// rows describing a *divergence* were the only rows in a report with no provenance and no account
+    /// of a near-miss marker. The judged outcome is therefore passed in and extended, and on the one
+    /// path that must change the verdict — the artifacts could not be assembled at all — its
+    /// provenance is carried across by hand for the same reason.
     fn deliver(
         &self,
         outcome: Outcome,
@@ -2119,8 +2131,15 @@ impl<'a> CellPlan<'a> {
             return outcome;
         }
         match self.assemble_finding(comparison, subject, counterpart, corroborant) {
-            Ok(finding) => findings::record(&finding, self.caps),
-            Err(error) => classify::internal_error(self.key, outcome.oracle(), &error),
+            Ok(finding) => findings::record(&finding, self.caps, outcome),
+            Err(error) => {
+                let provenance = outcome.provenance().cloned();
+                let failed = classify::internal_error(self.key, outcome.oracle(), &error);
+                match provenance {
+                    Some(provenance) => failed.with_provenance(provenance),
+                    None => failed,
+                }
+            }
         }
     }
 
@@ -3001,19 +3020,38 @@ fn withheld_notes(
 /// Resolve the oracles once, or refuse to start.
 ///
 /// Discovery is memoized in the harness, so calling this from every test is cheap and every test
-/// sees the same environment. A failure here is fatal rather than degraded: with no compiler under
-/// test there is nothing this suite could decide, and a green run over zero cells would be
-/// indistinguishable from a suite that works.
+/// sees the same environment. A failure here is fatal rather than degraded: without a readable run
+/// configuration and a usable compiler under test there is nothing this suite could decide, and a
+/// green run over zero cells would be indistinguishable from a suite that works.
+///
+/// # Why this frame carries no remedy of its own
+///
+/// Three distinct things are resolved before the first cell, in this order, and each can fail for
+/// its own reason: the catalogued environment variables must be decodable, the behavioural settings
+/// must be valid — a program filter naming a real area, a budget inside its ceiling — and the
+/// compiler under test must be locatable and vettable. A single remedy appended here would
+/// necessarily be right for at most one of them, and a diagnostic that names the wrong variable is
+/// worse than one that names none: it sends a maintainer to correct something that was never at
+/// fault, and it does so with the authority of the last sentence in the message.
+///
+/// So each failure supplies its own remedy at the point it arises, where the category is known —
+/// an undecodable value says which variable to re-export, a malformed budget states its default and
+/// its ceiling, a malformed filter restates the grammar and lists the areas, and an unlocatable
+/// compiler under test names `BCC_BIN`, the build-system path, and why it is not degraded around.
+/// What is left for this frame is the one statement true of all of them: the failure happened before
+/// any cell, and it is never an unavailable oracle.
 fn oracle_capabilities() -> Capabilities {
     match discovery::discover() {
         Ok(caps) => caps,
         Err(error) => panic!(
-            "the differential conformance suite cannot start.\n\n{error}\n\nThe compiler under \
-             test and the run configuration are resolved before any cell executes. Point {} at the \
-             binary to test, or build the package that provides it; this is never reported as an \
-             unavailable oracle, because an absent compiler under test is not a gap in the \
-             environment but the absence of the subject.",
-            discovery::VAR_BCC_BIN,
+            "the differential conformance suite cannot start.\n\n{error}\n\nThe run configuration \
+             and the compiler under test are both resolved before any cell executes, so this \
+             stopped the run before anything was built, executed or compared, and the remedy is the \
+             one the message above names — every startup failure states the variable or the \
+             mechanism that must be corrected, and this frame implies no other. None of them is \
+             ever reported as an unavailable oracle: a configuration this suite cannot read, and a \
+             compiler under test it cannot find, are prior to the environment rather than gaps in \
+             it, and an arm can only be missing from an environment the suite was able to survey."
         ),
     }
 }
@@ -4640,12 +4678,27 @@ fn matrix_statement(config: &RunConfig) -> String {
         shown_path(&report_root()),
         shown_path(&findings_root()),
     ));
-    // A rejected `CARGO_TARGET_DIR` is stated here rather than swallowed. The build roots fall back
-    // to the manifest-relative default when the variable cannot be trusted, so the run continues
-    // correctly — but it continues writing somewhere other than where the caller asked, and a
-    // maintainer who set that variable deliberately has to be told why it was ignored.
+    // `CARGO_TARGET_DIR` is stated on both outcomes, because both are decisions about where this
+    // run writes and the three lines above cannot express either: they render the build root as a
+    // symbolic token, so a redirected run and a default one print identically.
+    //
+    // A rejected value is stated rather than swallowed. The build roots fall back to the
+    // manifest-relative default when the variable cannot be trusted, so the run continues correctly
+    // — but it continues writing somewhere other than where the caller asked, and a maintainer who
+    // set that variable deliberately has to be told why it was ignored.
     if let Some(rejection) = target_dir_rejection() {
         text.push_str(&format!("  CARGO_TARGET_DIR:  ignored — {rejection}\n"));
+    }
+    // An accepted value is stated for the mirror-image reason: it was honoured exactly as
+    // documented, and that is precisely why nothing else in the record shows it. Without this line
+    // the answer to "was the build root redirected, and to where?" is absent from the run rather
+    // than merely elided, which would make acceptance the one configuration decision this suite
+    // took silently.
+    if let Some(honoured) = target_dir_acceptance() {
+        text.push_str(&format!(
+            "  CARGO_TARGET_DIR:  honoured — the three roots above sit beneath {honoured} rather \
+             than beneath the package-relative default\n"
+        ));
     }
     // The containment condition of the directory this run is ACTUALLY writing beneath, stated whether
     // or not it was configured. A configured root whose chain of directories another principal can

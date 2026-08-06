@@ -28,8 +28,12 @@
 # would quietly become the new expectation. Keeping regeneration a deliberate,
 # manual, git-recorded human act is what preserves its value, so:
 #
-#   * nothing in `tests/conformance.rs` or `tests/conformance_harness/` refers
-#     to this script, and nothing there may ever shell out to it;
+#   * nothing in `tests/conformance.rs` or `tests/conformance_harness/` INVOKES
+#     this script, and nothing there may ever shell out to it: no `Command` there
+#     names a shell or a script, only a resolved compiler, runner or artifact.
+#     (A module comment in `manifest.rs` MENTIONS this script, to say that
+#     regeneration happens out here and never on a test run's path. Naming it is
+#     the opposite of depending on it, and the claim is about invocation.)
 #   * `tests/conformance_harness/manifest.rs` deliberately provides NO writer
 #     for the record format. This script is the only writer that exists.
 #
@@ -79,11 +83,16 @@
 #     was -- never half-written, and never redirectable through a planted path.
 #   * A record whose final byte is not a NEWLINE is refused rather than silently
 #     terminated: adding that byte would change a byte outside `expected_stdout`.
-#   * Every compile and every run is BOUNDED, by `timeout` where it is present
-#     and usable and by this script's own self-tested watchdog otherwise, and
-#     runs in a fresh per-cell directory with the same sanitized environment the
-#     harness installs, so an ambient locale, TZ, HOME or toolchain variable
-#     cannot reach a cell and change the bytes that become a golden record.
+#   * Every compile, every run and every probe of a tool is BOUNDED, by `timeout`
+#     where it is present and usable and by this script's own self-tested watchdog
+#     otherwise, and runs in a fresh per-cell directory with stdin from /dev/null
+#     and the same sanitized environment the harness installs, so an ambient
+#     locale, TZ, HOME or toolchain variable cannot reach a cell and change the
+#     bytes that become a golden record.
+#   * The private working area is measured WHILE a cell runs, under both bound
+#     mechanisms, and a cell past either live ceiling is terminated: the time
+#     bound is no defence against space, because a process can write a great deal
+#     in one second.
 #   * Running the script twice in a row produces no diff.
 #   * No network access, no package installation, no path outside the corpus
 #     directory and the private working area. Every selected record must lie at
@@ -601,7 +610,12 @@ cf_release_record_dir() {
 cf_release_lock() {
 	if [ "$CF_LOCK_HELD" -eq 1 ] && [ -n "$CF_LOCK_DIR" ] && [ -n "$CF_LOCK_TOKEN" ]; then
 		if [ "$(cf_lock_owner_field token)" = "$CF_LOCK_TOKEN" ]; then
-			rm -f -- "$CF_LOCK_DIR/owner"
+			# `-rf` rather than `-f`: whatever stands in the owner's place is removed,
+			# including a DIRECTORY, which `rm -f` refuses. Inside this exit trap under
+			# `set -e` that refusal would abandon the release half done and leave the
+			# lock behind for the next run to reclaim -- a worse outcome than removing
+			# a shape that cannot be a lock owner in the first place.
+			rm -rf -- "$CF_LOCK_DIR/owner"
 			rmdir -- "$CF_LOCK_DIR" 2> /dev/null || true
 		fi
 		CF_LOCK_HELD=0
@@ -730,9 +744,10 @@ to bound anything, otherwise this script's own self-tested sleep/kill watchdog i
 and nothing is ever run unbounded.
 
 Bounds this script imposes on itself, none of them configurable away:
-  * Every compile and every run is bounded, and BCC_CONFORMANCE_TIMEOUT_SECS is
-    accepted only in 1..600 seconds. A budget with no ceiling configures no bound
-    while appearing to configure one.
+  * Every compile, every run and every probe of a tool -- including the --version
+    banner a fingerprint is read from -- is bounded, and
+    BCC_CONFORMANCE_TIMEOUT_SECS is accepted only in 1..600 seconds. A budget with
+    no ceiling configures no bound while appearing to configure one.
   * The private working area is measured while a cell is running -- in BOTH bounding
     modes, by one supervisor, so choosing `timeout` never costs the space bound --
     and the cell is terminated if it passes 65536 KiB or 256 entries at any depth.
@@ -761,10 +776,10 @@ Bounds this script imposes on itself, none of them configurable away:
     cell, so a package upgraded mid-run stops the sweep instead of splitting one
     record's golden bytes across two toolchains.
 
-Exit codes: 0 success, 2 usage, 3 environment (a missing tool, a live lock, or a
-            toolchain that changed mid-run), 4 record defect, 5 capture defect (an
-            unusable stream, a timeout, a working-area breach, or cells that
-            disagree), 6 --check found a record that would change.
+Exit codes: 0 success, 2 usage, 3 environment (a missing or unusable tool, a live
+            lock, or a toolchain that changed mid-run), 4 record defect, 5 capture
+            defect (an unusable stream, a timeout, a working-area breach, or cells
+            that disagree), 6 --check found a record that would change.
 Requires `mktemp`; `timeout` and `setsid` are optional. See the PORTABILITY banner
 at the top of this script for the exact tested utility baseline.
 USAGE
@@ -1365,10 +1380,12 @@ mkdir -p -- "$CF_WORK/cell"
 # =============================================================================
 # Bounded execution.
 #
-# EVERY compile, every run and every attestation probe is bounded. Nothing this
-# script starts is ever executed without a bound: a compiler or a generated
-# program that hangs would otherwise block forever, with no status, no
-# diagnostic and no cleanup.
+# EVERY compile, every run, every attestation probe and every version probe is
+# bounded. Nothing this script starts is ever executed without a bound, and
+# nothing it starts inherits this script's stdin: a compiler or a generated
+# program that hangs would otherwise block forever, with no status, no diagnostic
+# and no cleanup, and one that READ its input would consume whatever list the
+# enclosing loop was iterating over.
 #
 # WHY THE OUTCOME IS REPORTED OUT OF BAND
 # ---------------------------------------
@@ -1438,9 +1455,10 @@ CF_QUOTA_REASON_FILE="$CF_WORK/bound.quota.why"
 CF_IDENTITY_FIRED_FILE="$CF_WORK/bound.identity"
 CF_IDENTITY_REASON_FILE="$CF_WORK/bound.identity.why"
 
-# Set by cf_bound_run. Exactly one of the first two is meaningful per call.
+# Set by cf_bound_run. Exactly one of these four outcomes is meaningful per call.
 CF_BOUND_STATUS=''  # the child's true exit status, when it completed
-CF_BOUND_TIMEDOUT=0 # 1 when the bound fired and the child was terminated
+CF_BOUND_TIMEDOUT=0 # 1 when the time bound fired and the child was terminated
+CF_BOUND_QUOTA=''   # non-empty when the cell was terminated for working-area space
 CF_BOUND_ABORTED='' # non-empty when the bound itself failed to run the child
 
 # The interpreter that hosts the status-writing wrapper. `/bin/sh` rather than a
@@ -1756,22 +1774,78 @@ cf_first_line() {
 	' | awk 'NR == 1 { print; found = 1 } END { if (!found) { print "?" } }'
 }
 
-# A tool's identity, as a single line: resolved path, size in KiB blocks, and the
-# first line of its version banner.
+# A tool's identity, into CF_FINGERPRINT, as a single line: resolved path, size in
+# KiB blocks, and the first line of its version banner.
 #
 # Built from utilities this script already depends on -- `command -v`, `du -k` and
 # awk -- rather than from `stat`, which is not POSIX and is not in this script's
 # tool set. That is why the size is in blocks rather than bytes: it is a change
 # detector, not a measurement, and the version banner is the field that actually
 # moves when a package is upgraded underneath a running sweep.
+#
+# WHY THE BANNER PROBE GOES THROUGH THE BOUND, LIKE EVERYTHING ELSE
+# ----------------------------------------------------------------
+# Asking a tool for its version STARTS AN ARBITRARY EXTERNAL PROGRAM, and this
+# runs once per tool at pre-flight and again before every cell -- up to 1,296
+# times in a sweep. Run bare, it broke two of this script's own guarantees at
+# once, so it is now the same bounded, stdin-detached invocation every other child
+# gets:
+#
+#   * UNBOUNDED. A driver that blocked on `--version` blocked the whole run
+#     forever, with no diagnostic and no cleanup, however small
+#     BCC_CONFORMANCE_TIMEOUT_SECS was -- while the log said the bound was
+#     verified. "Nothing this script starts is ever executed without a bound" has
+#     to include this.
+#   * STDIN INHERITED. A tool that READ stdin consumed whatever the enclosing
+#     `while read` loop was iterating. Before every cell, that loop is the cell
+#     list of the record being regenerated, so the probe could swallow the
+#     remaining cells: a three-cell record was certified against one cell and the
+#     run reported success, and on a wider selection the truncation surfaced as a
+#     cells-disagree diagnostic blaming a record that was not at fault. cf_bound_run
+#     gives every child stdin from /dev/null, which is exactly why.
+#
+# The bound engine is defined below and reached here at call time: this function's
+# only caller runs long after every definition in this file.
+#
+# A probe that COMPLETES is treated as it always was -- the first line of stdout,
+# empty if it printed nothing, whatever status it exited with -- because the
+# fingerprint is a change detector and an unhelpful banner is not a fault. A probe
+# that reaches the bound or cannot be carried out is refused loudly instead: a tool
+# whose identity cannot be established is not a tool this script can attest, and
+# waiting the full budget again before each of 1,296 cells would be a hang wearing
+# a bound's clothes.
+CF_FINGERPRINT=''
 cf_tool_fingerprint() {
+	# $1 = tool as named, $2 = human label for the diagnostic
+	CF_FINGERPRINT=''
 	cf_fp_path=$(command -v -- "$1" 2> /dev/null) || cf_fp_path=$1
 	cf_fp_size=$(du -k -- "$cf_fp_path" 2> /dev/null | awk 'NR == 1 { print $1 + 0; exit }')
 	case $cf_fp_size in
 	'' | *[!0-9]*) cf_fp_size='size-unreadable' ;;
 	esac
-	cf_fp_banner=$("$1" --version 2> /dev/null | awk 'NR == 1 { print; exit }')
-	printf '%s|%s|%s\n' "$cf_fp_path" "$cf_fp_size" "$cf_fp_banner"
+
+	cf_fp_dir="$CF_WORK/fingerprint"
+	rm -rf -- "$cf_fp_dir"
+	mkdir -p -- "$cf_fp_dir"
+	cf_bound_run "$CF_TIMEOUT_SECS" "$cf_fp_dir" \
+		"$cf_fp_dir/version.stdout" "$cf_fp_dir/version.stderr" "$1" --version
+	if [ -n "$CF_BOUND_ABORTED" ] || [ -n "$CF_BOUND_QUOTA" ] ||
+		[ "$CF_BOUND_TIMEDOUT" -ne 0 ]; then
+		cf_error "the $2 could not be asked for its version"
+		cf_detail "tool: $cf_fp_path"
+		if [ "$CF_BOUND_TIMEDOUT" -ne 0 ]; then
+			cf_detail "it did not answer --version within the ${CF_TIMEOUT_SECS}s bound"
+		else
+			cf_detail "the probe could not be carried out: ${CF_BOUND_QUOTA:-$CF_BOUND_ABORTED}"
+		fi
+		cf_detail 'the version banner is what detects a package upgraded underneath a running'
+		cf_detail 'sweep, so a tool that will not state it cannot be held to being the same tool'
+		cf_detail 'from one cell to the next. Nothing is compiled and nothing is written.'
+		exit "$CF_EXIT_ENVIRONMENT"
+	fi
+	cf_fp_banner=$(awk 'NR == 1 { print; exit }' < "$cf_fp_dir/version.stdout")
+	rm -rf -- "$cf_fp_dir"
+	CF_FINGERPRINT="$cf_fp_path|$cf_fp_size|$cf_fp_banner"
 }
 
 # Require that a tool is still the tool it was when it was attested.
@@ -1785,12 +1859,19 @@ cf_tool_fingerprint() {
 #
 # Keyed by a file in the private working area rather than by a per-target variable,
 # so one predicate serves every driver and every runner.
+#
+# The fingerprint comes back in a VARIABLE rather than on stdout, and that is
+# load-bearing rather than a matter of taste: reading it through a command
+# substitution would run the probe in a subshell, where the refusal above could
+# only end the subshell. The run would carry on with an empty fingerprint and the
+# unusable tool would go unreported -- a refusal that refuses nothing.
 cf_require_stable_tool() {
 	# $1 = tool as named, $2 = human label
 	[ -n "$1" ] || return 0
 	cf_fp_key=$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')
 	cf_fp_file="$CF_WORK/fingerprint.$cf_fp_key"
-	cf_fp_now=$(cf_tool_fingerprint "$1")
+	cf_tool_fingerprint "$1" "$2"
+	cf_fp_now=$CF_FINGERPRINT
 	if [ -f "$cf_fp_file" ]; then
 		cf_fp_was=$(cat -- "$cf_fp_file")
 		if [ "$cf_fp_now" != "$cf_fp_was" ]; then
@@ -2103,7 +2184,7 @@ cf_bound_wrapper_on_signal() {
 #
 # The child runs with <workdir> as its working directory, with the environment
 # above, and with stdin from /dev/null so it can never consume the record or cell
-# list an enclosing read loop is iterating over. Results come back in the three
+# list an enclosing read loop is iterating over. Results come back in the four
 # CF_BOUND_* variables.
 cf_bound_run() {
 	cf_bound_secs=$1
@@ -2115,6 +2196,7 @@ cf_bound_run() {
 	CF_BOUND_STATUS=''
 	CF_BOUND_TIMEDOUT=0
 	CF_BOUND_ABORTED=''
+	CF_BOUND_QUOTA=''
 	rm -f -- "$CF_BOUND_STATUS_FILE" "$CF_BOUND_FIRED_FILE" \
 		"$CF_QUOTA_FIRED_FILE" "$CF_QUOTA_REASON_FILE" "$CF_BOUND_OUTER_FILE" \
 		"$CF_IDENTITY_FIRED_FILE" "$CF_IDENTITY_REASON_FILE"
@@ -2247,7 +2329,13 @@ cf_bound_run() {
 		else
 			CF_QUOTA_REASON='the working area passed a live ceiling'
 		fi
-		CF_BOUND_ABORTED="the cell was terminated for space: $CF_QUOTA_REASON"
+		# Reported in its OWN variable rather than folded into CF_BOUND_ABORTED,
+		# because the two are different kinds of fact and this script's exit codes
+		# distinguish them: an abort means the bound could not run the child at all,
+		# which is an unusable environment (3); a breach means the cell RAN and
+		# produced no usable capture, which is a capture defect (5) -- the class
+		# --help and the README have always documented for a working-area breach.
+		CF_BOUND_QUOTA="the cell was terminated for space: $CF_QUOTA_REASON"
 		return 0
 	fi
 	if [ -f "$CF_BOUND_FIRED_FILE" ]; then
@@ -2273,10 +2361,10 @@ cf_verify_bound_mode() {
 	cf_bound_run "$CF_TIMEOUT_SECS" "$cf_verify_dir" \
 		"$cf_verify_dir/out" "$cf_verify_dir/err" \
 		"$CF_BOUND_SHELL" -c 'exit 124'
-	if [ -n "$CF_BOUND_ABORTED" ] || [ "$CF_BOUND_TIMEDOUT" -ne 0 ] ||
-		[ "$CF_BOUND_STATUS" != '124' ]; then
+	if [ -n "$CF_BOUND_ABORTED" ] || [ -n "$CF_BOUND_QUOTA" ] ||
+		[ "$CF_BOUND_TIMEDOUT" -ne 0 ] || [ "$CF_BOUND_STATUS" != '124' ]; then
 		cf_error "the $CF_BOUND_MODE execution bound does not report a completed command's own status"
-		cf_detail "a command exiting 124 was reported as: status \"$CF_BOUND_STATUS\", timed out $CF_BOUND_TIMEDOUT${CF_BOUND_ABORTED:+, aborted: $CF_BOUND_ABORTED}"
+		cf_detail "a command exiting 124 was reported as: status \"$CF_BOUND_STATUS\", timed out $CF_BOUND_TIMEDOUT${CF_BOUND_ABORTED:+, aborted: $CF_BOUND_ABORTED}${CF_BOUND_QUOTA:+, space: $CF_BOUND_QUOTA}"
 		cf_detail 'without a trustworthy status there is no way to tell a program that chose an'
 		cf_detail 'exit code from one the bound terminated, so nothing is compiled or run'
 		exit "$CF_EXIT_ENVIRONMENT"
@@ -2292,7 +2380,7 @@ cf_verify_bound_mode() {
 		"$CF_BOUND_SHELL" -c 'sleep 5'
 	if [ "$CF_BOUND_TIMEDOUT" -ne 1 ]; then
 		cf_error "the $CF_BOUND_MODE execution bound did not terminate a command that outlived it"
-		cf_detail "a 1-second bound on a 5-second sleep was reported as: status \"$CF_BOUND_STATUS\", timed out $CF_BOUND_TIMEDOUT${CF_BOUND_ABORTED:+, aborted: $CF_BOUND_ABORTED}"
+		cf_detail "a 1-second bound on a 5-second sleep was reported as: status \"$CF_BOUND_STATUS\", timed out $CF_BOUND_TIMEDOUT${CF_BOUND_ABORTED:+, aborted: $CF_BOUND_ABORTED}${CF_BOUND_QUOTA:+, space: $CF_BOUND_QUOTA}"
 		if [ "$CF_BOUND_MODE" = 'watchdog' ]; then
 			cf_detail 'no timeout utility was found, so this script bounds runs itself with sleep and'
 			cf_detail 'kill; one of those is missing or unusable here'
@@ -2321,11 +2409,15 @@ cf_verify_bound_mode() {
 		'awk "BEGIN { line = sprintf(\"%99999s\", \"\"); for (i = 0; i < 40; i++) { print line } }" > flood; sleep 20'
 	CF_WORK_KB_MAX=$cf_verify_kb_max
 	CF_WORK_ENTRIES_MAX=$cf_verify_entries_max
-	case $CF_BOUND_ABORTED in
+	# Read out of CF_BOUND_QUOTA, which is where a space breach is reported: it is a
+	# distinct out-param from CF_BOUND_ABORTED precisely because the two carry
+	# different exit classes, so a self-test looking in the other one would pass only
+	# while the two were conflated.
+	case $CF_BOUND_QUOTA in
 	*'terminated for space'*) ;;
 	*)
 		cf_error "the $CF_BOUND_MODE execution bound did not terminate a cell that passed the live working-area ceiling"
-		cf_detail "a cell writing far past a 1 KiB ceiling was reported as: status \"$CF_BOUND_STATUS\", timed out $CF_BOUND_TIMEDOUT${CF_BOUND_ABORTED:+, aborted: $CF_BOUND_ABORTED}"
+		cf_detail "a cell writing far past a 1 KiB ceiling was reported as: status \"$CF_BOUND_STATUS\", timed out $CF_BOUND_TIMEDOUT${CF_BOUND_ABORTED:+, aborted: $CF_BOUND_ABORTED}${CF_BOUND_QUOTA:+, space: $CF_BOUND_QUOTA}"
 		cf_detail 'the time bound is no defence against space, so a run whose space bound does not'
 		cf_detail 'work is refused rather than started: one runaway cell would fill the disk'
 		exit "$CF_EXIT_ENVIRONMENT"
@@ -2637,7 +2729,7 @@ cf_list_corpus_records() {
 		case $cf_list_topname in
 		.*)
 			cf_reject_corpus_entry "$cf_list_topname" \
-				"it is a dot-prefixed entry, and only $CF_KEPT_DOT_ENTRY is allowed to be one"
+				"it is a dot-prefixed entry, and only $CF_KEPT_DOT_ENTRY and $CF_LOCK_DIR_NAME are allowed to be one"
 			;;
 		esac
 		if cf_is_excluded_dir "$cf_list_topname"; then
@@ -3075,6 +3167,133 @@ CF_SHARED_FLAGS_PERMITTED='-O0 -O1 -O2 -g -static -fPIC'
 CF_SHARED_FLAG_MANDATORY='-static'
 CF_TEMPLATE_OWNED_FLAGS='-o -c'
 
+# The minimal set every differential invocation carries, which is therefore
+# permitted in a command template whether or not the record declares it. Mirrors
+# DIFFERENTIAL_FLAGS_MINIMAL in mod.rs: `-o` is what makes the artifact findable
+# and `-static` is what makes it executable on all four targets.
+CF_DIFFERENTIAL_FLAGS_MINIMAL='-o -static'
+
+# The compiler-under-test target selection, permitted in bcc_command alone --
+# that side has no cross drivers, so it reaches a non-native backend by flag,
+# while the reference side reaches one by using a different driver binary.
+# Mirrors FLAG_TARGET_SELECT / BCC_TARGET_FLAG.
+CF_FLAG_TARGET_SELECT='--target'
+
+# Flags that must never appear in the SHARED argument set, mirroring
+# FORBIDDEN_IN_DIFFERENTIAL in mod.rs. Each is either reference-compiler-only,
+# compiler-under-test-only, or accepted by both with a different default scope --
+# and every member of the undefined-behaviour audit gate is listed, because that
+# gate drives the reference compiler alone and never the compiler under test.
+#
+# Kept here as text rather than derived, so this table and mod.rs's can be
+# compared line for line. Keep them in step.
+CF_FORBIDDEN_IN_DIFFERENTIAL='-O3 -Os -std= -pedantic -Wall -Wextra -Werror
+-Wconversion -Wsign-conversion -Wshadow -m32 -S -E -fwrapv -fno-strict-aliasing
+-fsanitize= -fno-builtin -ffreestanding -nostdlib -mretpoline -fcf-protection
+--target --sysroot'
+
+# Flags that take a value, in either the bare or the attached spelling. A record
+# may name neither: the value would be a path, an include directory or a macro
+# definition, and none of those is a decision the record layer is entitled to
+# make. Mirrors VALUE_TAKING_SHARED_FLAGS in manifest.rs.
+CF_VALUE_TAKING_FLAGS='-o -I -D -U -L -l'
+
+# The default undefined-behaviour warning gate, the one member no deviation may
+# drop, and the only members a deviation may drop. Mirrors UB_AUDIT_GATE_DEFAULT,
+# UB_AUDIT_GATE_MANDATORY and UB_AUDIT_GATE_REMOVABLE in mod.rs.
+CF_UB_GATE_DEFAULT='-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror'
+CF_UB_GATE_MANDATORY='-Werror'
+CF_UB_GATE_REMOVABLE='-pedantic -Wconversion -Wsign-conversion'
+
+# The two sanctioned reductions of that gate, and the one area whose gate may drop
+# the strict-conformance diagnostic. Mirrors UB_GATE_WITHOUT_CONVERSION,
+# UB_GATE_WITHOUT_PEDANTIC and EXTENSION_AREA. Written in gate order, because the
+# comparison below is against the value canonicalised into that order.
+CF_UB_GATE_WITHOUT_CONVERSION='-Wall -Wextra -pedantic -Wshadow -Werror'
+CF_UB_GATE_WITHOUT_PEDANTIC='-Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror'
+CF_UB_GATE_EXTENSION_AREA='08_gcc_extensions'
+
+# True when flag $1 must not appear in the shared argument set.
+#
+# Three matching forms, mirroring matches_flag_table in mod.rs, so a guard cannot
+# be defeated by a spelling variant: an exact match; a prefix match for the two
+# entries that end in `=` and never appear without a value; and `<entry>=<value>`
+# for every other entry, which catches `--target=aarch64-linux-gnu` and
+# `-fcf-protection=full` as surely as their space-separated spellings.
+#
+# The value form is tested explicitly rather than by a bare prefix test, so a
+# permitted flag is not swept up by accident: `-static` is not refused for
+# beginning with `-S`, and `-O0` is not refused for resembling `-O3`.
+cf_flag_forbidden_in_differential() {
+	for cf_fid_entry in $CF_FORBIDDEN_IN_DIFFERENTIAL; do
+		case $cf_fid_entry in
+		*=)
+			case $1 in
+			"$cf_fid_entry"*) return 0 ;;
+			esac
+			;;
+		*)
+			if [ "$1" = "$cf_fid_entry" ]; then
+				return 0
+			fi
+			case $1 in
+			"$cf_fid_entry"=*) return 0 ;;
+			esac
+			;;
+		esac
+	done
+	return 1
+}
+
+# Print the value-taking flag that token $1 names, or nothing. Recognises the bare
+# spelling (`-o`, which consumes whatever follows it) and the attached one
+# (`-o/tmp/x`, `-DNAME=1`, which names its value inline). Mirrors
+# value_taking_flag_named in manifest.rs, which exists to REFUSE such a token
+# rather than to accept it.
+cf_value_taking_flag_named() {
+	for cf_vtf_entry in $CF_VALUE_TAKING_FLAGS; do
+		if [ "$1" = "$cf_vtf_entry" ]; then
+			printf '%s\n' "$cf_vtf_entry"
+			return 0
+		fi
+		case $1 in
+		"$cf_vtf_entry"?*)
+			printf '%s\n' "$cf_vtf_entry"
+			return 0
+			;;
+		esac
+	done
+	return 1
+}
+
+# True when token $1 selects an optimization level in any spelling. Mirrors
+# is_opt_level_selector in manifest.rs: `-O` followed by nothing or by digits
+# only, plus the four named levels. Used to keep a pinned level out of the shared
+# set, where it would collapse the three cells of a program into one.
+cf_is_opt_level_selector() {
+	case $1 in
+	-Os | -Ofast | -Og | -Oz) return 0 ;;
+	-O) return 0 ;;
+	-O*)
+		case ${1#-O} in
+		*[!0-9]*) return 1 ;;
+		esac
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# True when $1 is a member of the space-separated set $2.
+cf_in_set() {
+	for cf_in_set_item in $2; do
+		if [ "$1" = "$cf_in_set_item" ]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
 # The two accepted values of an oracle switch.
 CF_TOGGLE_ENABLED='enabled'
 CF_TOGGLE_DISABLED='disabled'
@@ -3167,6 +3386,88 @@ cf_validate_template() {
 			;;
 		esac
 	fi
+}
+
+# Cross-check a BUILD template against the record's declared shared flags, in both
+# directions. $1 = record label, $2 = key, $3 = the value, $4 = the extra flags
+# this template alone may carry (empty for the reference side).
+#
+# WHY BOTH DIRECTIONS, AND WHY THIS BELONGS HERE
+# ----------------------------------------------
+# `shared_flags` and the templates are two statements about the same invocation,
+# and manifest.rs refuses a record whose two statements disagree either way round:
+#
+#   * A flag written straight into a template but NOT declared would bypass the
+#     shared-flag discipline entirely: verification answers which flags both
+#     compilers honour with the same meaning, and that verification is keyed to
+#     the declared list.
+#   * A flag declared but NOT passed by a template records an invocation that
+#     never happens -- which is exactly the kind of claim the reproduction
+#     commands exist to make checkable, since a maintainer renders these templates
+#     by hand.
+#
+# The minimal differential set is required rather than merely permitted, for the
+# same reason manifest.rs requires it: `-o` is what makes the artifact findable
+# and `-static` is what makes it executable on all four targets.
+cf_validate_template_flags() {
+	cf_tf_label=$1
+	cf_tf_key=$2
+	cf_tf_norm=$(cf_normalize_template "$3")
+	cf_tf_extra=$4
+
+	[ -n "$cf_tf_norm" ] || return 0
+
+	for cf_tf_need in $CF_DIFFERENTIAL_FLAGS_MINIMAL; do
+		case " $cf_tf_norm " in
+		*" $cf_tf_need "*) ;;
+		*)
+			cf_val_fault "$cf_tf_label" 0 "$cf_tf_key omits $cf_tf_need; every cell is built with the minimal differential set $CF_DIFFERENTIAL_FLAGS_MINIMAL, which is what makes the artifact both findable and executable on all four targets"
+			;;
+		esac
+	done
+
+	# Every flag the template passes, after the driver in first position, must be
+	# one this record is entitled to pass.
+	#
+	# Read one token per line through the argument-vector splitter rather than by
+	# shell word splitting, which is what manifest.rs does too and which matters
+	# for a value taken from a record: an unquoted expansion would additionally be
+	# subject to pathname expansion, so a template token containing a glob
+	# character would be replaced by whatever happened to match it in the
+	# directory the maintainer invoked the script from.
+	cf_split_words "$3" > "$CF_VAL_DIR/template.tokens"
+	cf_tf_first=1
+	while IFS= read -r cf_tf_token; do
+		if [ "$cf_tf_first" -eq 1 ]; then
+			cf_tf_first=0
+			continue
+		fi
+		case $cf_tf_token in
+		-*) ;;
+		*) continue ;;
+		esac
+		if cf_in_set "$cf_tf_token" "$CF_DIFFERENTIAL_FLAGS_MINIMAL"; then
+			continue
+		fi
+		if [ -n "$cf_tf_extra" ] && cf_in_set "$cf_tf_token" "$cf_tf_extra"; then
+			continue
+		fi
+		if grep -q -x -F -- "$cf_tf_token" "$CF_VAL_DIR/flags.seen"; then
+			continue
+		fi
+		cf_val_fault "$cf_tf_label" 0 "$cf_tf_key passes \"$cf_tf_token\", which shared_flags does not declare; the verification that both compilers honour a flag alike is keyed to that list, so a flag written straight into a template bypasses it"
+	done < "$CF_VAL_DIR/template.tokens"
+
+	# And every flag it declares must be one the template actually passes.
+	while IFS= read -r cf_tf_flag; do
+		[ -n "$cf_tf_flag" ] || continue
+		case " $cf_tf_norm " in
+		*" $cf_tf_flag "*) ;;
+		*)
+			cf_val_fault "$cf_tf_label" 0 "the record declares the shared flag \"$cf_tf_flag\" but $cf_tf_key never passes it; a declared flag that no invocation carries records an invocation that never happened"
+			;;
+		esac
+	done < "$CF_VAL_DIR/flags.seen"
 }
 
 # Validate a record COMPLETELY, before a single compile is spent on it.
@@ -3465,17 +3766,28 @@ SANCTIONS
 	fi
 
 	# --- Shared flags ---------------------------------------------------------
+	# An ARGUMENT VECTOR, so it is split on WHITESPACE, exactly as manifest.rs's
+	# parse_shared_flags splits it. Splitting it on commas instead would disagree
+	# with the parser in BOTH directions: `-static,` would be read as a legal
+	# `-static` and rewritten, and the harness would then refuse to parse the
+	# record; while the legal `-static -g` would be read as one unknown flag and
+	# refused, with a diagnostic that also claimed -static was absent when it was
+	# right there.
+	#
+	# The rules below are manifest.rs's, in its order, so that whatever this
+	# accepts the parser accepts too. Its ninth rule -- that a flag stopping the
+	# build short of a runnable executable is refused -- needs no line of its own
+	# here for the same reason it is unreachable there: `-S` and `-E` are refused
+	# by the forbidden set and `-c` by the template-owned set, both of which are
+	# tested first.
+	: > "$CF_VAL_DIR/flags.seen"
 	if cf_val_seen shared_flags; then
 		cf_vr_value=$(cf_val_get shared_flags)
-		if ! cf_split_commas "$cf_vr_value" > "$CF_VAL_DIR/flags"; then
-			cf_val_fault "$cf_vr_label" 0 "shared_flags = \"$cf_vr_value\" holds an empty element; a stray comma is a hard error rather than a dropped flag"
-			: > "$CF_VAL_DIR/flags"
-		fi
+		cf_split_words "$cf_vr_value" > "$CF_VAL_DIR/flags"
 		if [ ! -s "$CF_VAL_DIR/flags" ]; then
 			cf_val_fault "$cf_vr_label" 0 "shared_flags is empty; every artifact in the corpus is built statically, so the list carries at least $CF_SHARED_FLAG_MANDATORY"
 		fi
 		cf_vr_static=0
-		: > "$CF_VAL_DIR/flags.seen"
 		while IFS= read -r cf_vr_flag; do
 			if grep -q -x -F -- "$cf_vr_flag" "$CF_VAL_DIR/flags.seen"; then
 				cf_val_fault "$cf_vr_label" 0 "shared_flags names \"$cf_vr_flag\" twice; a repeated flag is a partly edited record rather than an intention"
@@ -3484,28 +3796,89 @@ SANCTIONS
 			if [ "$cf_vr_flag" = "$CF_SHARED_FLAG_MANDATORY" ]; then
 				cf_vr_static=1
 			fi
-			cf_vr_owned=0
-			for cf_vr_candidate in $CF_TEMPLATE_OWNED_FLAGS; do
-				if [ "$cf_vr_flag" = "$cf_vr_candidate" ]; then
-					cf_vr_owned=1
-				fi
-			done
-			if [ "$cf_vr_owned" -eq 1 ]; then
+			if cf_flag_forbidden_in_differential "$cf_vr_flag"; then
+				cf_val_fault "$cf_vr_label" 0 "shared_flags names \"$cf_vr_flag\", which must never appear in the SHARED set: it is honoured by one compiler only, or by both with a different default scope. Diagnostic and sanitizer flags belong to the audit gate; target selection belongs to the compiler under test"
+				continue
+			fi
+			if cf_in_set "$cf_vr_flag" "$CF_TEMPLATE_OWNED_FLAGS"; then
 				cf_val_fault "$cf_vr_label" 0 "shared_flags names \"$cf_vr_flag\", which belongs to a command template rather than to the shared argument set: it takes an operand the template supplies"
 				continue
 			fi
-			cf_vr_ok=0
-			for cf_vr_candidate in $CF_SHARED_FLAGS_PERMITTED; do
-				if [ "$cf_vr_flag" = "$cf_vr_candidate" ]; then
-					cf_vr_ok=1
-				fi
-			done
-			if [ "$cf_vr_ok" -eq 0 ]; then
+			if cf_is_opt_level_selector "$cf_vr_flag"; then
+				cf_val_fault "$cf_vr_label" 0 "shared_flags names \"$cf_vr_flag\", which pins an optimization level; the level is swept per cell through the <opt> placeholder, so a pinned one would collapse the cells into one"
+				continue
+			fi
+			if cf_vr_taking=$(cf_value_taking_flag_named "$cf_vr_flag"); then
+				cf_val_fault "$cf_vr_label" 0 "shared_flags names the value-taking flag \"$cf_vr_taking\" as \"$cf_vr_flag\"; no record may carry either spelling, because the bare form consumes what follows it and the attached form names a path. Only switches may appear: $CF_SHARED_FLAGS_PERMITTED"
+				continue
+			fi
+			if ! cf_in_set "$cf_vr_flag" "$CF_SHARED_FLAGS_PERMITTED"; then
 				cf_val_fault "$cf_vr_label" 0 "shared_flags names \"$cf_vr_flag\", which is not one of $CF_SHARED_FLAGS_PERMITTED; only flags both compilers honour with the same meaning may appear in a differential invocation"
 			fi
 		done < "$CF_VAL_DIR/flags"
 		if [ -s "$CF_VAL_DIR/flags" ] && [ "$cf_vr_static" -eq 0 ]; then
 			cf_val_fault "$cf_vr_label" 0 "shared_flags omits $CF_SHARED_FLAG_MANDATORY; it is the one linkage mode both compilers spell identically and what lets the emulators run a binary with no sysroot"
+		fi
+	fi
+
+	# --- The warning-gate deviation ------------------------------------------
+	# Also an ARGUMENT VECTOR, and also a closed set: manifest.rs models a
+	# deviation as a REMOVAL from a fixed gate rather than as a compiler
+	# invocation of its own, which is what stops a record handing the reference
+	# compiler an option that loads a plugin, substitutes a subprogram, redirects
+	# the output -- or simply turns the audit off while leaving it apparently
+	# configured. Since the audit is what establishes that a program is free of
+	# undefined behaviour, a record able to weaken it could remove the precondition
+	# that makes every divergence this suite reports mean anything at all.
+	if cf_val_seen ub_audit_flags; then
+		cf_vr_value=$(cf_val_get ub_audit_flags)
+		cf_split_words "$cf_vr_value" > "$CF_VAL_DIR/gate"
+		cf_vr_gate_werror=0
+		cf_vr_gate_count=0
+		: > "$CF_VAL_DIR/gate.seen"
+		while IFS= read -r cf_vr_flag; do
+			if ! cf_in_set "$cf_vr_flag" "$CF_UB_GATE_DEFAULT"; then
+				cf_val_fault "$cf_vr_label" 0 "ub_audit_flags names \"$cf_vr_flag\", which is not an entry of the default warning gate $CF_UB_GATE_DEFAULT; a deviation is expressed as a REMOVAL from that fixed gate, never as a compiler invocation of its own"
+				continue
+			fi
+			if grep -q -x -F -- "$cf_vr_flag" "$CF_VAL_DIR/gate.seen"; then
+				cf_val_fault "$cf_vr_label" 0 "ub_audit_flags names \"$cf_vr_flag\" twice; a repeated diagnostic switch says nothing the single occurrence does not"
+				continue
+			fi
+			printf '%s\n' "$cf_vr_flag" >> "$CF_VAL_DIR/gate.seen"
+			cf_vr_gate_count=$((cf_vr_gate_count + 1))
+			if [ "$cf_vr_flag" = "$CF_UB_GATE_MANDATORY" ]; then
+				cf_vr_gate_werror=1
+			fi
+		done < "$CF_VAL_DIR/gate"
+		if [ -s "$CF_VAL_DIR/gate" ] && [ "$cf_vr_gate_werror" -eq 0 ]; then
+			cf_val_fault "$cf_vr_label" 0 "ub_audit_flags drops $CF_UB_GATE_MANDATORY, which it may never drop; a gate that merely warns is not a gate, because the audit's whole purpose is to make a diagnostic stop the run"
+		fi
+		# Canonicalised into gate order, so two records expressing the same
+		# deviation compare equal however their authors happened to type them --
+		# and so the sanctioned-gate comparison below is a single string equality.
+		cf_vr_gate_canonical=''
+		cf_vr_gate_dropped=''
+		for cf_vr_candidate in $CF_UB_GATE_DEFAULT; do
+			if grep -q -x -F -- "$cf_vr_candidate" "$CF_VAL_DIR/gate.seen"; then
+				cf_vr_gate_canonical="${cf_vr_gate_canonical:+$cf_vr_gate_canonical }$cf_vr_candidate"
+			else
+				cf_vr_gate_dropped="${cf_vr_gate_dropped:+$cf_vr_gate_dropped }$cf_vr_candidate"
+				if ! cf_in_set "$cf_vr_candidate" "$CF_UB_GATE_REMOVABLE"; then
+					cf_val_fault "$cf_vr_label" 0 "ub_audit_flags drops \"$cf_vr_candidate\", which no program may drop; the only authorized removals are $CF_UB_GATE_REMOVABLE, and each for one stated subject only"
+				fi
+			fi
+		done
+		if [ -z "$cf_vr_gate_dropped" ]; then
+			cf_val_fault "$cf_vr_label" 0 "ub_audit_flags names the entire default gate, so it deviates in nothing; a program that passes the full gate simply omits the key, and a no-op deviation would demand a recorded reason for a narrowing that was never made"
+		elif [ "$cf_vr_gate_canonical" = "$CF_UB_GATE_WITHOUT_CONVERSION" ]; then
+			:
+		elif [ "$cf_vr_gate_canonical" = "$CF_UB_GATE_WITHOUT_PEDANTIC" ]; then
+			if [ "$cf_vr_area" != "$CF_UB_GATE_EXTENSION_AREA" ]; then
+				cf_val_fault "$cf_vr_label" 0 "ub_audit_flags drops -pedantic, which is sanctioned only in the $CF_UB_GATE_EXTENSION_AREA area, where the subject under test is non-standard by definition and that diagnostic exists precisely to reject it"
+			fi
+		elif [ "$cf_vr_gate_count" -ne 0 ]; then
+			cf_val_fault "$cf_vr_label" 0 "ub_audit_flags = \"$cf_vr_gate_canonical\" is not a sanctioned gate; the set of gates this suite runs is closed at two, so a record may neither combine both removals nor invent a third reduction"
 		fi
 	fi
 
@@ -3516,11 +3889,15 @@ SANCTIONS
 	if cf_val_seen bcc_command; then
 		cf_validate_template "$cf_vr_label" 'bcc_command' "$(cf_val_get bcc_command)" \
 			"$CF_PLACEHOLDER_BCC" '' '<triple> <opt> <src> <out>' '-o <out>'
+		cf_validate_template_flags "$cf_vr_label" 'bcc_command' \
+			"$(cf_val_get bcc_command)" "$CF_FLAG_TARGET_SELECT"
 	fi
 	if cf_val_seen ref_command; then
 		cf_validate_template "$cf_vr_label" 'ref_command' "$(cf_val_get ref_command)" \
 			"$CF_PLACEHOLDER_REF_TEMPLATED" "$CF_PLACEHOLDER_REF_BARE" \
 			'<opt> <src> <out>' '-o <out>'
+		cf_validate_template_flags "$cf_vr_label" 'ref_command' \
+			"$(cf_val_get ref_command)" ''
 	fi
 	if cf_val_seen run_command; then
 		cf_vr_value=$(cf_normalize_template "$(cf_val_get run_command)")
@@ -3805,18 +4182,64 @@ cf_validate_basis() {
 	return 0
 }
 
+# =============================================================================
+# The two splitting authorities, and which key belongs to which.
+#
+#   * An ARGUMENT VECTOR -- `shared_flags`, `ub_audit_flags` and the three
+#     command templates -- is a sequence handed to a process, where whitespace is
+#     the separator every shell and every argv already uses. cf_split_words.
+#   * A LIST OF NAMES -- `targets`, `opt_levels` -- is prose, and is comma
+#     separated. cf_split_commas.
+#
+# Reaching for the wrong separator is therefore a defect in the record, and both
+# mistakes are reported rather than quietly obeyed. A comma inside an argument
+# vector becomes part of the token, so `shared_flags = -static,` yields the single
+# item `-static,` which is not a flag any record may name; whitespace inside a
+# comma list becomes part of the element, so `targets = x86_64 i686` yields one
+# element that names no target.
+# =============================================================================
+
+# Split argument vector $1 into one item per line on stdout, on whitespace, the
+# way a shell would. Mirrors whitespace_items in manifest.rs.
+#
+# Needs no failure mode, and that is a property of the split rather than an
+# omission: awk's default field splitting collapses any run of blanks and yields
+# no empty field, so the empty-element fault cf_split_commas must report cannot
+# arise here, and leading or trailing whitespace needs no prior trim. An entirely
+# blank value yields no line at all, which each caller reports in its own terms.
+cf_split_words() {
+	printf '%s\n' "$1" | awk '{ for (cf_i = 1; cf_i <= NF; cf_i++) { print $cf_i } }'
+}
+
 # Split comma list $1 into one trimmed item per line on stdout. Exit status 1
 # when an element is empty, which the format treats as a hard error rather than
 # a dropped element.
+#
+# Deliberately NOT `RS = ","`: awk's record splitting produces no record after a
+# TRAILING separator, so `x86_64,` read that way yields one record and the empty
+# element disappears -- the exact silent matrix shrink manifest.rs's comma_items
+# rejects by index, and which this script has to reject too or it will rewrite a
+# record the harness then refuses to parse. Splitting the whole value with
+# `split()` sees every element, including an empty first, middle or last one.
+#
+# A value that is entirely empty yields no line and exit status 0, matching
+# comma_items: "the list is empty" is a different fault with a more specific
+# message, which each caller is better placed to phrase.
 cf_split_commas() {
-	printf '%s' "$1" | awk '
-	BEGIN { RS = "," }
+	printf '%s\n' "$1" | awk '
 	{
-		item = $0
-		gsub(/^[ \t\n]+/, "", item)
-		gsub(/[ \t\n]+$/, "", item)
-		if (item == "") { empty = 1; exit }
-		print item
+		value = $0
+		gsub(/^[ \t]+/, "", value)
+		gsub(/[ \t]+$/, "", value)
+		if (value == "") { exit 0 }
+		cf_n = split(value, cf_parts, ",")
+		for (cf_i = 1; cf_i <= cf_n; cf_i++) {
+			item = cf_parts[cf_i]
+			gsub(/^[ \t]+/, "", item)
+			gsub(/[ \t]+$/, "", item)
+			if (item == "") { empty = 1; exit }
+			print item
+		}
 	}
 	END { if (empty) { exit 1 } }
 	'
@@ -4089,7 +4512,14 @@ cf_resolve_implementation() {
 	CF_ATTEST_IMPL=$1
 	CF_ATTEST_CHAIN=$1
 	cf_resolve_depth=0
-	while [ "$cf_resolve_depth" -lt "$CF_WRAPPER_DEPTH_MAX" ]; do
+	# `-le`, not `-lt`, and the difference is one whole link. Following a chain of
+	# N links takes N iterations, and establishing that the file at the far end is
+	# NOT itself a wrapper takes one more -- so a loop that stopped at N could
+	# classify only N-1 links, making the effective limit one less than the number
+	# the refusal below quotes. Off by one in the safe direction is still off by
+	# one: a maintainer told a chain is "more than 4 links deep" would count four
+	# links and disbelieve the diagnostic rather than the chain.
+	while [ "$cf_resolve_depth" -le "$CF_WRAPPER_DEPTH_MAX" ]; do
 		if cf_resolve_next=$(cf_wrapper_target "$CF_ATTEST_IMPL"); then
 			cf_resolve_status=0
 		else
@@ -4131,6 +4561,10 @@ cf_run_probe() {
 	mkdir -p -- "$CF_WORK/probe"
 	cf_bound_run "$CF_TIMEOUT_SECS" "$CF_WORK/probe" \
 		"$CF_PROBE_OUT" "$CF_PROBE_ERR" "$@"
+	if [ -n "$CF_BOUND_QUOTA" ]; then
+		CF_PROBE_WHY="the probe could not be carried out: $CF_BOUND_QUOTA"
+		return 1
+	fi
 	if [ -n "$CF_BOUND_ABORTED" ]; then
 		CF_PROBE_WHY="the probe could not be carried out: $CF_BOUND_ABORTED"
 		return 1
@@ -4445,6 +4879,14 @@ cf_resolve_cell_tools() {
 		CF_CELL_RUNNER=$CF_RUN_RISCV64
 		;;
 	*)
+		# Unreachable, and a guard rather than a diagnostic path: both callers
+		# have already put the value through cf_normalize_target, which admits
+		# only these four names, and a target a record names that is not one of
+		# them is refused as a RECORD defect -- with its record, its line and the
+		# accepted spellings -- by the pre-flight union pass and by the matrix
+		# normalisation in cf_process_record. Reaching here would mean this
+		# script's own control flow had a hole, which is an environment failure
+		# in the only sense that matters: nothing about the corpus explains it.
 		cf_error "internal: no toolchain mapping for target \"$1\""
 		exit "$CF_EXIT_ENVIRONMENT"
 		;;
@@ -4608,6 +5050,20 @@ cf_capture_cell() {
 		"$cf_capture_cc_out" "$cf_capture_cc_err" \
 		"$CF_CELL_CC" "$cf_capture_opt" -static "$cf_capture_src" -o "$cf_capture_bin"
 	cf_capture_command="$CF_CELL_CC $cf_capture_opt -static $cf_capture_src -o <out>"
+	# A working-area breach is reported BEFORE an abort and with a different exit
+	# code, because the two say different things: the cell ran and was stopped for
+	# space, which is a capture defect (this is the class --help and the README
+	# document for it), rather than an environment in which the bound could not
+	# run a child at all.
+	if [ -n "$CF_BOUND_QUOTA" ]; then
+		cf_error "$cf_capture_rec: compiling $cf_capture_label was stopped: $CF_BOUND_QUOTA"
+		cf_detail "command: $cf_capture_command"
+		cf_detail "the private working area is measured while a cell runs, and a cell past the"
+		cf_detail "${CF_WORK_KB_MAX} KiB or ${CF_WORK_ENTRIES_MAX}-entry live ceiling is terminated: the per-cell time bound is no"
+		cf_detail 'defence against space, because a process can write a great deal in one second'
+		cf_detail 'nothing was written; the record is unchanged'
+		exit "$CF_EXIT_CAPTURE"
+	fi
 	if [ -n "$CF_BOUND_ABORTED" ]; then
 		cf_error "$cf_capture_rec: compiling $cf_capture_label could not be carried out: $CF_BOUND_ABORTED"
 		cf_detail "command: $cf_capture_command"
@@ -4649,6 +5105,14 @@ cf_capture_cell() {
 	else
 		cf_bound_run "$CF_TIMEOUT_SECS" "$cf_capture_cell_dir" \
 			"$cf_capture_out" "$cf_capture_run_err" "$CF_CELL_RUNNER" "$cf_capture_bin"
+	fi
+	if [ -n "$CF_BOUND_QUOTA" ]; then
+		cf_error "$cf_capture_rec: running $cf_capture_label was stopped: $CF_BOUND_QUOTA"
+		cf_detail "the private working area is measured while a cell runs, and a cell past the"
+		cf_detail "${CF_WORK_KB_MAX} KiB or ${CF_WORK_ENTRIES_MAX}-entry live ceiling is terminated: the per-cell time bound is no"
+		cf_detail 'defence against space, because a process can write a great deal in one second'
+		cf_detail 'nothing was written; the record is unchanged'
+		exit "$CF_EXIT_CAPTURE"
 	fi
 	if [ -n "$CF_BOUND_ABORTED" ]; then
 		cf_error "$cf_capture_rec: running $cf_capture_label could not be carried out: $CF_BOUND_ABORTED"
@@ -5371,24 +5835,70 @@ fi
 # all four, so a selection that declares fewer targets does not demand a driver it
 # will never use. Order is the declaration order of the first record that names
 # each target, which keeps the log stable.
+#
+# WHY THE UNION IS READ THROUGH THE RECORD SCANNER AND NOT BY MATCHING LINES
+# -------------------------------------------------------------------------
+# A record's heredoc bodies are DATA, and these records carry pages of expository
+# prose that quote key names -- `ub_notes` and `impl_defined_notes` discuss the
+# targets a program is restricted to and why. A pattern match for a line beginning
+# `targets =` cannot tell a matrix declaration from a sentence about one, so one
+# such line at column 1 anywhere in the corpus would be read as a declaration:
+# it could pull in a driver and an emulator the selection never uses, fail the run
+# before any record was processed when that toolchain is absent, or -- naming
+# something that is not a target at all -- reach a mapping arm that exists only as
+# an internal guard and report a corpus defect as an environment failure.
+#
+# So this reads the records through cf_scan_record, the one reader of the record
+# format in this script, which tracks heredoc state exactly as manifest.rs does.
+# A line inside a body is body, and only a real scalar `targets` entry counts.
+# Scan defects are deliberately IGNORED here: this pass exists to learn which
+# toolchain the selection needs, and every defect is reported properly, with its
+# line and its own message, by cf_validate_record before that record is compiled.
 # =============================================================================
 
-CF_PREFLIGHT_TARGETS=$(
+CF_PREFLIGHT_TARGETS=''
+cf_preflight_targets() {
+	: > "$CF_WORK/preflight.union"
 	while IFS= read -r cf_pf_record; do
 		[ -n "$cf_pf_record" ] || continue
-		cat -- "$cf_pf_record"
-	done < "$CF_RECORD_LIST" | awk -F '=' '
-		/^targets[ \t]*=/ {
-			n = split($2, cf_parts, ",")
-			for (i = 1; i <= n; i++) {
-				cf_t = cf_parts[i]
-				gsub(/[ \t]/, "", cf_t)
-				if (cf_t != "" && ! seen[cf_t]++) { order[++k] = cf_t }
-			}
-		}
-		END { for (i = 1; i <= k; i++) { print order[i] } }
-	'
-)
+		if ! cf_scan_record "$cf_pf_record" > "$CF_WORK/preflight.entries" 2> /dev/null; then
+			cf_pf_scan=$?
+			if [ "$cf_pf_scan" -gt 1 ]; then
+				# awk itself failed, which is not a statement about this record.
+				continue
+			fi
+		fi
+		cf_pf_base=${cf_pf_record##*/}
+		cf_pf_dir=${cf_pf_record%/*}
+		cf_pf_label="${cf_pf_dir##*/}/${cf_pf_base%.expected}"
+		while IFS="$CF_TAB" read -r cf_pf_tag cf_pf_kind cf_pf_line cf_pf_key cf_pf_value; do
+			[ "$cf_pf_tag" = 'K' ] || continue
+			[ "$cf_pf_kind" = 'S' ] || continue
+			[ "$cf_pf_key" = 'targets' ] || continue
+			if ! cf_split_commas "$cf_pf_value" > "$CF_WORK/preflight.items"; then
+				# An empty element is a record defect with its own precise
+				# message; it is reported where every other one is.
+				continue
+			fi
+			while IFS= read -r cf_pf_item; do
+				if ! cf_normalize_target "$cf_pf_item"; then
+					cf_error "$cf_pf_label line $cf_pf_line: targets names \"$cf_pf_item\", which is not one of the four supported targets"
+					cf_detail 'accepted: x86_64, i686, aarch64, riscv64 and their -linux-gnu triples'
+					cf_detail 'nothing was compiled and nothing was written: the toolchain a sweep needs is'
+					cf_detail 'read from the records it selected, so a target no backend exists for is a'
+					cf_detail 'defect in the record rather than something missing from this machine'
+					exit "$CF_EXIT_RECORD"
+				fi
+				if ! grep -q -x -F -- "$CF_NORM_TARGET" "$CF_WORK/preflight.union"; then
+					printf '%s\n' "$CF_NORM_TARGET" >> "$CF_WORK/preflight.union"
+				fi
+			done < "$CF_WORK/preflight.items"
+		done < "$CF_WORK/preflight.entries"
+	done < "$CF_RECORD_LIST"
+	CF_PREFLIGHT_TARGETS=$(cat -- "$CF_WORK/preflight.union")
+}
+
+cf_preflight_targets
 
 if [ -n "$CF_PREFLIGHT_TARGETS" ]; then
 	for cf_pf_target in $CF_PREFLIGHT_TARGETS; do

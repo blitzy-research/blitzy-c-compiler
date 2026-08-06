@@ -170,6 +170,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::Read;
+use std::iter::Peekable;
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -604,6 +605,46 @@ fn validate_environment() -> HarnessResult<()> {
     Ok(())
 }
 
+/// What a catalogued override variable's raw state is, for the provenance report.
+///
+/// Three states rather than two, because two of them behave identically and mean different things.
+/// `Unset` and `Blank` both resolve to the catalogued default — [`present_var_os`] treats an empty
+/// value as absent, and [`checked_var`] treats a whitespace-only one the same way — and that is the
+/// documented behaviour rather than an accident: a variable an environment cleared with `VAR=` names
+/// no tool, and probing the default is the only remaining answer.
+///
+/// What the two states must not share is the sentence that describes them. Reporting a value the
+/// operator explicitly exported as "unset" contradicts what they did, and leaves them unable to
+/// predict the outcome from the report they are reading. Distinguishing the two costs one enum and
+/// changes no behaviour anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverrideState {
+    /// The variable is not in the environment at all.
+    Unset,
+    /// The variable is in the environment but holds nothing usable — empty, or only whitespace.
+    Blank,
+    /// The variable names something, and that something is the only candidate.
+    Set,
+}
+
+/// Read a catalogued override variable's raw state.
+///
+/// Reads the same two predicates the resolution path reads, in the same order, so the state reported
+/// can never disagree with the state acted on. A value that is not valid text is reported as `Set`,
+/// which is correct in the only sense that matters here — it is present and it names something —
+/// and is unreachable in a real run regardless, because [`validate_environment`] refuses such a
+/// value with a precise diagnostic before any tool is resolved.
+fn override_state(name: &str) -> OverrideState {
+    match env::var_os(name) {
+        None => OverrideState::Unset,
+        Some(raw) => match raw.to_str() {
+            Some(text) if text.trim().is_empty() => OverrideState::Blank,
+            None if raw.is_empty() => OverrideState::Blank,
+            _ => OverrideState::Set,
+        },
+    }
+}
+
 /// Infallible view of a text variable, for the accessors whose signature cannot fail.
 ///
 /// An unreadable value yields `None`, exactly as an unset one does. That is safe here and only
@@ -660,9 +701,17 @@ fn checked_flag(name: &str) -> HarnessResult<bool> {
 ///   watching, so a value above this ceiling is a misconfiguration rather than a choice. The
 ///   ceiling is a constant of this module and cannot be raised by any variable, which is what
 ///   makes it a bound rather than another default.
-fn parse_timeout_secs(strict: bool) -> HarnessResult<u64> {
+///
+/// # Return value
+///
+/// The validated budget, paired with whether the variable supplied it. The second half exists so
+/// that [`Capabilities::render_report`] can state the budget without also advising a reader to set
+/// the very variable that produced it: the number alone cannot distinguish a default of 30 from an
+/// override that happens to say 30, and a report that offered the override as an available action
+/// while already obeying it would be describing a decision nobody made.
+fn parse_timeout_secs(strict: bool) -> HarnessResult<(u64, bool)> {
     let Some(raw) = checked_var(VAR_TIMEOUT_SECS)? else {
-        return Ok(DEFAULT_TIMEOUT_SECS);
+        return Ok((DEFAULT_TIMEOUT_SECS, false));
     };
     let parsed = raw.parse::<u64>().map_err(|error| {
         HarnessError::new(
@@ -712,7 +761,7 @@ fn parse_timeout_secs(strict: bool) -> HarnessResult<u64> {
             ),
         ));
     }
-    Ok(parsed)
+    Ok((parsed, true))
 }
 
 /// The bytes a feature-area directory name and a program stem may contain.
@@ -977,6 +1026,13 @@ pub struct RunConfig {
     missing_oracles_acknowledged: bool,
     keep_work: bool,
     timeout_secs: u64,
+    /// True when [`VAR_TIMEOUT_SECS`] supplied the budget rather than the catalogued default.
+    ///
+    /// Kept because the number cannot answer the question on its own: an override of exactly
+    /// [`DEFAULT_TIMEOUT_SECS`] is indistinguishable from no override at all, and the pre-flight
+    /// report has to tell a reader which of the two it is looking at before it offers the override
+    /// as something still to do.
+    timeout_from_variable: bool,
 }
 
 impl RunConfig {
@@ -1005,7 +1061,7 @@ impl RunConfig {
         // The strictness is read before the budget because the budget's ceiling depends on it, and
         // reading it here rather than inside the parser keeps this the only interpreter of the
         // catalogue.
-        let timeout_secs = parse_timeout_secs(strict)?;
+        let (timeout_secs, timeout_from_variable) = parse_timeout_secs(strict)?;
         let keep_work = checked_flag(VAR_KEEP_WORK)?;
         Ok(RunConfig {
             quick,
@@ -1015,6 +1071,7 @@ impl RunConfig {
             missing_oracles_acknowledged,
             keep_work,
             timeout_secs,
+            timeout_from_variable,
         })
     }
 
@@ -1068,6 +1125,15 @@ impl RunConfig {
     /// The validated per-cell execution budget in seconds.
     pub fn timeout_secs(&self) -> u64 {
         self.timeout_secs
+    }
+
+    /// True when [`VAR_TIMEOUT_SECS`] supplied the budget rather than the catalogued default.
+    ///
+    /// Exists for the report rather than for any decision: no behaviour depends on where a valid
+    /// budget came from, but the sentence that states it does, because a reader who has already
+    /// exported the variable must not be told to export it.
+    pub fn timeout_secs_from_variable(&self) -> bool {
+        self.timeout_from_variable
     }
 
     /// Whether unexpected success fails the run.
@@ -1251,6 +1317,28 @@ pub struct ToolIdentity {
     /// Boxed because the relation nests: a wrapper may `exec` another wrapper, and the chain is
     /// followed to its end within [`WRAPPER_ATTESTATION_DEPTH_MAX`].
     implementation: Option<Box<ToolIdentity>>,
+    /// The words this file's own `exec` line passes to the program it runs, when it is a wrapper.
+    ///
+    /// Empty for a file that is not a wrapper, and for one whose `exec` line names a program and
+    /// nothing else — which is a real shape and a consequential one, since such a launcher drops
+    /// every argument the suite assembled.
+    ///
+    /// # Why they are recorded rather than only counted
+    ///
+    /// The attestation exists to answer which implementation a name denotes, and the program word
+    /// answers that. It does not answer what the launcher *does with the command line*, and a
+    /// wrapper that inserts a flag changes what a differential invocation actually compiled — the one
+    /// property requirement 3's shared-flag discipline is about. The suite prescribes wrapper scripts
+    /// as the way to pin a driver under a plain name, so this is a mechanism it recommends; leaving
+    /// its effect out of the report would mean the report could not describe a configuration the
+    /// documentation asks for.
+    ///
+    /// Recorded and rendered, never acted on. A wrapper is not refused for carrying arguments: a
+    /// provisioned toolchain may legitimately need a sysroot or a machine flag to work at all, and
+    /// refusing it would break the environments the wrapper guidance was written for. What changes is
+    /// that the words appear in the capability report and in every finding's environment fingerprint,
+    /// so a divergence can be read against the command line that was really run.
+    implementation_arguments: Vec<String>,
     /// True when this file looks like a wrapper script but the program it runs could not be
     /// determined.
     ///
@@ -1291,30 +1379,35 @@ impl ToolIdentity {
             return None;
         }
         let canonical = fs::canonicalize(path).ok()?;
-        let (implementation, unattested_wrapper) = match read_wrapper_target(&canonical) {
-            // Not a script at all: a compiled binary is its own implementation, so there is
-            // nothing to attest and nothing missing.
-            WrapperTarget::NotAWrapper => (None, false),
-            WrapperTarget::Unreadable => (None, true),
-            WrapperTarget::Execs(program) => {
-                if depth == 0 {
-                    (None, true)
-                } else {
-                    match ToolIdentity::of_within(&program, depth - 1) {
-                        Some(inner) => (Some(Box::new(inner)), false),
-                        // The `exec` line names a program that cannot be identified. The wrapper
-                        // will fail at the first spawn, but more importantly its implementation is
-                        // unknown, so it cannot be compared for independence.
-                        None => (None, true),
+        let (implementation, implementation_arguments, unattested_wrapper) =
+            match read_wrapper_target(&canonical) {
+                // Not a script at all: a compiled binary is its own implementation, so there is
+                // nothing to attest and nothing missing.
+                WrapperTarget::NotAWrapper => (None, Vec::new(), false),
+                WrapperTarget::Unreadable => (None, Vec::new(), true),
+                WrapperTarget::Execs { program, arguments } => {
+                    if depth == 0 {
+                        // The chain is longer than the bound allows, so the implementation was never
+                        // established. The arguments are dropped with it: reporting what an
+                        // unattested launcher passes would dress an unknown chain up as a known one.
+                        (None, Vec::new(), true)
+                    } else {
+                        match ToolIdentity::of_within(&program, depth - 1) {
+                            Some(inner) => (Some(Box::new(inner)), arguments, false),
+                            // The `exec` line names a program that cannot be identified. The wrapper
+                            // will fail at the first spawn, but more importantly its implementation is
+                            // unknown, so it cannot be compared for independence.
+                            None => (None, Vec::new(), true),
+                        }
                     }
                 }
-            }
-        };
+            };
         Some(ToolIdentity {
             canonical,
             file_id: identity_numbers(&target),
             via_symlink,
             implementation,
+            implementation_arguments,
             unattested_wrapper,
         })
     }
@@ -1488,11 +1581,32 @@ impl ToolIdentity {
             if let Some((device, inode)) = implementation.file_id {
                 text.push_str(&format!(" (device {device}, inode {inode})"));
             }
+            // What the chain does to the command line, stated beside what it runs. Naming only the
+            // target program would describe a launcher that hands this suite's arguments through
+            // unchanged and one that rewrites them in exactly the same words.
+            text.push_str(&describe_wrapper_arguments(&self.chain_arguments()));
         }
         if self.unattested_wrapper {
             text.push_str(", a script whose exec target could not be determined");
         }
         text
+    }
+
+    /// Every word each hop of this wrapper chain adds, outermost hop first.
+    ///
+    /// Flattened rather than reported per hop because the chain is an implementation detail of how a
+    /// name was pinned, while what reaches the compiler is the accumulation of every hop's words. A
+    /// chain whose injection sits two levels down is exactly the case a per-hop-first reading would
+    /// let a reader skim past, so the words are gathered in the order they are applied and rendered
+    /// as one list.
+    fn chain_arguments(&self) -> Vec<String> {
+        let mut collected = self.implementation_arguments.clone();
+        let mut hop = self.implementation.as_deref();
+        while let Some(inner) = hop {
+            collected.extend(inner.implementation_arguments.iter().cloned());
+            hop = inner.implementation.as_deref();
+        }
+        collected
     }
     /// Device and inode numbers of the launcher, where the platform exposes them.
     pub fn file_id(&self) -> Option<(u64, u64)> {
@@ -1513,6 +1627,54 @@ impl ToolIdentity {
     }
 }
 
+/// The spellings of the shell's argument-forwarding placeholder.
+///
+/// A launcher whose `exec` line ends in exactly this and nothing else passes the suite's own command
+/// line through untouched, which is the canonical shape and the one the wrapper guidance describes.
+/// Both spellings are listed because the quotes are what make the expansion correct — an unquoted
+/// `$@` re-splits an argument containing a space — and a report must recognise the shape whichever
+/// way it was written rather than describing a correct launcher as an unusual one.
+const EXEC_FORWARD_PLACEHOLDERS: &[&str] = &["\"$@\"", "$@"];
+
+/// State what a wrapper chain's `exec` lines add to the command line, or say nothing when they add
+/// nothing worth saying.
+///
+/// Three outcomes, because there are three materially different things a launcher can do:
+///
+/// * **Forwards the command line untouched.** The single placeholder and nothing else. This is the
+///   documented shape and the overwhelmingly common one, so it earns no words: annotating every
+///   correctly written launcher would bury the two cases that matter under noise.
+/// * **Forwards nothing.** An `exec` line naming a program and no arguments at all. Easy to write by
+///   accident, and it silently discards every flag, source and output path the cell assembled, so it
+///   is stated plainly.
+/// * **Adds, reorders or drops arguments.** Anything else. The words are quoted verbatim so a reader
+///   can see precisely what was inserted and where it sits relative to the placeholder.
+///
+/// Every word is escaped for reporting before it is quoted. The words come from a file on disk that
+/// an override pointed at, so they are as untrusted as any other value this report renders, and a
+/// control character or a directional override in a wrapper script must not be able to repaint the
+/// line that discloses it.
+fn describe_wrapper_arguments(arguments: &[String]) -> String {
+    if arguments.is_empty() {
+        return String::from(
+            ", whose exec line passes it no arguments at all, so nothing this suite puts on the \
+             command line reaches it",
+        );
+    }
+    if arguments.len() == 1 && EXEC_FORWARD_PLACEHOLDERS.contains(&arguments[0].as_str()) {
+        return String::new();
+    }
+    let escaped: Vec<String> = arguments
+        .iter()
+        .map(|word| sanitize_text_for_report(word))
+        .collect();
+    format!(
+        ", whose exec line also passes {} — these words reach the compiler on every invocation, so \
+         the flags a comparison ran are these as well as the ones the suite assembled",
+        join_quoted(&escaped)
+    )
+}
+
 /// What inspecting a resolved tool for wrapper-hood established.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WrapperTarget {
@@ -1522,7 +1684,20 @@ enum WrapperTarget {
     Unreadable,
     /// The file is a script consisting of a shebang, comments and one unconditional `exec` of this
     /// absolute path — the only shape whose implementation is knowable without interpreting shell.
-    Execs(PathBuf),
+    Execs {
+        /// The absolute path the `exec` line runs.
+        program: PathBuf,
+        /// Every word the `exec` line passes after the program, in order and verbatim.
+        ///
+        /// Kept because they are part of what the wrapper *does*, not decoration. The canonical
+        /// launcher shape passes exactly `"$@"` and therefore hands the suite's own command line
+        /// through untouched; a line that passes anything else is adding to, reordering or dropping
+        /// the arguments every differential invocation was assembled from, which is a claim about the
+        /// flags the comparison actually ran. These words are never interpreted or acted on — the
+        /// grammar deliberately stops short of understanding shell — but discarding them would leave
+        /// the report unable to say that they exist.
+        arguments: Vec<String>,
+    },
 }
 
 /// How many wrapper links are followed before the chain is declared unattested.
@@ -1615,6 +1790,7 @@ fn read_wrapper_target(path: &Path) -> WrapperTarget {
     }
 
     let mut program: Option<PathBuf> = None;
+    let mut arguments: Vec<String> = Vec::new();
     let mut exec_lines = 0usize;
     for (index, line) in text.lines().enumerate() {
         let trimmed = line.trim();
@@ -1633,7 +1809,11 @@ fn read_wrapper_target(path: &Path) -> WrapperTarget {
             return WrapperTarget::Unreadable;
         }
         exec_lines += 1;
-        let Some(word) = exec_program_word(words) else {
+        // Split rather than consumed, so the words after the program word survive the scan. The
+        // program word decides the independence question; the rest decide what the launcher does to
+        // the command line, and the report states both.
+        let mut remainder = words.peekable();
+        let Some(word) = exec_program_word(&mut remainder) else {
             return WrapperTarget::Unreadable;
         };
         let candidate = Path::new(word);
@@ -1643,11 +1823,12 @@ fn read_wrapper_target(path: &Path) -> WrapperTarget {
             return WrapperTarget::Unreadable;
         }
         program = Some(candidate.to_path_buf());
+        arguments = remainder.map(String::from).collect();
     }
     match program {
         // Exactly one `exec`, nothing else executable, and it was necessarily the last statement —
         // the loop returns `Unreadable` for any statement it meets, whether before or after.
-        Some(target) if exec_lines == 1 => WrapperTarget::Execs(target),
+        Some(program) if exec_lines == 1 => WrapperTarget::Execs { program, arguments },
         _ => WrapperTarget::Unreadable,
     }
 }
@@ -1674,8 +1855,15 @@ const EXEC_END_OF_OPTIONS: &str = "--";
 /// be an absolute path. That is the safe direction: an unrecognised spelling produces a relative or
 /// nonsensical word, the caller declines it, and the tool is reported unattested — refused under
 /// strict mode rather than guessed at.
-fn exec_program_word<'a>(words: impl Iterator<Item = &'a str>) -> Option<&'a str> {
-    let mut words = words.peekable();
+///
+/// The iterator is borrowed rather than consumed so the caller keeps everything after the program
+/// word. Those words are the wrapper's effect on the command line, and the caller records them for
+/// the report; taking the iterator by value would have discarded them at exactly the point they
+/// became identifiable.
+fn exec_program_word<'a, I>(words: &mut Peekable<I>) -> Option<&'a str>
+where
+    I: Iterator<Item = &'a str>,
+{
     while let Some(word) = words.peek().copied() {
         if word == EXEC_END_OF_OPTIONS {
             words.next();
@@ -2828,6 +3016,13 @@ pub struct ToolRecord {
     /// correctly: a bad override is fixed by editing a variable, while a missing default is
     /// fixed by installing a package, and the two must not be described as each other.
     overridden: bool,
+    /// The raw state of the override variable, for the provenance report only.
+    ///
+    /// `overridden` answers "did the override supply the candidate list", which is the question every
+    /// decision turns on. This answers the narrower one the report needs: an override that was
+    /// exported empty did not supply a candidate list either, and calling it unset in the sentence a
+    /// reader checks their own configuration against would contradict what they did.
+    override_state: OverrideState,
     source: ToolSource,
     /// Absolute or `PATH`-resolved path to the executable, when one was found.
     path: Option<PathBuf>,
@@ -2933,6 +3128,7 @@ impl ToolRecord {
             defaults,
             candidates,
             overridden,
+            override_state: override_variable.map_or(OverrideState::Unset, override_state),
             source,
             identity: accepted.as_ref().and(identity),
             rejection,
@@ -3004,6 +3200,7 @@ impl ToolRecord {
             defaults: &[],
             candidates: vec![shown_path(&path)],
             overridden: false,
+            override_state: override_variable.map_or(OverrideState::Unset, override_state),
             source,
             identity: accepted.as_ref().and(identity),
             rejection,
@@ -3057,6 +3254,33 @@ impl ToolRecord {
     ///
     /// Returned as lines rather than one string so the caller controls indentation, and so a report
     /// can interleave these with its own headings without re-splitting text.
+    /// How this record's override variable failed to supply a candidate, in the report's own words.
+    ///
+    /// Called only on the two arms that reached the catalogued default, so the variable is known not
+    /// to have named anything. Which of the two ways it did not name anything is what this
+    /// distinguishes: absent from the environment, or present and holding nothing usable. The second
+    /// is a deliberate rule of the catalogue rather than a quirk — an empty or whitespace-only value
+    /// names no tool, and there is nothing to resolve — but a report that called it "unset" would
+    /// contradict the operator who exported it and leave them unable to predict this outcome from the
+    /// report they are reading.
+    ///
+    /// The third state is reachable only on a path a real run never takes, and is still given its own
+    /// words rather than folded into either neighbour. A variable holding bytes that are not valid
+    /// text is present and does name something, yet the resolution path reads it as absent — and
+    /// [`validate_environment`] refuses exactly that value, with the bytes shown, before the first
+    /// tool is resolved. Should it ever be reached, "unset" and "empty" would both be false, so
+    /// neither is what it says.
+    fn override_absence_phrase(&self) -> &'static str {
+        match self.override_state {
+            OverrideState::Unset => "is unset",
+            OverrideState::Blank => "is set but empty, which this catalogue treats as absent",
+            OverrideState::Set => {
+                "is set to a value that could not be read as text, so nothing could be resolved \
+                 from it"
+            }
+        }
+    }
+
     pub fn provenance_detail(&self) -> Vec<String> {
         let mut lines = vec![format!(
             "{} — located by {}",
@@ -3069,8 +3293,9 @@ impl ToolRecord {
                 join_quoted(self.candidates())
             )),
             Some(variable) if self.defaults().is_empty() => lines.push(format!(
-                "  override {variable} is unset and this tool has no name to probe; its path came \
-                 from the build system"
+                "  override {variable} {} and this tool has no name to probe; its path came from \
+                 the build system",
+                self.override_absence_phrase()
             )),
             // The list is a *probe order*, and saying only that it was "probed in order" would imply
             // every name in it was tried. One was: the first that exists on PATH becomes the
@@ -3079,8 +3304,9 @@ impl ToolRecord {
             // line below, when there is one, then reads as the fate of a named candidate rather than
             // of the whole list.
             Some(variable) => lines.push(format!(
-                "  override {variable} is unset; probe order {}, of which the first found on PATH is \
-                 the candidate vetted",
+                "  override {variable} {}; probe order {}, of which the first found on PATH is the \
+                 candidate vetted",
+                self.override_absence_phrase(),
                 join_quoted_static(self.defaults())
             )),
             None => lines.push(format!(
@@ -4700,10 +4926,18 @@ impl Capabilities {
             self.host_arch, self.host_os
         ));
         lines.push(format!("  kernel {}", self.kernel));
+        // Every parenthetical in this report describes the variable's CURRENT state, never an action
+        // the reader has already taken. Advising someone to set what they have already set is not
+        // merely redundant: it reads as though the setting had not taken effect, which is the one
+        // thing a configuration report must never suggest when it has.
         lines.push(format!(
-            "  per-cell execution budget {} s (override with {})",
+            "  per-cell execution budget {} s ({})",
             self.config.timeout_secs(),
-            VAR_TIMEOUT_SECS
+            if self.config.timeout_secs_from_variable() {
+                format!("{VAR_TIMEOUT_SECS} is set, and this is the value it names")
+            } else {
+                format!("the default; override with {VAR_TIMEOUT_SECS}")
+            }
         ));
         // Whether the second line of defence around this run's process groups is in force, stated
         // rather than assumed. Each spawned child is put in a group of its own so that terminating an
@@ -4788,13 +5022,17 @@ impl Capabilities {
                 lines.push(format!("  {gap}"));
             }
             lines.push(format!(
-                "  policy: an unavailable arm {} the run (set {} to escalate)",
+                "  policy: an unavailable arm {} the run ({})",
                 if self.config.unavailable_fails_run() {
                     "FAILS"
                 } else {
                     "is reported but does not fail"
                 },
-                VAR_STRICT
+                if self.config.unavailable_fails_run() {
+                    format!("{VAR_STRICT} is set, which is what escalates it")
+                } else {
+                    format!("set {VAR_STRICT} to escalate it")
+                }
             ));
             lines.push(format!(
                 "  acknowledgement ({}): {}",
@@ -4824,23 +5062,42 @@ impl Capabilities {
         lines.push(String::new());
 
         lines.push(String::from("Verdict policy"));
+        // Each of these three answers is decided by exactly one variable, so the state of that
+        // variable is already implied by the answer — which is why the parenthetical states it
+        // rather than advising it. `no` here means the variable IS set; offering it as the next step
+        // would leave a reader looking for a setting they had already made.
         lines.push(format!(
-            "  unexpected success (XPASS) fails the run: {} (set {} to downgrade it to a warning)",
+            "  unexpected success (XPASS) fails the run: {} ({})",
             yes_or_no(self.config.xpass_fails_run()),
-            VAR_ALLOW_XPASS
+            if self.config.allow_xpass() {
+                format!(
+                    "{VAR_ALLOW_XPASS} is set, which is what downgrades it to a warning; it is \
+                     still listed separately in the summary"
+                )
+            } else {
+                format!("set {VAR_ALLOW_XPASS} to downgrade it to a warning")
+            }
         ));
         lines.push(format!(
-            "  an unavailable oracle fails the run: {} (set {} to escalate; {} cannot lower it, \
-             because a job that demanded strictness while excusing the arms it could not attempt \
-             would report a green run over a matrix it never executed)",
+            "  an unavailable oracle fails the run: {} ({}; {} cannot lower it, because a job that \
+             demanded strictness while excusing the arms it could not attempt would report a green \
+             run over a matrix it never executed)",
             yes_or_no(self.config.unavailable_fails_run()),
-            VAR_STRICT,
+            if self.config.unavailable_fails_run() {
+                format!("{VAR_STRICT} is set, which is what escalates it")
+            } else {
+                format!("set {VAR_STRICT} to escalate it")
+            },
             VAR_ALLOW_MISSING_ORACLES
         ));
         lines.push(format!(
-            "  cell workspaces retained after success: {} (set {} to retain them)",
+            "  cell workspaces retained after success: {} ({})",
             yes_or_no(self.config.keep_work()),
-            VAR_KEEP_WORK
+            if self.config.keep_work() {
+                format!("{VAR_KEEP_WORK} is set, which is what retains them")
+            } else {
+                format!("set {VAR_KEEP_WORK} to retain them")
+            }
         ));
         lines.push(String::from(
             "  a missing oracle is never a silent pass: it is recorded as UNAVAILABLE and listed \

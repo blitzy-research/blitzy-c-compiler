@@ -279,12 +279,13 @@ use super::sandbox::{
     REFERENCE_EXIT_NAME, REFERENCE_STDERR_NAME, REFERENCE_STDOUT_NAME,
 };
 use super::{
-    ensure_within, infrastructure_breach, infrastructure_breach_refusal, isolate_child_environment,
-    own_process_group, posix_command_line, public_text, reap_bounded, record_infrastructure_breach,
-    redact_secrets, register_process_group, require_regular_file, sanitize_text_for_report,
-    shown_path, terminate_process_group, CaptureIntegrity, CellKey, DivergenceClass,
-    GroupTermination, HarnessError, HarnessResult, PinnedDirectory, ReapOutcome, Target,
-    CAPTURE_CHUNK_BYTES, CAPTURE_RETAINED_BYTES_MAX,
+    describe_missing_spawn_target, ensure_within, infrastructure_breach,
+    infrastructure_breach_refusal, isolate_child_environment, own_process_group,
+    posix_command_line, public_text, reap_bounded, record_infrastructure_breach, redact_secrets,
+    register_process_group, require_regular_file, sanitize_text_for_report, shown_path,
+    terminate_process_group, CaptureIntegrity, CellKey, DivergenceClass, GroupTermination,
+    HarnessError, HarnessResult, PinnedDirectory, ReapOutcome, Target, CAPTURE_CHUNK_BYTES,
+    CAPTURE_RETAINED_BYTES_MAX,
 };
 
 /// The highest exit code a corpus program may be expected to return.
@@ -1570,9 +1571,9 @@ fn execute_bounded(
         ));
     }
 
-    // The third and last question before the spawn. The two above ask whether the *files* are still
-    // the ones that were vetted; this one asks whether this run is still able to account for what it
-    // has already launched. A run that has leaked a process, or that holds a capture pipe it cannot
+    // The third question before the spawn. The two above ask whether the *files* are still the ones
+    // that were vetted; this one asks whether this run is still able to account for what it has
+    // already launched. A run that has leaked a process, or that holds a capture pipe it cannot
     // prove is closed, must not add another child to the pile — the fault recurs per cell, and the
     // matrix has thousands of them.
     if let Some(breach) = infrastructure_breach() {
@@ -1582,13 +1583,50 @@ fn execute_bounded(
         ));
     }
 
+    // The fourth and last question, and the only one about something that is not a file this run
+    // vetted. `Command::spawn` needs the working directory to exist, and reports its absence with the
+    // same operating-system error as an absent program — a bare "No such file or directory" whose
+    // subject the caller cannot recover. Asking here separates the two before either can be reported
+    // as the other.
+    //
+    // It is worth asking even though the workspace was created moments earlier and nothing in this
+    // suite removes another cell's directory: a diagnostic that has to be guessed at is exactly the
+    // one that costs an investigation, and this failure has been observed once without an explanation
+    // being available afterwards. A check that is unconditional cannot be reasoned away later.
+    if let Some(directory) = working_dir.as_deref() {
+        if let Some(defect) = working_directory_defect(directory) {
+            return Err(HarnessError::new(
+                format!("launching {}", posix_command_line(&launch_argv)),
+                format!(
+                    "the working directory this child was to be launched in {defect}: {}. Nothing \
+                     was launched. This is reported as its own refusal rather than left to the \
+                     spawn, because the operating system answers an absent working directory and an \
+                     absent program with the same error, and a cell that cannot say which of the two \
+                     it met is a cell nobody can act on",
+                    shown_path(directory)
+                ),
+            ));
+        }
+    }
+
     let started = Instant::now();
+    let launch_program = command.get_program().to_os_string();
     let mut child = command.spawn().map_err(|error| {
         HarnessError::new(
             format!("launching {}", posix_command_line(&launch_argv)),
             format!(
-                "the process could not be spawned: {error}; working directory {}",
-                describe_working_dir(working_dir.as_deref())
+                "the process could not be spawned: {error}; working directory {}{}",
+                describe_working_dir(working_dir.as_deref()),
+                // The operating system reports the same error for an absent program and an absent
+                // working directory, and the two send a reader to opposite places. Resolved here
+                // rather than left ambiguous, through the one shared implementation both spawn sites
+                // of this suite use, which answers only for a `NotFound` and names the path it
+                // measured.
+                describe_missing_spawn_target(
+                    &error,
+                    Some(Path::new(&launch_program)),
+                    working_dir.as_deref(),
+                )
             ),
         )
     })?;
@@ -1906,6 +1944,27 @@ fn describe_working_dir(directory: Option<&Path>) -> String {
     match directory {
         Some(directory) => shown_path(directory),
         None => String::from("(inherited from the test process)"),
+    }
+}
+
+/// Why `directory` cannot serve as a child's working directory, or [`None`] when it can.
+///
+/// Two answers rather than one, because they call for different responses: a directory that is gone
+/// is a cleanup or scheduling fault inside this run, while a path that exists as something other than
+/// a directory is a name collision with whatever put it there. Both are stated in the words a reader
+/// needs; neither is inferred from a later error.
+///
+/// A path that cannot be inspected at all is treated as absent, which is the safe direction: the
+/// spawn would fail on it too, and refusing here with an explanation is strictly better than
+/// launching into a failure with none.
+fn working_directory_defect(directory: &Path) -> Option<&'static str> {
+    match std::fs::metadata(directory) {
+        Ok(metadata) if metadata.is_dir() => None,
+        Ok(_) => Some("exists but is not a directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some("no longer exists — it was removed between being prepared and being used")
+        }
+        Err(_) => Some("could not be inspected, so it cannot be relied on"),
     }
 }
 

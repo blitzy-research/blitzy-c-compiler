@@ -1473,12 +1473,40 @@ const SLUG_SEPARATOR: char = '+';
 
 /// Introducer for an escape sequence inside an encoded slug component.
 ///
-/// The percent sign is itself escaped, as `%25`, so an escape sequence is always exactly
+/// The equals sign is itself escaped, as `=3D`, so an escape sequence is always exactly
 /// three characters long and can never be produced by passthrough input. That is what makes
 /// the encoding reversible, and reversibility is precisely the property collision freedom
 /// needs. Nothing in the harness decodes a slug; the escape is chosen to be reversible so
 /// that collision freedom is a fact about the function rather than a hope about its inputs.
-const SLUG_ESCAPE: char = '%';
+///
+/// # Why not the percent sign, which is the obvious choice
+///
+/// An encoded component *names a directory*, that directory becomes a workspace, and
+/// [`isolate_child_environment`] hands the workspace to every child of this suite as its
+/// `TMPDIR`, `TMP` and `TEMP`. A percent sign in that path is therefore not inert text: LLVM
+/// builds its temporary-file names by expanding `%` in a model string assembled from the
+/// temporary directory it was given, so a child driver built on LLVM resolves its temporary
+/// directory to a name that does not exist and fails with `unable to make temporary file: No
+/// such file or directory` before it has read a line of the program. Measured here: the same
+/// invocation under `TMPDIR=…/%2Do` fails and under `TMPDIR=…/=2Do` succeeds, and the four
+/// GCC drivers are unaffected either way — so the failure was a property of this suite's
+/// naming convention rather than of the compiler it was blaming.
+///
+/// The replacement had to satisfy four constraints at once, and the equals sign is the
+/// character that satisfies all of them:
+///
+/// - **Outside the passthrough alphabet**, so it can never be produced by passthrough input
+///   and the encoding stays injective. That rules out every letter, digit and the underscore.
+/// - **Not [`SLUG_SEPARATOR`]**, so splitting a slug still recovers exactly its components.
+/// - **Not a hyphen.** `findings::FindingId` renders as `F-<digest>-<slug>-<class>` and parses
+///   uniquely from the left *because* the slug alphabet contains no hyphen; an escape
+///   introduced by one would silently make two findings able to file into one directory.
+/// - **Expanded by nothing.** It is already listed in [`SHELL_SAFE_PUNCTUATION`], so no POSIX
+///   shell treats it specially in any position, and no compiler driver expands it in a path.
+///   A leading `=` is special to one thing only — GCC's sysroot-relative `-I=dir` form, which
+///   reads the *first* character of an argument — and every path this suite writes is
+///   absolute, so the character can never land there.
+const SLUG_ESCAPE: char = '=';
 
 /// Upper-case hexadecimal digits, indexed by nibble value.
 ///
@@ -1509,7 +1537,7 @@ const SLUG_HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 /// that folded every character outside the alphabet to a single underscore and collapsed runs
 /// made `a_b`, `a__b`, `a b` and `a/b` indistinguishable, and made an empty name
 /// indistinguishable from a name that was literally `unnamed`; under this encoding those six
-/// inputs render as `a_b`, `a__b`, `a%20b`, `a%2Fb`, the empty string and `unnamed`.
+/// inputs render as `a_b`, `a__b`, `a=20b`, `a=2Fb`, the empty string and `unnamed`.
 ///
 /// Two further properties follow from that alphabet, and they are what make a slug safe to join
 /// onto a path rather than merely tidy:
@@ -2239,6 +2267,42 @@ impl Outcome {
         self
     }
 
+    /// Append one further account to this outcome's detail, treated exactly as the constructor treats
+    /// the detail it is given.
+    ///
+    /// # Why appending exists rather than rebuilding the outcome
+    ///
+    /// Some facts about an outcome are only known after the verdict has been decided. The clearest is
+    /// a finding's artifact directory: the divergence is judged first, and only then are the
+    /// reproducer, the commands and the captures written, so the sentence naming where they landed
+    /// cannot be part of the detail the classifier produced. Rebuilding the outcome to add it was the
+    /// obvious move and the wrong one — it discarded the classifier's own account, and with it the
+    /// sentence naming which dimension of a near-miss marker failed to match, which is the one thing a
+    /// reader of that row most needs. Appending keeps both halves: what was decided, and what was then
+    /// produced.
+    ///
+    /// The addition passes through the same three transformations [`Outcome::new`] applies, in the same
+    /// order and for the same reasons, so an outcome still cannot exist carrying an unredacted
+    /// credential, an unelided absolute root, or a byte able to forge a column or repaint a line. The
+    /// detail already in place was treated identically when it was set, and the transformations are
+    /// idempotent over their own output — sanitization escapes only control and formatting characters
+    /// and never a backslash, redaction finds no credential in `[redacted]`, and elision finds no
+    /// absolute root in `<build>` — so nothing is double-processed.
+    ///
+    /// An empty or whitespace-only addition is ignored rather than appended as a dangling separator: a
+    /// caller with nothing to add has nothing to say, and a trailing space is not a fact.
+    pub fn with_detail_appended(mut self, addition: &str) -> Outcome {
+        if addition.trim().is_empty() {
+            return self;
+        }
+        let safe = sanitize_text_for_report(&symbolize_roots(&redact_secrets(addition)));
+        if !self.detail.ends_with(' ') {
+            self.detail.push(' ');
+        }
+        self.detail.push_str(&safe);
+        self
+    }
+
     /// The cell this outcome is about.
     pub fn key(&self) -> &CellKey {
         &self.key
@@ -2514,6 +2578,36 @@ pub fn target_dir_rejection() -> Option<String> {
 /// design prefers to a quiet one.
 pub fn build_root_trust_defect() -> Option<String> {
     untrusted_ancestry_defect(&build_root())
+}
+
+/// Which configured build directory was honoured, or `None` when the default is in force.
+///
+/// `Some(shown)` means [`VAR_CARGO_TARGET_DIR`] was set to a value this harness accepted, so every
+/// workspace, report and finding directory of this run sits beneath it rather than beneath the
+/// package-relative default.
+///
+/// # Why acceptance is disclosed and not only refusal
+///
+/// [`target_dir_rejection`] exists because a refused value is a setting the operator made and the
+/// suite did not honour, which has to be said. Acceptance needs saying for a different reason: it is
+/// the one input that moves **where every artifact of the run is**, and the three roots are rendered
+/// through [`shown_path`], which reduces the build root to [`BUILD_ROOT_TOKEN`] precisely so that a
+/// report cannot carry the absolute location of a workspace. The consequence is that a run whose
+/// build root was redirected and a run whose build root was the default print those three lines
+/// identically, and nothing else in the run record distinguishes them — so a reader could not answer
+/// "was the build root redirected, and to where?" from the artifacts at all. Disclosing acceptance
+/// here answers it once, in the same place and in the same rendering as a refusal, which is what
+/// makes the pair symmetric.
+///
+/// Rendered through the same package-eliding renderer the refusals use, so the two lines quote a
+/// value the same way, and so a value naming a location inside this checkout is quoted back with
+/// that location elided. Safe to render literally: a value carrying a character that could forge a
+/// column or repaint a line is refused by [`validated_target_dir`] before it can reach here.
+pub fn target_dir_acceptance() -> Option<String> {
+    validated_target_dir()
+        .ok()
+        .flatten()
+        .map(|configured| shown_path_within_package(&configured))
 }
 
 /// The configured build directory, validated, or `None` when the variable is unset or empty.
@@ -3210,9 +3304,10 @@ pub fn digest_hex_of_bytes(bytes: &[u8]) -> String {
 //   identical inputs and a token would break that on every run. It is physically written in exactly
 //   three places, one of which is a run manifest rather than a rendered report:
 //
-//   1. the `run_token` line of `run.txt`, the run manifest `sandbox.rs` writes beside the reports,
-//      which is what tells a reader whose reports these are — argued at
-//      [`sandbox::RUN_MANIFEST_NAME`];
+//   1. the `run_token` line of `run.txt`, the run manifest `sandbox.rs` renders and `report.rs`
+//      publishes beside the reports once it has claimed the directory, which is what tells a reader
+//      whose reports these are — argued at [`sandbox::RUN_MANIFEST_NAME`] and
+//      [`sandbox::publish_run_manifest`];
 //   2. the `token=` field of an area report's generation preamble, a comment line whose only
 //      consumer is the machine check that refuses a report an earlier run of an identical
 //      configuration left behind — argued in `report.rs`'s generation-identity section;
@@ -5704,6 +5799,13 @@ impl Replaceable {
 /// refusal is a loud, attributable failure carrying the path; a silent repair is an artefact published
 /// as though nothing were wrong.
 ///
+/// What the refusal *costs* is the caller's to state, and the returned message deliberately does not
+/// state it. Publishing a report or a finding directory propagates the failure and the run ends; the
+/// evidence archiver, which runs after a cell's verdicts are decided and must not re-decide them,
+/// records the refusal in the run summary instead. One wording claiming a single consequence would be
+/// wrong for one of them — and was, reading "the run fails loudly" inside a summary that correctly
+/// reported `run_fails false` beside it.
+///
 /// Anything else that is not the expected kind — a directory where a file belongs, a FIFO, a device
 /// node, a socket — is refused for the same reason.
 ///
@@ -5736,8 +5838,8 @@ pub fn require_replaceable(context: &str, path: &Path, kind: Replaceable) -> Har
                 "{} is a symbolic link. The suite publishes {} at that name and never a link, so a \
                  link being there means something outside this suite created it — and following it \
                  would write the artefact through it, while removing it would hide that it had been \
-                 done. It is refused instead, and the run fails loudly rather than publishing as \
-                 though nothing were wrong",
+                 done. It is refused instead of published as though nothing were wrong, and \
+                 reported by the operation that attempted it",
                 shown_path(path),
                 kind.description()
             ),
@@ -6169,7 +6271,15 @@ pub fn shown_path(path: &Path) -> String {
 /// depends on nothing — and leaves everything else literal. Two consequences, both wanted: a refused
 /// value is still stated in the words the operator wrote it in, which is what makes the diagnostic
 /// actionable, and the checkout's own location is still elided wherever it appears inside that value.
-fn shown_path_within_package(path: &Path) -> String {
+///
+/// # The second caller, and why it is not a third rendering policy
+///
+/// `sandbox::require_usable_as_child_private_directory` uses it too, for a reason of the same shape:
+/// its whole subject is a **character inside the path**, and [`shown_path`] would replace the part of
+/// the path that character sits in with `<build>` — reporting "this path contains `%`" beside a
+/// rendering with no `%` in it, which is worse than saying nothing. Both callers need the literal
+/// value for the same reason, so both use one renderer rather than each growing its own.
+pub(super) fn shown_path_within_package(path: &Path) -> String {
     let rendered = path.to_string_lossy();
     let package = manifest_dir();
     let symbolized = match package.to_str() {
@@ -6957,6 +7067,94 @@ pub fn isolate_child_environment(command: &mut Command, private_directory: &Path
 /// Public because a finding's reproduction script has to set the same four, pointed at the reader's
 /// own scratch directory. Two lists would be two things to keep in step; this is one.
 pub const CHILD_PRIVATE_DIRECTORY_VARIABLES: &[&str] = &["HOME", "TMPDIR", "TMP", "TEMP"];
+
+/// Characters that a tool this suite spawns does not read literally when it finds one in the path
+/// it was handed under [`CHILD_PRIVATE_DIRECTORY_VARIABLES`], each paired with what it does with it.
+///
+/// A directory handed to a child as its temporary directory is not inert text: some tools treat it
+/// as a *template*. A character on this list therefore turns a perfectly good directory into a name
+/// that does not exist, and the child then fails for a reason that has nothing to do with the
+/// program it was asked to compile — which is exactly how such a failure comes to be attributed to
+/// the compiler instead of to the path.
+///
+/// This suite's own component encoding cannot produce any of these — see [`SLUG_ESCAPE`], where the
+/// alphabet is chosen for it — so the list exists to catch the remaining source, which is the build
+/// directory the environment supplies. Keeping it as data rather than as a condition buried in a
+/// check means the reason travels with the character into the diagnostic.
+pub const CHILD_PRIVATE_DIRECTORY_HAZARDS: &[(char, &str)] = &[(
+    '%',
+    "LLVM assembles the name of a temporary file by expanding every `%` in a model string built \
+     from the temporary directory it was given, so a driver built on LLVM — `clang` is the one that \
+     matters here — resolves that directory to a name nothing created and fails with `unable to \
+     make temporary file: No such file or directory` before it has read a line of the program",
+)];
+
+/// Name which of the two things a failed spawn could not find, when the operating system will not.
+///
+/// A spawn reports `No such file or directory` for two entirely different situations: the program is
+/// not there, or the working directory the child was to start in is not there. The error carries no
+/// way to tell them apart, and the difference decides where a reader looks — at the toolchain, or at
+/// the build directory. Guessing wrong is not a cosmetic matter: an audit gate once read an absent
+/// working directory as its compiler being unusable and withheld every area it governed, so a run
+/// produced no verdicts and blamed the wrong thing for it.
+///
+/// So the two candidates are examined *after* the failure, when there is time to look, and the answer
+/// is appended to the diagnostic. It is written as an observation rather than a conclusion — both may
+/// have appeared or disappeared between the spawn and the check — which is why the wording says what
+/// was seen and when.
+///
+/// Returns the empty string when there is nothing useful to add: either the failure was not a
+/// missing-file error, or both candidates were present when they were checked, in which case naming
+/// them would only crowd out the underlying message.
+pub fn describe_missing_spawn_target(
+    error: &io::Error,
+    program: Option<&Path>,
+    working_dir: Option<&Path>,
+) -> String {
+    if error.kind() != io::ErrorKind::NotFound {
+        return String::new();
+    }
+    let missing_program = program.map(|path| !path.exists()).unwrap_or(false);
+    let missing_working_dir = working_dir.map(|path| !path.is_dir()).unwrap_or(false);
+    match (missing_program, missing_working_dir) {
+        (false, false) => String::new(),
+        (true, false) => format!(
+            ". Checked immediately afterwards: the program {} was not there, while the working \
+             directory was — so this is the toolchain rather than the build directory",
+            program.map(shown_path).unwrap_or_default()
+        ),
+        (false, true) => format!(
+            ". Checked immediately afterwards: the working directory {} was not there, while the \
+             program was — so this is the build directory rather than the toolchain, and the failure \
+             says nothing about the compiler or the program it was given",
+            working_dir.map(shown_path).unwrap_or_default()
+        ),
+        (true, true) => format!(
+            ". Checked immediately afterwards: neither the program {} nor the working directory {} \
+             was there",
+            program.map(shown_path).unwrap_or_default(),
+            working_dir.map(shown_path).unwrap_or_default()
+        ),
+    }
+}
+
+/// The first character of `path` that [`CHILD_PRIVATE_DIRECTORY_HAZARDS`] names, with its reason.
+///
+/// [`None`] is the ordinary answer and means the path may be handed to a child as its private
+/// temporary directory as it stands.
+///
+/// The whole path is examined rather than only its final component, because a child is given the
+/// path in full: an ancestor directory carrying the character breaks the child exactly as its own
+/// name would. The comparison is over the lossy rendering, which is what a diagnostic would print
+/// and is sufficient here — every one of these characters is ASCII, and ASCII survives that
+/// rendering unchanged.
+pub fn child_private_directory_hazard(path: &Path) -> Option<(char, &'static str)> {
+    let shown = path.to_string_lossy();
+    CHILD_PRIVATE_DIRECTORY_HAZARDS
+        .iter()
+        .find(|(character, _)| shown.contains(*character))
+        .map(|(character, reason)| (*character, *reason))
+}
 
 /// Every fixed name and value a child of this suite receives, in the order they are applied.
 ///

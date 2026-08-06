@@ -136,8 +136,10 @@
 //! run's would. Finalization would then aggregate a set of files that never described one run — a
 //! reduced run's rows counted beside a full run's, or a finding fixed weeks ago presented as
 //! current — and the summary would state that total with no way for a reader to tell. Both are
-//! therefore retired once, at the start of the run, and the run's identity is written to
-//! [`RUN_MANIFEST_NAME`] beside the reports so a reader can see whose they are.
+//! therefore retired once, at the start of the run, and the run's identity is then written to
+//! [`RUN_MANIFEST_NAME`] beside the reports — by [`publish_run_manifest`], after the report root has
+//! been claimed — so a reader can see whose they are and a run that was refused the directory has
+//! claimed nothing in it.
 //!
 //! ## Retention policy
 //!
@@ -193,13 +195,14 @@ use std::time::Duration;
 
 use super::env::RunConfig;
 use super::{
-    build_root, claim_run_namespace, create_directory_chain_below, encode_slug_component,
-    ensure_within, findings_root, measure_tree, must_escape_for_report, process_start_token,
-    publish_bytes_no_follow, read_file_bounded, record_infrastructure_breach, remove_entry,
-    report_root, require_directory_chain_below, require_real_directory_within,
-    require_regular_file, run_generation, run_id, sanitize_text_for_report, shown_path, work_root,
-    write_new_file, Cell, CellKey, HarnessError, HarnessResult, PinnedDirectory, RunClaim,
-    TreeLimits,
+    build_root, child_private_directory_hazard, claim_run_namespace, comma_separated,
+    create_directory_chain_below, encode_slug_component, ensure_within, findings_root,
+    measure_tree, must_escape_for_report, process_start_token, publish_bytes_no_follow,
+    read_file_bounded, record_infrastructure_breach, remove_entry, report_root,
+    require_directory_chain_below, require_real_directory_within, require_regular_file,
+    run_generation, run_id, sanitize_text_for_report, shown_path, shown_path_within_package,
+    work_root, write_new_file, Cell, CellKey, HarnessError, HarnessResult, PinnedDirectory,
+    RunClaim, TreeLimits, CHILD_PRIVATE_DIRECTORY_VARIABLES, PACKAGE_ROOT_TOKEN,
 };
 
 // The well-known entries of a cell workspace. Named here so that the module which compiles a
@@ -308,14 +311,6 @@ pub const FLAG_PROBE_ROOT_NAME: &str = "_flagprobe";
 /// Container for the workspaces of the undefined-behaviour audit gates.
 pub const UB_AUDIT_ROOT_NAME: &str = "_ubaudit";
 
-/// Directory names immediately beneath [`work_root`] that are reserved for the two
-/// infrastructure users and may therefore never be taken by a cell.
-///
-/// Both begin with an underscore and every feature-area directory begins with a digit, so in
-/// practice the sets are disjoint already. [`for_cell`] checks it anyway rather than relying on
-/// that convention holding forever: the check costs one comparison, and a future area name
-/// that happened to collide would otherwise let a cell and the probe write into one directory
-/// concurrently — the one failure this module exists to make impossible.
 /// Directory beneath [`work_root`] that holds the emulator attestation workspaces.
 ///
 /// An emulator has to be proved to execute the architecture it was selected for, which means
@@ -323,6 +318,18 @@ pub const UB_AUDIT_ROOT_NAME: &str = "_ubaudit";
 /// exists. Its own grouping directory keeps that pre-flight work distinguishable from the matrix.
 pub const ATTESTATION_ROOT_NAME: &str = "_attest";
 
+/// Directory names immediately beneath [`work_root`] that are reserved for the three
+/// infrastructure users and may therefore never be taken by a cell.
+///
+/// Every one of them begins with an underscore and every feature-area directory begins with a
+/// digit, so in practice the sets are disjoint already. [`for_cell`] checks it anyway rather than
+/// relying on that convention holding forever: the check costs one comparison, and a future area
+/// name that happened to collide would otherwise let a cell and an infrastructure user write into
+/// one directory concurrently — the one failure this module exists to make impossible.
+///
+/// The reserved set is documented for a suite author under "What a retained flag-probe or audit
+/// workspace holds" in `tests/conformance/README.md`, and this constant is what that documentation
+/// describes; the two are meant to be read together, so a name added here belongs there as well.
 pub const RESERVED_ROOT_NAMES: &[&str] = &[
     FLAG_PROBE_ROOT_NAME,
     UB_AUDIT_ROOT_NAME,
@@ -432,9 +439,10 @@ pub const RETAINED_WORKSPACE_COUNT_MAX: usize = 512;
 ///
 /// # What initialization does
 ///
-/// The three roots are created, and this run's identity is written to [`RUN_MANIFEST_NAME`] beside
-/// the reports, so a reader looking at a report directory can tell which run produced it. Nothing is
-/// removed here — see the next section for why, and for which module owns each root's clearing.
+/// The three roots are created, and nothing else. Nothing is removed here — see the next section for
+/// why, and for which module owns each root's clearing — and nothing is published here either: this
+/// run's identity reaches [`RUN_MANIFEST_NAME`] beside the reports through
+/// [`publish_run_manifest`], which `report.rs` calls once it has claimed the report directory.
 ///
 /// Created through the suite's shared guarded walk rather than a bare recursive create, so a
 /// symbolic link planted at one of the three root names is refused here — at the first moment the
@@ -452,8 +460,14 @@ pub const RETAINED_WORKSPACE_COUNT_MAX: usize = 512;
 /// clearing step in this function would therefore delete a directory another live run is still
 /// writing into — and it could not do otherwise, because it runs before any ownership question has
 /// been asked: this is the function that *creates* the roots, so there is nothing here to consult.
-/// Its own run manifest is the only thing it publishes, by rename over a unique temporary, which
-/// replaces one file and destroys nothing.
+///
+/// The same argument is why it publishes nothing either. It used to write the run manifest, which is
+/// one file rather than a removal and so destroys nothing — but the manifest *claims* something: it
+/// states which run produced the reports in that directory. Written before the ownership question was
+/// asked, a run that was then refused the directory had already replaced the owning run's manifest
+/// with its own token, leaving the report root's identity naming a run that produced nothing in it and
+/// contradicting the generation stamp of the valid report beside it. Publication therefore belongs
+/// after the claim, and lives in [`publish_run_manifest`].
 ///
 /// Clearing therefore belongs to the module that owns each root, and each of those does it behind one
 /// once-per-process initializer that refuses a **live foreign owner** before it removes anything:
@@ -474,11 +488,9 @@ pub const RETAINED_WORKSPACE_COUNT_MAX: usize = 512;
 ///
 /// # Errors
 ///
-/// Returns an error naming the absolute path and the underlying cause if a root cannot be created,
-/// if it is not a real directory beneath the build directory, or if the run manifest cannot be
-/// published. Every one is a hard failure rather than a degraded run: a suite that cannot write its
-/// workspaces cannot test anything, and a suite that cannot prove which run its reports belong to
-/// cannot report honestly.
+/// Returns an error naming the absolute path and the underlying cause if a root cannot be created or
+/// if it is not a real directory beneath the build directory. Either is a hard failure rather than a
+/// degraded run: a suite that cannot write its workspaces cannot test anything.
 pub fn ensure_roots() -> HarnessResult<()> {
     static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
     match INITIALIZED.get_or_init(|| initialize_run().map_err(|error| error.to_string())) {
@@ -492,7 +504,6 @@ pub fn ensure_roots() -> HarnessResult<()> {
 
 /// The work performed by the first caller of [`ensure_roots`].
 fn initialize_run() -> HarnessResult<()> {
-    let generation = run_generation();
     let build = build_root();
 
     for (role, root) in [
@@ -508,19 +519,64 @@ fn initialize_run() -> HarnessResult<()> {
         require_real_directory_within(&context, &build, &root)?;
     }
 
-    // Nothing is removed here, and that is a correctness requirement rather than an omission. See
-    // "Why no root is emptied here" above: retiring the report root or the findings root from this
-    // function would delete a *concurrent* run's ownership stamp and its live artifacts, because this
-    // function has no way to tell one run's directory from another's — it runs before any ownership
-    // question has been asked. Each of those two roots is cleared by the module that owns it, behind
-    // its own once-per-process initializer that refuses a live foreign owner first.
-    let areas_dir_name = super::report::AREAS_DIR_NAME;
+    // Nothing is removed here, and nothing is published here, and both are correctness requirements
+    // rather than omissions. See "Why no root is emptied here" above: retiring the report root or the
+    // findings root from this function would delete a *concurrent* run's ownership stamp and its live
+    // artifacts, because this function has no way to tell one run's directory from another's — it runs
+    // before any ownership question has been asked. Each of those two roots is cleared by the module
+    // that owns it, behind its own once-per-process initializer that refuses a live foreign owner
+    // first, and the report root's owner publishes the run manifest once its claim has succeeded.
+    Ok(())
+}
 
+/// Publish this run's identity to [`RUN_MANIFEST_NAME`] beside the reports.
+///
+/// Called by `report.rs` from the once-per-process initializer that retires and claims the report
+/// root, as the **last** step of it, and by nothing else.
+///
+/// # Why the caller is the module that claims the directory, and why it calls this last
+///
+/// The manifest answers "which run produced the reports in this directory". That is a claim about the
+/// directory, so only the run that has established it owns the directory may make it. Publishing it
+/// from the function that merely *creates* the three roots put it before any ownership question had
+/// been asked, with a measured consequence: a second concurrent run, correctly refused the report
+/// directory a moment later, had already overwritten the owning run's manifest with its own token. The
+/// report root then carried an identity naming a run that produced nothing in it, and that
+/// contradicted the `token=` stamp of the one valid area report beside it — inverting the check the
+/// token exists to serve. Ordering the publication after the claim makes the refusal total: a refused
+/// run leaves the directory exactly as it found it.
+///
+/// Published by rename over a unique temporary through the suite's no-follow publisher, so it replaces
+/// one file, destroys nothing, and cannot be delivered through a link planted at the name.
+///
+/// # Errors
+///
+/// Returns an error naming the path and the underlying cause when the manifest cannot be published. A
+/// suite that cannot prove which run its reports belong to cannot report honestly, so this is a hard
+/// failure rather than a degraded run.
+pub(super) fn publish_run_manifest(context: &str) -> HarnessResult<()> {
+    let generation = run_generation();
+    let areas_dir_name = super::report::AREAS_DIR_NAME;
+    // Which build root this run wrote beneath, stated rather than left to be inferred. Every path
+    // inside these reports is rendered with the build root reduced to its symbolic token, which is
+    // what stops a report carrying the absolute location of a workspace — and which also means a
+    // run whose root was redirected by `CARGO_TARGET_DIR` and a run that used the package-relative
+    // default describe their artifacts in exactly the same words. This line is where the run record
+    // answers the difference. A refused value is not named here, because a refused value did not
+    // move anything: the capability report states the refusal and the reason for it.
+    let build_root = match super::target_dir_acceptance() {
+        Some(honoured) => format!("{honoured} (CARGO_TARGET_DIR, honoured)"),
+        None => format!(
+            "{}/target (the package-relative default)",
+            super::PACKAGE_ROOT_TOKEN
+        ),
+    };
     let manifest = report_root().join(RUN_MANIFEST_NAME);
     let text = format!(
         "# identity of the run that produced the reports in this directory\n\
          run_token = {}\n\
          configuration = {}\n\
+         build_root = {build_root}\n\
          area_reports = {areas_dir_name}/\n\
          retained_run_bytes_max = {RETAINED_RUN_BYTES_MAX}\n\
          retained_workspace_bytes_max = {RETAINED_WORKSPACE_BYTES_MAX}\n\
@@ -535,17 +591,21 @@ fn initialize_run() -> HarnessResult<()> {
          # area report. That is the artifact to diff when asking whether a change altered a\n\
          # result, and it is stable because no run-specific value is rendered into it.\n\
          #\n\
-         # What is intentionally run-specific, so that a diff of it is expected to show changes:\n\
-         # the token= field named above; the identity column of every area .tsv row, together\n\
-         # with the configuration digest and fingerprint the summary reports; and the emulator\n\
-         # lines of the summary's environment fingerprint. The last of those is the reason for\n\
-         # the others. Each emulator is attested by being made to print a token derived from this\n\
-         # run and exit with a status derived from it, so a stand-in that ignored its argument\n\
-         # could not satisfy the check by accident; that per-run status is recorded in the\n\
-         # runner's fingerprint line, and the digests computed over the fingerprint therefore\n\
-         # differ from run to run as well. Dropping the evidence would make a silently absent\n\
-         # emulator indistinguishable from a working one, so the variation is kept and stated\n\
-         # here rather than left for a reader to discover against a promise of stability.\n\
+         # What is intentionally run-specific or measured, so that a diff of it is expected to\n\
+         # show changes: the token= field named above; the identity column of every area .tsv\n\
+         # row, together with the configuration digest and fingerprint the summary reports; the\n\
+         # emulator lines of the summary's environment fingerprint; the measured outer-net probe\n\
+         # cost beside them; the retained-evidence, retained-bytes and finding-artifact-bytes\n\
+         # totals, which are sums over what concurrently failing cells actually retained; and\n\
+         # the measured duration_ms and the ownership stamp inside an evidence document or a\n\
+         # finding's termination records. The emulator lines are the reason for the digests.\n\
+         # Each emulator is attested by being made to print a token derived from this run and\n\
+         # exit with a status derived from it, so a stand-in that ignored its argument could not\n\
+         # satisfy the check by accident; that per-run status is recorded in the runner's\n\
+         # fingerprint line, and the digests computed over the fingerprint therefore differ from\n\
+         # run to run as well. Dropping the evidence would make a silently absent emulator\n\
+         # indistinguishable from a working one, so the variation is kept and stated here rather\n\
+         # than left for a reader to discover against a promise of stability.\n\
          #\n\
          # The configuration fingerprint is carried by the reports throughout, so a reduced run's\n\
          # numbers can never be mistaken for a full run's.\n",
@@ -553,7 +613,7 @@ fn initialize_run() -> HarnessResult<()> {
         generation.configuration(),
     );
     publish_bytes_no_follow(
-        "publishing the run manifest beside the reports",
+        &format!("{context}: publishing the run manifest beside the reports"),
         &manifest,
         text.as_bytes(),
     )
@@ -816,7 +876,10 @@ fn require_beneath_work_root(context: &str, candidate: &Path) -> HarnessResult<(
 ///
 /// Whitespace is deliberately allowed, unlike in a corpus stem: a probe may legitimately be
 /// keyed by a flag spelling that contains a space, and such a byte encodes to an escape that is
-/// still exactly one safe component.
+/// still exactly one safe component. The escape introducer is chosen so that an encoded name is
+/// also safe to hand a child as its temporary directory — the harness root's slug-escape constant
+/// carries that argument — and [`require_usable_as_child_private_directory`] is where the property
+/// is enforced rather than trusted.
 fn encode_component(role: &str, raw: &str) -> HarnessResult<String> {
     let context = format!("deriving the {role} component of a workspace path");
     if raw.is_empty() {
@@ -921,6 +984,66 @@ fn validate_entry_name(context: &str, name: &str) -> HarnessResult<()> {
     Ok(())
 }
 
+/// Refuse a workspace whose path a child cannot be given as its private temporary directory.
+///
+/// Every workspace this module allocates becomes the working directory of a child process *and* the
+/// value of all four names in [`CHILD_PRIVATE_DIRECTORY_VARIABLES`] for it. That makes the path text
+/// itself load-bearing: a character some tool expands rather than reads turns a directory that
+/// exists into a name that does not, and the child then fails for a reason unrelated to the program
+/// it was handed. The harness root enumerates those characters and what each one does.
+///
+/// # Why this is checked here rather than trusted
+///
+/// The component encoding this module uses cannot emit such a character — the escape introducer is
+/// chosen precisely so it cannot — so in a correct build the only remaining source is the build
+/// directory the environment supplies, which no amount of care inside this file can constrain. Two
+/// things therefore follow, and both are the point:
+///
+/// * **A maintainer who changes the encoding cannot silently reintroduce the fault.** The property
+///   would break in a way that shows up as a compiler failing to make a temporary file on one
+///   machine, in one configuration, with nothing in the message pointing at the name. Checking it at
+///   the one place every workspace is created turns that into a refusal that names the cause.
+/// * **An environment that carries the character is diagnosed accurately.** Before this check, the
+///   suite reported such a run as "the reference compiler failed to build the probe program", which
+///   sends a reader to the compiler. The remedy is a build directory free of the character, which
+///   the diagnostic names along with the variable that relocates it.
+///
+/// # Errors
+///
+/// Names the path, the character, what the tool does with it, and the remedy. This is a hard failure
+/// rather than a degraded run: the affected child is a compiler, and a compiler that cannot write a
+/// temporary file compiles nothing, so every cell beneath such a build directory would fail anyway —
+/// with a message about the compiler instead of about the path.
+fn require_usable_as_child_private_directory(context: &str, candidate: &Path) -> HarnessResult<()> {
+    let Some((character, reason)) = child_private_directory_hazard(candidate) else {
+        return Ok(());
+    };
+    // Rendered literally apart from the package root, rather than through `shown_path`, because the
+    // subject of this message is a character *inside* the path: `shown_path` replaces the build
+    // directory with `<build>`, which is precisely the part the character is most likely to sit in,
+    // and a refusal that named a character its own rendering did not show would send a reader
+    // looking in the wrong place. The renderer documents this second use.
+    let shown = shown_path_within_package(candidate);
+    let mut located = String::new();
+    if !shown.contains(character) {
+        located = format!(
+            ". The character is inside the checkout's own path, which this message elides as {}",
+            PACKAGE_ROOT_TOKEN
+        );
+    }
+    Err(HarnessError::new(
+        String::from(context),
+        format!(
+            "{shown} contains {character:?}, and this directory is handed to every child of this \
+             cell as its working directory and as each of {}{located}. {reason}. Nothing was created \
+             here. The workspace names this suite derives cannot contain that character, so it comes \
+             from the directory the run was pointed at: place the build directory at a path free of \
+             {character:?} — CARGO_TARGET_DIR relocates it — and re-run",
+            comma_separated(CHILD_PRIVATE_DIRECTORY_VARIABLES)
+        ),
+    ))
+}
+
 /// Remove `path` and everything beneath it, treating absence as success.
 ///
 /// Every removal in this module funnels through here, and the containment guard is applied
@@ -980,12 +1103,19 @@ fn purge(context: &str, path: &Path) -> HarnessResult<()> {
 /// derived spelling, so its path is identical to the workspace a resolved [`Cell`] carries and
 /// to the working directory handed to the cell's child processes, and one cell is never described
 /// two ways.
+///
+/// The second lexical guard, [`require_usable_as_child_private_directory`], runs beside the first
+/// and for the same reason: both ask a question about the *path text* before anything touches the
+/// filesystem, so a path that a child could not be given is never created and never removed. It is
+/// applied here rather than at each of the five callers because this is the one function through
+/// which every workspace in the suite is born.
 fn allocate(role: &str, root: PathBuf, keep_on_success: bool) -> HarnessResult<Workspace> {
     let context = format!(
         "allocating the workspace for {role} at {}",
         shown_path(&root)
     );
     require_beneath_work_root(&context, &root)?;
+    require_usable_as_child_private_directory(&context, &root)?;
     // The claim is a sibling of the workspace, so the workspace's parent has to exist before it can
     // be created — and it has to be a *verified* chain, which is what this call establishes. The
     // workspace itself is deliberately not created here: it is purged below, and creating it only to
@@ -1236,6 +1366,78 @@ impl Workspace {
         Ok(resolved)
     }
 
+    /// Re-establish this workspace's directory if it is no longer there, and say so when it was not.
+    ///
+    /// [`allocate`] created the directory; between then and the moment a child is spawned into it,
+    /// this asks the one question the spawn itself cannot distinguish. It exists because of an
+    /// observed failure: an audit gate's working directory was absent at the instant of its spawn,
+    /// which the operating system reports as `No such file or directory` — the *same* error it
+    /// reports for a program that is not there. The audit read that as its driver being unusable and
+    /// withheld every governed area, so one transient absence cost a whole run its verdicts.
+    ///
+    /// # What this does and does not claim
+    ///
+    /// It does **not** claim to remove a race, and no such claim would be honest: the absence was
+    /// never reproducible, so its trigger is unproven. What it does is make the absence *survivable
+    /// and visible*. Re-creating a directory that this run derived, owns and is about to write into
+    /// costs nothing when it is already there — which is every ordinary call — and turns the one
+    /// abnormal case from a corpus-wide withholding into a gate that ran, with a sentence in its own
+    /// report saying the directory had to be re-established.
+    ///
+    /// It is deliberately **not** applied to cell workspaces. A cell's workspace is a direct child of
+    /// the work root, nothing in the suite prunes a level above it mid-run, and a cell that lost its
+    /// directory has lost the artifacts a comparison would read — re-creating it there would produce
+    /// an empty workspace and a divergence that describes nothing. Only the audit's nested
+    /// `<area>/<program>/<gate>` workspaces sit under a grouping level that this module removes at
+    /// all, so they are the only ones that ask this question.
+    ///
+    /// # Ownership is re-established, not assumed
+    ///
+    /// The re-creation refuses a **live foreign owner** first, exactly as [`allocate`] does, so a
+    /// directory another running process has claimed since is never taken over; and it re-claims this
+    /// run's ownership afterwards, so the re-created directory is not left unstamped. Both go through
+    /// the same guarded walk, so a symbolic link planted at any level on the way down is refused
+    /// rather than followed.
+    ///
+    /// # Return value
+    ///
+    /// [`Ok(None)`] when the directory was already a real directory in the right place — the ordinary
+    /// answer, and it reads as silence. `Ok(Some(note))` when it had to be re-established, carrying
+    /// the sentence a caller must put in its report: a directory that was re-created may have lost
+    /// something written into it earlier, and a reader has to be told rather than left to infer it.
+    ///
+    /// # Errors
+    ///
+    /// The path is not beneath the work root or cannot be handed to a child, another live run owns
+    /// it, or it could not be re-created or re-claimed. Each is a genuine inability to proceed, and
+    /// each names the path.
+    pub fn reassert(&self) -> HarnessResult<Option<String>> {
+        let context = format!(
+            "re-establishing the workspace {} immediately before it is used",
+            shown_path(&self.root)
+        );
+        // Cheap and total: a real directory beneath the work root, every level of the way down
+        // verified rather than assumed, and nothing re-created. This is the answer on every call but
+        // the abnormal one.
+        if require_directory_chain_below(&context, &work_root(), &self.root).is_ok() {
+            return Ok(None);
+        }
+        require_beneath_work_root(&context, &self.root)?;
+        require_usable_as_child_private_directory(&context, &self.root)?;
+        if let Some(conflict) = live_foreign_owner(&self.root) {
+            return Err(HarnessError::new(context, conflict));
+        }
+        create_directory_chain_below(&context, &work_root(), &self.root)?;
+        ensure_within(&context, &work_root(), &self.root)?;
+        claim_ownership(&context, &self.root)?;
+        Ok(Some(format!(
+            "the workspace {} was not there immediately before it was used and was re-established, \
+             so anything written into it earlier is gone; the step that follows this note ran in a \
+             freshly created directory",
+            shown_path(&self.root)
+        )))
+    }
+
     /// Write `bytes` to the named entry, replacing it if it is already there, and return its
     /// path.
     ///
@@ -1351,8 +1553,10 @@ impl Workspace {
     /// Only the directory this workspace owns is removed, never a parent it merely sits inside.
     /// Keeping this method's reach to one directory is what makes it safe to call from anywhere, at
     /// any time, without knowing what else is running. The empty grouping directories that follow
-    /// from that are tidied separately by [`prune_empty_audit_grouping`], whose documentation
-    /// carries the full argument for why pruning a shared parent is safe there and not here.
+    /// from that are tidied separately — the `<program>` level by [`prune_empty_audit_grouping`] as
+    /// each program finishes, the shared `<area>` level by [`prune_empty_audit_areas`] once the walk
+    /// is over — and the first of those carries the full argument for why pruning a parent is safe
+    /// there and not here.
     ///
     /// # Errors
     ///
@@ -1966,8 +2170,8 @@ pub fn audit_workspace(
     allocate(&role, root, config.keep_work())
 }
 
-/// Remove the two grouping directories one program's audit gates were nested inside, once they
-/// hold nothing.
+/// Remove the grouping directory one program's audit gates were nested inside, once it holds
+/// nothing.
 ///
 /// [`audit_workspace`] is the only workspace in the suite nested more than one level below
 /// [`work_root`]: its path is `<audit root>/<area>/<program>/<gate>`, because a program has more
@@ -1989,8 +2193,20 @@ pub fn audit_workspace(
 /// corpus **sequentially**, one program and one gate at a time. There is therefore no concurrent
 /// creator of any `<area>/<program>` directory at the moment a program finishes with it. The
 /// narrow interface is part of the argument: this function takes one program's identity and can
-/// only ever reach the two directories that identity names, so it cannot prune a level any other
+/// only ever reach the one directory that identity names, so it cannot prune a level any other
 /// caller depends on.
+///
+/// # Why the `<area>` level is *not* pruned here, though it once was
+///
+/// The `<program>` level belongs to the program that has just finished with it: nothing will create
+/// it again, so removing it ends its life. The `<area>` level does not — the next program of the same
+/// area needs it, and it is empty for the instant between one program's gates ending and the next
+/// program's beginning. Pruning it per program therefore put the run through one create-and-delete
+/// cycle of a *shared* directory for every program of every area, which is churn with no purpose:
+/// the emptied `<area>` directories are equally gone if they are swept once at the end, and until
+/// then they are the parent of the directory the audit is actively writing into. Removing something
+/// while it is about to be needed again is the one shape of cleanup this module refuses everywhere
+/// else, so it is refused here too, and [`prune_empty_audit_areas`] does the sweep after the walk.
 ///
 /// Three further properties mean a mistaken call could still not destroy evidence:
 ///
@@ -2029,22 +2245,59 @@ pub fn prune_empty_audit_grouping(area: &str, program: &str) -> Option<String> {
     // cannot have produced a directory to tidy, so there is nothing to report.
     let area_component = encode_component("feature area", area).ok()?;
     let program_component = encode_component("program", program).ok()?;
-    let area_directory = work_root().join(UB_AUDIT_ROOT_NAME).join(area_component);
-    let program_directory = area_directory.join(program_component);
-    // Innermost first: the area directory cannot be empty until the program directory beneath it
-    // is gone. When the program directory survives, the area directory still holds it and the
-    // second call finds it non-empty and leaves it alone.
-    if let Some(note) = remove_directory_if_empty(&context, &program_directory) {
-        return Some(note);
+    let program_directory = work_root()
+        .join(UB_AUDIT_ROOT_NAME)
+        .join(area_component)
+        .join(program_component);
+    remove_directory_if_empty(&context, &program_directory)
+}
+
+/// Remove every emptied `<area>` grouping directory of the audit root, once the whole walk is over.
+///
+/// The companion to [`prune_empty_audit_grouping`], and the reason that function stops one level
+/// short. An `<area>` directory is shared by every program of its area, so it is only finished with
+/// when the audit is: called then, this can neither remove a directory something is about to write
+/// into nor leave scaffolding behind. After a run whose gates all passed and kept nothing, the audit
+/// root ends as empty as the other two reserved roots.
+///
+/// Only directories that are already **empty** are removed, and only the immediate children of the
+/// audit root are candidates: an area still holding a retained failing gate keeps its whole path, so
+/// the evidence a report points at stays reachable. The audit root itself is never a candidate — it
+/// is reserved and expected to survive.
+///
+/// # Return value
+///
+/// The notes worth reporting, in the order they arose, and an empty vector in the ordinary case. This
+/// is cleanup, so it may never fail a run or colour a verdict — the same invariant
+/// [`Workspace::discard_advisory`] and [`prune_empty_audit_grouping`] state. An audit root that
+/// cannot be listed at all is silence rather than a note: there is then nothing to tidy and nothing
+/// to say.
+pub fn prune_empty_audit_areas() -> Vec<String> {
+    let context = String::from("tidying the emptied audit area directories once the walk is over");
+    let audit_root = work_root().join(UB_AUDIT_ROOT_NAME);
+    let Ok(entries) = fs::read_dir(&audit_root) else {
+        return Vec::new();
+    };
+    let mut notes = Vec::new();
+    for entry in entries.flatten() {
+        // A file, a symbolic link or an unreadable entry is left exactly as it is: this removes
+        // emptied directories the audit created and nothing else.
+        if !matches!(entry.file_type().map(|kind| kind.is_dir()), Ok(true)) {
+            continue;
+        }
+        if let Some(note) = remove_directory_if_empty(&context, &entry.path()) {
+            notes.push(note);
+        }
     }
-    remove_directory_if_empty(&context, &area_directory)
+    notes
 }
 
 /// Remove `directory` when it holds nothing, reporting only a genuine obstruction.
 ///
 /// The emptiness test and the removal are separate steps on purpose; see
 /// [`prune_empty_audit_grouping`] for why emptiness is established by listing rather than by
-/// interpreting a removal failure, and for why that is sound at the one place this is called.
+/// interpreting a removal failure, and for why that is sound at both places this is called — the
+/// `<program>` level as each program finishes with it, and the `<area>` level once the walk is over.
 fn remove_directory_if_empty(context: &str, directory: &Path) -> Option<String> {
     if let Err(error) = require_beneath_work_root(context, directory) {
         return Some(error.to_string());

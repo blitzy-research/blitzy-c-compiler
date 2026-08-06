@@ -32,8 +32,10 @@
 //! Those eight paths are a contract shared with the suite driver, with the build directory's
 //! ignore rules and with the continuous-integration job that uploads them, so they are named by
 //! the constants and helpers below rather than spelled at a call site. The run manifest is listed
-//! because it lands in the same directory and is uploaded with the rest, even though the module
-//! that establishes the run's identity is the one that writes it. Everything is written
+//! because it lands in the same directory and is uploaded with the rest; its text belongs to the
+//! module that establishes the run's identity, and this module publishes it — as the last step of
+//! claiming the directory, so that only the run which owns the reports states whose they are.
+//! Everything is written
 //! beneath [`report_root`] and nothing is written anywhere else — in particular nothing is ever
 //! written under the corpus root, whose two registers
 //! (`tests/conformance/EXPECTED_DIVERGENCES.md`, `tests/conformance/FINDINGS.md`) and curated
@@ -110,10 +112,18 @@
 //!
 //! [`prepare_namespace`] closes both holes, and it is the **only** path that clears anything here.
 //! Exactly once per process, guarded by a [`OnceLock`] so that concurrent callers block until it has
-//! finished rather than racing it, it refuses a live foreign owner, removes the two summary artifacts
-//! and the whole per-area directory, purges any temporary a crashed run left behind, recreates the
-//! per-area directory, and stamps the root with this run's ownership. Every level on the way to each
-//! of those removals is verified to be a real directory rather than a link first.
+//! finished rather than racing it, it refuses a live foreign owner, retires the report root **whole**
+//! — every entry directly inside it, following no link — recreates the per-area directory, stamps the
+//! root with this run's ownership, and only then publishes the run manifest that names this run as the
+//! owner of what is about to be written.
+//!
+//! The root is retired whole rather than by naming the artifacts it is known to hold, because a list
+//! of names has to be kept in step with the artifacts written into it and this has no list to fall
+//! behind. Naming them was measured to leave two categories standing: the durable evidence documents
+//! beneath `evidence/`, which carry no generation stamp of their own and so cannot be told apart by
+//! the check that protects the per-area reports, and anything else that happens to be at the root —
+//! both of which a continuous-integration job then uploads beside this run's own report as though one
+//! run had produced all of it.
 //!
 //! There is deliberately no second, lighter entry point that merely scans the per-area directory and
 //! deletes the report-shaped files it finds. Clearing this directory is destructive, and a route that
@@ -249,17 +259,19 @@ use super::env::{
 use super::findings::{self, FindingId, COMMANDS_NAME};
 use super::manifest::{self, ExpectedDivergence};
 use super::sandbox::{
-    claim_ownership, live_foreign_owner_identity, workspace_path, RUN_OWNER_ENTRY,
+    claim_ownership, live_foreign_owner_identity, retire_directory_contents, workspace_path,
+    RUN_OWNER_ENTRY,
 };
 use super::{
     claim_run_namespace, create_directory_chain_below, escape_markdown_inline, posix_quote,
     read_file_bounded, redact_secrets, report_root, require_directory_chain_below,
     require_replaceable, resolve_shown_path, run_generation, sanitize_text_for_report, shown_path,
-    stable_digest, AreaSpec, CellKey, DivergenceClass, HarnessError, HarnessResult, OptLevel,
-    Oracle, Outcome, PinnedDirectory, Replaceable, RunClaim, Target, Verdict, AREAS, AREA_COUNT,
-    BCC_CELL_COUNT, MAX_INSPECTED_FILE_BYTES, MIN_PROGRAMS_PER_MANDATED_AREA,
-    ORACLE_A_COMPARISON_COUNT, ORACLE_B_COMPARISON_COUNT, ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT,
-    REFERENCE_CROSS_CELL_COUNT_MAX, REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
+    stable_digest, symbolize_roots, AreaSpec, CellKey, DivergenceClass, HarnessError,
+    HarnessResult, OptLevel, Oracle, Outcome, PinnedDirectory, Replaceable, RunClaim, Target,
+    Verdict, AREAS, AREA_COUNT, BCC_CELL_COUNT, MAX_INSPECTED_FILE_BYTES,
+    MIN_PROGRAMS_PER_MANDATED_AREA, ORACLE_A_COMPARISON_COUNT, ORACLE_B_COMPARISON_COUNT,
+    ORACLE_C_ASSERTION_COUNT, PROGRAM_COUNT, REFERENCE_CROSS_CELL_COUNT_MAX,
+    REFERENCE_NATIVE_CELL_COUNT, TOTAL_ASSERTION_COUNT,
 };
 
 /// Directory beneath [`report_root`] that holds the per-area reports.
@@ -1225,6 +1237,9 @@ fn ensure_report_namespace(context: &str) -> HarnessResult<()> {
 /// underneath this run. A crash midway still leaves a directory the next run will clear again rather
 /// than one another run believes is owned.
 ///
+/// The run manifest is published **last**, after the claim has succeeded and after the stamp, so a
+/// run that was refused this directory never names itself as the owner of somebody else's reports.
+///
 /// Clearing is what makes aggregation honest. `try_finalize` writes the summary once the area file of
 /// every area this invocation selected exists, so without clearing, files from an earlier run
 /// standing beside one from this run would be a complete-looking set — thirteen stale plus one fresh
@@ -1233,11 +1248,36 @@ fn ensure_report_namespace(context: &str) -> HarnessResult<()> {
 /// selected and stamps it **partial**, listing every area that did not contribute; what clearing
 /// guarantees is that those contributions are all this run's own.
 ///
-/// Every removal is addressed through **one pinned handle** on the report root rather than by name.
-/// The root's name is predictable and this function removes two summaries, a whole directory tree and
-/// any temporary debris through it, so a name-based sequence would re-resolve the root four times and
-/// leave three windows in which an intermediate level could be replaced — aiming a recursive removal
-/// outside the build tree while every diagnostic still named the report directory.
+/// # Why the whole root is retired rather than the artifacts this module knows about
+///
+/// The removal is [`super::sandbox::retire_directory_contents`] over the root itself — the same one
+/// implementation of "empty a directory" the generated-findings root uses — rather than a list of the
+/// paths this module publishes. A list has to be kept in step with what is written into the
+/// directory, and this has no list to fall behind.
+///
+/// That is not a hypothetical tidiness argument. Naming the artifacts left the durable evidence
+/// documents beneath [`evidence_dir`] untouched, and an evidence document carries no generation stamp
+/// of its own — it is a rendering of one cell, not a report file — so the staleness check that
+/// protects the per-area reports cannot protect these. A run whose cells published none of them would
+/// therefore report `Evidence documents published | 0` while an earlier run's documents sat in the
+/// directory the same summary points a reader at, and the continuous-integration job uploads the whole
+/// report tree unconditionally. Anything else at the root — a file some other tool wrote there, a
+/// directory a future version of this module publishes — was left standing for the same reason.
+///
+/// Retiring the root whole also subsumes the temporary-file sweep this function used to perform
+/// separately: a temporary a crashed run left behind is an entry directly inside the root, so it is
+/// removed by the same pass, and there is no longer a second rule about which names may be cleaned up.
+///
+/// Only two things are then created: the per-area directory, because [`write_area`] publishes into it
+/// rather than creating it per call, and the ownership stamp. [`evidence_dir`] is deliberately *not*
+/// recreated here — [`publish_cell_evidence`] creates it on demand, so a run that publishes no
+/// evidence document leaves no empty directory suggesting it lost one.
+///
+/// Every removal is still addressed through **one pinned handle** on the report root rather than by
+/// name, because that is how the shared implementation works: the root's name is predictable, so a
+/// name-based sequence would re-resolve it once per entry and leave a window per entry in which an
+/// intermediate level could be replaced — aiming a recursive removal outside the build tree while
+/// every diagnostic still named the report directory.
 fn prepare_report_namespace() -> HarnessResult<()> {
     let context = "preparing the report directory for this run";
     let root = report_root();
@@ -1265,37 +1305,14 @@ fn prepare_report_namespace() -> HarnessResult<()> {
         ));
     }
 
-    let pinned = PinnedDirectory::pin(context, &root)?;
-    for stale in [summary_markdown_name(), summary_tsv_name()] {
-        require_replaceable(
-            context,
-            &pinned.shown_entry(&stale),
-            Replaceable::RegularFile,
-        )?;
-        pinned.remove_within(context, &stale)?;
-    }
-    // Three directories rather than one, and the two beyond `areas/` are not an afterthought.
-    // Everything beneath this root is named deterministically, so an earlier run's document does not
-    // collide with this run's — it *survives beside* it, and a reader of the uploaded artifact cannot
-    // tell which run produced which file. For an area report that would corrupt an aggregate, which is
-    // why it was always cleared; for an evidence document and a finding's review copy it is worse in a
-    // different way, because both are evidence: a marker retired since the last run, or a finding that
-    // has stopped diverging, would keep publishing its old evidence into every later report as though
-    // this run had observed it. Clearing all three is also what makes this suite's own statement true —
-    // `tests/conformance/FINDINGS.md` §4 says the report root is emptied whole at the start of every
-    // run — and each removal keeps the same guard as the first: the entry must be a real directory this
-    // module put there, addressed through the one pinned handle.
-    for directory in [AREAS_DIR_NAME, EVIDENCE_DIR_NAME, FINDING_BUNDLE_DIR_NAME] {
-        require_replaceable(
-            context,
-            &pinned.shown_entry(directory),
-            Replaceable::Directory,
-        )?;
-        pinned.remove_within(context, directory)?;
-    }
-    purge_stale_temporaries(context, &pinned)?;
+    // Retired WHOLE through the suite's one implementation of "empty a directory", so no list of
+    // published names can fall behind what is written here.
+    retire_directory_contents(context, &root)?;
     create_directory_chain_below(context, &root, &areas_dir())?;
     claim_ownership(context, &root)?;
+    // Last, and only now that the claim has succeeded: the manifest states which run produced the
+    // reports in this directory, so a run that was refused the directory must not have written it.
+    super::sandbox::publish_run_manifest(context)?;
     // Stored only now, after everything that could fail has succeeded. A claim recorded before a
     // failed clearing would be released by the process exit rather than by this run's own accounting,
     // and a reader of the failure would have no way to tell whether the directory had been claimed.
@@ -1329,29 +1346,6 @@ fn remember_report_claim(claim: RunClaim) {
     }
 }
 
-/// Remove any temporary file a crashed earlier run left at the report root.
-///
-/// A temporary name carries the writing run's generation token and a counter unique within that
-/// run, so a leftover can never be reused or collided with; it would simply accumulate. Removing them here keeps the claim that a failed write
-/// leaves no debris true across runs as well as within one. An entry that is not one of ours by name
-/// is left alone, and the ownership stamp is not one of ours by name.
-///
-/// Takes the report root as a **pinned directory** rather than as a path, so the listing and every
-/// removal that follows from it address the same held object. Listing by name and then removing by
-/// name are two resolutions of one predictable path: between them the root can be replaced, and the
-/// removals — aimed at names this function found in the *previous* directory — would then execute in
-/// the substitute. Since the names it acts on come from the listing, the listing and the removals have
-/// to describe one directory or neither answer means anything.
-fn purge_stale_temporaries(context: &str, root: &PinnedDirectory) -> HarnessResult<()> {
-    for name in root.entry_names(context)? {
-        if name == RUN_OWNER_ENTRY || !name.starts_with('.') || !name.ends_with(TEMPORARY_SUFFIX) {
-            continue;
-        }
-        root.remove_within(context, &name)?;
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------------------------
 // Writing
 //
@@ -1360,16 +1354,13 @@ fn purge_stale_temporaries(context: &str, root: &PinnedDirectory) -> HarnessResu
 // partially written report, and a writer that fails leaves the previous report intact instead of
 // replacing it with a truncated one. A report is the only account of a run that outlives the
 // process, so a torn report is worse than no new report at all.
+//
+// The shared publisher names each temporary from the destination's own name, this run's generation
+// token and a counter unique within the run, so a temporary this module leaves behind can only be
+// debris from a run that died mid-write. It needs no rule of its own: `prepare_report_namespace`
+// retires every entry directly inside the report root at start-up, so such debris is removed by the
+// same pass that retires the previous run's reports.
 // ---------------------------------------------------------------------------------------------
-
-/// Suffix of every temporary file published beneath the report root, and the only name this module
-/// will clean up.
-///
-/// The shared publisher builds its temporary names from the destination's own name, this run's
-/// generation token and a counter unique within the run, and ends every one of them with this
-/// suffix. Nothing in this module creates a file it does not then rename, so a name ending this way
-/// beneath the report root is always debris from a run that died mid-write.
-const TEMPORARY_SUFFIX: &str = ".tmp";
 
 /// Publish a Markdown report and its machine-readable sibling as one operation.
 ///
@@ -1526,6 +1517,21 @@ pub fn evidence_refusal_notes() -> Vec<String> {
     }
 }
 
+/// What a refused evidence document costs, said once and appended to every refusal.
+///
+/// The consequence has to be stated by this module rather than inherited from the guard that produced
+/// the cause, because the guards are shared with the paths that publish a report and a finding
+/// directory, where a refusal *does* end the run. Here it cannot: archiving runs after a cell's
+/// verdicts are decided, and a decided cell must not be re-decided by a problem with its own tidying.
+/// A cause reading "the run fails loudly" beside a summary correctly reporting `run_fails false` is a
+/// report contradicting itself about the one thing a reader acts on first, so the true consequence is
+/// spelled out at the one place that knows it.
+const EVIDENCE_REFUSAL_CONSEQUENCE: &str = "This does not fail the run and does not change the \
+                                            cell's verdict: the archiving happens after the verdict \
+                                            is decided, so the refusal is reported here, at run \
+                                            scope, and the claim that every reported outcome \
+                                            received a document is withheld instead.";
+
 /// Record one refusal so that it reaches the run summary.
 fn note_evidence_refusal(note: String) -> String {
     match evidence_refusals().lock() {
@@ -1552,14 +1558,20 @@ pub fn publish_cell_evidence(
 ) -> String {
     let key = outcome.key();
     let path = evidence_document_path(key, outcome.oracle());
-    let context = format!(
-        "publishing durable evidence for {}/{} @ {} {} oracle_{}",
+    // Two strings rather than one, because they are read in two different places and a single string
+    // cannot be right in both. `context` is the gerund a `HarnessError` is attributed to — "while
+    // publishing …" — and `subject` names the cell alone, for a note that already opens with
+    // "evidence for". Reusing the gerund there produced "evidence for publishing durable evidence
+    // for 08_gcc_extensions/…", which reads as a defect in the tool rather than a fact about the run.
+    let subject = format!(
+        "{}/{} @ {} {} oracle_{}",
         key.area(),
         key.program(),
         key.target().triple(),
         key.opt().flag(),
         outcome.oracle().letter()
     );
+    let context = format!("publishing durable evidence for {subject}");
 
     let document = render_evidence_document(outcome, archived, reason);
     let bytes = document.len() as u64;
@@ -1570,16 +1582,16 @@ pub fn publish_cell_evidence(
         return note_evidence_refusal(format!(
             "evidence for {} was not published: it would have taken this run past the \
              {EVIDENCE_RUN_BYTES_MAX}-byte evidence ceiling ({charged} bytes charged). Re-run this \
-             cell on its own, or set {VAR_KEEP_WORK}, to obtain it",
-            sanitize_text_for_report(&context)
+             cell on its own, or set {VAR_KEEP_WORK}, to obtain it. {EVIDENCE_REFUSAL_CONSEQUENCE}",
+            sanitize_text_for_report(&subject)
         ));
     }
 
     if let Err(error) = ensure_report_namespace(&context) {
         EVIDENCE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
         return note_evidence_refusal(format!(
-            "evidence for {} was not published: {}",
-            sanitize_text_for_report(&context),
+            "evidence for {} was not published: {}. {EVIDENCE_REFUSAL_CONSEQUENCE}",
+            sanitize_text_for_report(&subject),
             error.cause()
         ));
     }
@@ -1589,8 +1601,8 @@ pub fn publish_cell_evidence(
     {
         EVIDENCE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
         return note_evidence_refusal(format!(
-            "evidence for {} was not published: {}",
-            sanitize_text_for_report(&context),
+            "evidence for {} was not published: {}. {EVIDENCE_REFUSAL_CONSEQUENCE}",
+            sanitize_text_for_report(&subject),
             error.cause()
         ));
     }
@@ -1709,10 +1721,36 @@ fn render_evidence_document(
 /// everything else sanitization escapes — because unlike a report row, this artifact *is*
 /// multi-line: a compiler's diagnostic output is only readable with its line structure intact, and
 /// collapsing it would defeat the purpose of archiving it. Every other forgeable character, and every
-/// credential-bearing value, is still removed, by the same two functions the report rows use.
+/// credential-bearing value, is still removed, by the same functions the report rows use.
+///
+/// # Why root elision belongs here and not only in the fields
+///
+/// The three transformations are the same three [`super::Outcome::new`] applies, in the same order and
+/// for the same reasons: redaction first, because it recognises a credential by its exact characters
+/// and an escape inserted before it would hide the match; **root elision second**; sanitization last,
+/// so that whatever the first two produce still cannot forge a column or repaint a line.
+///
+/// Elision was missing here, and the omission was not theoretical. This document's own fields arrive
+/// already elided — a [`super::SideRecord`] and an [`super::Outcome`] both apply it at construction —
+/// but the archived capture bodies do not: they are the workspace's `*.status` and `*.exit` records
+/// and its `commands.txt`, written verbatim for a reader who needs to re-run the cell, and each one
+/// spells this machine's build and package roots out in its `command`, `spawned`, `argv`, `artifact`
+/// and `working_dir` lines. Measured on one long-double document: nineteen occurrences of the absolute
+/// package path inside archived bodies, beside five correctly elided occurrences in the document's own
+/// fields. The continuous-integration job uploads the whole report tree on the strength of the claim
+/// that a published report carries neither a credential nor the absolute location of the workspace
+/// that produced it, and gates the finding directories behind an opt-in *because* those deliberately
+/// do disclose it — so an evidence document was the one artifact escaping the distinction the two
+/// upload rules are built on. Applying elision to the assembled document covers the fields and the
+/// archived bodies alike, and the substitution is textual and idempotent, so the already-elided fields
+/// are unaffected.
+///
+/// A finding directory is deliberately *not* treated this way: its captures are evidence that must
+/// compare byte for byte and its `commands.sh` has to stay runnable, which is why it carries its own
+/// disclosure review instead.
 fn sanitize_document_for_evidence(text: &str) -> String {
-    let redacted = redact_secrets(text);
-    redacted
+    let portable = symbolize_roots(&redact_secrets(text));
+    portable
         .lines()
         .map(sanitize_text_for_report)
         .collect::<Vec<_>>()
@@ -7169,13 +7207,14 @@ fn render_summary_tsv(
 //
 // Two mechanisms close that gap, and both are needed:
 //
-// - This module's own namespace preparation retires the previous run's `areas/` directory once per
+// - This module's own namespace preparation retires the previous run's report root whole once per
 //   process, before this run publishes anything: [`prepare_report_namespace`], reached through
 //   [`ensure_report_namespace`] from [`write_area`] and [`try_finalize`]. It is a precondition of
 //   both rather than an assumption about call order, so an area report can never be published beside
-//   a stale neighbour. [`super::sandbox::ensure_roots`] only *creates* the three artifact roots and
-//   publishes the run manifest; it clears nothing, because it runs before any ownership question has
-//   been asked.
+//   a stale neighbour, and no other entry of that root — an evidence document, a temporary, anything
+//   a previous run or another tool left there — outlives the retirement either.
+//   [`super::sandbox::ensure_roots`] only *creates* the three artifact roots; it clears nothing and
+//   publishes nothing, because it runs before any ownership question has been asked.
 // - The registry below records which areas *this process* published. It is the set the summary
 //   aggregates from, so a file this run did not write cannot enter a total even if something else
 //   put one there — the completeness check consults memory, not the directory listing.

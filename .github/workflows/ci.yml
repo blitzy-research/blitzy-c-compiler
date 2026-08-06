@@ -4,7 +4,13 @@
 # type-checking, installs the reference compilers and emulators the suite's oracles compare
 # against, proves that toolchain really is the one the corpus is judged against, establishes the
 # Cargo package every later command depends on, pre-flights the discovered oracle inventory, runs
-# the suite in strict mode, and publishes the report as a build artifact.
+# the suite in strict mode, and publishes the evidence of the run.
+#
+# Both trees this job can publish are named here so neither is a surprise. The report tree goes up
+# on EVERY run, and it carries a review copy of every finding the run recorded, so a divergence can
+# be inspected without reproducing the run locally even on a green automatic run. The raw generated
+# finding directories — the byte-exact, unreviewed ones — go up when a dispatch asks for them, for
+# the disclosure reason the upload steps at the end of the job set out in full.
 #
 # ## One job, and why exactly one
 #
@@ -72,8 +78,12 @@ name: CI
 on:
   push:
     branches: [ main ]
-  # Manual dispatch exists for one reason: it carries the opt-in that releases the raw generated
-  # finding directories as an artifact. See the upload steps at the end of the conformance job.
+  # Manual dispatch exists for two reasons. It lets this matrix be exercised on demand — against a
+  # revision that has already been reviewed, per the paragraph above — rather than only when
+  # something lands on the default branch; and it carries the opt-in that releases the raw generated
+  # finding directories as a separate artifact. See the upload steps at the end of the conformance
+  # job: the report tree, which carries a review copy of every finding, is published on every run
+  # without asking, and only the byte-exact unreviewed directories wait for this input.
   workflow_dispatch:
     inputs:
       publish_raw_findings:
@@ -170,12 +180,13 @@ jobs:
         with:
           persist-credentials: false
 
-      # Pinned to the exact supported version rather than to a channel. `stable` moves without any
-      # change to this file, which makes a green run unreproducible and a red one hard to
-      # attribute; the repository builds against 1.93.1, so this installs that. Using rustup
-      # directly also removes a third-party action from the trust surface of a job that already
-      # has rustup available to it. `rustfmt` is requested explicitly because the minimal profile
-      # does not carry it and the formatting gate below invokes it directly.
+      # Pinned to the exact supported version rather than to a channel, and installed by invoking
+      # rustup directly rather than through a toolchain action. A channel such as `stable` moves
+      # without any change to this file, which makes a green run unreproducible and a red one hard
+      # to attribute; the repository builds against 1.93.1, so this installs that. Calling rustup
+      # itself also removes a third-party action from the trust surface of a job that already has
+      # rustup available to it. `rustfmt` and `clippy` are requested explicitly because the minimal
+      # profile does not carry them, and the formatting gate below invokes `rustfmt` directly.
       - name: Install the pinned Rust toolchain
         run: |
           set -euo pipefail
@@ -490,7 +501,7 @@ jobs:
       # before an area test asserts, so a complete report exists even then; without this the
       # evidence would be discarded exactly when it is needed.
       #
-      # ## Why only the report is published by default
+      # ## Both trees are published, and they are published differently
       #
       # Every free-text value that reaches a report row passes through the harness's secret
       # redaction, root elision and report-safe rendering at the single point an outcome comes into
@@ -504,6 +515,11 @@ jobs:
       # is, precisely: sanitized by construction against the named forms, with a narrow residual
       # class the module enumerates, which is why the step below states the bound in the run log
       # where the artifact is produced.
+      #
+      # The durable evidence documents under `evidence/` are covered by the same three
+      # transformations, applied to the whole assembled document — which is what it takes, because the
+      # capture bodies they archive are verbatim workspace records naming this machine's roots in
+      # their own command lines.
       #
       # A generated finding directory is deliberately the opposite — it describes the machine that
       # produced it as freely as it likes, because that is what makes it re-runnable there — and its
@@ -558,6 +574,13 @@ jobs:
           fi
           echo "::notice::This artifact carries a review copy of ${copies} finding(s) under conformance-report/findings/, each holding all seven artifact classes — reproducer, expectation record, manifest, commands, captures, environment fingerprint and diff — plus a BUNDLE.txt stating that the copy is report-grade rather than the byte-exact evidence. A finding does not fail this job, so without these copies a green run would have named findings whose evidence went with the runner. The exact bytes and the runnable commands stay in target/conformance-findings/, which is released only by a manual dispatch setting publish_raw_findings, because tests/conformance/FINDINGS.md §5.3 requires a person to read all of it first; the run summary's own accounting states how many copies were published and names any that were refused."
 
+      #
+      # Three measures keep that gate honest rather than merely stated, and all three are below:
+      # the audit step reports how many generated directories exist and what each one's manifest
+      # says about its own review, and raises a `::warning::` naming the artifact as unreviewed and
+      # unminimized; the artifact is named `conformance-findings-raw` so nothing about it reads as
+      # curated; and its retention is one day, because it is evidence released for an investigation
+      # rather than a durable publication.
       - name: Upload the conformance reports
         if: always()
         # Pinned by digest for the same reason as the checkout above.
@@ -572,9 +595,13 @@ jobs:
           path: target/conformance-report/**
 
       # The disclosure gate, made visible rather than assumed. It states how many generated
-      # finding directories exist and what each one's manifest says about its own review, so an
-      # operator who opted in knows exactly what they are downloading — and so a directory that
+      # finding directories exist and what each one's manifest says about its own review, so
+      # whoever downloads the artifact knows exactly what they have — and so a directory that
       # somehow claimed to have been reviewed by a run is caught here instead of being believed.
+      #
+      # Its condition is the report upload's condition, deliberately: the audit must run on exactly
+      # the runs whose findings are published, and `always()` covers the run that failed, which is
+      # the run that produced findings in the first place.
       - name: Audit the generated findings before releasing them
         if: always() && inputs.publish_raw_findings
         run: |
@@ -599,6 +626,15 @@ jobs:
               "$(grep -m1 '^disclosure_review' "$manifest" || echo 'disclosure_review = <ABSENT>')" \
               "$(grep -m1 '^minimization' "$manifest" || echo 'minimization = <ABSENT>')"
           done
+          # The annotation exists to flag UNREVIEWED evidence, so it is raised only when there is
+          # some. A run that found nothing is the ordinary and desired outcome, and the roots are
+          # created on every run whether or not anything is written beneath them, so warning at a
+          # count of zero would put a standing annotation on every green run — which is how a
+          # warning that means something becomes one nobody reads.
+          if [ "$count" -eq 0 ]; then
+            echo "no generated finding directories in this run; nothing to release"
+            exit 0
+          fi
           echo "::warning::Releasing $count raw generated finding directory(ies) as the conformance-findings-raw artifact. Every one of them is UNREVIEWED and UNMINIMIZED evidence: each retains captured diagnostics, exact commands and absolute tool paths, and each reproducer is a verbatim copy of a corpus program rather than a reduced case. Perform the tests/conformance/FINDINGS.md §5.3 disclosure review on what you download before sharing it further, and the §5.1 minimization step before treating any of it as a filed finding."
 
       - name: Upload the raw generated finding directories (UNREVIEWED evidence, opt-in)
@@ -607,9 +643,18 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: conformance-findings-raw
-          if-no-files-found: warn
+          # `ignore`, where the report above uses `warn`, and the asymmetry is the point. A missing
+          # report means a run that executed the matrix failed to record it, which is worth an
+          # annotation. An empty finding tree means the matrix found nothing to report, which is the
+          # outcome the suite exists to produce — and since the three roots are created on every run,
+          # `warn` here would annotate every green run with a notice about absent evidence that was
+          # never expected to exist. The audit step above states the count either way, so nothing is
+          # hidden by declining to raise it as a warning.
+          if-no-files-found: ignore
           # Short-lived deliberately: this is unreviewed evidence released for a specific
           # investigation, not a durable publication. The curated, reviewed finding set lives in
-          # the repository under tests/conformance/findings/ and needs no artifact at all.
+          # the repository under tests/conformance/findings/ and is a committed deliverable that
+          # needs no artifact at all. One day is enough to open a red run and read its evidence,
+          # and short enough that unreviewed material does not accumulate.
           retention-days: 1
           path: target/conformance-findings/**

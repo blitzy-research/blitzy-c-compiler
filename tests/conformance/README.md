@@ -1096,8 +1096,21 @@ the time to investigate and then teaches them to distrust the suite.
 ### Headers: hand-declare, do not include
 
 **Hand-declare the libc prototypes a program needs and include no header**, with the two sanctioned
-exceptions recorded below and no others. That is `int printf(const char *, ...);` in nearly every
-program, and `_Noreturn void exit(int);` as well in `10_declarations_and_types/008_noreturn.c`.
+header exceptions recorded below and no others. The prototype is `int printf(const char *, ...);` in
+nearly every program, and exactly two programs declare anything beyond it. That list is complete as
+it stands, and it is the whole of the corpus's dependence on libc:
+
+- `_Noreturn void exit(int);` as well in `10_declarations_and_types/008_noreturn.c`.
+- `void *malloc(<this target's size_t>);` and `void free(void *);` as well in
+  `03_initializers/011_flexible_array_member.c`, the corpus's only use of the allocator. A flexible
+  array member's whole point is a run-time-sized object, so that program obtains one. Its record
+  carries the argument for it: the size type is spelled per target through the architecture macros
+  (`unsigned int` on i686, `unsigned long` on the other three, with an `#error` on an unrecognised
+  fifth target) so that no target is lost and the declaration matches the built-in on all four
+  reference drivers; an allocation opens no file, no socket and no path, so hermeticity is untouched;
+  the single block is released with `free` before `main` returns, measured clean under the sanitizer
+  gate's leak checker; and a refusal prints the fixed line `alloc_refused=1` and returns 3, inside the
+  suite's 0–125 range, so even that path stays byte-deterministic.
 
 The reason is not obvious, so it is worth stating plainly. `bcc` bundles only nine freestanding
 headers — `stddef.h`, `stdint.h`, `stdarg.h`, `stdbool.h`, `limits.h`, `float.h`, `stdalign.h`,
@@ -1171,7 +1184,9 @@ conflating them is a defect in the test material, so they are stated separately.
   the shared flag set.
 - **No other header is permitted anywhere in the corpus.** In particular no `stdio.h` (`bcc` ships
   none), no `wchar.h`, no `uchar.h` and no `string.h`. Every other program — all of them — includes
-  nothing and hand-declares the single libc prototype it needs.
+  nothing and hand-declares the libc prototypes it needs, which is `printf` alone except in the two
+  programs named under
+  [Headers: hand-declare, do not include](#headers-hand-declare-do-not-include).
 
 ### The two-variant rule
 
@@ -1695,7 +1710,15 @@ describes a run.** They are listed separately here for that reason.
   full 108-program corpus present on this branch, so a run traverses ≈**2,592** compile-and-run pairs.
 - **Suite measurement.** On a 4-core Intel Xeon @ 2.60 GHz running Linux 6.12.85, with `rustc` 1.93.1,
   `gcc` 13.4.0 (native plus all three cross drivers) and `qemu-user` 10.1.0, against a surrogate
-  compiler under test with all eighteen tests passing:
+  compiler under test with all eighteen tests passing — which **requires
+  `BCC_CONFORMANCE_ALLOW_XPASS=1`**, and the timings below were taken with it set. A surrogate that
+  forwards to the reference toolchain supports GCC case ranges, so it retires
+  `XD-GCCEXT-CASE-RANGES-001`: measured on this branch, `area_08_gcc_extensions` reports **12 `XPASS`
+  rows and fails** without the variable and passes with it, which makes an otherwise identical run
+  17 passed / 1 failed rather than eighteen. That is the marker working as designed rather than a
+  defect in the surrogate — see
+  [the unexpected-success policy](#the-unexpected-success-policy) for why a surrogate XPASS
+  establishes nothing:
 
   | Scope | Tests | Measured wall time | Samples |
   | --- | --- | --- | --- |
@@ -1868,12 +1891,23 @@ then run every gate in the third column there. Nothing in the suite needs to cha
 is an auto-discovered `tests/<name>.rs` target with a nested non-target helper directory and a data-only
 corpus directory, which is precisely the shape that merges without touching the manifest.
 
-**What a blocked gate looks like.** Every blocked command above exits `101` with `could not find
-Cargo.toml`. That includes the two infrastructure tests which otherwise need no toolchain at all —
-the files they read are committed and present — because the runner itself cannot be started. Nothing
-here is broken by that: the gate is simply not invocable until the package is present, and it is
-stated so that a reader who tries one of these commands on a documentation-only branch knows
-immediately which of the two situations they are in.
+**What a blocked gate looks like.** Every blocked command above exits non-zero naming the same cause,
+`could not find Cargo.toml`, and the exit **code** is not uniform across the five. Four of them —
+`cargo test --test conformance --no-run`, `cargo clippy -- -D warnings`,
+`cargo test --test conformance` and the whole-repository `cargo test` — exit **101**, which is Cargo's
+own code for "this is not a package", with that message verbatim. `cargo fmt -- --check` exits **1**:
+it reaches the same conclusion one step earlier, through `cargo metadata`, and reports it as
+`` `cargo metadata` exited with an error: error: could not find `Cargo.toml` … ``. Measured, not
+assumed — all five were run in a documentation-only checkout. The difference matters only to a script
+that tests for a particular code, and it is recorded because a sentence promising `101` uniformly would
+be wrong about one of the five commands it describes, which is the same class of defect as documenting
+a command that does not run.
+
+That set includes the two infrastructure tests which otherwise need no toolchain at all — the files
+they read are committed and present — because the runner itself cannot be started. Nothing here is
+broken by that: the gate is simply not invocable until the package is present, and it is stated so
+that a reader who tries one of these commands on a documentation-only branch knows immediately which
+of the two situations they are in.
 
 | Purpose | Command |
 | --- | --- |
@@ -2072,9 +2106,22 @@ is reaped — **before** any check has decided whether it passed. A check does n
 until after the invocation it is judging, so recording only on failure would mean the evidence for a
 failure was never captured; and `BCC_CONFORMANCE_KEEP_WORK` asks for a passing run's evidence too.
 
-Probe workspaces live beneath the same work root as the corpus cells, under two reserved names that
-no cell may use: `target/conformance-work/_flagprobe/<flag>/` for one flag check, and
-`target/conformance-work/_ubaudit/<area>/<program>/<gate>/` for one gate applied to one program.
+Probe workspaces live beneath the same work root as the corpus cells, and the harness reserves
+**three** names there that no cell may use. `RESERVED_ROOT_NAMES` in
+`tests/conformance_harness/sandbox.rs` is the list, and `sandbox::for_cell` refuses a cell whose
+derived directory name collides with one of them rather than trusting the naming convention — every
+reserved name begins with an underscore and every feature-area directory begins with a digit, so the
+sets are disjoint in practice, but a future area name that happened to collide would otherwise let a
+cell and an infrastructure user write into one directory concurrently:
+
+- `target/conformance-work/_flagprobe/<flag>/` — one flag check.
+- `target/conformance-work/_ubaudit/<area>/<program>/<gate>/` — one gate applied to one program.
+- `target/conformance-work/_attest/<triple>/` — the runner attestation for one architecture. This one
+  is not a probe workspace, but it shares the reservation and is created on every run: an emulator has
+  to be proved to execute the architecture it was selected for, which means building a program and
+  running it *before* any cell runs and therefore before any cell workspace exists. The workspace
+  holds exactly `attest.c` and `attest.out`, built `-O0 -static`, and its own grouping directory is
+  what keeps that pre-flight work distinguishable from the matrix.
 
 Flag-probe captures are named `{bcc|ref}.{compile|run}.{NN}.{stdout,stderr,exit}`, where `NN` is a
 two-digit ordinal allocated per workspace. The ordinal is what makes several invocations in one
@@ -2135,10 +2182,20 @@ tells you which oracle arms will be available before the matrix spends time disc
 Every variable has a safe default. **The suite runs correctly with none of them set.** A boolean
 variable is true when it is set, non-empty and not the single character `0`.
 
+**An empty value is treated as absence, for every variable in the table.** Exporting `BCC_REF_CC=`
+— or a value that is only whitespace — is equivalent to not exporting it at all: the documented
+default applies, and for a tool variable that means the probe order runs. This is deliberate rather
+than incidental, because a variable an environment cleared with `VAR=` names nothing there is to
+resolve. The capability report says which of the two it saw, in as many words: `is unset` when the
+variable is absent from the environment and `is set but empty, which this catalogue treats as
+absent` when it is present and holds nothing usable. A value that is not valid text is the one
+non-empty case that is **refused** rather than defaulted, with the offending bytes shown — see the
+paragraph below this table.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `BCC_BIN` | the Cargo-provided `CARGO_BIN_EXE_bcc` path | Override the compiler under test, for validating an externally built binary |
-| `BCC_REF_CC` | probe `gcc`, then `cc`, then `clang` | Native reference compiler for oracle (a) and for both audit gates |
+| `BCC_REF_CC` | probe `gcc`, then `cc`, then `clang` | Native reference compiler for oracle (a) and for both audit gates. Selecting `clang` here is supported for oracle (a) only; see the measured limitations in [Toolchain of record](#toolchain-of-record) |
 | `BCC_REF_CC_I686` | `i686-linux-gnu-gcc` | Oracle (a)'s i686 arm |
 | `BCC_REF_CC_AARCH64` | `aarch64-linux-gnu-gcc` | Oracle (a)'s AArch64 arm |
 | `BCC_REF_CC_RISCV64` | `riscv64-linux-gnu-gcc` | Oracle (a)'s RISC-V 64 arm |
@@ -2152,7 +2209,7 @@ variable is true when it is set, non-empty and not the single character `0`.
 | `BCC_CONFORMANCE_ALLOW_MISSING_ORACLES` | unset | Explicitly acknowledge a reduced-oracle environment; the gap is still reported, and under strict mode it is still a failure |
 | `BCC_CONFORMANCE_TIMEOUT_SECS` | `30` | Per-cell execution budget, in whole seconds. Accepted range **1–3600**, narrowing to **1–300** when `BCC_CONFORMANCE_STRICT` is set |
 | `BCC_CONFORMANCE_KEEP_WORK` | unset | Retain every cell workspace instead of removing it on success |
-| `CARGO_TARGET_DIR` | unset — the build root is the package-relative `target/` | Cargo's own variable, honoured rather than ignored: it moves the **build root** under which every workspace, report and finding directory is created, so those paths are `<build-root>/conformance-work`, `<build-root>/conformance-report` and `<build-root>/conformance-findings`. A value is **refused** — with the package-relative default used instead, and the refusal printed in the capability report rather than swallowed — when it is not valid text, contains a character that could forge a column in a report, contains a relative path component, has an existing ancestor that is not a real directory, or names, contains or sits inside a committed tree this suite reads or curates |
+| `CARGO_TARGET_DIR` | unset — the build root is the package-relative `target/` | Cargo's own variable, honoured rather than ignored: it moves the **build root** under which every workspace, report and finding directory is created, so those paths are `<build-root>/conformance-work`, `<build-root>/conformance-report` and `<build-root>/conformance-findings`. A value is **refused** — with the package-relative default used instead, and the refusal printed in the capability report rather than swallowed — when it is not valid text, contains a character that could forge a column in a report, contains a relative path component, has an existing ancestor that is not a real directory, or names, contains or sits inside a committed tree this suite reads or curates. An **accepted** value is printed too, and for a symmetric reason: the three root paths are rendered with the build root reduced to `<build>`, so a redirected run and a default one describe their artifacts identically. The capability report therefore states `CARGO_TARGET_DIR: honoured — …` naming the directory the roots sit beneath, and the run manifest `target/conformance-report/run.txt` records it as `build_root` |
 
 Configuration is read **once** into a single validated snapshot before any cell runs, so two
 concurrently executing area tests cannot observe different policies and the report cannot describe a
@@ -2398,6 +2455,31 @@ search `/usr/local/libexec/gcc/…` and fail with `cannot execute 'cc1'`. A one-
 `exec`s the real driver by absolute path works, and naming the drivers through the `BCC_REF_CC*`
 overrides avoids the question entirely.
 
+**What the harness reads out of such a script, and what it does not.** The attestation grammar is
+deliberately narrow: a shebang, comment and blank lines, and exactly one unconditional `exec` of an
+absolute path. Any other statement — a conditional, an assignment, a second `exec`, a relative
+program word — makes the file *unattested*, which strict mode refuses rather than trusts. Within that
+grammar the harness reads two things and reports both:
+
+- **which program the chain runs**, following an `exec`-to-an-`exec` chain to its end, up to four
+  levels. This is what makes oracle (a) an oracle: two different launcher names that reach the same
+  driver are not two independent compilers, and a launcher comparison alone would have called them
+  independent.
+- **what the `exec` line passes to it.** A line ending in exactly `"$@"` hands your command line
+  through untouched and is reported without comment, because it is the documented shape. A line that
+  passes *anything else* — an inserted `-D`, a `--sysroot`, a reordering, or no arguments at all —
+  is disclosed verbatim in the capability report beside the program it wraps, and travels into every
+  finding's environment fingerprint.
+
+Such a wrapper is **not refused**: a provisioned cross toolchain may genuinely need a flag to work,
+and refusing it would break the environments this guidance exists for. But note the limit it implies.
+The suite passes only `-o`, one of `-O0`/`-O1`/`-O2` and `-static` in a differential invocation, and
+a wrapper that adds a flag on one side has changed what that comparison compiled — requirement 3's
+shared-flag discipline, bypassed through a mechanism this document recommends. Disclosure is what
+makes that visible rather than silent; if you want the guarantee rather than the disclosure, point the
+`BCC_REF_CC*` overrides at the real driver binaries, which is what the continuous-integration job
+does.
+
 ```bash
 cargo test --test conformance infra_oracle_capability_report -- --nocapture
 ```
@@ -2432,14 +2514,15 @@ suite runs somewhere else, `infra_oracle_capability_report` reports that host's 
 | AArch64 C runtime | `libc6-dev-arm64-cross` | **2.42** | `2.42-0ubuntu3cross1` |
 | RISC-V 64 C runtime | `libc6-dev-riscv64-cross` | **2.42** | `2.42-0ubuntu3cross1` |
 | Per-cell timeout | `timeout` at `/usr/bin/timeout` | **uutils coreutils 0.2.2** | `coreutils-from-uutils` |
-| Alternate reference oracle | `clang` | **20.1.8**, present | `clang` `1:20.0-63ubuntu1` |
+| Alternate reference oracle | `clang` | **20.1.8**, present — usable for oracle (a), **not** for the audit gates | `clang` `1:20.0-63ubuntu1` |
 | Reducer for finding minimization | `creduce` | **2.11.0**, present | `creduce` `2.11.0~20240909-2.1` |
 | ELF inspection | `binutils` | 2.45 present, but **not a dependency** — the flag probe reads the identification bytes with `std` | `binutils` |
 
 `gcc-13` is the reference compiler of record, and the version is not incidental: it is chosen for
 its **gnu17** default, since no `-std` flag may be passed to either compiler. `clang` is selectable
-through `BCC_REF_CC` where a second independent oracle is wanted; `creduce` is used for minimization
-only when present, and is never required.
+through `BCC_REF_CC` where a second independent oracle is wanted — with the two measured limitations
+recorded in the bullet below, which bound what that selection can establish on this machine;
+`creduce` is used for minimization only when present, and is never required.
 
 Three entries deserve a second look, because each was reasoned about from a stale assumption before
 it was measured:
@@ -2457,9 +2540,29 @@ it was measured:
   neither `--signal=KILL` nor `--kill-after` is ever passed. Do not assume GNU semantics from the
   command name.
 - **`clang` and `creduce` are present here**, so neither optional capability is hypothetical on this
-  machine. They remain optional in the sense that the suite is complete without them. Note that
-  `clang`'s default language mode differs from the pinned reference driver's, so selecting it
-  changes what the oracle compares against.
+  machine. They remain optional in the sense that the suite is complete without them. Selecting
+  `clang` through `BCC_REF_CC` gives a second independent oracle for the **differential comparison**,
+  and three measured facts bound what it can do — stated here rather than left for a reader to
+  discover, because a documented capability that does not hold is worse than an absent one:
+    - **Its default language mode differs** from the pinned reference driver's, so selecting it
+      changes what the oracle compares against.
+    - **It cannot drive the sanitizer gate on this machine.** `clang -fsanitize=undefined,address`
+      fails at the link step — `cannot find /usr/lib/llvm-20/lib/clang/20/lib/x86_64-pc-linux-gnu/`
+      `libclang_rt.asan_static.a`, and the same for `libclang_rt.asan.a` — because the compiler-rt
+      runtime archives are not installed here (they ship in `libclang-rt-20-dev`, which is not part
+      of the toolchain of record). With `BCC_REF_CC=clang` the sanitizer half of the
+      undefined-behaviour audit therefore fails for **every** program in the corpus, and since a
+      failed gate is blocking, no area produces a verdict. This is a property of the installed
+      packages, not of the suite: the gate is doing exactly what it says, which is to refuse to
+      certify a corpus it could not instrument.
+    - **Its warning set is not `gcc-13`'s**, so the warning gate is not equivalent either: one corpus
+      program is rejected under `clang`'s reading of the same flags. The gate's flags are fixed by
+      requirement 1 and the per-program deviations are recorded against the driver of record, so a
+      different driver's diagnostics are a different question from the one the corpus was authored
+      against.
+  The practical consequence: use `BCC_REF_CC=clang` to obtain a second opinion on **oracle (a)**,
+  with `gcc-13` retained for the audit gates. Installing `libclang-rt-20-dev` is what would lift the
+  second limitation, and nothing in the suite needs to change for that.
 - **There is no binfmt registration**, so every QEMU runner is invoked explicitly, and if no
   `timeout` utility is found at all the harness falls back to a standard-library watchdog thread.
 
@@ -2786,7 +2889,7 @@ F-<16 hex digits>-<cell slug>-<divergence class>
 ```
 
 - the **cell slug** is the harness's own cell identity — area, program, target and optimization level
-  — with every byte outside `[A-Za-z0-9_]` escaped as `%XX` and the four parts joined with `+`. It is
+  — with every byte outside `[A-Za-z0-9_]` escaped as `=XX` and the four parts joined with `+`. It is
   **injective**: two different cells cannot produce the same slug, and nothing is abbreviated or
   truncated on the way in;
 - the **divergence class** is one of `compile-failure`, `link-failure`, `run-crash`,
@@ -3118,14 +3221,29 @@ three transformations in the same order:
    substring would rewrite the booleans and digits that carry the report's own evidence, `run_fails`
    included. Measured in this repository's own container: without the bound, the row `run_fails false`
    renders as `run_fails [redacted]`.
-2. **Sanitization.** Every control character, every escape introducer and every directional override
+2. **Root elision.** The absolute build directory and the absolute package directory are replaced by
+   `<build>` and `<package>`. A report names a continuous-integration workspace or an agent clone
+   otherwise, and it is read on machines that never had that directory.
+3. **Sanitization.** Every control character, every escape introducer and every directional override
    is escaped, so no field can forge a column, split one row into two or repaint a verdict.
-3. **Markdown escaping**, applied only on the way into the Markdown half, so no printable character
+4. **Markdown escaping**, applied only on the way into the Markdown half, so no printable character
    that is syntax there can restructure the document.
 
 The order is load-bearing: redaction recognises a value by the characters the environment holds, and a
 value containing a tab or a newline is no longer that value once it has been escaped — redacting
-afterwards would search for text that no longer exists.
+afterwards would search for text that no longer exists. Elision sits between them for the same reason
+in reverse: it substitutes plain text, and it must run before the text it is looking for could have
+been escaped.
+
+The **evidence documents** are a fourth sink and they go through the same three transformations that
+apply outside Markdown, applied to the whole assembled document rather than to each field. That last
+detail is the whole of it: a document's own fields arrive already treated, but the archived capture
+bodies beside them — a workspace's `*.status` and `*.exit` records and its `commands.txt`, written
+verbatim so the cell can be re-run — spell this machine's roots out in their `command`, `argv`,
+`artifact` and `working_dir` lines, and for a while they reached a published document that way. Treating
+the assembled document covers the fields and the archived bodies alike. Only sanitization is applied
+line by line there rather than to the whole, because an evidence document *is* multi-line: a compiler's
+diagnostics are readable only with their line structure intact.
 
 Two things are exact rather than redacted, and both live inside a finding directory beneath the build
 directory: the captured streams and the `diff.txt` computed from them, which are evidence and have to
@@ -3148,18 +3266,43 @@ partway — would leave the *previous* run's `summary.md` standing as though it 
 whole root is emptied rather than the two known artifacts named, because a list of names has to be
 kept in step with the artifacts written into it and this has no list to fall behind.
 
-The identity of the run is written to `run.txt` beside the reports. **The artifact to diff is an area
+That last sentence is the whole of the rule, and it is worth stating what it costs to break it,
+because it *was* broken: an earlier form of the run-start purge named the two summary files and the
+per-area directory instead of emptying the root, and the two categories it did not name survived. One
+was the durable evidence documents beneath `evidence/`. An evidence document is the rendering of one
+cell rather than a report file, so it carries no generation stamp of its own and the staleness check
+that protects a per-area report cannot protect it — a run that published none would state
+`Evidence documents published | 0` while an earlier run's documents sat in the directory that same
+summary points a reader at, and the continuous-integration job uploads the whole report tree
+unconditionally. The other was anything else at the root, which was left standing for the same reason.
+Emptying the root whole covers both, and covers whatever the next artifact turns out to be.
+
+Two things are created after the emptying, and only two: `areas/`, because a per-area report is
+published into it rather than creating it per call, and the ownership stamp. `evidence/` is not
+recreated, so a run that published no evidence document leaves no empty directory suggesting it lost
+one.
+
+The identity of the run is then written to `run.txt` beside the reports, and the order matters: it is
+written **after** the ownership claim succeeds, so a second concurrent run — which is refused the
+directory — never replaces the owning run's manifest with its own token. A refused run leaves the
+report root exactly as it found it. **The artifact to diff is an area
 report's `.md`: it is byte-identical across two runs with identical inputs.** That is stated at
-exactly that scope on purpose, because three provenance fields elsewhere are deliberately
-run-specific:
+exactly that scope on purpose, because the values below are deliberately run-specific or measured, and
+this is the whole list — a maintainer diffing against it should see no other difference, and anything
+else that moves is something the run genuinely found:
 
 | Field | Where | Why it moves |
 | --- | --- | --- |
 | `token=` | The `token=` field of an area `.tsv`'s [generation preamble](#the-generation-stamp--why-a-summary-never-reports-another-runs-results) — a comment line whose only consumer is the machine check it serves | It identifies *this process*, which is the whole point: it is what recognises a report an earlier identically configured run left behind |
 | `identity` | The `identity` column of every area `.tsv` row, and the summary's **`Configuration digest`** | It digests the resolved tool set, and an attested runner's identity includes the run-specific status it had to exit with |
 | `configuration` | `run.txt`, and the summary's **`Configuration fingerprint`** | The same reason |
+| `runner-i686`, `runner-aarch64`, `runner-riscv64` | The summary's environment fingerprint, and a finding's `environment.txt` | Each states the run-derived status its attestation required — the cause the two digests above inherit |
+| `outer-net` | The summary's environment fingerprint, and a finding's `environment.txt` | It states a **measured** probe cost in milliseconds, so it moves by a millisecond or two between two runs on one machine |
+| `Evidence bytes`, `Bytes retained`, `Finding artifact bytes` | The summary's [`## Retained evidence`](#retention-budgets) totals | They are sums over what concurrently failing cells actually retained, in the order they reached retention |
+| `duration_ms`, and an archived or published `.run-owner` | Inside an evidence document, and inside a finding's `.exit`/`.compile.exit` records and its own `.run-owner` stamp | A duration is measured, and an ownership stamp names the process that claimed the directory. Neither an evidence document nor an ownership stamp is part of the byte-identical promise: that promise is the area `.md`, and within a finding directory it is the file set plus `reproducer.c`, `reproducer.expected`, `MANIFEST.txt`, `commands.sh`, `diff.txt` and the `.stdout`/`.stderr` captures |
 
-The last two share one cause, and it is evidence rather than noise. Under strict mode each emulator is
+The three attested runners and the two digests share one cause, and it is evidence rather than noise.
+Under strict mode each emulator is
 **attested**: it is required to print a token derived from this run and to exit with a status derived
 from it, so a stand-in that ignored its arguments could not pass by luck. The status it had to produce
 is recorded in that runner's fingerprint line, so any digest computed over the fingerprint differs
@@ -3312,11 +3455,29 @@ re-run rather than one they must accept — which is the whole difference betwee
 assertion. Second, the summary's `outcome` records carry **this same block, in this same order**,
 copied from the area rows rather than derived a second time, so a consumer that learned to read a cell's
 evidence from one file reads it unchanged from the other. Third, the group is **empty rather than
-invented** for the one kind of row that describes no execution: a
-[recorded exclusion](#the-verdict-taxonomy) was deliberately not attempted, so it has no
-command, no termination and no capture to name, and the columns say exactly that. On this branch that
-is nine rows — oracle (b) against `13_floating_point/004_long_double_target_restricted`, whose
-cross-backend value comparison is excluded for the measured reason its record states.
+invented** for a row that describes no execution — and only for such a row.
+
+**Divergence is evidenced on exactly the same terms as agreement.** A `FINDING` and a `FAIL` reached
+from a comparison carry the whole group, `first_difference` included, and a `FINDING` reached from a
+refused build carries the refusing side with the authority side empty, exactly as the `XFAIL` refusal
+does. That is worth stating because it was once untrue, and untrue in the worst direction: the artifact
+writer rebuilt the outcome after writing the directory, so the rows a consumer most needs to act on
+were the only rows with no provenance at all, while the prose `detail` beside them quoted the byte
+offset the columns had lost. A row is checkable or it is not; being checkable only when nothing was
+wrong is not a property worth having.
+
+The rows that legitimately carry an empty group are the ones with nothing to describe, and this is the
+whole list:
+
+| Row | Why the group is empty |
+| --- | --- |
+| A [recorded exclusion](#the-verdict-taxonomy) (`XFAIL`) | The comparison was deliberately not attempted, so there is no command, no termination and no capture to name. On this branch that is **nine rows** — oracle (b) against `13_floating_point/004_long_double_target_restricted`, whose cross-backend value comparison is excluded for the measured reason its record states |
+| An absent oracle (`UNAVAILABLE`) | The arm could not be attempted at all, because tooling it needs is not on this machine. Nothing ran, so nothing is recorded; the diagnosis names the tool and the variable that would supply it. A healthy full run has none of these |
+| An unexplained harness or corpus failure (`FAIL`) | The observation was lost rather than made — an unreadable expectation record, a workspace that could not be created, a capture that exceeded its quota so the bytes a verdict would be computed from do not exist. There is no completed execution to describe, and inventing fields for one would make a row that measured nothing look like a row that measured and found nothing |
+
+Every one of those rows still carries `source`, `record_path`, `severity` and `cell_fingerprint`,
+because those are derived from the cell identity and this run's own policy rather than from an
+execution.
 
 ### The configuration digest covers the corpus's bytes, not its file names
 
@@ -3394,6 +3555,17 @@ A `PASS` publishes no document, and that is deliberate rather than an omission: 
 described by its report row — both command lines, both terminations, both capture locations and the
 byte counts — and re-running the cell reproduces it, so archiving three and a half thousand of them
 per run would bury the documents that matter.
+
+**A cell whose outcome fails the run publishes no document either, and for the opposite reason: its
+workspace is kept.** The two rules meet exactly, with no cell falling between them — a discarded
+non-`PASS` cell gets a document, a retained one keeps the captures themselves — but they do not reach a
+reader equally, and the difference is worth stating rather than discovering. `conformance-report/**` is
+uploaded by continuous integration and `conformance-work/` is not, so the raw captures of a failing
+`XPASS` or a strict-mode `UNAVAILABLE` stay on the machine that produced them. What travels instead is
+the report row, and it travels complete: both exact commands, both terminations with their raw wait
+statuses, both capture locations and the located first difference, which is enough to re-run precisely
+that cell. A maintainer who needs the bytes rather than the row re-runs the cell — the row names it — or
+sets `BCC_CONFORMANCE_KEEP_WORK` and collects `conformance-work/` themselves.
 
 Four bounds apply, and each **reports** rather than quietly shortening: 64 KiB per archived capture,
 256 KiB per cell's archive, 384 KiB per rendered document, and 64 MiB across the run. A truncated
@@ -3640,6 +3812,23 @@ rather than about the writer:
 Neither is noise; they are simply not the parts of a two-run diff that carry information about whether
 the divergence changed. Diff two runs' finding directories and anything else that differs is something
 the run genuinely found.
+
+**Which is why `MANIFEST.txt` does not digest those two.** The manifest publishes an inventory of every
+artifact beside it and every capture beneath `outputs/`, each with its exact size and the digest of its
+bytes, and that inventory is validated in both directions — so a reduction that regenerated some
+artifacts and not others is reported rather than certified. For the two entries above it cannot be: a
+digest over a file that legitimately changes every run reports the passage of time as a change in the
+evidence, and it was measured doing exactly that — two identical injections produced two manifests whose
+**only** difference was the inventory lines for `environment.txt` and for the executed sides' `.exit`
+records. Those lines therefore record `bytes=run-varying digest=run-varying` and say why, in the
+inventory's own preamble. What is still checked for them is everything that can be: the entry must be
+present, must be a regular file rather than a link, must be non-empty, must be named by exactly one
+line, and no file beside it may go unnamed. What is given up is tamper detection on a duration and on a
+fingerprint — neither of which a curator edits, and both of which re-running the cell reproduces.
+
+The capture inventory's closing total is stated the same way for the same reason: it sums the entries
+whose size it claims and counts the run-varying records separately, so a total cannot move while every
+line above it holds still.
 
 **`diff.txt` is stable to its last line, the comparator's verbatim account included.** That property
 is bought by a deliberate split rather than inherited. A build's and an execution's one-line
@@ -3980,8 +4169,13 @@ All harness code is written to satisfy `cargo clippy -- -D warnings` and `cargo 
 
 Both gates are `cargo` gates, so — exactly as for the commands under
 [Running the suite](#running-the-suite) — they require the package-complete branch. On a
-documentation-only checkout each exits 101 with `could not find Cargo.toml`, and the claim above is
-therefore an obligation on the code as written rather than a result observed on this branch.
+documentation-only checkout neither can run, though they fail differently and the difference is worth
+knowing before you read an exit code as a result: `cargo clippy -- -D warnings` exits **101** with
+`could not find Cargo.toml`, while `cargo fmt -- --check` exits **1**, surfacing the same diagnostic
+second-hand as `` `cargo metadata` exited with an error: error: could not find `Cargo.toml` `` because
+`cargo fmt` reaches the manifest through `cargo metadata` rather than directly — the reason is set out
+under [the Cargo integration precondition](#the-cargo-integration-precondition). Either way the claim
+above is an obligation on the code as written rather than a result observed on this branch.
 Formatting can still be checked here without the package, because `rustfmt` accepts a file path
 directly: `rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs`.
 

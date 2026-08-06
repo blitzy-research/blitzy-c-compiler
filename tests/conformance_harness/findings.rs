@@ -94,7 +94,7 @@
 //! ```
 //!
 //! The **cell slug** is [`CellKey::slug`]: the area, program, target and optimization level with
-//! every byte outside `[A-Za-z0-9_]` escaped as `%XX` and the four parts joined with `+`. It is
+//! every byte outside `[A-Za-z0-9_]` escaped as `=XX` and the four parts joined with `+`. It is
 //! **injective** — two different cells cannot produce the same slug — and nothing in it is
 //! abbreviated or truncated. The kebab-cased **divergence class** completes the identity, and the
 //! leading **digest** is [`super::stable_digest`] over exactly those same components, giving a short
@@ -936,14 +936,92 @@ struct FixedArtifacts<'a> {
     environment: &'a str,
 }
 
-/// One `artifact = ` inventory line: a name, its exact size, and the digest of its bytes.
+/// One `artifact = ` inventory line: a name, and either its exact size and digest or the mark that
+/// says those two values move between runs by design.
 fn artifact_inventory_entry(name: &str, bytes: &[u8]) -> String {
-    format!(
-        "artifact = {name} bytes={} digest={}",
-        bytes.len(),
-        digest_hex_of_bytes(bytes)
-    )
+    format!("artifact = {name} {}", inventory_measurement(name, bytes))
 }
+
+/// The value recorded in the inventory for `bytes`, and the whole of the rule deciding which form it
+/// takes.
+///
+/// # Why two forms, and why the second is not a weakening
+///
+/// The inventory exists so that a directory can be checked in both directions — every line matches a
+/// file, every file is named by a line — and so that a reduction which regenerated some artifacts and
+/// not others is reported rather than certified. The size and the digest are what turn the second
+/// claim into a check.
+///
+/// For two of the entries they cannot. `environment.txt` records this run's token, its configuration
+/// fingerprint and each emulator's run-derived attestation status; a `*.exit` or `*.compile.exit`
+/// record carries the wall-clock `duration_ms` its observation measured. Both are stated by this
+/// suite's own contract as legitimately run-varying — they are kept *because* they vary, since a token
+/// is what identifies the run and an attestation whose expected answer never changed could be replayed
+/// — so a digest over them cannot detect the thing the inventory digests for. Regenerating them is
+/// precisely what changes them, so "this artifact was not regenerated with the others" is unanswerable
+/// for exactly these two, and asking it anyway had a real cost: `MANIFEST.txt` is documented as
+/// byte-identical between two runs of one unchanged divergence, which is what makes a finding
+/// directory worth diffing, and measured against two identical injections these lines were the *only*
+/// thing that moved in it.
+///
+/// So the rule is: an entry whose bytes are a pure function of the divergence records its exact size
+/// and digest and is validated against both; an entry the contract declares run-varying records
+/// [`RUN_VARYING_MARK`] in place of each, is still required to be present as a non-empty regular file,
+/// and is still required to be named by exactly one line with no file beside it unnamed. What is given
+/// up is tamper detection on a duration and on a fingerprint — neither of which a curator edits and
+/// both of which are reproduced by re-running the cell — and what is bought is a manifest whose
+/// stability is a property rather than a coincidence.
+///
+/// If a further run-varying value is ever added to one of these records, extend
+/// [`run_varying_reason`] rather than leaving the manifest to drift: that function is the single place
+/// this judgement is made, and both the writer and the two validators consult it.
+fn inventory_measurement(name: &str, bytes: &[u8]) -> String {
+    match run_varying_reason(name, bytes) {
+        Some(_) => format!("bytes={RUN_VARYING_MARK} digest={RUN_VARYING_MARK}"),
+        None => format!(
+            "bytes={} digest={}",
+            bytes.len(),
+            digest_hex_of_bytes(bytes)
+        ),
+    }
+}
+
+/// The value written where a size or a digest would go for an entry whose bytes move between runs.
+///
+/// Deliberately not a number and not a hexadecimal digest, so a reader and a parser both see at once
+/// that no measurement is claimed. [`parse_inventory`] accepts exactly this spelling and nothing else
+/// in its place; any other unparseable value is still a malformed line.
+const RUN_VARYING_MARK: &str = "run-varying";
+
+/// Why this entry's bytes are not a pure function of the divergence, or `None` when they are.
+///
+/// Decided from the **content** for a capture rather than from its name, which is what keeps the
+/// exemption as narrow as the contract: `c-<target>-<opt>.exit` is the golden oracle's authority, which
+/// ran no process and therefore records no duration, so it keeps its digest while the executed sides'
+/// records do not. The one name-based case is the environment fingerprint, whose variation is
+/// pervasive rather than confined to one field.
+fn run_varying_reason(name: &str, bytes: &[u8]) -> Option<&'static str> {
+    if name == ENVIRONMENT_NAME {
+        return Some(
+            "records this run's token, its configuration fingerprint and each emulator's \
+             run-derived attestation status",
+        );
+    }
+    let carries_duration = String::from_utf8_lossy(bytes)
+        .lines()
+        .any(|line| line.trim_start().starts_with(DURATION_KEY));
+    match carries_duration {
+        true => Some("records the wall-clock duration this run's observation measured"),
+        false => None,
+    }
+}
+
+/// The key of the one field inside a termination record that moves between two runs of one unchanged
+/// divergence.
+///
+/// Spelled here as the prefix of a `key = value` line so that the match cannot be satisfied by the
+/// word appearing inside a value, and shared by the writer and both validators.
+const DURATION_KEY: &str = "duration_ms =";
 
 /// Build this oracle's contribution: every section of the merged artifacts that only it can supply.
 ///
@@ -981,13 +1059,16 @@ fn build_contribution(
             capture.file_stem(),
             render_capture_block(capture, variables),
         ));
-        for (name, bytes, digest) in capture_artifact_inventory(capture) {
+        for (name, bytes, measurement) in capture_artifact_inventory(capture) {
             contribution.inventory.push(format!(
-                "capture = {name} role={} target={} opt={} bytes={bytes} digest={digest}",
+                "capture = {name} role={} target={} opt={} {measurement}",
                 capture.role().prefix(),
                 capture.target().triple(),
                 finding.key().opt().flag()
             ));
+            // The real size is what the budget is reserved against and what the roster totals, whether
+            // or not the inventory records it: a run-varying record still occupies the bytes it
+            // occupies.
             contribution.capture_files.push((name, bytes));
         }
     }
@@ -1014,7 +1095,7 @@ fn build_contribution(
 // Three facts carry the argument.
 //
 // - `CellKey::slug` is injective over the four cell components. It escapes every byte outside
-//   `[A-Za-z0-9_]` into a `%`-introduced hexadecimal pair and separates components with `+`, which
+//   `[A-Za-z0-9_]` into a `=`-introduced hexadecimal pair and separates components with `+`, which
 //   escaping guarantees cannot appear inside one. So a slug recovers exactly the components that
 //   produced it.
 // - A slug therefore contains no hyphen, and neither does a hexadecimal digest. The identifier's
@@ -1662,7 +1743,7 @@ impl FindingId {
     ///
     /// - [`CellKey::slug`] is injective over the four components of a cell identity. It renders
     ///   each component through an escaping encoder whose output alphabet is `[A-Za-z0-9_]` plus
-    ///   `%`-introduced hexadecimal escapes, and joins them with `+`. Two different cell identities
+    ///   `=`-introduced hexadecimal escapes, and joins them with `+`. Two different cell identities
     ///   cannot render the same slug.
     /// - That alphabet contains **no hyphen**, and neither does a hexadecimal digest, so each
     ///   occupies exactly one hyphen-delimited field. The identifier therefore parses uniquely from
@@ -1713,7 +1794,7 @@ impl FindingId {
     /// The area and program names are ones [`CellKey`] has already refused to accept unless they are
     /// canonical stems, and every part of the identifier draws on an alphabet that excludes the path
     /// separator. The digest is hexadecimal; [`CellKey::slug`] emits only `[A-Za-z0-9_]`, `+` and
-    /// `%`-introduced hexadecimal pairs; and [`kebab`] emits only lower-case ASCII alphanumerics and
+    /// `=`-introduced hexadecimal pairs; and [`kebab`] emits only lower-case ASCII alphanumerics and
     /// hyphens. Together with the literal `F` and the hyphens joining those three fields, that is the
     /// whole alphabet. The identifier can therefore contain no path separator and can be neither `.`
     /// nor `..`, so joining it onto the findings root always yields a direct child of that root.
@@ -6530,46 +6611,34 @@ fn describe_termination(capture: &Capture) -> String {
 ///
 /// The digest is over the bytes this run captured, so a curated directory whose captures were
 /// regenerated after a reduction — or edited by hand — no longer matches its own manifest, and
-/// `curated_finding_defects` says so.
+/// `curated_finding_defects` says so. The two termination records of an executed side are the
+/// exception, and [`inventory_measurement`] argues why: they carry a wall-clock duration, so a digest
+/// over them would move between two runs of one unchanged divergence and would report the fact that
+/// time passed as a change in the evidence.
+///
+/// Each entry is returned as its name, its **real** size — the budget is reserved against the bytes
+/// that exist, whatever the inventory records — and the value the inventory line publishes.
 fn capture_artifact_inventory(capture: &Capture) -> Vec<(String, u64, String)> {
     let stem = capture.file_stem();
     let mut entries = vec![
-        (
-            format!("{stem}.stdout"),
-            capture.stdout().len() as u64,
-            digest_hex_of_bytes(capture.stdout()),
-        ),
-        (
-            format!("{stem}.stderr"),
-            capture.stderr().len() as u64,
-            digest_hex_of_bytes(capture.stderr()),
-        ),
-        (
-            format!("{stem}.exit"),
-            capture.exit_report().len() as u64,
-            digest_hex_of_bytes(capture.exit_report().as_bytes()),
-        ),
+        measured(format!("{stem}.stdout"), capture.stdout()),
+        measured(format!("{stem}.stderr"), capture.stderr()),
+        measured(format!("{stem}.exit"), capture.exit_report().as_bytes()),
     ];
     if let Some(compile) = capture.compile() {
-        entries.push((
-            format!("{stem}.compile.stdout"),
-            compile.stdout().len() as u64,
-            digest_hex_of_bytes(compile.stdout()),
-        ));
-        entries.push((
-            format!("{stem}.compile.stderr"),
-            compile.stderr().len() as u64,
-            digest_hex_of_bytes(compile.stderr()),
-        ));
+        entries.push(measured(format!("{stem}.compile.stdout"), compile.stdout()));
+        entries.push(measured(format!("{stem}.compile.stderr"), compile.stderr()));
         if let Some(report) = capture.compile_report() {
-            entries.push((
-                format!("{stem}.compile.exit"),
-                report.len() as u64,
-                digest_hex_of_bytes(report.as_bytes()),
-            ));
+            entries.push(measured(format!("{stem}.compile.exit"), report.as_bytes()));
         }
     }
     entries
+}
+
+/// One capture-inventory entry: its name, the real byte count, and the value the inventory publishes.
+fn measured(name: String, bytes: &[u8]) -> (String, u64, String) {
+    let measurement = inventory_measurement(&name, bytes);
+    (name, bytes.len() as u64, measurement)
 }
 
 /// The manifest's machine-readable capture inventory, merged across every contributing oracle.
@@ -6595,9 +6664,15 @@ fn render_capture_inventory(
          and the digest of its bytes. This is validated against the filesystem in both directions — \
          every line must match a file, and every file must be named by a line — when the directory is \
          published and again whenever a curated finding is checked, so a lost capture, an edited one \
-         or a stray one is reported rather than certified.\n\n"
+         or a stray one is reported rather than certified.\n\n\
+         A size and a digest of `{RUN_VARYING_MARK}` mean the record carries a wall-clock duration, so \
+         those two values would differ between two runs of one unchanged divergence and are not \
+         claimed here; this file is diffed across runs, and reporting the passage of time as a change \
+         in the evidence would defeat that. Such a capture is still required to be present as a \
+         non-empty regular file and still required to be named by exactly one line.\n\n"
     ));
     let mut emitted: Vec<&str> = Vec::new();
+    let mut varying_names: Vec<&str> = Vec::new();
     for contribution in merged.values() {
         for line in &contribution.inventory {
             let name = line.split_whitespace().nth(2).unwrap_or_default();
@@ -6605,13 +6680,32 @@ fn render_capture_inventory(
                 continue;
             }
             emitted.push(name);
+            if line.contains(&format!("bytes={RUN_VARYING_MARK}")) {
+                varying_names.push(name);
+            }
             text.push_str(&format!("  {line}\n"));
         }
     }
+    // The total is taken over the entries whose size this file claims, and the rest are counted rather
+    // than summed. Summing them all would put a run-varying number in the one artifact that is
+    // diffed across runs — the very instability the marks above exist to remove — and a total that
+    // moved while every line above it held still would be the most confusing form of it.
+    let mut stated_count = 0usize;
+    let mut stated_bytes = 0u64;
+    let mut varying_count = 0usize;
+    for (name, bytes) in capture_bytes {
+        if varying_names.contains(&name.as_str()) {
+            varying_count += 1;
+        } else {
+            stated_count += 1;
+            stated_bytes += bytes;
+        }
+    }
     text.push_str(&format!(
-        "\n  {} capture file(s), {} byte(s) in total\n",
-        capture_bytes.len(),
-        capture_bytes.iter().map(|(_, bytes)| bytes).sum::<u64>()
+        "\n  {} capture file(s); {stated_bytes} byte(s) across the {stated_count} whose size is a \
+         pure function of the divergence, plus {varying_count} run-varying record(s) whose size \
+         moves between runs and is therefore not totalled here\n",
+        capture_bytes.len()
     ));
     text
 }
@@ -6634,13 +6728,19 @@ fn render_capture_inventory(
 /// reader checking one thing by hand checks that one.
 fn render_artifact_inventory(entries: &[String]) -> String {
     let mut text = String::from("\nARTIFACT INVENTORY\n------------------\n");
-    text.push_str(
+    text.push_str(&format!(
         "One line per artifact beside this manifest, with its exact size and the digest of its bytes, \
          taken from\nthe bytes actually written. Validated against the filesystem whenever a curated \
          finding is checked, so a\nreduction that regenerated some artifacts and not others is \
          reported rather than certified. This manifest\ncannot digest itself; the reproducer digest \
-         above is the one a reader checks by hand.\n\n",
-    );
+         above is the one a reader checks by hand.\n\n\
+         A size and a digest of `{RUN_VARYING_MARK}` mean the artifact is one this suite's contract \
+         declares run-varying:\n{ENVIRONMENT_NAME} records this run's token, its configuration \
+         fingerprint and each emulator's run-derived\nattestation status, so measuring it here would \
+         make this manifest differ between two runs of one\nunchanged divergence — and this manifest \
+         is diffed across runs precisely to answer whether the\ndivergence changed. It is still \
+         required to be present and non-empty.\n\n"
+    ));
     for entry in entries {
         text.push_str(&format!("  {entry}\n"));
     }
@@ -6799,23 +6899,30 @@ fn require_complete(context: &str, directory: &Path, key: &CellKey) -> HarnessRe
 /// validator whose prefix silently stops matching reports a complete directory for an empty one.
 const MANIFEST_CAPTURE_PREFIX: &str = "capture = ";
 
-/// One parsed capture-inventory entry: the file a run published, its size and the digest of its bytes.
+/// One parsed inventory entry: the file a run published and, when the entry claims one, the exact
+/// measurement of its bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InventoryEntry {
-    /// The file name beneath `outputs/`.
+    /// The file name, beneath `outputs/` for a capture and beside the manifest for an artifact.
     name: String,
-    /// The exact byte count the run published.
-    bytes: u64,
-    /// The digest of those bytes.
-    digest: String,
+    /// The exact byte count and digest the run published, or `None` for an entry the manifest marks
+    /// [`RUN_VARYING_MARK`] — see [`inventory_measurement`] for which entries those are and why. A
+    /// validator holding `None` checks presence and non-emptiness and claims nothing about the bytes,
+    /// which is exactly what the line claims.
+    measurement: Option<(u64, String)>,
 }
 
-/// Read the capture inventory out of a manifest.
+/// Read an inventory out of a manifest.
 ///
 /// Tolerant of the surrounding prose by construction: only lines whose first non-space token sequence
 /// is the inventory prefix are considered, and a line that carries the prefix without a well-formed
 /// `bytes=` and `digest=` is returned as malformed rather than skipped — a validator that skipped it
 /// would certify a directory whose inventory it could not read.
+///
+/// A `bytes=` and `digest=` pair both spelled [`RUN_VARYING_MARK`] is well-formed and yields an entry
+/// with no measurement. The two have to agree: a line claiming a size but no digest, or the reverse, is
+/// malformed, because it would leave half a check to be silently skipped. Any other unparseable value
+/// is malformed exactly as before.
 fn parse_inventory(text: &str, prefix: &str) -> (Vec<InventoryEntry>, Vec<String>) {
     let mut entries = Vec::new();
     let mut malformed = Vec::new();
@@ -6829,21 +6936,27 @@ fn parse_inventory(text: &str, prefix: &str) -> (Vec<InventoryEntry>, Vec<String
             malformed.push(String::from(trimmed));
             continue;
         };
-        let mut bytes: Option<u64> = None;
-        let mut digest: Option<String> = None;
+        let mut bytes: Option<&str> = None;
+        let mut digest: Option<&str> = None;
         for field in fields {
             if let Some(value) = field.strip_prefix("bytes=") {
-                bytes = value.parse::<u64>().ok();
+                bytes = Some(value);
             } else if let Some(value) = field.strip_prefix("digest=") {
-                digest = Some(String::from(value));
+                digest = Some(value);
             }
         }
         match (bytes, digest) {
-            (Some(bytes), Some(digest)) => entries.push(InventoryEntry {
+            (Some(RUN_VARYING_MARK), Some(RUN_VARYING_MARK)) => entries.push(InventoryEntry {
                 name: String::from(name),
-                bytes,
-                digest,
+                measurement: None,
             }),
+            (Some(bytes), Some(digest)) => match bytes.parse::<u64>() {
+                Ok(bytes) => entries.push(InventoryEntry {
+                    name: String::from(name),
+                    measurement: Some((bytes, String::from(digest))),
+                }),
+                Err(_) => malformed.push(String::from(trimmed)),
+            },
             _ => malformed.push(String::from(trimmed)),
         }
     }
@@ -6937,23 +7050,38 @@ fn capture_inventory_defect(directory: &Path, manifest_text: &str) -> Option<Str
             ))
             }
         };
-        if bytes.len() as u64 != entry.bytes {
+        // An entry the manifest marks run-varying claims no size and no digest, so neither is
+        // compared. What is still required is that the capture *exists* and holds something: an empty
+        // termination record would mean the run recorded no ending at all, and the line above already
+        // established that the name matches a regular file rather than a link or a directory.
+        let Some((recorded_bytes, recorded_digest)) = &entry.measurement else {
+            if bytes.is_empty() {
+                return Some(format!(
+                    "its {MANIFEST_NAME} records {OUTPUTS_DIR_NAME}/{} as a run-varying capture, and \
+                     the file is empty; a termination record always states how its observation ended, \
+                     so an empty one is a lost capture rather than a short one",
+                    sanitize_text_for_report(&entry.name)
+                ));
+            }
+            continue;
+        };
+        if bytes.len() as u64 != *recorded_bytes {
             return Some(format!(
                 "its {MANIFEST_NAME} records {OUTPUTS_DIR_NAME}/{} as {} byte(s) and the file holds \
                  {}; the evidence and the manifest describing it no longer agree",
                 sanitize_text_for_report(&entry.name),
-                entry.bytes,
+                recorded_bytes,
                 bytes.len()
             ));
         }
         let observed_digest = digest_hex_of_bytes(&bytes);
-        if observed_digest != entry.digest {
+        if &observed_digest != recorded_digest {
             return Some(format!(
                 "its {MANIFEST_NAME} records {OUTPUTS_DIR_NAME}/{} with digest {} and the file \
                  digests to {}; the captured evidence was changed after the manifest was written, \
                  which is the signature of a reduction whose evidence was not regenerated",
                 sanitize_text_for_report(&entry.name),
-                sanitize_text_for_report(&entry.digest),
+                sanitize_text_for_report(recorded_digest),
                 sanitize_text_for_report(&observed_digest)
             ));
         }
@@ -7074,8 +7202,21 @@ fn artifact_inventory_defect(directory: &Path, manifest_text: &str) -> Option<St
         // arithmetic is not one anybody does by hand — so this message is the calculator: it states
         // the recorded pair and the observed pair, and transcribing the observed one closes the loop
         // in a single pass instead of two.
+        // As in the capture inventory: an entry the manifest marks run-varying claims no measurement,
+        // so presence and non-emptiness are the whole of what can be checked, and they are checked.
+        let Some((recorded_bytes, recorded_digest)) = &entry.measurement else {
+            if bytes.is_empty() {
+                return Some(format!(
+                    "its {MANIFEST_NAME} records {} as a run-varying artifact, and the file is empty; \
+                     the fingerprint always names this run's tools, so an empty one is a lost artifact \
+                     rather than a short one",
+                    sanitize_text_for_report(&entry.name)
+                ));
+            }
+            continue;
+        };
         let observed = digest_hex_of_bytes(&bytes);
-        if bytes.len() as u64 != entry.bytes || observed != entry.digest {
+        if bytes.len() as u64 != *recorded_bytes || &observed != recorded_digest {
             return Some(format!(
                 "its {MANIFEST_NAME} records {} as {} byte(s) with digest {}, and the file holds {} \
                  byte(s) digesting to {}. Reducing a reproducer is expected, and so is eliding a \
@@ -7083,8 +7224,8 @@ fn artifact_inventory_defect(directory: &Path, manifest_text: &str) -> Option<St
                  it was before either is not. Rerun every affected cell, or transcribe the observed \
                  pair into this line, so every artifact and the record of it agree",
                 sanitize_text_for_report(&entry.name),
-                entry.bytes,
-                sanitize_text_for_report(&entry.digest),
+                recorded_bytes,
+                sanitize_text_for_report(recorded_digest),
                 bytes.len(),
                 sanitize_text_for_report(&observed)
             ));
@@ -8060,39 +8201,57 @@ struct DirectoryPayload<'a> {
 /// classified as an expected divergence and cannot reach this point at all: [`Finding::new`] refuses
 /// to assemble it. A marker that is merely in scope for the arm documents nothing about a divergence
 /// of another class, so such a cell does reach here, and it reaches here with its artifacts.
-pub fn record(finding: &Finding, caps: &Capabilities) -> Outcome {
+///
+/// # Why the judged outcome is carried in rather than rebuilt here
+///
+/// `judged` is the outcome `classify.rs` reached for this arm, and it is **extended** rather than
+/// replaced. Rebuilding it here — which is what this function used to do — silently discarded two
+/// things that only the classifier and the comparator have, and discarded them one step before the
+/// report that needed them:
+///
+/// - the structured [`super::Provenance`] of the observation: both sides' role, exact command,
+///   termination and capture location, and the located first difference. Those are the columns that
+///   make a machine-readable row *checkable*, and they were populated on every agreement and empty on
+///   every finding — exactly inverted, since a divergence is the row a consumer most needs to act on;
+/// - the classifier's own account, which for a program carrying a marker that does **not** cover this
+///   observation states which dimension failed to match. That sentence existed only inside the finding
+///   directory, so the row a reader sees first said nothing about the near miss at all.
+///
+/// Extending keeps both and adds the one fact that could not exist before the write: where the
+/// artifacts landed and the command that reproduces them without this harness. The write-failure
+/// branch does the same in the one way it can — the verdict has to change, so the outcome is rebuilt,
+/// but the judged account is quoted in full and the judged provenance is carried across.
+pub fn record(finding: &Finding, caps: &Capabilities, judged: Outcome) -> Outcome {
     match write(finding, caps) {
-        Ok(artifacts) => Outcome::new(
-            finding.key().clone(),
-            finding.oracle(),
-            Verdict::Finding,
-            Some(finding.class()),
-            None,
-            format!(
-                "{} — undocumented divergence recorded as a deliverable, not patched. Finding {} \
-                 holds {} artifact files in {}; reproduce with no harness, no Cargo and no Rust \
-                 toolchain using: {}",
-                finding.summary(),
-                artifacts.id(),
-                artifacts.entries().len(),
-                shown_path(artifacts.directory()),
-                artifacts.reproduction_command()
-            ),
-        ),
-        Err(error) => Outcome::new(
-            finding.key().clone(),
-            finding.oracle(),
-            Verdict::Fail,
-            Some(finding.class()),
-            None,
-            format!(
-                "an undocumented divergence was observed and its artifacts could NOT be written, so \
-                 there is no reproducer to act on: {error}. The directory they were being written \
-                 into is {}, which may hold a partial set worth inspecting. The divergence itself \
-                 was: {}",
-                shown_path(&finding.id().directory()),
-                finding.summary()
-            ),
-        ),
+        Ok(artifacts) => judged.with_detail_appended(&format!(
+            "The deliverable exists: finding {} holds {} artifact files in {}; reproduce with no \
+             harness, no Cargo and no Rust toolchain using: {}",
+            artifacts.id(),
+            artifacts.entries().len(),
+            shown_path(artifacts.directory()),
+            artifacts.reproduction_command()
+        )),
+        Err(error) => {
+            let provenance = judged.provenance().cloned();
+            let failed = Outcome::new(
+                finding.key().clone(),
+                finding.oracle(),
+                Verdict::Fail,
+                Some(finding.class()),
+                None,
+                format!(
+                    "an undocumented divergence was observed and its artifacts could NOT be \
+                     written, so there is no reproducer to act on: {error}. The directory they were \
+                     being written into is {}, which may hold a partial set worth inspecting. The \
+                     judgement reached about the divergence itself is preserved here in full: {}",
+                    shown_path(&finding.id().directory()),
+                    judged.detail()
+                ),
+            );
+            match provenance {
+                Some(provenance) => failed.with_provenance(provenance),
+                None => failed,
+            }
+        }
     }
 }

@@ -1279,39 +1279,47 @@ fn marker_non_coverage(
     if covers(marker, key, oracle, class) {
         return None;
     }
+    // Each mismatch names its own dimension before saying what missed. The dimension is the thing a
+    // maintainer acts on — a class mismatch needs a marker for the other class, a scope mismatch needs
+    // a program of its own for the other cells — so leaving it to be inferred from the sentence made
+    // the row's account of a near miss weaker than the finding manifest's beside it.
     let mut mismatches: Vec<String> = Vec::new();
     if marker.class() != MarkerClass::Observed(class) {
         mismatches.push(match marker.class() {
             MarkerClass::ComparisonExcluded => format!(
-                "it documents a comparison this record declines to make, not an observation, while                  a {class} was observed"
+                "the CLASS dimension — it documents a comparison this record declines to make, not \
+                 an observation, while a {class} was observed"
             ),
             MarkerClass::Observed(documented) => format!(
-                "it documents class {documented} while a {class} was observed"
+                "the CLASS dimension — it documents class {documented} while a {class} was observed"
             ),
         });
     }
     if !marker.scope().oracles().contains(&oracle) {
         mismatches.push(match shape {
             DivergenceShape::Compared => format!(
-                "its scope covers {} while this comparison was made by {oracle}",
+                "the ORACLE dimension — its scope covers {} while this comparison was made by \
+                 {oracle}",
                 joined(marker.scope().oracles())
             ),
             DivergenceShape::Refused => format!(
-                "its scope covers {} while this observation was made by {oracle}",
+                "the ORACLE dimension — its scope covers {} while this observation was made by \
+                 {oracle}",
                 joined(marker.scope().oracles())
             ),
         });
     }
     if !marker.scope().targets().contains(&key.target()) {
         mismatches.push(format!(
-            "its scope covers targets {} while this cell is {}",
+            "the TARGET dimension — its scope covers targets {} while this cell is {}",
             joined(marker.scope().targets()),
             key.target()
         ));
     }
     if !marker.scope().opt_levels().contains(&key.opt()) {
         mismatches.push(format!(
-            "its scope covers optimization levels {} while this cell is at {}",
+            "the OPTIMIZATION-LEVEL dimension — its scope covers optimization levels {} while this \
+             cell is at {}",
             joined(marker.scope().opt_levels()),
             key.opt()
         ));
@@ -1332,7 +1340,8 @@ fn marker_non_coverage(
         }
     };
     Some(format!(
-        "Marker {} is present in this program's record but does not cover this observation: {}.\
+        "Marker {} is present in this program's record but does not cover this observation. {} \
+         failed to match: {}.\
          {dimensions} A marker is never widened to absorb a divergence it does not describe, \
          because that would launder a genuine second defect into an expected divergence while {} \
          still documented only the first. If this divergence is also documented, it needs a marker \
@@ -1341,6 +1350,10 @@ fn marker_non_coverage(
          second marker block beside the one above is not an option: the grammar admits one, and a \
          duplicated key is a hard parse error that would remove this program from the run.",
         marker.id(),
+        match mismatches.len() {
+            1 => "One dimension",
+            _ => "Several dimensions",
+        },
         joined(&mismatches),
         EXPECTED_DIVERGENCE_REGISTER
     ))

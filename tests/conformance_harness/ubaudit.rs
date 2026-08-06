@@ -1337,6 +1337,14 @@ pub struct AuditReport {
     /// finds an excerpt where a complete diagnostic was expected can settle in one line whether the
     /// run as a whole was reducing captures or whether this one capture was unusually large.
     diagnostics: DiagnosticsBudget,
+    /// Whatever the end-of-walk tidy-up of the audit root could not do, in the order it arose.
+    ///
+    /// Empty in every ordinary run, and rendered only when it is not. Cleanup may never fail a run or
+    /// colour a verdict — the invariant `sandbox::prune_empty_audit_areas` states — but it may not be
+    /// silent either: a scaffolding directory left behind because it could not be removed, and one
+    /// left behind because it still holds a retained failing gate, look identical on disk and mean
+    /// opposite things.
+    cleanup: Vec<String>,
 }
 
 impl AuditReport {
@@ -1610,6 +1618,23 @@ impl AuditReport {
                 ),
                 "  ",
             );
+            out.push('\n');
+        }
+        if !self.cleanup.is_empty() {
+            out.push_str("CLEANUP NOT COMPLETED\n");
+            out.push_str("---------------------\n");
+            indent_block_into(
+                out,
+                "the audit finished and rendered its verdicts; what follows is scaffolding beneath \
+                 the audit root that could not be tidied afterwards. It colours no gate and fails \
+                 nothing, and it is stated because a directory left behind because it could not be \
+                 removed and one left behind because it still holds a retained failing gate look \
+                 identical on disk.",
+                "  ",
+            );
+            for note in &self.cleanup {
+                indent_block_into(out, &sanitize_line(note), "    ");
+            }
             out.push('\n');
         }
 
@@ -2199,6 +2224,14 @@ pub fn run(caps: &Capabilities) -> HarnessResult<AuditReport> {
             &mut diagnostics,
         )?);
     }
+    // The shared `<area>` grouping level is tidied here rather than per program, and this is the
+    // first moment at which it is safe: the walk is over, so no program is about to need one of these
+    // directories again. Pruning them per program instead put every area through a
+    // create-and-delete cycle of the parent of the directory the audit was writing into, for no gain
+    // over one sweep at the end — `sandbox::prune_empty_audit_areas` carries the argument. Notes are
+    // carried on the report rather than raised, under the same cleanup invariant.
+    let cleanup = sandbox::prune_empty_audit_areas();
+
     // A filter that selected nothing fails the run rather than shrinking it: an audit of zero
     // programs reports success for want of anything to judge, which in continuous integration is
     // indistinguishable from an audit that works. The policy lives in `env.rs`; the count is ours.
@@ -2226,6 +2259,7 @@ pub fn run(caps: &Capabilities) -> HarnessResult<AuditReport> {
         discovered: discovered.len(),
         quick: config.quick_mode(),
         diagnostics,
+        cleanup,
     })
 }
 
@@ -3490,7 +3524,12 @@ fn run_warning_gate(
     let label = format!("{area}/{program}");
     let context = format!("applying the {gate} gate to {label}");
     let workspace = sandbox::audit_workspace(area, program, gate.label(), caps.config())?;
-    workspace.copy_in(source, PROGRAM_SOURCE_NAME)?;
+    // Collected rather than raised: a directory that had to be re-established is a fact about how
+    // this gate ran, so it belongs in the gate's own detail beside its outcome.
+    let mut workspace_notes: Vec<String> = Vec::new();
+    retry_if_workspace_vanished(&workspace, &mut workspace_notes, |workspace| {
+        workspace.copy_in(source, PROGRAM_SOURCE_NAME)
+    })?;
 
     let object = workspace.path(WARNING_GATE_OBJECT_NAME)?;
     let source_text = path_text(&context, "the program source", source)?;
@@ -3512,14 +3551,20 @@ fn run_warning_gate(
     ]);
     guard_invocation(&context, &argv, reference, &permitted)?;
 
-    let outcome = spawn_guarded(caps, reference, &argv, &workspace)?;
+    let outcome = retry_if_workspace_vanished(&workspace, &mut workspace_notes, |workspace| {
+        spawn_guarded(caps, reference, &argv, workspace)
+    })?;
     let commands = vec![outcome.command_line()];
-    record_commands(&workspace, gate, &label, &commands)?;
+    retry_if_workspace_vanished(&workspace, &mut workspace_notes, |workspace| {
+        record_commands(workspace, gate, &label, &commands)
+    })?;
     // Persisted **before** the excerpt is taken, so the recoverability the bounded record promises is
     // already true when it is promised: the entries named below hold the untruncated bytes whatever
     // the ceilings then allow into memory.
     let captures = CaptureNames::reference();
-    outcome.persist(&workspace, &captures)?;
+    retry_if_workspace_vanished(&workspace, &mut workspace_notes, |workspace| {
+        outcome.persist(workspace, &captures)
+    })?;
 
     // Judged first, so the capture below is taken only when the report will actually render it. A
     // passing gate's output is never shown, and spending the run's allowance on it could leave a
@@ -3545,6 +3590,7 @@ fn run_warning_gate(
         )
     };
     let flags_used = flags.to_vec();
+    note_workspace(&mut detail, &workspace_notes);
     let workspace_kept = conclude(workspace, status, &mut detail);
     Ok(GateResult::new(
         gate,
@@ -3656,7 +3702,12 @@ fn run_sanitizer_gate(
     let label = format!("{area}/{program}");
     let context = format!("applying the {gate} gate to {label}");
     let workspace = sandbox::audit_workspace(area, program, gate.label(), caps.config())?;
-    workspace.copy_in(source, PROGRAM_SOURCE_NAME)?;
+    // As on the warning-gate path: collected, and folded into this gate's detail on every return
+    // below, so a re-established directory is never invisible.
+    let mut workspace_notes: Vec<String> = Vec::new();
+    retry_if_workspace_vanished(&workspace, &mut workspace_notes, |workspace| {
+        workspace.copy_in(source, PROGRAM_SOURCE_NAME)
+    })?;
 
     let artifact = workspace.path(SANITIZER_ARTIFACT_NAME)?;
     let source_text = path_text(&context, "the program source", source)?;
@@ -3676,15 +3727,21 @@ fn run_sanitizer_gate(
     permitted.extend([OUTPUT_FLAG, source_text.as_str(), artifact_text.as_str()]);
     guard_invocation(&context, &argv, reference, &permitted)?;
 
-    let build = spawn_guarded(caps, reference, &argv, &workspace)?;
+    let build = retry_if_workspace_vanished(&workspace, &mut workspace_notes, |workspace| {
+        spawn_guarded(caps, reference, &argv, workspace)
+    })?;
     let mut commands = vec![build.command_line()];
     // As on the warning-gate path: the streams reach disk before any ceiling is consulted, so a
     // bounded excerpt can name the file holding the bytes it left out.
     let build_captures = CaptureNames::reference();
-    build.persist(&workspace, &build_captures)?;
+    retry_if_workspace_vanished(&workspace, &mut workspace_notes, |workspace| {
+        build.persist(workspace, &build_captures)
+    })?;
 
     if !build.termination().succeeded() || !artifact.is_file() {
-        record_commands(&workspace, gate, &label, &commands)?;
+        retry_if_workspace_vanished(&workspace, &mut workspace_notes, |workspace| {
+            record_commands(workspace, gate, &label, &commands)
+        })?;
         let diagnostics = Diagnostics::capture(
             budget,
             &[
@@ -3702,6 +3759,7 @@ fn run_sanitizer_gate(
         );
         let mut detail = describe_failed_build(&build, &artifact);
         let status = GateStatus::Failed;
+        note_workspace(&mut detail, &workspace_notes);
         let kept = conclude(workspace, status, &mut detail);
         return Ok(GateResult::new(
             gate,
@@ -3723,15 +3781,21 @@ fn run_sanitizer_gate(
     require_regular_file(&context, &artifact)?;
     ensure_within(&context, workspace.root(), &artifact)?;
 
-    let run = spawn_guarded_artifact(caps, &artifact, &workspace)?;
+    let run = retry_if_workspace_vanished(&workspace, &mut workspace_notes, |workspace| {
+        spawn_guarded_artifact(caps, &artifact, workspace)
+    })?;
     commands.push(run.command_line());
-    record_commands(&workspace, gate, &label, &commands)?;
+    retry_if_workspace_vanished(&workspace, &mut workspace_notes, |workspace| {
+        record_commands(workspace, gate, &label, &commands)
+    })?;
     let run_captures = CaptureNames::new(
         SANITIZER_RUN_STDOUT_NAME,
         SANITIZER_RUN_STDERR_NAME,
         SANITIZER_RUN_EXIT_NAME,
     );
-    run.persist(&workspace, &run_captures)?;
+    retry_if_workspace_vanished(&workspace, &mut workspace_notes, |workspace| {
+        run.persist(workspace, &run_captures)
+    })?;
 
     // As on the warning-gate path: judged first, and retained only when a reader will see it. This
     // is where the saving is real — a passing sanitizer gate captures the program's ordinary standard
@@ -3761,6 +3825,7 @@ fn run_sanitizer_gate(
             ],
         )
     };
+    note_workspace(&mut detail, &workspace_notes);
     let kept = conclude(workspace, status, &mut detail);
     Ok(GateResult::new(
         gate,
@@ -3771,6 +3836,71 @@ fn run_sanitizer_gate(
         detail,
         kept,
     ))
+}
+
+/// Perform one step of a gate's work, and if its workspace has gone, re-establish it and try again.
+///
+/// The companion to the pre-spawn re-assertion in [`spawn_guarded`], and it exists because the spawn
+/// is not the only moment that can meet the absence. A gate writes into its workspace repeatedly —
+/// the program copy, the command lines, each captured stream — and a directory that vanishes between
+/// two of those steps fails whichever step happens to be next. Without this, which step that was
+/// decided whether the run lost one gate or lost every verdict it had: an error out of a gate is not a
+/// failed gate but an *unperformed audit*, and an unperformed audit withholds every area it governs.
+///
+/// # Why one retry, and why only after an established absence
+///
+/// [`sandbox::Workspace::reassert`] answers whether the directory was actually gone. When it says the
+/// directory is there, the step failed for some other reason — a full disk, a refused publication, a
+/// parent replaced by a symbolic link — and retrying would only produce the same error a second time,
+/// so the original is returned untouched. Only an established absence is retried, and only once: a
+/// second failure after a freshly created directory is a real fault rather than a transient, and a
+/// loop here would turn one into an unbounded one.
+///
+/// A re-establishment that itself fails is reported *beside* the original error rather than instead of
+/// it. The step's own failure is the primary fact; why the directory could not be brought back — a
+/// live foreign owner, a path that left the work root — is the explanation, and a reader needs both.
+///
+/// Every re-establishment is pushed onto `notes`, which the caller folds into the gate's detail
+/// through [`note_workspace`]. Cleanup and recovery are never silent in this module: a directory that
+/// was re-created may have lost something written into it earlier, and a reader sent to a retained
+/// workspace has to be told that.
+fn retry_if_workspace_vanished<T>(
+    workspace: &Workspace,
+    notes: &mut Vec<String>,
+    step: impl Fn(&Workspace) -> HarnessResult<T>,
+) -> HarnessResult<T> {
+    let first = match step(workspace) {
+        Ok(value) => return Ok(value),
+        Err(first) => first,
+    };
+    match workspace.reassert() {
+        // The directory is there, so absence is not what went wrong. The original error stands.
+        Ok(None) => Err(first),
+        Ok(Some(note)) => {
+            notes.push(note);
+            step(workspace)
+        }
+        Err(recovery) => Err(HarnessError::new(
+            String::from("performing one step of an audit gate"),
+            format!(
+                "{first}. Its workspace was then found to be unusable and could not be \
+                 re-established, which is why the step could not simply be repeated: {recovery}"
+            ),
+        )),
+    }
+}
+
+/// Fold any workspace re-establishment into a gate's own detail.
+///
+/// The counterpart of the retention and cleanup notes `conclude` appends, and phrased the same way so
+/// a reader meets one convention rather than three. An empty list writes nothing, which is the
+/// ordinary case; a note means the gate's directory had gone and was re-created immediately before it
+/// was used, which a reader must be told because it bounds what the retained directory can contain.
+fn note_workspace(detail: &mut String, notes: &[String]) {
+    for note in notes {
+        detail.push_str(". Workspace note: ");
+        detail.push_str(&sanitize_line(note));
+    }
 }
 
 /// The sanitizer gate flags as owned strings, for a result record.
@@ -4024,6 +4154,19 @@ fn guard_invocation(
 ///
 /// The child could not be spawned or reaped, or the vector was empty. Both are defects rather than
 /// properties of a program.
+/// # A spawn whose working directory has gone
+///
+/// A child spawned with a working directory that is not there fails with `No such file or directory`
+/// — indistinguishable, at the spawn, from a driver binary that is not there. That ambiguity once
+/// cost a run every verdict it had: an audit gate's directory was absent at the instant of its spawn,
+/// the audit read the failure as its driver being unusable, and every governed area was withheld.
+/// Nothing is done about that here: every call to this function goes through
+/// [`retry_if_workspace_vanished`], which is the one place in this module that decides whether a
+/// failed step met a vanished workspace, re-establishes it and repeats the step exactly once. Placing
+/// the recovery around the call rather than inside it is what makes it cover the whole step —
+/// the shared execution path does a substantial amount of work between a caller's last look at the
+/// directory and the spawn itself, and a check performed before that work would leave precisely that
+/// interval unguarded.
 fn spawn_guarded(
     caps: &Capabilities,
     reference: &Path,
@@ -4074,6 +4217,11 @@ fn spawn_guarded(
 ///
 /// Forcing is not a weakening of the earlier "run the runtimes as they come" posture; it is that
 /// posture made true. As they come is precisely what an inherited variable prevented.
+///
+/// Called through [`retry_if_workspace_vanished`] for the reason [`spawn_guarded`] records. Recovery
+/// can only go so far here and that is honest rather than unfortunate: the artifact lives *inside*
+/// the workspace, so a workspace that vanished took it with it, and the repeated attempt then fails
+/// naming the artifact as the thing that is missing — which is the truth, and is what a reader needs.
 ///
 /// # Errors
 ///

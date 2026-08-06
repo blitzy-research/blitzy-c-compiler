@@ -159,8 +159,8 @@ use super::sandbox::{
     REFERENCE_COMPILE_STDERR_NAME, REFERENCE_COMPILE_STDOUT_NAME,
 };
 use super::{
-    bcc_requires_explicit_target, bcc_target_arguments, corpus_root, ensure_within,
-    infrastructure_breach, infrastructure_breach_refusal, is_bcc_target_selector,
+    bcc_requires_explicit_target, bcc_target_arguments, corpus_root, describe_missing_spawn_target,
+    ensure_within, infrastructure_breach, infrastructure_breach_refusal, is_bcc_target_selector,
     is_forbidden_for_side, isolate_child_environment, measure_pinned_tree, own_process_group,
     posix_command_line, public_text, reap_bounded, record_infrastructure_breach, redact_secrets,
     register_process_group, require_regular_file, sanitize_text_for_report, shown_path,
@@ -2331,6 +2331,7 @@ fn spawn_bounded(
         ));
     }
     let started = Instant::now();
+    let spawn_program = command.get_program().to_os_string();
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -2341,7 +2342,14 @@ fn spawn_bounded(
                      rather than the program under test — a binary that has been removed, or one \
                      that cannot be executed — and it is reported as a failure of the suite \
                      rather than as a divergence, because no compiler ran and therefore nothing \
-                     was observed. The command was: {}",
+                     was observed{}. The command was: {}",
+                    // "No such file or directory" names neither of the two things it could mean, and
+                    // the difference is between the toolchain and the build directory.
+                    describe_missing_spawn_target(
+                        &error,
+                        Some(Path::new(&spawn_program)),
+                        Some(working_directory),
+                    ),
                     posix_command_line(argv)
                 ),
             ));
