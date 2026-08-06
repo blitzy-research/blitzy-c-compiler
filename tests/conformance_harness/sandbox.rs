@@ -1401,7 +1401,7 @@ impl Workspace {
     ///
     /// # Return value
     ///
-    /// [`Ok(None)`] when the directory was already a real directory in the right place — the ordinary
+    /// `Ok(None)` when the directory was already a real directory in the right place — the ordinary
     /// answer, and it reads as silence. `Ok(Some(note))` when it had to be re-established, carrying
     /// the sentence a caller must put in its report: a directory that was re-created may have lost
     /// something written into it earlier, and a reader has to be told rather than left to infer it.

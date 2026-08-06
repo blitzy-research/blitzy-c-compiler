@@ -1739,9 +1739,9 @@ fn render_evidence_document(
 /// package path inside archived bodies, beside five correctly elided occurrences in the document's own
 /// fields. The continuous-integration job uploads the whole report tree on the strength of the claim
 /// that a published report carries neither a credential nor the absolute location of the workspace
-/// that produced it, and gates the finding directories behind an opt-in *because* those deliberately
-/// do disclose it — so an evidence document was the one artifact escaping the distinction the two
-/// upload rules are built on. Applying elision to the assembled document covers the fields and the
+/// that produced it, and publishes the finding directories as a separate, expiring artifact that
+/// announces itself as unreviewed *because* those deliberately do disclose it — so an evidence
+/// document was the one artifact escaping the distinction the two upload rules are built on. Applying elision to the assembled document covers the fields and the
 /// archived bodies alike, and the substitution is textual and idempotent, so the already-elided fields
 /// are unaffected.
 ///
@@ -1780,8 +1780,9 @@ fn sanitize_document_for_evidence(text: &str) -> String {
 // - The **generated** directory holds the exact bytes and the exact commands. It is what a
 //   reproduction runs, and `report.rs` says elsewhere why nothing in it is redacted: a redacted
 //   command is not a runnable command, and captured bytes compared against redacted ones report a
-//   divergence in the compiler. It stays git-ignored, stays behind the workflow's explicit opt-in, and
-//   keeps its manifest's `disclosure_review = not-performed`.
+//   divergence in the compiler. It stays git-ignored, is published by the workflow as its own
+//   expiring, explicitly unreviewed artifact rather than folded into the report, and keeps its
+//   manifest's `disclosure_review = not-performed`.
 // - The **review copy** holds the same seven classes rendered to *report grade*: redacted, sanitized,
 //   bounded, and — where a capture is not text at all — described rather than transcribed. It is what
 //   a reader of the uploaded report gets without asking, and it is enough to read a finding, judge it
@@ -1790,8 +1791,10 @@ fn sanitize_document_for_evidence(text: &str) -> String {
 //
 // That preserves the disclosure gate rather than routing around it. The gate exists because a curated
 // finding is committed and permanent, and `FINDINGS.md` §5.3 requires a person to read every byte
-// before it lands; publishing the *unredacted* directory by default would hand that judgement to a
-// workflow. A report-grade copy makes no claim the report does not already make about itself, and the
+// before it lands; letting an *uploaded* directory pass for a curated one would hand that judgement to
+// a workflow. So the workflow publishes the unredacted directory as its own expiring artifact that
+// states in as many words that it is unreviewed and unminimized, and neither it nor this copy claims
+// the review happened. A report-grade copy makes no claim the report does not already make about itself, and the
 // copy's own index repeats the report's bound: sanitized against the named forms, with the narrow
 // residual class `mod.rs` enumerates, so inspect it before republishing it outside the repository.
 
@@ -1981,8 +1984,8 @@ pub fn publish_finding_bundle(id: &FindingId) -> Option<String> {
         // run, the second reaches the summary, which is what a reader of the artifact has.
         let note = note_evidence_refusal(format!(
             "the review copy of finding {} is incomplete: {} was not carried. The generated \
-             directory still holds all of it — publish it with the workflow's raw-findings opt-in, or \
-             read it beside the run",
+             directory still holds all of it — read it beside the run, or take it from the \
+             workflow's raw-findings artifact",
             sanitize_text_for_report(id.as_str()),
             refused.join(", ")
         ));
@@ -2215,11 +2218,11 @@ fn render_bundle_index(id: &FindingId, source: &Path, carried: &[(String, Carria
          READING a finding — deciding whether it is real, what it is about, and whether to ask for the\n\
          rest. It is not the evidence itself.\n\n\
          The EXACT bytes and the runnable commands are in the generated directory named above, which\n\
-         is git-ignored, is not redacted, and is uploaded only behind the workflow's explicit\n\
-         raw-findings opt-in — because that directory names absolute tool paths and carries captured\n\
-         diagnostics verbatim, and `tests/conformance/FINDINGS.md` §5.3 requires a person to read all of\n\
-         it before any of it is published or committed. Nothing here performs that review or stands in\n\
-         for it.\n\n\
+         is git-ignored and is not redacted. Continuous integration uploads it beside this report as a\n\
+         separate, expiring raw-findings artifact rather than folding it in here — because that\n\
+         directory names absolute tool paths and carries captured diagnostics verbatim, and\n\
+         `tests/conformance/FINDINGS.md` §5.3 requires a person to read all of it before any of it is\n\
+         committed. Nothing here performs that review or stands in for it.\n\n\
          This copy inherits the report's own disclosure bound rather than improving on it:\n\
          `conformance_harness/mod.rs` documents, beside BARE_REDACTION_MIN_CHARS and is_path_value,\n\
          exactly what the redactor leaves in place — a credential-bearing value shorter than the floor\n\
@@ -6496,10 +6499,11 @@ fn render_summary_markdown(
         "A review copy is redacted, sanitized and bounded, and a capture that is not text is described \
          rather than transcribed, so it is what a reader judges a finding *from* and not the evidence \
          itself. The exact bytes and the runnable commands stay in the generated directory each row of \
-         section 4 names, which is git-ignored and — in continuous integration — released only behind \
-         the explicit raw-findings opt-in, because `{FINDINGS_REGISTER}` §5.3 requires a person to read \
-         all of it before any of it is published. Every copy states that distinction in its own \
-         `{BUNDLE_INDEX_NAME}`, together with what reached it and what did not."
+         section 4 names, which is git-ignored and — in continuous integration — published beside this \
+         report as a separate, expiring raw-findings artifact that names itself unreviewed, because \
+         `{FINDINGS_REGISTER}` §5.3 requires a person to read all of it before any of it is committed. \
+         Every copy states that distinction in its own `{BUNDLE_INDEX_NAME}`, together with what \
+         reached it and what did not."
     ));
     lines.push(String::new());
     let refusals = evidence_refusal_notes();

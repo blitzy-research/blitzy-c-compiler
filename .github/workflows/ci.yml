@@ -6,11 +6,13 @@
 # Cargo package every later command depends on, pre-flights the discovered oracle inventory, runs
 # the suite in strict mode, and publishes the evidence of the run.
 #
-# Both trees this job can publish are named here so neither is a surprise. The report tree goes up
-# on EVERY run, and it carries a review copy of every finding the run recorded, so a divergence can
+# Both trees this job publishes are named here so neither is a surprise, and both go up on EVERY
+# run. The report tree carries a review copy of every finding the run recorded, so a divergence can
 # be inspected without reproducing the run locally even on a green automatic run. The raw generated
-# finding directories — the byte-exact, unreviewed ones — go up when a dispatch asks for them, for
-# the disclosure reason the upload steps at the end of the job set out in full.
+# finding directories — the byte-exact, unreviewed ones — go up beside it as a separate, short-lived
+# artifact, because a finding is a DELIVERABLE and discarding its exact bytes with the runner would
+# lose the one verdict class the requirements call one. The upload steps at the end of the job set
+# out in full what each artifact is, and what review neither of them has had.
 #
 # ## One job, and why exactly one
 #
@@ -78,22 +80,17 @@ name: CI
 on:
   push:
     branches: [ main ]
-  # Manual dispatch exists for two reasons. It lets this matrix be exercised on demand — against a
-  # revision that has already been reviewed, per the paragraph above — rather than only when
-  # something lands on the default branch; and it carries the opt-in that releases the raw generated
-  # finding directories as a separate artifact. See the upload steps at the end of the conformance
-  # job: the report tree, which carries a review copy of every finding, is published on every run
-  # without asking, and only the byte-exact unreviewed directories wait for this input.
+  # Manual dispatch, and it takes no inputs. It exists so that this matrix can be exercised on
+  # demand — against a revision that has already been reviewed, per the paragraph above — rather
+  # than only when something lands on the default branch. There is nothing left to opt into: both
+  # artifacts this job publishes are published on every run, so the two upload steps at the end of
+  # the conformance job need nothing from whoever dispatched it.
+  #
+  # An input gating the finding directories was worse than redundant, which is why none is declared
+  # here. `inputs` is EMPTY on `push`, and `push` is the only automatic trigger this workflow has,
+  # so such a condition evaluates to null on every ordinary run — discarding with the runner exactly
+  # the evidence requirement 6 calls a deliverable, on precisely the runs nobody is watching.
   workflow_dispatch:
-    inputs:
-      publish_raw_findings:
-        description: >-
-          Upload the raw generated finding directories as a separate artifact. These carry
-          UNREVIEWED evidence — captured diagnostics, exact commands and absolute tool paths — and
-          their own manifests record `disclosure_review = not-performed`. Leave this false unless
-          you intend to perform that review on what you download.
-        type: boolean
-        default: false
 
 # Least privilege, declared rather than inherited. Every step below reads the checkout, compiles
 # it and uploads an artifact; none writes to the repository, opens an issue or publishes a
@@ -524,9 +521,16 @@ jobs:
       # A generated finding directory is deliberately the opposite — it describes the machine that
       # produced it as freely as it likes, because that is what makes it re-runnable there — and its
       # own manifest says so, recording `disclosure_review = not-performed`.
-      # `tests/conformance/FINDINGS.md` §5.3 requires that review before a finding is published, and
-      # publishing the raw directory by default would route evidence around the one gate that exists
-      # to hold it.
+      #
+      # Both trees are nevertheless published on every run, and where `tests/conformance/FINDINGS.md`
+      # §5.3 actually applies is what makes the second one publishable. That section is titled
+      # "mandatory before committing", and what it governs is the promotion of a transient directory
+      # into `tests/conformance/findings/`: a commit is public, durable and cannot be undone, which is
+      # why a person must read every byte first. It does not govern the path from a run to its own
+      # evidence. A build artifact is neither committed nor durable — this one expires after a day —
+      # and its manifest still records `disclosure_review = not-performed`, so nothing here performs
+      # that review or stands in for it. Withholding the artifact would not enforce §5.3; it would
+      # destroy the evidence with the runner and leave the review nothing to be performed on.
       #
       # ## Why a finding nevertheless always reaches this artifact
       #
@@ -542,18 +546,20 @@ jobs:
       #
       # So the harness publishes a REVIEW COPY of every finding inside the report root —
       # `conformance-report/findings/<finding-id>/`, all seven artifact classes plus a `BUNDLE.txt`
-      # that states what the copy is — and the unconditional upload below carries it. That closes the
-      # gap without touching the gate above, because the two copies are different things: the review
-      # copy is rendered to exactly the grade this artifact claims for itself (redacted, sanitized,
-      # bounded, and a capture that is not text described rather than transcribed), while the generated
-      # directory keeps the exact bytes and the runnable commands and stays behind the opt-in. Neither
-      # copy performs the §5.3 review or stands in for it: both manifests record
+      # that states what the copy is — and the unconditional upload below carries it. The two copies
+      # stay different things and neither replaces the other: the review copy is rendered to exactly
+      # the grade this artifact claims for itself (redacted, sanitized, bounded, and a capture that is
+      # not text described rather than transcribed), while the generated directory keeps the exact
+      # bytes and the runnable commands that `sh commands.sh` needs. Neither copy performs the §5.3
+      # review or stands in for it: both manifests record
       # `disclosure_review = not-performed`, and only a person promoting a finding into
       # `tests/conformance/findings/` can change that.
       #
-      # So the raw directories are behind an explicit opt-in below, and the report — which names
-      # every finding, its identifier and its directory, carries a review copy of each, and gives a
-      # sanitized account of each divergence — is what a reader gets without asking.
+      # So both go up on every run, without anyone asking: the report — which names every finding,
+      # its identifier and its directory, carries a review copy of each, and gives a sanitized
+      # account of each divergence — and, beside it, the byte-exact directories under the
+      # deliberately uninviting `conformance-findings-raw` name, announced by a `::warning::` that
+      # says what they are and expiring after a day.
       #
       # Evidence integrity is a separate, enforced gate rather than part of that prose-redaction
       # claim. Before a captured stream can enter `conformance-report/evidence/`, the harness pins
@@ -572,15 +578,15 @@ jobs:
           if [ -d target/conformance-report/findings ]; then
             copies=$(find target/conformance-report/findings -mindepth 1 -maxdepth 1 -type d | wc -l)
           fi
-          echo "::notice::This artifact carries a review copy of ${copies} finding(s) under conformance-report/findings/, each holding all seven artifact classes — reproducer, expectation record, manifest, commands, captures, environment fingerprint and diff — plus a BUNDLE.txt stating that the copy is report-grade rather than the byte-exact evidence. A finding does not fail this job, so without these copies a green run would have named findings whose evidence went with the runner. The exact bytes and the runnable commands stay in target/conformance-findings/, which is released only by a manual dispatch setting publish_raw_findings, because tests/conformance/FINDINGS.md §5.3 requires a person to read all of it first; the run summary's own accounting states how many copies were published and names any that were refused."
+          echo "::notice::This artifact carries a review copy of ${copies} finding(s) under conformance-report/findings/, each holding all seven artifact classes — reproducer, expectation record, manifest, commands, captures, environment fingerprint and diff — plus a BUNDLE.txt stating that the copy is report-grade rather than the byte-exact evidence. A finding does not fail this job, so without these copies a green run would have named findings whose evidence went with the runner. The exact bytes and the runnable commands stay in target/conformance-findings/, published beside this artifact as conformance-findings-raw on every run — UNREVIEWED, unminimized, expiring after one day, and still recording disclosure_review = not-performed, because tests/conformance/FINDINGS.md §5.3 requires a person to read all of it before any of it is committed; the run summary's own accounting states how many copies were published and names any that were refused."
 
       #
-      # Three measures keep that gate honest rather than merely stated, and all three are below:
-      # the audit step reports how many generated directories exist and what each one's manifest
-      # says about its own review, and raises a `::warning::` naming the artifact as unreviewed and
-      # unminimized; the artifact is named `conformance-findings-raw` so nothing about it reads as
-      # curated; and its retention is one day, because it is evidence released for an investigation
-      # rather than a durable publication.
+      # Three measures keep that distinction honest rather than merely stated, and all three are
+      # below: the audit step reports how many generated directories exist and what each one's
+      # manifest says about its own review, and raises a `::warning::` naming the artifact as
+      # unreviewed and unminimized; the artifact is named `conformance-findings-raw` so nothing
+      # about it reads as curated; and its retention is one day, because it is evidence published
+      # for an investigation rather than a durable publication.
       - name: Upload the conformance reports
         if: always()
         # Pinned by digest for the same reason as the checkout above.
@@ -603,7 +609,7 @@ jobs:
       # the runs whose findings are published, and `always()` covers the run that failed, which is
       # the run that produced findings in the first place.
       - name: Audit the generated findings before releasing them
-        if: always() && inputs.publish_raw_findings
+        if: always()
         run: |
           set -euo pipefail
           root=target/conformance-findings
@@ -637,8 +643,8 @@ jobs:
           fi
           echo "::warning::Releasing $count raw generated finding directory(ies) as the conformance-findings-raw artifact. Every one of them is UNREVIEWED and UNMINIMIZED evidence: each retains captured diagnostics, exact commands and absolute tool paths, and each reproducer is a verbatim copy of a corpus program rather than a reduced case. Perform the tests/conformance/FINDINGS.md §5.3 disclosure review on what you download before sharing it further, and the §5.1 minimization step before treating any of it as a filed finding."
 
-      - name: Upload the raw generated finding directories (UNREVIEWED evidence, opt-in)
-        if: always() && inputs.publish_raw_findings
+      - name: Upload the raw generated finding directories (UNREVIEWED evidence)
+        if: always()
         # Pinned by digest for the same reason as the checkout above.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

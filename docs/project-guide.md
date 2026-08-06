@@ -192,7 +192,7 @@ All test results originate from Blitzy's autonomous validation execution, with o
 
 **Acceptance criterion for replacing this row with a measurement — the whole of it, in one place.** In a checkout carrying the compiler's own `Cargo.toml` and `src/**`, run `BCC_CONFORMANCE_STRICT=1 cargo test --test conformance` and then `cargo test --no-fail-fast`; the row may be filled in when, and only when, **every** `test result:` line reads `ok` with `0 failed`, the `ignored` counts sum to **exactly 13**, and the `passed` counts sum to **3,942** — 3,924 existing plus these 18 — against a **3,955** defined total. Any `FAIL` or `XPASS` must be resolved and any `FINDING` curated into `tests/conformance/FINDINGS.md` first, because both are outcomes the suite is designed to report rather than reasons to relax the criterion. Read `3,955 / 3,942 / 0 / 13` as *the figures a package-complete run must print*, never as figures this branch has printed; the three-condition gate is stated in full under [Running the suite](testing/differential-conformance.md#running-the-suite), and the packaging precondition under [Cargo integration without a manifest change](testing/differential-conformance.md#cargo-integration-without-a-manifest-change) and — with a per-check table of what each checkout shape can and cannot establish — in the suite's own contract at `tests/conformance/README.md` under "The Cargo integration precondition". That second reference is deliberately named rather than linked: this page is published as a documentation site rooted at `docs/`, so a relative link climbing out of it would resolve on a checkout and 404 on the site. The other 3,937 tests are unaffected: they are the compiler's own suites, measured by its own validation execution.
 
-**† The 18 differential-conformance figures are PLANNED and STATICALLY VALIDATED, not a measured `bcc` result, and the two totals carry the same qualification for as long as that holds.** The suite is committed complete — 108 programs, 108 expectation records, the harness, the registers — and what has been established about it is exactly this: it is rustfmt-clean, it type-checks with warnings denied, it is clippy-clean, and its whole 1,296-cell matrix has been driven end to end. But it was driven against a **documented stand-in** compiler on a branch that carries the suite ahead of the compiler tree, and a stand-in that forwards to the reference toolchain compares one toolchain with itself, which is evidence about the environment rather than about `bcc`. The suite's own registers state the same thing: what has been established about `bcc` is nothing at all. Read the `18` in the defined column as *the shape the suite will report*, and replace the row's empty result cells with a measurement with a measurement once `cargo test --test conformance` has run against the real binary — the precondition for which is set out under "The Cargo integration precondition" in `tests/conformance/README.md`, named here rather than linked because `tests/` sits outside the documentation root and a relative link climbing out of `docs/` resolves to nothing once the site is published. The other 3,937 tests are unaffected: they are the compiler's own suites, measured by its own validation execution.
+**† The 18 differential-conformance figures are PLANNED and STATICALLY VALIDATED, not a measured `bcc` result, and the two totals carry the same qualification for as long as that holds.** The suite is committed complete — 108 programs, 108 expectation records, the harness, the registers — and what has been established about it is exactly this: it is rustfmt-clean, it type-checks with warnings denied, it is clippy-clean, and its whole 1,296-cell matrix has been driven end to end. But it was driven against a **documented stand-in** compiler on a branch that carries the suite ahead of the compiler tree, and a stand-in that forwards to the reference toolchain compares one toolchain with itself, which is evidence about the environment rather than about `bcc`. The suite's own registers state the same thing: what has been established about `bcc` is nothing at all. Read the `18` in the defined column as *the shape the suite will report*, and replace the row's empty result cells with a measurement once `cargo test --test conformance` has run against the real binary — the precondition for which is set out under "The Cargo integration precondition" in `tests/conformance/README.md`, named here rather than linked because `tests/` sits outside the documentation root and a relative link climbing out of `docs/` resolves to nothing once the site is published. The other 3,937 tests are unaffected: they are the compiler's own suites, measured by its own validation execution.
 
 **One further qualification on the two totals, and it predates this suite.** Summing the table's own columns gives 3,956 defined and 3,925 passed, one more in each case than the Totals row states. The discrepancy is inherited: at the pre-suite baseline the columns already summed to 3,938 and 3,925 against a recorded 3,937 and 3,924, and it lives in the compiler's own rows rather than in the differential-conformance row, which contributes exactly 18 to the defined column and nothing to the passed column. The recorded totals are left as they stand — they are the figures the project's own validation execution produced, and this suite's obligation is to add 18 to them rather than to restate a measurement it did not take — but the off-by-one is stated here so that a reader who adds the columns up is not left wondering which number to trust.
 
@@ -532,14 +532,32 @@ qemu-riscv64 ./hello_riscv64
 cargo build --release 2>&1 | tail -1
 # Expected: Finished `release` profile [optimized] target(s) in ...
 
-# Verify all tests pass. `cargo test` prints ONE "test result:" line PER test binary -- the
-# library's unit tests and each integration target separately -- so no single line carries the
-# repository-wide figure and the totals in Section 3 are the sum across every binary. Aggregate
-# them explicitly rather than reading one line as if it were the whole:
-cargo test --no-fail-fast 2>&1 | awk '/^test result:/ { pass += $4; fail += $6; ignored += $8 } END { printf "aggregate: %d passed; %d failed; %d ignored\n", pass, fail, ignored }'
-# Expected, executed baseline: aggregate: 3924 passed; 0 failed; 13 ignored
+# Verify all tests pass, and FAIL when they do not. `cargo test` prints ONE "test result:" line
+# PER test binary -- the library's unit tests and each integration target separately -- so no
+# single line carries the repository-wide figure and the totals in Section 3 are the sum across
+# every binary. Aggregate them explicitly rather than reading one line as if it were the whole,
+# and let the aggregate decide the exit status: the block below is non-zero if either Cargo
+# failed or a count did not match. `pipefail` is what carries Cargo's own failure -- exit 101
+# when it cannot read a manifest -- past awk, which is the last element of the pipeline; the
+# subshell keeps the option out of your own shell. (`pipefail` is bash, not POSIX.)
+want_pass=3924   # the executed baseline; 3942 once the differential conformance suite's 18 tests run
+( set -o pipefail
+  cargo test --no-fail-fast 2>&1 | awk -v want_pass="$want_pass" '
+    /^test result:/ { lines++; if ($3 != "ok.") not_ok++; pass += $4; fail += $6; ignored += $8 }
+    END {
+      printf "aggregate: %d passed; %d failed; %d ignored, over %d result line(s)\n",
+             pass, fail, ignored, lines
+      if (lines == 0)        { print "gate FAILED: no test binary reported a result"; exit 1 }
+      if (not_ok != 0)       { print "gate FAILED: " not_ok " result line(s) do not read ok"; exit 1 }
+      if (fail != 0)         { print "gate FAILED: " fail " failed; 0 is required"; exit 1 }
+      if (ignored != 13)     { print "gate FAILED: " ignored " ignored; exactly 13 is required"; exit 1 }
+      if (pass != want_pass) { print "gate FAILED: " pass " passed; " want_pass " is required"; exit 1 }
+      print "every result line reads ok: 0 failed, exactly 13 ignored, " pass " passed"
+    }' )
+# Expected, executed baseline: aggregate: 3924 passed; 0 failed; 13 ignored, and exit status 0
 # The differential conformance suite contributes 18 more once it runs in this package; until a run
-# produces them, Section 3 counts them separately rather than folding them into this figure.
+# produces them, Section 3 counts them separately rather than folding them into this figure, so
+# raise want_pass to 3942 in the same step that fills in that row.
 
 # Verify binary exists and runs
 ./target/release/bcc --help 2>&1 | head -3

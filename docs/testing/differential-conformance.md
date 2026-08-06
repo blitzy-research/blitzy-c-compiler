@@ -1082,20 +1082,40 @@ BCC_CONFORMANCE_KEEP_WORK=1 cargo test --test conformance -- --nocapture
 ```bash
 # whole-repository health gate. `cargo test` prints one `test result:` line PER TEST
 # BINARY -- the unit tests, then each integration target -- so no single line carries
-# the repository-wide figure. Aggregate them instead of grepping for one.
-cargo test --no-fail-fast 2>&1 | awk '
-  /^test result:/ { pass += $4; fail += $6; ignored += $8 }
-  END { printf "aggregate: %d passed; %d failed; %d ignored\n", pass, fail, ignored }'
+# the repository-wide figure. Aggregate them instead of grepping for one, and let the
+# aggregate DECIDE: the block's exit status is the verdict, non-zero if either Cargo
+# failed or a count did not match. `pipefail` is what carries Cargo's own failure --
+# 101 when it cannot read a manifest -- past awk, which is the last element of the
+# pipeline; the subshell keeps the option out of the shell you typed this into.
+want_pass=3942   # 3924 before this suite's 18 tests run in the package; 3942 once they do
+( set -o pipefail
+  cargo test --no-fail-fast 2>&1 | awk -v want_pass="$want_pass" '
+    /^test result:/ { lines++; if ($3 != "ok.") not_ok++; pass += $4; fail += $6; ignored += $8 }
+    END {
+      printf "aggregate: %d passed; %d failed; %d ignored, over %d result line(s)\n",
+             pass, fail, ignored, lines
+      if (lines == 0)        { print "gate FAILED: no test binary reported a result"; exit 1 }
+      if (not_ok != 0)       { print "gate FAILED: " not_ok " result line(s) do not read ok"; exit 1 }
+      if (fail != 0)         { print "gate FAILED: " fail " failed; 0 is required"; exit 1 }
+      if (ignored != 13)     { print "gate FAILED: " ignored " ignored; exactly 13 is required"; exit 1 }
+      if (pass != want_pass) { print "gate FAILED: " pass " passed; " want_pass " is required"; exit 1 }
+      print "every result line reads ok: 0 failed, exactly 13 ignored, " pass " passed"
+    }' )
 cargo clippy -- -D warnings
 cargo fmt -- --check
 cargo build --release
 ```
 
-The aggregate must report **0 failed** and **13 ignored**. The passing figure is whatever the run
-measures: it is the baseline's 3,924 plus this suite's 18 only once the suite has actually executed, and
-[the project guide's test inventory](../project-guide.md) is where an executed result is recorded.
-`--no-fail-fast` is not decoration — without it a failure in one binary stops the run and the aggregate
-would silently omit every binary after it.
+The aggregate must report **0 failed** and **13 ignored**, and `want_pass` is the passing figure the run
+must produce: the baseline's 3,924 before this suite executes, and 3,942 once its 18 tests have run, which
+is why it is a variable rather than a constant. [The project guide's test inventory](../project-guide.md)
+is where an executed result is recorded. The `if` conditions are what make this a gate rather than a
+report — they assert, in order, at least one result line, every line reading `ok`, `0 failed`, exactly
+`13 ignored` and `want_pass` passed, which is precisely the conjunction set out below; a repository
+printing `1 passed; 0 failed; 0 ignored` satisfies an unasserted aggregate exactly as readily as the right
+one does. `--no-fail-fast` is not decoration either: without it a failure in one binary stops the run and
+the aggregate would silently omit every binary after it. (`pipefail` is a bash feature rather than POSIX,
+so run the block in bash.)
 
 **The gate is that aggregate, and no one-line filter substitutes for it.** `cargo test` runs one test binary per target and prints one `test result:` line
 per binary. A pipeline such as `cargo test 2>&1 | grep "test result"` is a **convenience for locating

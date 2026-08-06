@@ -3192,7 +3192,7 @@ business rather than the repository's.
 | `target/conformance-report/summary.tsv` | The same data, machine-readable. Its **first line** is the same generation preamble, for the same reason and in the same shape as an area report's; the column header is line two |
 | `target/conformance-report/evidence/<cell-slug>+oracle_<x>.txt` | Durable, sanitized evidence for an outcome that was **reported without failing** and whose cell workspace was therefore discarded — an expected divergence, or a permissive run's absent oracle. Holds the cell's identity, the verdict, the marker, both sides' exact commands and terminations, the detail, and the archived content of the capture files the cell persisted. See [what survives a run](#what-survives-a-run--a-retained-workspace-an-evidence-document-or-a-findings-review-copy) |
 | `target/conformance-report/findings/F-<digest>-<cell-slug>-<class>/` | The **review copy** of every finding this run recorded: all seven artifact classes, rendered to the same grade as everything else in the report — redacted, sanitized, bounded, with a capture that is not text described rather than transcribed — plus a `BUNDLE.txt` naming what the copy is, what it is not, the generated directory holding the exact bytes, the two curation attestations copied from the finding's own manifest, and the carriage state of every entry. It exists because a `FINDING` does not fail the run: the cell keeps its workspace and publishes no evidence document, and the generated root below is beneath the build directory rather than inside the report, so without this copy a passing run would name a finding whose evidence nobody could open. Two ceilings bound it — 384 KiB on one artifact and 64 MiB across the run — and exceeding either **refuses the copy and reports the refusal in the summary** rather than failing the cell, because the generated directory still holds all of it |
-| `target/conformance-findings/F-<digest>-<cell-slug>-<class>/` | Auto-generated finding artifacts from the current run — the **exact bytes and the runnable commands**, unredacted, which is why it is git-ignored and, in continuous integration, released only behind an explicit opt-in. One directory per divergence, **not** per oracle: every oracle that observed the same divergence at the same cell contributes to this one directory and is indexed in its `MANIFEST.txt` `observed_by` line. Four ceilings bound what a run may publish here — 8 MiB on one artifact, 16 MiB on one directory, 1 GiB and 1,536 directories across the run — and exhausting any of them fails the run loudly rather than filling the disk |
+| `target/conformance-findings/F-<digest>-<cell-slug>-<class>/` | Auto-generated finding artifacts from the current run — the **exact bytes and the runnable commands**, unredacted, which is why it is git-ignored and why continuous integration publishes it as a separate, deliberately uninviting `conformance-findings-raw` artifact that expires after a day, announced by a warning naming it unreviewed and unminimized. One directory per divergence, **not** per oracle: every oracle that observed the same divergence at the same cell contributes to this one directory and is indexed in its `MANIFEST.txt` `observed_by` line. Four ceilings bound what a run may publish here — 8 MiB on one artifact, 16 MiB on one directory, 1 GiB and 1,536 directories across the run — and exhausting any of them fails the run loudly rather than filling the disk |
 
 **`findings.rs` never writes into `tests/conformance/`.** The curated finding set and both registers
 are human-maintained committed deliverables. A run writes only beneath the build directory.
@@ -3605,9 +3605,11 @@ the moment its cell is retired and carried by every archive of the report:
 The two copies answer different questions, and neither replaces the other:
 
 - **The generated directory is the evidence.** Exact bytes, exact commands, absolute tool paths,
-  unredacted diagnostics. It is what `sh commands.sh` runs, it stays git-ignored, and continuous
-  integration releases it only behind an explicit opt-in — because `FINDINGS.md` §5.3 requires a person
-  to read all of it before any of it is published.
+  unredacted diagnostics. It is what `sh commands.sh` runs, and it stays git-ignored. Continuous
+  integration publishes it on every run, as a separate `conformance-findings-raw` artifact that
+  expires after a day and is announced by a warning naming it unreviewed and unminimized — because
+  `FINDINGS.md` §5.3 is a gate on *committing* a finding, not on a run keeping its own evidence, and
+  withholding the artifact would enforce nothing while destroying the bytes with the runner.
 - **The review copy is how a finding is read.** Every artifact goes through the same redaction and
   report-safe rendering every other line of the report goes through, a capture that is not valid UTF-8
   is described rather than transcribed, and 384 KiB per artifact and 64 MiB per run bound it. In
@@ -3961,20 +3963,47 @@ the whole of what a checkout carrying this suite alone can establish.
 The count itself — **exactly 13 ignored** — is a property of the *whole repository*, and no integration
 test can read another test target's ignored count, so it is verified by the health gate rather than
 asserted by the suite. That gate has to **aggregate** rather than grep, because `cargo test` prints one
-`test result:` line *per test binary* and no single line carries the repository-wide figure:
+`test result:` line *per test binary* and no single line carries the repository-wide figure — and it has
+to **decide**, because a command that prints an aggregate and exits 0 whatever it printed is a report
+rather than a gate:
 
 ```bash
-cargo test --no-fail-fast 2>&1 | awk '
-  /^test result:/ { pass += $4; fail += $6; ignored += $8 }
-  END { printf "aggregate: %d passed; %d failed; %d ignored\n", pass, fail, ignored }'
+want_pass=3942   # 3924 before this suite's 18 tests run in the package; 3942 once they do
+( set -o pipefail
+  cargo test --no-fail-fast 2>&1 | awk -v want_pass="$want_pass" '
+    /^test result:/ { lines++; if ($3 != "ok.") not_ok++; pass += $4; fail += $6; ignored += $8 }
+    END {
+      printf "aggregate: %d passed; %d failed; %d ignored, over %d result line(s)\n",
+             pass, fail, ignored, lines
+      if (lines == 0)        { print "gate FAILED: no test binary reported a result"; exit 1 }
+      if (not_ok != 0)       { print "gate FAILED: " not_ok " result line(s) do not read ok"; exit 1 }
+      if (fail != 0)         { print "gate FAILED: " fail " failed; 0 is required"; exit 1 }
+      if (ignored != 13)     { print "gate FAILED: " ignored " ignored; exactly 13 is required"; exit 1 }
+      if (pass != want_pass) { print "gate FAILED: " pass " passed; " want_pass " is required"; exit 1 }
+      print "every result line reads ok: 0 failed, exactly 13 ignored, " pass " passed"
+    }' )
 ```
 
-The aggregate must report `0 failed` and `13 ignored`. `--no-fail-fast` is load-bearing: without it a
-failure in one binary stops the run, and the aggregate would silently omit every binary after it —
-which is how a shrinking ignored count could go unnoticed. On a checkout
-without the compiler's Cargo package that gate cannot run at all, for the reasons set out under
-[The Cargo integration precondition](#the-cargo-integration-precondition), so the claim is stated
-here as what must hold and be measured after the merge, not as something already measured.
+**The block's own exit status is the verdict**, and it is non-zero if *either* Cargo failed *or* a count
+did not match, so it can be used directly as a gate. Three details make that true rather than merely
+intended:
+
+- `set -o pipefail` is what carries **Cargo's** failure to the status. awk is the last element of the
+  pipeline, so without it the status is awk's and Cargo's own exit — 101 when it cannot read a manifest
+  at all, and non-zero when a test binary fails — is discarded. It is set inside a **subshell** so the
+  option does not leak into the shell you typed this into. (`pipefail` is a bash feature, not POSIX.)
+- The `END` block **asserts** the conditions instead of only printing them, and names the one that
+  failed: at least one result line, every line reading `ok`, `0 failed`, exactly `13 ignored`, and
+  `want_pass` passed. Without those assertions a repository reporting `1 passed; 0 failed; 0 ignored`
+  satisfies the command just as readily as one reporting `3942 passed; 0 failed; 13 ignored`.
+- `--no-fail-fast` is load-bearing: without it a failure in one binary stops the run, and the aggregate
+  would silently omit every binary after it — which is how a shrinking ignored count could go unnoticed.
+
+On a checkout without the compiler's Cargo package that gate cannot run at all, for the reasons set out
+under [The Cargo integration precondition](#the-cargo-integration-precondition) — `cargo test` exits 101
+and prints no result line, which the `lines == 0` condition reports as a failed gate rather than as a
+clean aggregate of nothing. So the claim is stated here as what must hold and be measured after the
+merge, not as something already measured.
 
 The reason those 13 stay ignored is worth recording, because it looks like an omission otherwise:
 they are network-dependent, and C4 forbids network access. Re-enabling them would violate C4 while
