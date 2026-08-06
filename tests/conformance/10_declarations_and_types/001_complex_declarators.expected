@@ -1,0 +1,47 @@
+program            = 001_complex_declarators
+area               = 10_declarations_and_types
+description        = Complex declarators: arrays of pointers to functions returning pointers, pointer to array, function returning a function pointer, folded and runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every call is through a fully initialized function pointer: table and direct_table are
+static arrays initialized with the addresses of functions of exactly the matching type,
+and typedef_slot is assigned pick_slot directly. pick_slot indexes slot_table with i & 1,
+so the index is always 0 or 1 and can never leave the two-element array. row_ptr points at
+grid[1], a genuine element of grid, and only elements 0 through 2 of that row are read, all
+of which are initialized. No pointer is ever formed one past the end and dereferenced. All
+arithmetic is on small int values far from the int range edges, so there is no signed
+overflow: the largest intermediate value is 27. No shift is performed. No object is
+modified twice between sequence points, and no printf call receives more than one
+side-effecting argument, so unspecified evaluation order cannot affect the output. No
+storage is read before it is written. There is no aliasing violation: every object is
+accessed only through an lvalue of its own declared type. No padding byte is read.
+END
+impl_defined_notes <<END
+Both printed sizes are of int-based arrays only: sizeof grid is a 3x3 int array (36 bytes)
+and sizeof slot_table is a 2-element int array (8 bytes). Both are therefore identical on
+all four targets, because int is 4 bytes on x86_64, i686, aarch64 and riscv64 alike. No
+sizeof of long, pointer, double, long long or any aggregate containing them is printed, so
+the measured i686 difference (4-byte long and pointer versus 8 bytes elsewhere) cannot
+surface. No address or pointer value is printed anywhere: pointer facts appear only as
+dereferenced int values. Plain char is not used, so the measured char signedness difference
+(signed on x86_64 and i686, unsigned on aarch64 and riscv64) is irrelevant here. The only
+printf conversion specifier used in the program is %d.
+END
+expected_stdout    <<END
+fn_table_folded=27
+fn_table_runtime=21
+slot_values=11 22
+direct_table=11 22
+row_ptr=4 5 6
+choose=11 10
+sizes=36 8
+END

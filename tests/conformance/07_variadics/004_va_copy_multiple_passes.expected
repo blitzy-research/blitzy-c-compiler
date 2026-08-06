@@ -1,0 +1,161 @@
+program            = 004_va_copy_multiple_passes
+area               = 07_variadics
+description        = Variadic argument list copied and traversed more than once, including a copy of a copy and a copy ended early, folded and volatile-runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Header exception: this program includes <stdarg.h>. The corpus sanctions two header
+exception classes and only two, and this is the first of them: the programs in area 07 may
+include <stdarg.h> and nothing else. The second class is the dedicated bundled-header probe
+12_preprocessor/003_bundled_header_inclusion.c, which may include the nine required bundled
+freestanding headers; it does not apply here, and no program may take both. The exception is
+needed because variadic functions cannot be written at all without
+va_list, va_start, va_arg and va_end, and because this program additionally copies a list
+with va_copy, which is its whole subject. stdarg.h is in bcc's own bundled
+freestanding set, and docs/technical-specifications.md line 208 documents va_copy
+explicitly among the macros implemented via compiler builtins, which is precisely what
+this program exercises. stdarg.h is also a freestanding header supplied by the reference
+compiler, so it compiles identically under both oracles and the program remains a
+single-file reproducer. No other header is included; in particular stdio.h is not
+included, because bcc ships none. printf is hand-declared.
+va_copy lifecycle, the central correctness rule of this program: every va_copy is matched
+by its own va_end on the destination list, and each original list is va_end-ed exactly
+once. The file contains three va_start invocations, four va_copy invocations and seven
+va_end invocations, which is one va_end for each va_start and one for each va_copy. Every
+va_end is in the same function as the va_start or va_copy that created its list, as C11
+requires. In two_passes the copy is taken before any traversal, then the copy is traversed
+fully and ended, then the original is traversed fully and ended. In three_passes the first
+copy is taken from the original and the second copy is taken from the first copy, both
+before either has been traversed, so all three lists start at the same position; each is
+then traversed fully and ended exactly once. In head_tail the copy is read only three
+times out of six arguments and then ended without consuming the remainder, which is
+explicitly permitted, and the original is read all six times and ended once.
+No list is ever read past the number of arguments actually supplied at its call site, so
+there is no over-read. Nothing derived from a va_list object itself is ever printed; only
+the values retrieved from it are printed.
+Retrieval types: int and double arguments are not subject to the default argument
+promotions, so va_arg(ap, int) and va_arg(ap, double) retrieve exactly the types supplied.
+The floating arguments are written as double literals with no f suffix, so no promotion is
+involved and va_arg(ap, float) never appears.
+Arithmetic: no signed overflow is possible. The integer operands are small mixed-sign
+values and the totals are -6, -10, 6, 15, 21, 60, 150 and 210, all far inside the 32-bit
+int range. Floating addition is on dyadic rationals only. No int is ever added to a double
+accumulator or the reverse. There is no shift, no division, no aliasing violation, no read
+of uninitialized storage, no object modified twice between sequence points, and no
+dependence on padding or on the addresses of unrelated objects.
+Evaluation order: each helper prints all of its own derived lines and returns void, so
+main makes six plain calls and no call has more than one side-effecting argument. In the
+runtime variants each volatile object or volatile array element is written and then read
+back into plain storage before the call, so the arguments in the call expression are pure
+reads of plain objects and the unspecified argument-evaluation order is unobservable.
+Warning gate: this program passes the full default gate, -Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror, unmodified. That was verified by
+compiling it with exactly that gate on the reference compiler, so this record declares
+no deviation and omits the ub_audit_flags key, which is how a record whose program needs
+the whole gate says so. Area 07 sanctions no deviation in any case: the only authorized
+removals are -pedantic, for the supported-extension area where the subject is
+non-standard by definition, and the conversion diagnostics, for the corpus's one
+deliberate narrowing-conversion program, 01_integer_conversions/004_narrowing_conversions,
+where a narrowing conversion is the behaviour under test. Neither removal applies to a
+variadic program.
+END
+impl_defined_notes <<END
+Width normalization: the types long and unsigned long are never used, because sizeof(long)
+and sizeof(void *) are 4 on i686 and 8 on x86-64, AArch64 and RISC-V 64
+(docs/technical-specifications.md lines 457 to 462). Only int and double appear, and the
+printf conversions are limited to %s, %d and %.6f. No address, no pointer value, no sizeof
+result and no plain char value is printed.
+Floating determinism: every floating literal is a dyadic rational exactly representable in
+IEEE binary64 (1.5, 2.25, 4.125, 0.5, 3.25, 8.125), and all floating output is printed at
+fixed precision with %.6f, so the rendered text is byte-identical on all four backends.
+va_list representation differs by target, which is why this program is valuable rather
+than why it should be restricted. On i686 a va_list is effectively a single pointer walking
+a stack argument block, while on x86-64 System V it is a structure describing a register
+save area plus an overflow area (docs/technical-specifications.md lines 546 and 553), and
+AArch64 AAPCS64 and RISC-V 64 LP64D use their own register save areas (lines 559 and 565).
+va_copy must reproduce whichever representation the target uses, so the semantic invariant
+asserted here, that a copied list yields exactly the same values in the same order as the
+original, is meaningful on every target and is compared across all four.
+Semantic invariants visible in the golden output: each _copy line equals its _orig
+counterpart, both _equal lines read 1, each _sums line carries three identical values, and
+head_sum plus tail_sum equals total in both split cases.
+Cross-backend comparability: integer and double variadic argument passing was measured to
+produce byte-identical results on all four targets at all three optimization levels, so no
+target is restricted and all three oracles are enabled.
+END
+expected_stdout    <<END
+fdup_copy[0]=2
+fdup_copy[1]=-5
+fdup_copy[2]=10
+fdup_copy[3]=-13
+fdup_orig[0]=2
+fdup_orig[1]=-5
+fdup_orig[2]=10
+fdup_orig[3]=-13
+fdup_copy_sum=-6
+fdup_orig_sum=-6
+fdup_equal=1
+rdup_copy[0]=3
+rdup_copy[1]=-7
+rdup_copy[2]=12
+rdup_copy[3]=-18
+rdup_orig[0]=3
+rdup_orig[1]=-7
+rdup_orig[2]=12
+rdup_orig[3]=-18
+rdup_copy_sum=-10
+rdup_orig_sum=-10
+rdup_equal=1
+ftri_c2[0]=1.500000
+ftri_c2[1]=2.250000
+ftri_c2[2]=4.125000
+ftri_c1[0]=1.500000
+ftri_c1[1]=2.250000
+ftri_c1[2]=4.125000
+ftri_ap[0]=1.500000
+ftri_ap[1]=2.250000
+ftri_ap[2]=4.125000
+ftri_sums=7.875000,7.875000,7.875000
+rtri_c2[0]=0.500000
+rtri_c2[1]=3.250000
+rtri_c2[2]=8.125000
+rtri_c1[0]=0.500000
+rtri_c1[1]=3.250000
+rtri_c1[2]=8.125000
+rtri_ap[0]=0.500000
+rtri_ap[1]=3.250000
+rtri_ap[2]=8.125000
+rtri_sums=11.875000,11.875000,11.875000
+fsplit_head[0]=1
+fsplit_head[1]=2
+fsplit_head[2]=3
+fsplit_all[0]=1
+fsplit_all[1]=2
+fsplit_all[2]=3
+fsplit_all[3]=4
+fsplit_all[4]=5
+fsplit_all[5]=6
+fsplit_head_sum=6
+fsplit_tail_sum=15
+fsplit_total=21
+rsplit_head[0]=10
+rsplit_head[1]=20
+rsplit_head[2]=30
+rsplit_all[0]=10
+rsplit_all[1]=20
+rsplit_all[2]=30
+rsplit_all[3]=40
+rsplit_all[4]=50
+rsplit_all[5]=60
+rsplit_head_sum=60
+rsplit_tail_sum=150
+rsplit_total=210
+END

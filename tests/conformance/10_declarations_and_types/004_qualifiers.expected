@@ -1,0 +1,81 @@
+program            = 004_qualifiers
+area               = 10_declarations_and_types
+description        = const, volatile and restrict on objects and parameters, with a truthful non-aliasing restrict contract
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+RESTRICT NON-ALIASING ARGUMENT. This is the most important undefined-behaviour risk in this
+program, because a lying restrict is diagnosed by no warning flag and detected by neither
+UndefinedBehaviorSanitizer nor AddressSanitizer, so it would pass every automated gate while
+silently invalidating every verdict the program produces. The guarantee here is structural
+rather than incidental. scale_into declares int *restrict dst and const int *restrict src.
+There is exactly one call site in the whole program, and it passes dest_data and
+source_data. Those are two separately declared file-scope arrays of four ints each: dest_data
+is a distinct object from source_data, neither is a pointer into the other, and their storage
+does not overlap in any way. During the call, dst therefore accesses only dest_data and src
+accesses only source_data, so no object modified through dst is ever read through src and the
+restrict contract holds absolutely. Additionally src is const-qualified, so the source array
+is not written at all. dest_data is written before it is read: scale_into fills all four
+elements, and only then does the summing loop read them.
+
+REMAINING UB-FREEDOM ARGUMENT. Every index is in range: the loop bound n is 4 and both arrays
+have exactly four elements, so dst[i] and src[i] are valid for i = 0 through 3, and the
+summing loop uses the same fixed bound of 4. No pointer is formed one past the end and
+dereferenced. const_ptr_to_int is an int *const initialized to the address of the automatic
+object target, so writing through it is well defined -- the pointer is immutable but the
+pointee is a non-const int. ptr_to_const points at the genuinely const object const_source
+and is only ever read through, never written through, so no const object is modified. Every
+object read is initialized first: ticks, target, sum and i all have initializers or are
+assigned before use, and dest_data has static storage duration so it is zero initialized even
+before scale_into fills it. All arithmetic is on small int values far from the int range
+edges, so there is no signed overflow: the largest intermediate value is 30. No shift is
+performed. No object is modified twice between sequence points, and no printf call receives a
+side-effecting argument at all. There is no aliasing violation anywhere: every object is
+accessed only through an lvalue of its own declared type. No padding byte is read.
+END
+impl_defined_notes <<END
+This program prints no size and no alignment at all, so the measured i686 width differences
+(4-byte long and pointer versus 8 bytes on x86_64, aarch64 and riscv64) cannot surface. All
+printed values are small int quantities. No address or pointer value is printed: pointer
+facts appear only as dereferenced int values. Plain char is not used, so the measured char
+signedness difference (signed on x86_64 and i686, unsigned on aarch64 and riscv64) is
+irrelevant. The only printf conversion specifier used in the program is %d.
+
+The volatile object ticks is read and written three times in sequence, by 1 then 2 then 3, and
+the printed total is 6. What that single printed value can and cannot prove is worth stating
+exactly, because overclaiming it would make the assertion look stronger than it is.
+
+It CAN prove that the three read-modify-write operations were composed correctly: any backend
+that dropped one of them, applied one twice, mis-ordered the reads relative to the writes, or
+loaded a stale value would print something other than 6, and every such difference is caught by
+oracle (a) against the reference compiler, by oracle (b) across the four backends, and by
+oracle (c) against this record, at all three optimization levels. It also proves the value is
+stable ACROSS optimization levels, since the same 6 is expected at -O0, -O1 and -O2.
+
+It CANNOT prove that three distinct volatile accesses were actually emitted. A compiler that
+illegally collapsed the sequence into one store of 6 would print 6 as well, so this output does
+not distinguish the two. Whether the accesses survive individually is an instruction-level
+property, and verifying it needs a white-box check on the generated code -- which is deliberately
+outside this suite's oracles, all three of which compare only observable program behaviour. That
+check belongs to the repository's existing per-backend code-generation tests, which inspect
+emitted instructions directly; the note here is confined to what stdout can settle.
+
+For a side effect whose omission IS observable from stdout, see the short-circuit programs in
+area 06, where the assertion is that a counter did not change -- an omission the printed value
+reports directly.
+END
+expected_stdout    <<END
+const_read=42
+volatile_seq=6
+restrict_scaled=3 6 9 12 sum=30
+const_qualified_ptr_target=42
+const_pointer_write=19
+END

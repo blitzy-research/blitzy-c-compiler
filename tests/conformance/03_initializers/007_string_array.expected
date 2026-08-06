@@ -1,0 +1,269 @@
+# Expectation record for 03_initializers/007_string_array.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 007_string_array
+area               = 03_initializers
+description        = Character arrays initialized from string literals in both C11 6.7.9p14 forms -- exact width, where the terminator is not copied, and with room to spare, where it is -- across unsigned char, signed char and plain char, plus the braced spelling, adjacent-literal concatenation, escape sequences, a designated character array, two-dimensional grids at both widths, and a literal initializing a pointer
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined and no unspecified behaviour, which is the precondition that
+makes both differential oracles sound: undefined behaviour would license either compiler to do
+anything at all, so a divergence over it would prove nothing about either one.
+The construct that looks most dangerous here is defined, and it is the point of the program: an
+array whose declared width is exactly the length of its string literal receives the literal's bytes
+and the terminating null is simply NOT copied. C11 6.7.9p14 states that explicitly, so g_exact_u[3]
+from "abc", g_exact_s[3] from "xyz" and each row of g_grid_exact[2][5] from "hello" and "world" are
+well defined rather than overflowing -- those, and only those, are the exact-width objects.
+g_escapes[4] is deliberately NOT one of them, and saying so is worth a sentence because its literal
+LOOKS longer than it is: "\x41\102\n" is three characters, measured as sizeof - 1 == 3, so the array
+has a fourth element and the terminator IS copied into it, which the golden line g_escapes[3]=0
+records. It is the minimal with-room case rather than an exact-width one, and mistaking it for one
+would invite a maintainer to "correct" its width to 3 and delete a line of the golden record.
+Nothing in the program ever reads the terminator the exact-width arrays do not have: they are never
+printed with %s and never walked for a terminator, every read goes through a helper that is given
+the array's DECLARED element count -- 3, 4, 5, 6 or 7 -- and loops strictly below it, and the two
+grids are read with literal bounds equal to their declared row widths. No read therefore passes the
+last element of any object, no subscript is ever out of bounds and no one-past-the-end pointer is
+formed or dereferenced.
+The `sizeof_g_exact_u=3` and `sizeof_g_grid_exact=10` lines exist to detect the failure mode that
+would otherwise be silent: a compiler that helpfully reserved a byte for a terminator would either
+store one past the end of the object -- an out-of-bounds write, which the sanitizer gate catches --
+or size the array wrongly, which those lines catch.
+Every array with room to spare is fully initialized: the literal's bytes and its terminator are
+copied and every element beyond them is implicitly zero by C11 6.7.9p21, for automatic duration
+exactly as for static, because an array with any initializer is fully initialized. g_desig is a
+designated character array whose unmentioned elements are zero by the same rule. So no read of an
+indeterminate value is reachable anywhere in the program, including from l_exact_u and l_room.
+No arithmetic is performed on any character value. The only arithmetic is the loop counters'
+increments, bounded by the literals 3, 4, 5, 6, 7 and 2, so signed overflow is unreachable; the
+byte counts sizeof yields are constants of a complete object type. Nothing is shifted, divided or
+remaindered. Nothing is modified after its initialization, so no object is modified twice between
+two sequence points. Every loop bound is either a literal dimension or a count the caller passes
+explicitly, so no bound is computed from a value the initializer under test supplied.
+g_ptr is a const char * initialized from the literal "lit", whose array has 4 elements, and it is
+read at indices 0 through 3 -- its three characters and its terminator, all inside the object the
+literal denotes. No pointer VALUE is printed, no pointer difference is taken and no pointer
+arithmetic beyond those in-bounds reads is performed. No string literal is modified anywhere in the
+program: every literal is either an initializer for a separate mutable array of its own, or is
+reached through a const-qualified pointer.
+There is no aliasing violation. Each array is read only through an lvalue of its own declared element
+type -- unsigned char through unsigned char, signed char through signed char, plain char through
+char -- and the helpers' parameters are declared with matching element types, so no object is
+accessed through an incompatible effective type. Every cast in the file is a VALUE conversion applied
+to an already-loaded character, (int) or (int)(unsigned char), never a pointer cast and never pointer
+punning. No object representation is inspected, no union appears, and no padding byte is read -- a
+character array has no padding in any case -- and nothing depends on the relative addresses of
+unrelated objects.
+Each printf call receives a name pointer, one or two loop counters and one already-narrowed int,
+none of which has a side effect, so the unspecified order in which a function call's arguments are
+evaluated cannot be observed. %s takes a null-terminated const char * naming the array, and %d takes
+an int in every case, matching after the default argument promotions, so no variadic argument is read
+at the wrong width.
+main returns 0, inside the 0-125 range the suite requires so that no exit status is truncated by the
+operating system. Every input is a literal in this file: nothing is read from the environment, the
+clock, the file system or the network, and iteration order is fixed by literal bounds, so every cell
+is reproducible from this source and this record alone.
+No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
+That is the corpus-wide rule stated in tests/conformance/README.md, whose two sanctioned exceptions
+are area 07's stdarg.h and area 12's bundled-header probe; area 03 takes neither.
+This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
+under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
+-Werror in the single native compile-only invocation the suite's warning gate makes, and it builds
+and runs clean under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both
+gates are reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag
+discipline is untouched. The unbraced string literals initializing the two grids' inner arrays are
+brace elision, and they are gate-clean unaided because a string literal may initialize a character
+array without braces (C11 6.7.9p14), so no pragma is needed here.
+END
+impl_defined_notes <<END
+This record narrows nothing: all four targets, all three optimization levels and all three
+oracles are enabled, no expected-divergence marker is carried, and no `ub_audit_flags` key
+appears because the program passes the suite's full default warning gate unmodified. That is a
+stronger statement here than in the rest of the area, because this is the one program in it that
+handles character data, and character data is where the corpus's two measured
+implementation-defined properties live -- so both are handled explicitly rather than avoided.
+EXECUTION CHARACTER SET, PINNED AT TRANSLATION TIME. This program prints the numeric codes of the
+characters in its literals, and C11 5.2.1 leaves those values to the implementation -- nothing in
+the standard says 'a' is 97. All four supported targets were measured to use ASCII, and the source
+pins the characters it prints with two _Static_assert declarations: one conjunctive assertion naming
+seventeen letters (a, b, c, d, e, f, g, h, i, l, o, r, t, w, x, y and z at their ASCII codes) and one
+for the simple escape '\n' == 10. An implementation with a different execution character set
+therefore fails to TRANSLATE rather than printing different numbers that an oracle would have to
+attribute to a compiler defect. Verified by negative test: perturbing one asserted value makes
+translation stop with the assertion's own message.
+THE PINNING IS EXHAUSTIVE -- ALL SEVENTEEN LETTERS THIS PROGRAM PRINTS ARE NAMED, and the count is
+spelled both here and in the assertion's own message so that the claim can be checked against the
+list rather than trusted. The seventeen are a, b, c, d, e from g_exact_u, g_room_u, g_extra_u,
+g_braced, g_concat and g_desig; x, y, z from g_exact_s and g_room_s; h, i from g_plain; h, e, l, o,
+w, r, d from the two grids; l, i, t through g_ptr; d, e, f from l_exact_u; and g, h from l_room.
+'f' (102) and 'g' (103) are the two an author is most likely to miss, because they occur ONLY in the
+two automatic-duration twins declared inside main -- l_exact_u from "def" at index 2 and l_room from
+"gh" at index 0 -- and nowhere in the file-scope literals. Neither is implied by its neighbours: C11
+5.2.1 guarantees contiguity only for the digits, so 'e' == 101 and 'h' == 104 pin nothing between them
+and each is named explicitly. Naming all seventeen costs no output, because a _Static_assert emits
+none, and it is what backs the two golden lines l_exact_u[2]=102 and l_room[0]=103 with a
+translation-time guarantee instead of resting on the measured fact that all four targets are ASCII.
+The assertion's own message states the counted claim the seventeen-letter conjunction delivers rather
+than a broader claim about "every letter this program prints", so the message, this paragraph and the
+conjunction say the same thing. There is no residual: no printed character's value is unpinned, and any
+literal added later must extend the conjunction and its count together.
+The two NUMERIC escapes in g_escapes need no assertion -- C11 6.4.4.4p7 fixes \x41 and \102 at 65
+and 66 by their numeric value regardless of charset, which is precisely why they are spelled
+numerically -- whereas the simple escape \n does need one, because 6.4.4.4p4 gives it a
+charset-dependent value.
+PLAIN-CHAR SIGNEDNESS. Plain char is never printed as itself. Its signedness is
+implementation-defined and was MEASURED signed on x86-64 and i686 but unsigned on AArch64 and
+RISC-V 64, so a plain-char value printed as itself would diverge across backends for a reason that
+is not a compiler defect -- which would destroy the oracle rather than exercise it. Two mechanisms
+are applied together so the rule holds by construction and cannot be broken by a later edit that
+introduces a high-bit character. Every array the requirement names is spelled unsigned char or
+signed char and read back through (int), whose value is unambiguous by declaration. Every
+plain-char object, and the const char * dereference, is read back through (int)(unsigned char),
+which the dump_plain helper exists solely to centralise so it cannot be forgotten at a call site.
+Each cast is a value conversion of an already-loaded character, never pointer punning. Every
+literal in the file is US-ASCII, so in practice the two spellings agree; the cast is applied
+unconditionally anyway.
+WIDTH NORMALIZATION. Every printed value is an int printed with %d, and every character value is
+cast before printing. Each sizeof is taken of a CHARACTER array, so its value is a count of bytes
+and is identical on all four targets -- 3, 4, 6, 7, 10 and 12 -- and is cast to int before it
+reaches the variadic call. sizeof is deliberately never taken of g_ptr, whose width differs
+between the targets: i686 is ELF32 with a four-byte pointer while x86-64, AArch64 and RISC-V 64
+are ELF64 with eight (docs/technical-specifications.md target table, lines 457-462), a difference
+also MEASURED on all four targets in this environment. No long, size_t, ptrdiff_t, intptr_t, float
+or double appears and no length modifier is used. No address or pointer VALUE is printed -- the
+pointer case is reported through its pointee, not its address -- so where the implementation places
+these objects, and whether two identical literals share storage, is unobservable.
+PADDING. Character arrays have no padding, and no object representation is inspected.
+REPORT SAFETY OF THE GOLDEN BYTES. One byte of the escape-sequence array would be a control
+character if it were rendered: g_escapes is initialized from "\x41\102\n", whose third element is a
+line feed. It is read through dump_u as a NUMBER and prints as 10, which is required rather than
+incidental -- the expectation record format permits no control character but the line feed that
+joins its own lines, because a field value is copied verbatim into a report row, a tab-separated
+summary column and a findings manifest. Reading the escapes numerically covers them fully and keeps
+the golden bytes report-safe at the same time.
+THE EXACT-WIDTH DECLARATIONS MUST NEVER BE "FIXED" BY WIDENING THEM; they are the construct under
+test. g_grid_exact and g_grid_room differ only in row width, which makes the terminator's presence
+or absence a single-line difference between two otherwise identical groups, and that is the
+comparison this program exists to make. The exact sizes are the lines that would detect a compiler
+reserving a byte it was not asked for.
+THE DISCRIMINATING VARIANT in this area is the pairing of storage durations rather than a volatile
+operand. The two automatic-duration objects, l_exact_u and l_room, are the twins: they carry the
+exact-width and with-room forms into the path where the initializer is performed by emitted code at
+run time rather than laid into a data section at translation time. With optimization off the statics
+appear as data-section bytes while the twins appear as a run of stores into the frame, and at a
+higher level either path may be folded into immediate operands, so both are compiled at all three
+levels rather than at one and their answers are printed separately. A volatile operand would add
+nothing, because the subject here is what an initializer produces rather than what an operator
+computes.
+WHY ALL THREE ORACLES ARE ENABLED WITH NO NARROWING, AND WHAT WOULD LEGITIMATELY BREAK IT. Every
+line printed below is target-invariant by the normalization argued above, so the same bytes are the
+right answer on each of the four backends; that is what makes cross-backend comparison sound and
+lets oracle (c) hold these bytes as the golden record. What would legitimately break that is a
+target whose execution character set is not ASCII, such as one using EBCDIC: it would print
+different byte values without being defective, and that would be an implementation-defined
+divergence to record as an expected divergence with this record's target list narrowed and the
+reason stated in this field -- never left to surface as a finding against a backend that did nothing
+wrong, and never resolved by dropping the string-literal initializer coverage this program exists to
+provide.
+END
+expected_stdout    <<END
+g_exact_u[0]=97
+g_exact_u[1]=98
+g_exact_u[2]=99
+g_room_u[0]=97
+g_room_u[1]=98
+g_room_u[2]=99
+g_room_u[3]=0
+g_extra_u[0]=97
+g_extra_u[1]=98
+g_extra_u[2]=99
+g_extra_u[3]=0
+g_extra_u[4]=0
+g_extra_u[5]=0
+g_exact_s[0]=120
+g_exact_s[1]=121
+g_exact_s[2]=122
+g_room_s[0]=120
+g_room_s[1]=121
+g_room_s[2]=122
+g_room_s[3]=0
+g_room_s[4]=0
+g_room_s[5]=0
+g_plain[0]=104
+g_plain[1]=105
+g_plain[2]=0
+g_plain[3]=0
+g_plain[4]=0
+g_braced[0]=97
+g_braced[1]=98
+g_braced[2]=99
+g_braced[3]=0
+g_concat[0]=97
+g_concat[1]=98
+g_concat[2]=99
+g_concat[3]=100
+g_concat[4]=101
+g_concat[5]=0
+g_concat[6]=0
+g_escapes[0]=65
+g_escapes[1]=66
+g_escapes[2]=10
+g_escapes[3]=0
+g_desig[0]=97
+g_desig[1]=0
+g_desig[2]=99
+g_desig[3]=0
+g_desig[4]=0
+g_desig[5]=0
+g_grid_exact[0][0]=104
+g_grid_exact[0][1]=101
+g_grid_exact[0][2]=108
+g_grid_exact[0][3]=108
+g_grid_exact[0][4]=111
+g_grid_exact[1][0]=119
+g_grid_exact[1][1]=111
+g_grid_exact[1][2]=114
+g_grid_exact[1][3]=108
+g_grid_exact[1][4]=100
+g_grid_room[0][0]=104
+g_grid_room[0][1]=101
+g_grid_room[0][2]=108
+g_grid_room[0][3]=108
+g_grid_room[0][4]=111
+g_grid_room[0][5]=0
+g_grid_room[1][0]=119
+g_grid_room[1][1]=111
+g_grid_room[1][2]=114
+g_grid_room[1][3]=108
+g_grid_room[1][4]=100
+g_grid_room[1][5]=0
+g_ptr[0]=108
+g_ptr[1]=105
+g_ptr[2]=116
+g_ptr[3]=0
+sizeof_g_exact_u=3
+sizeof_g_room_u=4
+sizeof_g_extra_u=6
+sizeof_g_concat=7
+sizeof_g_grid_exact=10
+sizeof_g_grid_room=12
+l_exact_u[0]=100
+l_exact_u[1]=101
+l_exact_u[2]=102
+l_room[0]=103
+l_room[1]=104
+l_room[2]=0
+l_room[3]=0
+END

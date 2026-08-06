@@ -1,0 +1,191 @@
+# Expectation record for 04_bitfields/005_straddling_and_zero_width.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 005_straddling_and_zero_width
+area               = 04_bitfields
+description        = Bitfields straddling a byte boundary inside a storage unit, fields pushed to a fresh unit, and zero-width and unnamed separators
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+The default undefined-behaviour warning gate applies unmodified, with no deviation:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror.  The program
+was verified to pass that gate and to run cleanly under
+-fsanitize=undefined,address -fno-sanitize-recover=all.
+
+No unspecified padding bit is ever observed, and this is the program's central safety property.
+A bitfield struct's unnamed padding bits hold unspecified values even after every named field
+has been assigned, because padding bits are not members and a member write is not required to
+preserve them.  The program therefore prints a byte image only for the two structs whose named
+field widths sum to a whole number of four-byte storage units: cover32 sums to exactly
+thirty-two bits and cover64 to exactly sixty-four.  On every toolchain in the measured target set
+that leaves no padding bit in either struct, which was confirmed directly from the printed sizes
+and byte images rather than assumed; the C standard does not itself guarantee padding-free
+adjacent allocation, so this is a measured property of the four target ABIs and not a derivation
+from the standard.  Should a toolchain ever pack these structs differently, the byte-image lines
+below would change and this record's expectations would have to be re-derived for that target
+rather than read as a compiler defect.  Every struct that necessarily contains padding, which is
+every struct demonstrating a zero-width or unnamed separator and the struct whose fields are each
+pushed to a fresh unit, is observed only through sizeof, _Alignof and read-back of its named
+members.  Both byte-image unions are additionally zeroed byte by byte through an explicit loop
+before any bitfield is written, so the initial state is defined even before any field is stored.
+
+No aliasing violation: the byte image is read exclusively through an unsigned char array member
+of a union that also contains the bitfield struct, which is the well-defined aliasing route.  No
+incompatible pointer type is ever formed or dereferenced, and no struct pointer is cast to any
+other pointer type.
+
+Nothing depends on unspecified evaluation order, and the volatile runtime variant is where that
+property has to be established rather than assumed.  An access to a volatile object is an
+observable side effect, and the relative order of side effects within one argument list is
+unspecified, so a printf reading four volatile bit-fields in one call would have made the order
+of four side effects depend on the unspecified order of argument evaluation.  Every volatile
+field is therefore read into a plain local in a full expression of its own, each separated from
+the next by a sequence point, and only those plain locals are passed: NO ARGUMENT TO ANY CALL IN
+THIS PROGRAM HAS A SIDE EFFECT.  The staging changes nothing the program observes -- each value
+is read exactly once, no read modifies the object another read names, and the printed bytes are
+byte-identical to the unstaged form on all four targets at all three optimization levels -- and
+it costs the test nothing, because a load from volatile storage is still unavailable for
+compile-time substitution and every bit-field extraction is still emitted by the backend.
+
+Every store is a constant inside the destination field's representable range, so no conversion
+can change a value.  No arithmetic is performed on any bitfield, so no signed overflow can
+occur.  No shift operator appears anywhere in the program, so no question of shift range,
+negative left shift or implementation-defined negative right shift arises.  No object is
+modified twice between sequence points.  No uninitialized read: the two automatic unions are
+fully zeroed before use, and every file-scope object either has an explicit constant initializer
+or has static storage duration with every field written before it is read.  No pointer value,
+address, timestamp, random value or locale-dependent format is printed, and every loop bound is
+a sizeof of a fixed-size array.
+
+No call receives a side-effecting argument.  The runtime variant reads volatile bitfields, and
+a volatile access is an observable side effect whose order relative to the other arguments of
+the same call is unspecified, because C11 6.5.2.2p10 fixes no evaluation order among them.
+Every such read is therefore staged into a plain local in a full expression of its own before
+the printing call that reports it, and every volatile write likewise stands alone, so the order
+of the accesses is a property of this program rather than of whichever compiler translated it.
+END
+impl_defined_notes <<END
+Every bitfield is declared with an explicit signed int or unsigned int base type, including the
+unnamed separators, which are spelled as unsigned int with no name.  A plain int bitfield's
+signedness is implementation-defined, so using it would manufacture a spurious divergence;
+stating the signedness in the declaration removes that dependency entirely.
+
+Plain char is not used as a value type.  The byte-image arrays are unsigned char, whose
+signedness is fixed by the standard, which matters because plain char signedness was measured
+to differ across the four targets (signed on x86_64 and i686, unsigned on aarch64 and riscv64).
+
+No value whose width varies by target is printed.  sizeof(long) and sizeof(void *) differ on
+i686 (4) from the other three targets (8), so neither is printed, and no pointer value or
+address appears in the output.
+
+THE GOLDEN SIZES, ALIGNMENTS AND BYTE IMAGES REST ON A MEASURED ABI PREMISE, NOT ON A
+LANGUAGE GUARANTEE, and the distinction matters enough to state precisely.  C leaves almost
+everything about bitfield storage implementation-defined: the size of the addressable unit
+into which a bitfield is allocated, whether a field that does not fit may straddle two such
+units, the order in which fields are allocated within a unit, and how much padding the
+containing structure carries (C11 6.7.2.1p11, and 6.7.2.1p15 for the padding).  Nothing in
+the standard derives a four-byte allocation unit from a four-byte int, so the values below
+CANNOT be deduced from int's width, and this record does not claim they can.
+
+What supports them is measurement.  On all four supported targets, with each target's own
+reference driver, the following were observed to agree exactly:
+
+  - the allocation unit for a bitfield declared on an int base type is FOUR BYTES;
+  - allocation within a unit proceeds from the LEAST SIGNIFICANT BIT UPWARD, and all four
+    targets are little-endian, so a field's bit position within a unit fixes which bytes of
+    the structure image it occupies;
+  - a field DOES straddle a BYTE boundary inside its allocation unit -- struct cover32's
+    9-bit c occupies bits 8 through 16 and its 15-bit d occupies bits 17 through 31, which
+    is what makes its printed byte image a non-trivial fact;
+  - a field that does NOT fit in the remainder of the current unit STARTS A FRESH UNIT
+    rather than straddling the unit boundary, and the corpus depends on that reading: struct
+    nostraddle declares 20 + 20 + 24 bits, which would occupy 8 bytes if the unit boundary
+    could be straddled and occupies 12 because it cannot -- and 12 is what the golden record
+    below states.  Independently measured with a two-field probe, { a : 30; b : 4; }, which is
+    8 bytes on all four targets rather than the 5 a straddling rule would give.  The struct's
+    NAME records the same fact.
+  - each structure below carries no padding beyond the bytes the units themselves occupy, so
+    its size is exactly the number of allocation units it spans -- 4 for a single 32-bit
+    cover, 8 for the 64-bit cover, 12 for the three units nostraddle needs and for the three
+    a pair of zero-width separators forces.
+
+Every printed size, alignment and byte image follows from THAT premise.  Each of the four
+supported ABIs fixes these choices in its own psABI document, and the measurement is the
+statement that the four fix them identically; the printed values are target-invariant because
+the four ABIs agree, not because the language required them to.
+
+The consequence for the oracles.  Because the premise is measured to hold on all four
+targets rather than assumed, no target restriction is applied and all three oracles remain
+enabled, and a cross-backend divergence here is a FINDING -- a deliverable with a reproducer
+and exact commands -- rather than something excused.  No expected-divergence marker is
+attached, because no documented bitfield limitation exists anywhere in the repository to
+serve as a basis.
+
+What such a finding is ATTRIBUTABLE to is decided by the harness, from evidence the run
+already holds, and this record does not decide it here.  Every cross-backend finding carries
+the same-target reference capture beside the two it compared, and its manifest states one of:
+
+  - attribution = abi-observation, when bcc AGREES with the toolchain that implements this
+    target's own ABI and only the cross-target comparison differs.  A difference over a
+    property each psABI fixes for itself is then a statement about two ABIs rather than a
+    defect in bcc.  It remains a finding; it is not excused and not passed.
+  - attribution = defect-candidate, when bcc disagrees with its own target's reference
+    toolchain too, so two independent oracles point the same way.
+  - attribution = undetermined, when no same-target reference capture accompanies the
+    finding, in which case the target's psABI is authoritative and is what a maintainer
+    reads next.
+
+Asserting flatly that a cross-backend divergence here is a genuine defect rather than an
+implementation-defined difference would sit badly beside FINDINGS.md's triage procedure, under
+which same-target agreement makes it an ABI observation: both statements reason correctly about
+the same distinction and neither DECIDES it, so the two documents could be read against each
+other.  The decision therefore lives in one place, in code, and both documents point at it.
+
+Signed straddling fields are observed through read-back of their values rather than through a
+byte image, because the bit pattern of a negative value is a representation detail rather than a
+value.  Their read-back values are fully defined and are compared across all four targets.
+END
+expected_stdout    <<END
+size_cover32=4 align_cover32=4
+size_cover64=8 align_cover64=4
+size_nostraddle=12 align_nostraddle=4
+size_nozero=4 size_onezero=8 size_twozero=12
+size_unnamedpad=4 align_unnamedpad=4
+size_signedstraddle=4 align_signedstraddle=4
+cover32_read a=5 b=21 c=300 d=20000
+cover32_image ad 2c 41 9c
+cover32_after_c a=5 b=21 c=511 d=20000
+cover32_image_after_c ad ff 41 9c
+cover32_c_zero a=5 b=21 c=0 d=20000
+cover32_image_c_zero ad 00 40 9c
+cover64_read a=7 b=31 c=511 d=32767 e=2047 f=2097151
+cover64_all_ones ff ff ff ff ff ff ff ff
+cover64_mixed a=5 b=21 c=300 d=20000 e=1365 f=1398101
+cover64_image ad 2c 41 9c 55 ad aa aa
+nostraddle_read a=703710 b=74565 c=6785451
+nostraddle_after_b a=703710 b=1048575 c=6785451
+nozero_read a=21 b=10
+onezero_read a=21 b=10
+twozero_read a=100 b=101 c=102
+onezero_after_a a=31 b=10
+twozero_after_b a=100 b=127 c=102
+unnamedpad_read a=5 b=300
+unnamedpad_after_b a=5 b=511
+signedstraddle_read a=-256 b=-4096 c=-512
+signedstraddle_after_b a=-256 b=4095 c=-512
+volatile_cover32 a=5 b=21 c=300 d=20000
+volatile_cover32_after_c a=5 b=21 c=511 d=20000
+volatile_signedstraddle a=-256 b=-4096 c=-512
+volatile_signedstraddle_after_b a=-256 b=4095 c=-512
+END

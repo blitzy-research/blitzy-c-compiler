@@ -1,0 +1,244 @@
+# Expectation record for 02_constant_expressions/005_integer_constant_suffixes.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 005_integer_constant_suffixes
+area               = 02_constant_expressions
+description        = Suffix-driven and base-driven type selection for integer and floating constants at the boundary where a literal no longer fits the default type, observed through _Generic and through folded and volatile-runtime arithmetic including defined unsigned wraparound
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined behaviour and depends on no unspecified behaviour, which is the
+precondition both differential oracles rest on rather than a stylistic preference: undefined
+behaviour would license either compiler to do anything at all, so a divergence between them would
+prove nothing about either. The paragraphs below are the written argument required of every program
+in this suite; the warning gate and the sanitizer gate are its machine half.
+EVERY LITERAL IS REPRESENTABLE IN THE TYPE C11 6.4.4.1p5 SELECTS FOR IT, so no constant is out of
+range for its own type and no constant expression overflows. The decimal literals without a suffix
+are within int or within the first type of the signed list that holds them; the hexadecimal and octal
+literals without a suffix are within the corresponding list including the unsigned types; and every
+suffixed literal is within the type its suffix names.
+THE ONLY WRAPPING ARITHMETIC IN THIS PROGRAM IS UNSIGNED, WHICH IS DEFINED RATHER THAN OVERFLOWING.
+C11 6.2.5p9 states that a computation involving unsigned operands can never overflow, because a
+result that cannot be represented is reduced modulo one greater than the largest representable value.
+So 0u - 1u, 0xFFFFFFFFu + 1u, u_zero - 1u and u_max + 1u are fully defined unsigned int operations,
+and 0ULL - 1ULL and ull_zero - 1ULL are fully defined unsigned long long operations; the wraparound
+they exhibit is the behaviour under test rather than a defect in the test. Each of the three constant
+forms is both asserted statically and printed, the printed line spelling the middle one
+0xFFFFFFFF + 1 -- the same unsigned int addition, because a hexadecimal constant above INT_MAX is
+already unsigned int before any suffix is applied, which is itself part of the rule under test. The
+three volatile twins are printed only, because a volatile object's value is not a constant expression
+and therefore cannot appear in a _Static_assert at all.
+NO SIGNED EXPRESSION EVER LEAVES ITS RANGE. The largest signed intermediate anywhere is 10000000000,
+the long long product 100000LL * 100000LL, identical on the folded and the runtime path and far
+inside the 64-bit range C11 guarantees for long long. The next largest is 4294967296, and it too is
+formed only in a type wider than 32 bits: the unsuffixed decimal constant 4294967295 has a
+signed type wide enough to hold it -- long on the LP64 targets, long long on i686, and long long in
+the runtime object -- so 4294967295 + 1 is exact rather than wrapping and the line correctly prints 0
+for "did it wrap". Nothing approaches INT_MAX in int arithmetic, and no signed value is negated at
+its minimum.
+BOTH SHIFT COUNTS ARE IN RANGE, AND EVERY SHIFT IS A RIGHT SHIFT OF AN UNSIGNED VALUE. The counts are
+16 and 32. 0xFFFFFFFFuL >> 16 shifts an unsigned long, which is 32 bits on i686 and 64 bits on the
+other three targets, and 16 is strictly below either width; 0xFFFFFFFFFFFFFFFFULL >> 32 shifts an
+unsigned long long, which is 64 bits everywhere. The runtime twins shift volatile objects of exactly
+those types by the same constant counts. Both left operands are unsigned, so no left shift and no
+shift of a signed value appears anywhere, and neither the undefined signed-left-shift case nor the
+implementation-defined negative-right-shift case can arise. The one division, (0u - 1u) / 3u, has the
+non-zero constant divisor 3u and unsigned operands, so it can be neither a division by zero nor the
+one signed division C11 leaves undefined, and no remainder operator appears at all.
+EVERY CONVERSION THAT COULD NARROW IS WRITTEN WITH AN EXPLICIT CAST, so the conversion is stated in
+the source rather than inferred; each such conversion is either value-preserving or a defined modular
+reduction of an unsigned value.
+_Generic DOES NOT EVALUATE ITS CONTROLLING EXPRESSION (C11 6.5.1.1p2): it selects on the type alone.
+Every _Generic here therefore performs no arithmetic at all, which is precisely why the same
+constants can be classified and then, separately, used in arithmetic on the fold and runtime lines,
+and each association is a small int constant, so no probe can itself misbehave. Every selection has a
+matching association or an explicit default, so no _Generic is ill-formed.
+EVERY _Static_assert IN THE FILE IS SATISFIED AND TARGET-INVARIANT. Thirteen of them pin the
+classifications and the wraparound identities before the program runs, so a mis-typed constant is a
+translation failure rather than a silently wrong line. That second half of the claim is a soundness
+requirement, not a nicety: an assertion that failed on one target would break that target's build and
+destroy the four-way comparison rather than reporting a divergence, and both mandated oracles compare
+the observable behaviour of a binary that built successfully. The two-argument form is used
+throughout because the message-less spelling is C23 and the default gate's -pedantic -Werror rejects
+it.
+THIS PROGRAM DECLARES NO POINTER OBJECT AND NO AGGREGATE OBJECT -- the only pointer type anywhere in
+the file is the const char * parameter of the printf prototype, which each format-string literal
+converts to -- so no aliasing rule can be broken, no one-past-the-end pointer can be formed, no
+subscript is written, no object representation is inspected, no padding byte can be observed and
+nothing depends on the addresses of unrelated objects. All eleven volatile objects are initialized in
+their own declarations and none is assigned to afterwards -- checked mechanically, finding zero
+assignments -- so no storage is read uninitialized and no object is modified even once, let alone
+twice between two sequence points. Each printf argument is a _Generic selection, a comparison, or a
+long long product folded from constants or computed from volatile reads; none has a side effect
+beyond those reads. Ten of the eleven volatile objects are read exactly once per expression. The
+eleventh, ll_factor, is read twice in ll_factor * ll_factor, which is deliberate and harmless:
+nothing anywhere assigns to it, so both reads yield 100000 in whichever order they occur and the
+unspecified order between them is unobservable. No argument's value depends on the order in which the
+others are evaluated either, so the unspecified order of argument evaluation is likewise
+unobservable.
+LIMITS ARE SPELLED AS LITERALS rather than taken from a header, and limits.h is deliberately not
+named: the literals the program needs -- 2147483647, 2147483648, 4294967295, 4294967296,
+18446744073709551615 and the hexadecimal and octal forms of the same magnitudes -- are exactly the
+boundary values the typing rule turns on, so writing them out is what the program is about, and it
+keeps the program single-file reproducible.
+NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, printf, is declared by
+hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
+bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md, "9 bundled freestanding
+headers"), so a directive naming that header would fail on the bcc side of oracle (a) while
+succeeding on the reference side -- a spurious divergence caused by the test rather than by the
+compiler under test. Nothing in the file is a GCC extension, so no include exception and no gate
+deviation is available to area 02 and none is needed; the corpus has exactly two header exceptions,
+area 07's stdarg.h and the dedicated bundled-header probe in area 12. THIS RECORD DECLARES NO
+WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
+is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror in the single native compile-only invocation the
+suite's warning gate makes, and it builds and runs clean under the sanitizer gate
+-fsanitize=undefined,address -fno-sanitize-recover=all run natively to completion. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
+END
+impl_defined_notes <<END
+This record narrows nothing. All four targets, all three optimization levels and all three
+oracles are enabled, and no expected-divergence marker is attached. These notes exist to
+record how that was achieved, because a program in this area could easily have had to narrow:
+constant evaluation reaches straight into the type system, which is where the four supported
+targets differ.
+THE CENTRAL NORMALIZATION, AND THE REASON THIS PROGRAM CAN KEEP ALL FOUR TARGETS. C11 6.4.4.1p5
+gives an integer constant the FIRST type in a list that can represent its value, and the list
+depends on the spelling: an unsuffixed decimal constant walks int, long, long long, every
+candidate SIGNED, while an unsuffixed hexadecimal or octal constant walks int, unsigned int,
+long, unsigned long, long long, unsigned long long and so becomes UNSIGNED at a magnitude where
+a decimal constant of exactly the same value never does. long is 4 bytes on i686 and 8 bytes on
+x86-64, AArch64 and RISC-V 64 (docs/technical-specifications.md target table, lines 457-462), so
+the unsuffixed decimal constant 4294967295 legitimately has type long on the three 64-bit targets
+and long long on i686. Printing a width -- or asking _Generic to distinguish those two types --
+would diverge on i686 through no fault of the compiler. The program asks instead whether the
+constant is UNSIGNED, and whether it is one of the two wider SIGNED types, which yields one answer
+on every target while still proving the typing rule was applied. No sizeof is printed anywhere in
+the file, and no line depends on the width of long or unsigned long.
+EVERY CLASSIFICATION WHOSE ANSWER WOULD DIFFER BETWEEN THE FOUR TARGETS IS PRINTED AS A
+DISJUNCTION OVER THE CANDIDATE TYPES rather than as a single type test. 4294967296u is unsigned
+long on the LP64 targets and unsigned long long on i686, so its line asks whether it took a wider
+UNSIGNED type; 0xFFFFFFFFFFFFFFFF is likewise tested against unsigned long or unsigned long long
+together. The l/L and ul/UL/lu suffix lines name long and unsigned long, which are the types those
+suffixes select on every target regardless of how wide they are, so they too are
+width-independent.
+THE UNSUFFIXED-CONSTANT LINES ARE STABLE FOR THE SAME REASON. 2147483647 and 0x7FFFFFFF are int
+on all four; 0x80000000 is unsigned int on all four because a hexadecimal constant may take an
+unsigned type; 2147483648 is never unsigned int on any of them, which is what makes
+dec_2147483648_is_uint=0 a portable observation rather than a coincidence; and 0177 and 010 are
+int everywhere.
+EVERY CLAIM IS PRINTED AS OBSERVABLE BEHAVIOUR RATHER THAN AS A WIDTH: a _Generic selection that
+names a TYPE, or the value an expression actually computes. That is the distinction that keeps
+the program comparable across all four backends, and it is stronger than a width would be,
+because the value an expression computes is the thing a user would notice.
+long double APPEARS ONLY THROUGH ITS SELECTION BY THE l AND L SUFFIXES, in two _Generic
+selections, and never as a value. That is deliberate: no long double VALUE and no long double
+width is ever printed, so the MEASURED 16, 12, 16 and 16-byte representations across x86-64,
+i686, AArch64 and RISC-V 64 -- x87 80-bit against IEEE binary128 -- cannot reach stdout, whereas
+the suffix's type-selection behaviour is fully cross-comparable. The type is therefore covered
+here rather than dropped for being awkward, and cross-backend value comparison for it is owned by
+13_floating_point/004_long_double_target_restricted.c as a RECORDED EXCLUSION -- oracle_b
+disabled, with the measured representations as its recorded reason -- beside which that record
+carries the marker XD-TYPE-LONGDOUBLE-001, class comparison_excluded, scope oracle_b. The marker is
+REQUIRED rather than optional there: a disabled oracle is reported XFAIL, which claims the authority
+of a documented limitation, so the format makes the marker carry that claim while the recorded reason
+explains it. Its class is comparison_excluded, the one value that names no observation, because no
+cross-backend value comparison is attempted for that program at all -- the record switches that arm
+off, so an observational class would claim a byte disagreement nothing ran to find. It excuses the
+cross-backend arm alone; a same-target disagreement is still a FINDING.
+WIDTH NORMALIZATION IN THE OUTPUT ITSELF. Every printed value is an int printed with %d -- a
+_Generic result or a comparison result, cast where needed -- except the two long long products
+printed with %lld, and long long is 64 bits on all four targets. No plain long, no size_t, no
+ptrdiff_t, no sizeof result, no address, no pointer value and no floating-point value reaches a
+format string, so the measured i686 difference in sizeof(long) and sizeof(void *) -- 4 there
+against 8 on the other three -- cannot be observed even though this program deliberately reasons
+about it.
+PLAIN-char SIGNEDNESS. Plain char was MEASURED as signed on x86-64 and i686 and unsigned on
+AArch64 and RISC-V 64. Character data does appear -- the format strings are arrays of char, reached
+through const char * -- but no plain-char value is read as a NUMBER: none is converted, compared,
+used as an arithmetic operand or formatted numerically. printf copies those bytes through unchanged,
+so no printed line depends on that choice.
+_Generic IS RESOLVED ENTIRELY AT TRANSLATION TIME AND THEREFORE HAS NO RUNTIME TWIN BY
+CONSTRUCTION, which is correct rather than an omission: there is no run-time object whose type
+could be re-examined, so a twin would only re-print the same translation-time answer. The
+arithmetic consequences of the selected types DO carry runtime twins -- every fold_ line has a
+matching runtime_ line computed from volatile operands holding the same literals, and their
+equality is the two-variant assertion -- and at -O2 those twins were measured to emit genuine
+instructions (imulq and shrq on x86-64, mul and lsr on AArch64, mul and srli on RISC-V 64) where
+the folded forms collapse to immediates. So the suffix's effect on typing is checked by _Generic
+and its effect on generated code is checked by the twin; without the twin, optimization would
+answer with the constant folder's result and a backend defect in the same computation would never
+be asked to appear.
+WHAT WOULD LEGITIMATELY BREAK THAT, AND HOW IT MUST THEN BE HANDLED. A conforming target on which
+int were not 32 bits, or on which long long were wider than 64, would move a constant into a
+different type and change one of these lines without being defective. That would be an
+implementation-defined divergence rather than a compiler defect, and it must then be recorded as
+an expected divergence with this record's target list narrowed and the reason stated in this
+field -- never left to surface as a finding against a backend that did nothing wrong, and never
+resolved by deleting the boundary constants, which are the whole subject requirement 2 asks this
+program to cover.
+EXECUTION CHARACTER SET: NOT ENGAGED, VERIFIED RATHER THAN ASSERTED. C11 5.2.1 leaves the
+members of the execution character set and their codes implementation-defined, so a program
+that printed a character's numeric code, or rendered a literal as bytes, would owe an
+accounting here. This one owes none: it contains no character constant at all -- checked
+mechanically, by stripping comments and string literals and finding zero -- and derives no
+printed VALUE from a character. Its only string literals are printf format strings and, where
+it declares any, _Static_assert messages -- the messages consumed by the compiler and never
+emitted, the format strings contributing only fixed label text that is byte-identical in all
+twelve cells of the matrix and in the golden above. There is therefore no code to pin and
+nothing to narrow. That is precisely what distinguishes this program from 004_sizeof_alignof.c
+and 007_string_literal_constants.c in the same area, both of which do print character codes and
+both of which pin every code they print with a _Static_assert for that reason.
+HERMETIC AND DETERMINISTIC. Every input is a literal in the source: nothing is read from the
+clock, the environment, the command line, a file or a socket, and nothing is written anywhere.
+Output is one line per semantic property claimed, in a fixed order, so a single divergent line
+names the construct that produced it. No address or pointer value is printed, there is no
+randomness, no locale-dependent formatting and no data-dependent iteration order, and the
+program returns 0 -- well inside the 0-125 range the suite requires so that no exit status is
+truncated by the operating system.
+MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at
+-O0, -O1 and -O2 -- twelve configurations -- and every one produced these 27 lines
+byte-identically with exit status 0, which is why cross-backend comparison is sound, oracle (b)
+is enabled with no narrowing, and oracle (c) can hold these bytes as the golden record.
+END
+expected_stdout    <<END
+hex_ffffffff_is_uint=1
+dec_4294967295_is_uint=0
+dec_4294967295_is_wider_signed=1
+dec_2147483647_is_int=1 hex_7fffffff_is_int=1
+dec_2147483648_is_uint=0 hex_80000000_is_uint=1
+u_dec_2147483648_is_uint=1 u_dec_4294967296_is_uint=0 u_dec_4294967296_is_wider_unsigned=1
+hex_max64_is_wider_unsigned=1
+u_suffix=1 ll_suffix=1 f_suffix=1
+suffix_upper_u=1 suffix_lower_l=1 suffix_upper_l=1
+suffix_lower_ll=1 suffix_ul=1 suffix_upper_ul=1 suffix_lu=1
+suffix_ull=1 suffix_upper_ull=1 suffix_llu=1
+float_upper_f=1 double_no_suffix=1 long_double_lower_l=1 long_double_upper_l=1
+octal_0177_is_int=1 octal_010_is_int=1 dec_1_is_int=1
+fold_uwrap=1 fold_ullwrap=1
+fold_hex_max_plus_one_is_zero=1 fold_dec_max_plus_one_is_zero=0
+fold_neg_below_hex_boundary=0 fold_neg_below_dec_boundary=1
+fold_ll_product=10000000000
+fold_ul_shift=1 fold_ull_shift=1
+fold_octal_0177_is_127=1 fold_octal_010_is_8=1
+fold_udiv=1
+runtime_uwrap=1 runtime_ullwrap=1
+runtime_hex_max_plus_one_is_zero=1 runtime_dec_max_plus_one_is_zero=0
+runtime_neg_below_hex_boundary=0 runtime_neg_below_dec_boundary=1
+runtime_ll_product=10000000000
+runtime_ul_shift=1 runtime_ull_shift=1
+runtime_octal_0177_is_127=1 runtime_octal_010_is_8=1
+runtime_udiv=1
+END

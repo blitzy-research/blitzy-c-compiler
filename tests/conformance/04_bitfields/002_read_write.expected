@@ -1,0 +1,70 @@
+# Expectation record for 04_bitfields/002_read_write.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_read_write
+area               = 04_bitfields
+description        = Read and write of every bitfield across mixed signedness and width, folded and volatile runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+The default undefined-behaviour warning gate applies unmodified, with no deviation:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror.  The program
+was verified to pass that gate and to run cleanly under
+-fsanitize=undefined,address -fno-sanitize-recover=all.
+
+Every store lands inside the destination field's representable range.  The folded variant
+stores only constants that fit.  The runtime variant reads each field through volatile
+storage, adds one, and stores the result: each unsigned destination is masked to its exact
+field width, so the conversion back into the field is provably value-preserving, and each
+signed destination receives a value one step inside its range.  No signed overflow can occur
+because every signed operand is promoted to int before the addition and the result is far
+from the int limits.  No shift is performed anywhere in the program.  No aliasing violation:
+no pointer is formed to any bitfield and no type-punning of any kind occurs.  No
+uninitialized read: the folded object has an explicit constant initializer, and the volatile
+object has static storage duration and so is zero-initialized, and in any case every one of
+its fields is written before it is read.  No object is modified twice between sequence points;
+each read-modify-write is a separate full statement.  No pointer value, address, timestamp,
+random value or locale-dependent format is printed.
+END
+impl_defined_notes <<END
+Every bitfield is declared with an explicit signed int or unsigned int base type.  A plain
+int bitfield's signedness is implementation-defined, so using it would manufacture a spurious
+divergence; stating the signedness in the declaration removes that dependency entirely.  The
+struct deliberately mixes both signednesses and five widths (3, 5, 9, 12 and 1 bits) inside a
+single four-byte storage unit.
+
+Plain char is not used.  Plain char signedness was measured to differ across the four targets
+(signed on x86_64 and i686, unsigned on aarch64 and riscv64), so it is avoided entirely.
+
+No value whose width varies by target is printed.  sizeof(long) and sizeof(void *) differ on
+i686 (4) from the other three targets (8), so neither is printed, and no pointer value or
+address appears in the output.  Every bitfield is declared on an int base type, and int is
+four bytes on all four targets, so every printed value is target-invariant by derivation.
+Every printf argument is explicitly cast to unsigned or int, so no default argument promotion
+is relied upon implicitly.
+
+All four targets and all three oracles remain enabled.  Bitfield read-back values and the
+minimum value of a narrow signed field were measured identical on all four targets, so a
+cross-backend divergence here is a genuine finding rather than an implementation-defined
+difference.
+END
+expected_stdout    <<END
+folded_read u3=6 s5=-13 u9=400 s12=-1500 u1=1
+folded_write u3=1 s5=15 u9=511 s12=2047 u1=0
+folded_min s5=-16 s12=-2048
+runtime_read u3=6 s5=-13 u9=400 s12=-1500 u1=1
+runtime_write u3=7 s5=-12 u9=401 s12=-1499 u1=0
+runtime_max u3=7 u9=511 u1=1
+runtime_zero u3=0 u9=0 u1=0
+END

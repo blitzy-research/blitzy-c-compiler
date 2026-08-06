@@ -1,0 +1,122 @@
+program            = 007_alignof_alignas
+area               = 10_declarations_and_types
+description        = _Alignof and _Alignas asserted by exact equality, with alignment observed only as residues and never through addresses
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every object read is written first. local8[0], p.c and p.aligned_member are all assigned
+before the readback line prints them, and buf16 and wide_aligned have static storage duration
+so they are initialized before main begins. Only element 0 of local8 is accessed, well inside
+its eight elements, and only element 0 of buf16 is ever addressed, never dereferenced beyond
+its bounds. The four address values are obtained by converting an object pointer first to
+unsigned long, which is exactly pointer width on every target, and only then widening that
+result to unsigned long long, which is eight bytes everywhere; no conversion crosses a width
+boundary, so no pointer value is ever truncated. Those converted values are used only as the
+left operand of a remainder against a positive ULL constant, which is well defined, and the
+results are small so the casts back to int are value preserving. Each residue depends only on
+that object's own address modulo that object's own required alignment; no residue depends on
+the relationship between two objects, so there is no dependence on the relative addresses of
+unrelated objects. No address value ever reaches stdout. All other arithmetic is on small int
+values far from the range edges, so there is no signed overflow. No shift is performed. No
+object is modified twice between sequence points and no printf call receives a side-effecting
+argument. There is no aliasing violation: every object is accessed only through an lvalue of
+its own declared type, and the unsigned char arrays are never reinterpreted as another type.
+No padding byte is read -- p.c and p.aligned_member are named members, and the padding the
+_Alignas(8) member introduces between them is never accessed.
+END
+impl_defined_notes <<END
+RESIDUE TECHNIQUE. An address is never reproducible: it varies with the loader, the target, the
+optimization level and whether execution is native or under emulation, so printing one would
+make byte-exact comparison meaningless and would generate divergences in every cell that say
+nothing about compiler correctness. This program therefore prints only alignment residues. Each
+object's address is carried through a two-step conversion: the pointer is cast first to
+unsigned long, which is exactly pointer width on all four targets, and that result is then
+widened to unsigned long long, which is eight bytes everywhere and so always holds the residue
+arithmetic. uintptr_t is unavailable because this program includes no header -- the corpus's
+only sanctioned inclusion is area 07's <stdarg.h>, and stdint.h, though bundled, is not
+sanctioned here -- which is why unsigned long is the carrier. The two-step form is deliberate
+rather than incidental: casting a pointer directly to unsigned long long crosses a width
+boundary on i686, where it is diagnosed as -Wpointer-to-int-cast and escalated to an error by
+the mandatory audit gate, so the single-step spelling would fail that gate on one of the four
+targets this record declares. Only the value modulo that object's own requested alignment is
+printed. Every residue must be 0 on every target at every optimization level, which is exactly
+what _Alignas promises. The address itself never reaches stdout.
+
+MEASURED I686 ALIGNMENT DIFFERENCE, HANDLED BY AN EXACT PER-TARGET EXPECTATION RATHER THAN BY
+RESTRICTION. On the i386 System V ABI, _Alignof(double), _Alignof(long long), _Alignof(long) and
+_Alignof(void *) are all 4, whereas on x86_64, aarch64 and riscv64 they are 8, and sizeof(void *)
+and sizeof(long) vary with them. Printing any of those six raw would be a legitimate
+implementation-defined difference that oracle (b) would misreport as a defect. Raw alignments are
+therefore printed only for char (1), short (2), int (4) and float (4), which were measured
+identical on all four targets. The six width-varying quantities are still exercised -- no feature
+is dropped for being awkward -- but each is asserted as an EQUALITY against the one number the
+target must use, selected by the architecture macro the compiler predefines. EXPECTED_WIDE_ALIGN
+is 8 for __x86_64__, 4 for __i386__, 8 for __aarch64__ and 8 for __riscv, so every printed
+predicate is 1 on every target and stdout stays byte-identical. Because the difference is
+neutralized inside the program, no target restriction is applied and all four targets run.
+
+THE UNRECOGNISED-ARCHITECTURE BRANCH DEGRADES RATHER THAN REFUSING, AND THE COST IS RECORDED
+HERE BECAUSE IT IS EVIDENTIARY. The selection chain has five arms: the four architecture macros
+above, then __SIZEOF_POINTER__, then sizeof(void *). It is deliberately not an #error. Nothing in
+C and nothing this repository documents obliges an implementation to predefine __x86_64__,
+__i386__, __aarch64__ or __riscv -- they are spellings of one compiler FAMILY -- so a compiler
+that names its target some other way is not defective, and refusing to translate would charge a
+macro-naming difference to the compiler under test as a compile failure. What the fallback costs
+is the STRENGTH of two lines, not their presence: on an architecture arm the expectation is an
+independent number and the width and alignment predicates are an independent check, whereas on
+either fallback arm the expectation is derived from the compiler's own declaration, so those two
+predicates become a self-consistency check between two of its claims rather than a check against
+an outside authority. Every arm still prints 1 for a self-consistent compiler, so no arm can
+manufacture a divergence out of a naming difference; and the alignment RELATIONS printed alongside
+them do not depend on the chain at all. On the four supported targets the first four arms are what
+actually select, which is why the reduced arms cost this suite nothing today: a fifth target would
+inherit the weaker check, and that is the fact this paragraph exists to disclose.
+
+A PERMISSIVE RANGE IS DELIBERATELY NOT USED. A bounded relation such as "at least 4 and at most 8"
+would also print 1 on all four targets, but it accepts an alignment of 5, 6 or 7 and it accepts
+the wrong choice between 4 and 8, so a real code-generation defect would still print 1 and
+oracle (a), oracle (b) and the golden record would all agree with it. Exact equality is what makes
+the line discriminating. The expectation is keyed FIRST to the ARCHITECTURE macro rather than to
+__SIZEOF_POINTER__ or any other width macro, because the architecture is a categorical fact the
+harness fixes with --target, whereas a width macro is a numeric claim by the compiler under test,
+and asserting that claim against itself is circular. That is precisely why the width macro sits
+below all four architecture arms and not above them: it is reached only where no architecture is
+recognised, and on that arm the circularity is accepted knowingly and disclosed above rather than
+being mistaken for an independent check. On the four supported targets it is never reached.
+
+SIZES PINNED ALONGSIDE ALIGNMENTS. sizeof(void *) and sizeof(long) are pinned to the same
+architecture-selected number, and sizeof(double) and sizeof(long long) to 8 outright, because a
+compiler that got both an alignment and the corresponding width wrong in the same direction could
+otherwise still satisfy the alignment line on its own.
+
+ALIGNAS PLACEMENT. _Alignas is an alignment specifier legal only in the declaration specifiers
+of an object or a struct member; attaching it to a struct tag as struct _Alignas(16) Tag is a
+syntax error. The struct therefore carries _Alignas(8) on its int member, which raises the
+whole struct's alignment to 8 and its size to 16 as a standard-mandated consequence: the char
+member occupies offset 0, the aligned member is forced to offset 8, and the 12-byte extent is
+rounded up to the struct's 8-byte alignment. Those two values are therefore target-stable and
+are printed raw.
+
+KEYWORD SPELLINGS. The lowercase alignas and alignof macros live in the bundled header
+stdalign.h, which this program does not include, so the C11 keywords _Alignas and _Alignof are
+used directly. Both are documented as supported. No plain char signedness dependence exists:
+the buffers are unsigned char, and the one plain char member holds the small positive value 2,
+which is representable identically whether char is signed or unsigned. The only printf
+conversion specifier used in the program is %d.
+END
+expected_stdout    <<END
+alignof_stable=1 2 4 4
+alignof_exact=1 1 1 1
+sizeof_exact=1 1 1 1
+alignas_struct=8 16
+residues=0 0 0 0
+readback=1 2 3
+END

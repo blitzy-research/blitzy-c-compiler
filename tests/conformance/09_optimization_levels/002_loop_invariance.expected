@@ -1,0 +1,83 @@
+# Expectation record for 09_optimization_levels/002_loop_invariance.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_loop_invariance
+area               = 09_optimization_levels
+description        = Loop results byte-identical at -O0, -O1 and -O2 under whatever transformations each compiler's pipeline applies -- shapes chosen so that invariant motion and strength reduction are genuinely applicable, with no pass and no surviving loop assumed
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour. No signed overflow anywhere: every loop bound
+is at most 1000 and every accumulator stays far inside int range, the largest being
+sum_big at 499500, which is about 0.02 percent of INT_MAX. Every induction variable is
+bounded by 1000 and is assigned before every use, so there is no read of uninitialized
+storage. The only division is i % 3, whose divisor is non-zero and whose dividend is
+non-negative. No shift operator appears. No pointer arithmetic, no aliasing violation, no
+object modified twice between sequence points, at most one side-effecting argument per
+call, and no dependence on padding bytes or on relative addresses.
+Several volatile objects are read within a single expression; their relative order is
+unspecified, but no volatile object is modified anywhere in the program, so every read of
+a given object yields the same value and the printed output does not depend on the
+ordering.
+END
+impl_defined_notes <<END
+No implementation-defined behaviour is observed. Widths are normalized: only int is used,
+which is 32 bits on all four targets, and long is never used because sizeof(long) is 4 on
+i686 and 8 on the other three targets. Plain char is not used, so the measured plain-char
+signedness difference (signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64)
+cannot be observed. No address, pointer value, sizeof or _Alignof result is printed. No
+floating point is used.
+WHAT THIS PROGRAM ASSERTS, STATED EXACTLY, because a wider claim would be unverifiable from its
+output. It asserts that the eight printed results are identical at -O0, -O1 and -O2 on every
+target, and it assumes nothing about which transformations produce that. It does NOT assert that
+any particular transformation ran: nothing in a program's stdout can reveal which passes fired,
+and the two compilers under comparison document different optimization sets, which is the very
+difference that must not be observable. The documented pipeline for the compiler under test is
+-O0 with no passes, -O1 with mem2reg, constant folding and dead-code elimination, and -O2 adding
+common-subexpression elimination and simplification iterated to a fixed point
+(docs/technical-specifications.md line 535). Loop-invariant code motion and strength reduction
+are not among them, and loop unrolling and vectorization are explicitly out of scope for this
+project, so this record neither names nor requires any of the four. The reference compiler
+applies a larger and differently documented set, and that asymmetry is precisely why only the
+printed values may be compared.
+THE LOOP SHAPES ARE STILL CHOSEN SO THAT THE TWO TRANSFORMATIONS THE PLAN NAMES FOR THIS PROGRAM
+ARE GENUINELY APPLICABLE -- sum_inv adds the loop-invariant product k * m, and sum_mul and
+sum_pow2 accumulate i * k and i * 8, the textbook strength-reduction candidates -- so the
+invariance being asserted is invariance across those transformations being applied or not
+applied, by either compiler, at any level. Loop unrolling is deliberately NOT named as covered:
+the repository documents no unroller for the compiler under test and lists loop unrolling among
+the transformations explicitly out of scope (docs/technical-specifications.md line 717), and the
+minimal shared flag set gives no guarantee
+that the reference compiler unrolls either, so a claim of unrolling coverage would be a claim
+this program cannot support.
+MOST BOUNDS AND FACTORS ARE READ FROM VOLATILE STORAGE, which means those loops cannot be reduced
+to a constant by the folder alone and the backend must emit real loop code -- that is what keeps
+the runtime path under test at -O1 and -O2. One loop is a deliberate exception and is named
+rather than left implicit: the do-while whose controlling expression is the literal-false i < 0
+runs exactly once by construction, which is the single-iteration boundary it exists to check, and
+it may legitimately be folded straight to its result of 5. No loop anywhere in this program is
+required to survive translation, and no line below depends on generated code: a loop that is
+unrolled, rotated, inverted, turned into a closed form or eliminated entirely still produces the
+value that is compared.
+END
+expected_stdout    <<END
+sum_mul=135
+sum_inv=210
+sum_pow2=360
+sum_big=499500
+down=55
+once=5
+nested=1540
+guarded=147
+END

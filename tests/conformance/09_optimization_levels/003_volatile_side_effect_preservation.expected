@@ -1,0 +1,58 @@
+# Expectation record for 09_optimization_levels/003_volatile_side_effect_preservation.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 003_volatile_side_effect_preservation
+area               = 09_optimization_levels
+description        = Volatile side-effect sequence preserved without elision, reordering or coalescing at -O0, -O1 and -O2
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour. This is the only program in the area that
+modifies volatile objects, and every modification is a separate full statement with its own
+sequence point, so no ordering question arises: the sequence of observable side effects is
+fully determined by the order of the statements. The compound form g_counter = g_counter + 1
+is well defined because C11 6.5.16p3 sequences the update of the left operand after the
+value computations of both operands, so the read and the write within one assignment are
+ordered. No object is modified twice between sequence points. No signed overflow: the
+counter reaches only 8 and the sink holds at most 33. There is no shift, no division, no
+pointer arithmetic, no aliasing violation, and no read of uninitialized storage, because
+step1, step2, step3, loop_total and i are all assigned before use. No printf argument
+expression has a side effect; every argument is a plain read. No dependence on padding
+bytes or on relative addresses.
+END
+impl_defined_notes <<END
+No implementation-defined behaviour is observed. Widths are normalized: only int is used,
+which is 32 bits on all four targets, and long is never used because sizeof(long) is 4 on
+i686 and 8 on the other three targets. Plain char is not used, so the measured plain-char
+signedness difference (signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64) cannot
+be observed. No address, pointer value, sizeof or _Alignof result is printed. No floating
+point is used. The volatile qualification of g_counter and g_sink is required semantics, not
+an implementation-defined property: every access must be materialized on every target at
+every optimization level, so the printed sequence is identical everywhere.
+END
+expected_stdout    <<END
+counter_initial=0
+after_step1 returned=1 counter=1
+after_step2 returned=2 counter=2
+after_step3 returned=3 counter=3
+sink_a=11
+sink_b=22
+sink_c=33
+loop_step=0 counter=4
+loop_step=1 counter=5
+loop_step=2 counter=6
+loop_step=3 counter=7
+loop_step=4 counter=8
+counter_final=8
+END

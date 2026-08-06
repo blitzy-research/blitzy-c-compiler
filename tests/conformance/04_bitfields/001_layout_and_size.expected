@@ -1,0 +1,141 @@
+# Expectation record for 04_bitfields/001_layout_and_size.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_layout_and_size
+area               = 04_bitfields
+description        = Bitfield sizeof, _Alignof and observable byte image, read through an unsigned char union member
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+The default undefined-behaviour warning gate applies unmodified, with no deviation, which is
+why no ub_audit_flags key appears above.  That is measured rather than claimed: the program
+compiles with zero diagnostics under the full gate -Wall -Wextra -pedantic -Wconversion
+-Wsign-conversion -Wshadow -Werror, and it builds and runs cleanly under
+-fsanitize=undefined,address -fno-sanitize-recover=all, producing the golden stdout below and
+writing nothing to standard error.
+
+Object-representation determinacy is the argument this program rests on, because a byte image
+is the one thing it prints that could be indeterminate.  A store into a bitfield leaves the
+bits of its allocation unit that belong to no named field UNSPECIFIED afterwards, so zeroing
+an overlay first buys freedom from reading uninitialized storage and nothing more.  A byte
+image is therefore printed only for the two structs whose every bit belongs to a named field
+-- oneword, whose two 16-bit fields cover a 32-bit unit exactly, and covered32, whose
+1 + 14 + 7 + 10 fields partition one exactly.  The struct that necessarily leaves padding,
+packed3, names 17 of its 32 bits and is observed only through sizeof, _Alignof and
+named-member read-back; withsigned and spanning likewise.  Full bit coverage, not the zero
+fill, is what makes an image determinate.
+
+The byte image is read exclusively through an unsigned char array member of a union whose
+other member is the bitfield struct, which is the standard's own route to an object
+representation and the one route that cannot violate an aliasing rule: a character type may
+alias any object.  No incompatible pointer type is formed or dereferenced anywhere in the
+program, and no value is punned back out of the bytes -- each image is printed as bytes and
+each field value is read from the field.
+
+Nothing uninitialized is read.  The two automatic overlays are byte-written in full through
+their unsigned char member, by a loop bounded by the sizeof of that member, before any byte
+of either is read; the three volatile objects have static storage duration and therefore
+begin zeroed.
+
+Every value stored into a bitfield is representable in that field's declared width and
+signedness, so no store is out of range and no conversion can change a value: the constant
+variant stores literals that fit, and the runtime variant masks each volatile source to its
+destination field's exact width before storing it.  No arithmetic is performed on any
+bitfield.  The only operators the program executes are the pre-increment of an unsigned loop
+counter bounded by the sizeof of a four- or eight-byte array, and bitwise AND masks against
+unsigned constants, so there is no signed overflow and no operand can wrap.  No shift
+operator appears in executable code at all, so no shift count can be out of range.
+
+No object is modified twice between sequence points, and nothing depends on padding bytes or
+on the relative addresses of unrelated objects.  Every store into a volatile destination is a
+full expression of its own, terminated by its own semicolon, so no store ever shares a full
+expression with a read.
+CALLS DO TAKE ARGUMENTS WITH SIDE EFFECTS here, because C11 5.1.2.3p2 counts accessing a
+volatile object as one, and the three readback calls each pass several: the packed3 readback
+passes three volatile bitfield reads, the oneword readback two, and the covered32 readback
+four.  The relative order of the reads within a call is unspecified, and nothing printed can
+turn on it.  Each call reads DISTINCT members, no read modifies anything, and every store that
+produced the values being read is an earlier statement whose end-of-full-expression sequence
+point separates it from the call -- so each read yields the value its own store put there
+whichever order the reads happen in, and every permitted order produces the same stdout, which
+is the property the oracle needs.  Reading the fields back inside one call is deliberate: it is
+what forces the backend to emit a genuine extract per field instead of reusing a value it has
+just inserted.  The two byte-image loops pass exactly one volatile read per call, so no
+ordering question arises in them at all.
+Output is deterministic by construction: no address, pointer value, timestamp or random value
+is printed, no locale-dependent conversion is used, the only conversion specifiers are %u and
+%02x and each is given an operand cast to unsigned, and every loop bound is the sizeof of a
+fixed-size array, so both iteration order and iteration count are fixed.
+
+Every read-back and every byte image is produced twice, once from constant initializers and
+literals that a constant folder can evaluate whole and once through volatile-qualified
+destinations fed from volatile sources, so the folder's answer cannot stand in for the one
+the backend computes at run time.  The ten sizeof and _Alignof facts are compile-time
+constants by nature and are printed once.
+
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+impl_defined_notes <<END
+Every bitfield is declared on an explicit unsigned int or signed int base type.  A bitfield
+declared on unqualified int has implementation-defined signedness, so using it would
+manufacture a divergence that says nothing about code generation; stating the signedness in
+the declaration removes that dependency outright.  Fixing the signedness is the whole of what
+the base type fixes: it does not fix the allocation unit, whose size is implementation-defined.
+
+Plain char is never used as a value type.  The byte image is an array of unsigned char, whose
+signedness the standard fixes, which matters because plain char signedness was measured to
+differ across the four targets -- signed on x86_64 and i686, unsigned on aarch64 and riscv64.
+
+No value whose width varies by target is printed.  The documented target table records that
+the pointer and long widths are four bytes on i686 and eight on the other three, so neither
+sizeof(long) nor sizeof(void *) is printed and no address reaches the output.  int is four
+bytes under both the ILP32 model i686 uses and the LP64 model the other three use, which
+removes one variable; it does not by itself determine a bitfield allocation unit, so all ten
+layout values below are stated as measured expectations for the four ABIs under test rather
+than as guarantees derived from the base type.
+
+How much storage a bitfield sequence is allocated, whether a field may straddle an allocation
+unit boundary, and in what order fields are placed inside a unit are implementation-defined,
+and the byte images are exactly what observes them.  The same table records all four targets
+as little-endian, and the twelve configurations of this program -- four targets at each of
+three optimization levels -- were measured to produce byte-identical output.  The program is
+therefore compared on all four targets rather than restricted, and all three oracles stay
+enabled; the measured agreement is the reason.  A cross-backend divergence here is a genuine
+finding, not an implementation-defined difference, which is why no expected-divergence marker
+is attached: the repository documents no bitfield limitation that could serve as a basis for
+one.
+END
+expected_stdout    <<END
+sizeof_packed3=4
+alignof_packed3=4
+sizeof_oneword=4
+alignof_oneword=4
+sizeof_withsigned=4
+alignof_withsigned=4
+sizeof_spanning=8
+alignof_spanning=4
+sizeof_covered32=4
+alignof_covered32=4
+packed3_readback a=5 b=21 c=300
+oneword_readback lo=4660 hi=22136
+oneword_image 34 12 78 56
+covered32_readback a=1 b=12345 c=101 d=678
+covered32_image 73 e0 b2 a9
+volatile_packed3_readback a=5 b=21 c=300
+volatile_oneword_readback lo=4660 hi=22136
+volatile_oneword_image 34 12 78 56
+volatile_covered32_readback a=1 b=12345 c=101 d=678
+volatile_covered32_image 73 e0 b2 a9
+END

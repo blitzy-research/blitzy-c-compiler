@@ -1,0 +1,67 @@
+program            = 008_noreturn
+area               = 10_declarations_and_types
+description        = _Noreturn declaration and its effect on reachable code, with a function that genuinely never returns and an unreachable statement after the call site
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+NORETURN DESIGN. C11 makes it undefined behaviour for a function declared _Noreturn to return
+to its caller, so this program is built so that it provably cannot happen. terminate_now is
+declared _Noreturn, prints one line, and then calls exit. exit is itself declared _Noreturn --
+hand-declared as _Noreturn void exit(int), which makes this the one program in the corpus that
+hand-declares two libc prototypes rather than printf alone, because stdlib.h is not in bcc's
+bundled set at all and the corpus's only sanctioned inclusion is area 07's <stdarg.h> -- so it
+never returns, and therefore control never reaches the closing brace of terminate_now. There is
+no return statement anywhere in terminate_now, and no path through it can fall off the end. The
+_Noreturn contract is honoured absolutely rather than merely intended, and the sanitizer gate
+independently confirms it: UndefinedBehaviorSanitizer instruments _Noreturn functions and
+reports when one actually returns, so a clean sanitizer run is positive evidence rather than
+just an absence of complaint.
+
+MAIN HAS NO RETURN STATEMENT, AND THAT IS WELL DEFINED. main ends with the call to
+terminate_now, followed by an unreachable printf, followed by the closing brace, with no
+return. Because terminate_now terminates the process, control never reaches either the
+unreachable printf or the end of main, so no value is ever required from main and no
+indeterminate status can be produced. The process exit status is 0, supplied explicitly by
+exit(0), which is a normal exit rather than a signal termination and is well inside the
+permitted 0 to 125 range. The absence of the after_noreturn line from the expected output is
+itself the assertion: it is the observable proof that the call did not return. A compiler that
+generated a return path would print a fourth line and the divergence would be immediate.
+
+REMAINING UB-FREEDOM ARGUMENT. Every object read is initialized: before is assigned from
+reachable_probe(0) at its declaration, and reachable_probe adds one to its parameter with no
+other state. All arithmetic is on small int values far from the int range edges, so there is no
+signed overflow: the largest value computed is 2. No shift and no pointer arithmetic is
+performed. No object is modified twice between sequence points, and no printf call receives
+more than one side-effecting argument -- reachable_probe is pure and mutates nothing. There is
+no aliasing violation and no uninitialized read. No padding byte is read, because the program
+declares no aggregate at all.
+END
+impl_defined_notes <<END
+This program prints no size and no alignment at all, so the measured i686 width differences
+(4-byte long and pointer versus 8 bytes on x86_64, aarch64 and riscv64) cannot surface. All
+printed values are small int quantities. No address or pointer value is printed. Plain char is
+not used, so the measured char signedness difference (signed on x86_64 and i686, unsigned on
+aarch64 and riscv64) is irrelevant. The only printf conversion specifier used in the program is
+%d, and it appears three times, the fewest of any program in this area.
+
+KEYWORD SPELLING. The lowercase noreturn macro lives in the bundled header stdnoreturn.h, which
+this program does not include, so the C11 keyword _Noreturn is used directly on both the
+hand-declared exit prototype and the terminate_now definition. _Noreturn is documented as one
+of the supported C11 keywords. Hand-declaring a libc prototype is the corpus-wide technique and
+is not the same thing as including a header: bcc ships no stdio.h and no stdlib.h, so an
+include of either would fail against bcc while succeeding against the reference compiler and
+would manufacture a divergence caused by the test rather than by the compiler.
+END
+expected_stdout    <<END
+before=1
+reachable=2
+noreturn_reached=1 code=0
+END

@@ -1,0 +1,128 @@
+# Expectation record for 01_integer_conversions/010_integer_division_modulo.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 010_integer_division_modulo
+area               = 01_integer_conversions
+description        = Integer division truncating toward zero and a dividend-signed remainder, folded and runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Integer division has exactly two undefined cases and both are provably absent from this
+program.  No divisor is ever zero: in the folded variant every divisor is a nonzero literal,
+and in the runtime variant every divisor is a plain object staged from a volatile object
+initialised to 2, -2 or 3 -- r_b_pos from b_pos, r_b_neg from b_neg, r_three from three,
+r_u_two from u_two and r_l_two from l_two -- and each initialiser is visible in the source, so
+no divisor can be zero however the reads are ordered.  The most negative value divided by -1,
+which overflows and is therefore undefined, is deliberately never formed: the large-magnitude
+case uses -2147483647, which is one greater than the most negative int, and divides it by 3
+rather than by -1.
+No signed overflow occurs anywhere else either.  Every quotient is representable in its own
+type, and the widest product any identity check forms is 6 in magnitude, so no
+multiplication can overflow.  No shift operator appears anywhere in the program.  There is
+no aliasing violation, no uninitialized read, and no dependence on padding bytes or on the
+relative addresses of unrelated objects.
+NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and that is enforced structurally rather
+than argued.  An access to a volatile object is an observable side effect, and C11 6.5.2.2p10
+leaves the order of evaluation of a call's function designator, of its arguments, and of
+subexpressions within those arguments unspecified.  The runtime variant therefore STAGES every
+volatile datum before any call: each of the ten volatile objects is read exactly once, in a
+full expression of its own, into a plain object -- r_a_pos, r_a_neg, r_b_pos, r_b_neg,
+r_big_neg, r_three, r_u_seven, r_u_two, r_l_neg7 and r_l_two -- and every quotient, every
+remainder and both identity results are then computed from those plain objects in statements of
+their own.  The calls pass plain objects only, so no argument list contains a side effect at
+all and the suite's authoring rule of at most one side-effecting argument per call is satisfied
+by construction.  Each volatile object is additionally written exactly once, by its own
+initialiser in its own declaration, so no object is modified twice between sequence points.
+Staging costs the test nothing: a value that arrived through a volatile load stays opaque to
+the optimizer, so every division and every remainder is still emitted as a run-time operation.
+That was verified at instruction level at -O2 on all four targets, and the counts appear in
+impl_defined_notes below.
+Truncation toward zero and a remainder taking the sign of the dividend are not
+implementation-defined choices this program rests on: C11 6.5.5p6 makes / yield the
+algebraic quotient with any fractional part discarded and requires (a / b) * b + a % b to
+equal a wherever the quotient is representable, from which the remainder's sign follows.
+The two identity lines assert that law directly, and both operands of every comparison in
+them share a signedness, so no implicit signed-to-unsigned comparison is formed and the
+full default warning gate passes with no deviation at all.
+UndefinedBehaviorSanitizer checks division by zero and the most negative value divided by
+-1 specifically, and reports nothing for this program. That is measured evidence rather than an
+assertion that both undefined cases are absent -- and it is exactly as much evidence as the
+suite's sanitizer gate produces: ONE instrumented native build, dynamically linked and driven by
+the reference compiler, and then executed once. The gate does not sweep the optimization levels
+or the cross targets, so no claim is made here about behaviour under -O1 or -O2 that the run did
+not establish; the argument above, which is about the operand values rather than the code
+generated for them, is what covers every cell.
+Every property is computed twice, once from literal constants and once from
+volatile-qualified storage, so the constant folder's answer cannot stand in for the
+one the backend computes at run time.
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+impl_defined_notes <<END
+This program takes NO target restriction, and the reason is NORMATIVE rather than empirical.
+C11 6.5.5p6 makes / yield the algebraic quotient with any fractional part discarded -- which is
+truncation toward zero -- and requires (a / b) * b + a % b to equal a wherever the quotient is
+representable, from which the remainder's sign follows: it must take the sign of the dividend.
+Neither is an implementation-defined choice a target is free to make differently, so every
+value this program prints is fixed by the standard on any conforming implementation and the
+comparison is portable across all four backends by construction.  (That was not always so:
+C89 left the direction of truncation for negative operands implementation-defined, and C99
+closed it.  This corpus is compiled in a C11-or-later mode on both sides, so the C11 rule is
+the one in force.)  Measurement CORROBORATES that and is retained for exactly that role, never
+as the basis: -7 / 2 yields -3 and -7 % 2 yields -1 on x86-64, i686, AArch64 and RISC-V 64
+alike, and all twelve target-and-optimization configurations printed the same 319 bytes.  So a
+cross-backend divergence in this program is a genuine finding to report rather than an
+implementation-defined difference to mark, and oracle (b) is enabled for it.
+The lowering differs sharply per target even though the results agree, which is what makes
+the runtime variant valuable.  Measured at -O2 with gcc 13.4.0 on the staged source as
+committed: x86-64 and i686 each emit six idivl, a single instruction that yields the quotient
+and the remainder at once, plus one divl for the unsigned pair; AArch64 has no remainder
+instruction, so its seven sdiv and one udiv are each paired with an msub that synthesises the
+remainder -- eight msub for the program's eight remainders; and RISC-V 64 uses separate
+instructions throughout, six divw with six remw, one divuw with one remuw, and one div with
+one rem.  The 64-bit signed case is where the two x86 targets part company: x86-64 divides in
+registers with cqto and idivq, while i686 has no 64-bit divide instruction at all and calls
+the libgcc helper __divmoddi4, which returns the quotient and the remainder together -- static
+linkage is what resolves that helper with no dynamic loader involved.  Those counts are also
+the instruction-level evidence that staging folded nothing away.
+long and unsigned long are deliberately never used.  Their width was measured at 4 bytes on
+i686 and 8 bytes on the other three targets, so dividing a long would print two different
+values across backends for reasons that have nothing to do with the compiler.  Only int and
+unsigned int, 32 bits on all four targets, and long long, 64 bits on all four, appear here.
+No object of plain char type is declared and no plain-char value is printed, because plain
+char signedness was measured signed on x86-64 and i686 but unsigned on AArch64 and RISC-V
+64.  The only char in the program is the const char * parameter of the hand-declared printf
+prototype, where no signedness is observable.  No pointer value is printed and no header is
+included, so every bound this program relies on is spelled literally in its own source.
+END
+expected_stdout    <<END
+fold_pos_pos=3 1
+fold_neg_pos=-3 -1
+fold_pos_neg=-3 1
+fold_neg_neg=3 -1
+fold_exact=-4 0
+fold_large=-715827882 -1
+fold_unsigned=3 1
+fold_llong=-3 -1
+fold_identity=1
+run_pos_pos=3 1
+run_neg_pos=-3 -1
+run_pos_neg=-3 1
+run_neg_neg=3 -1
+run_exact=-4 0
+run_large=-715827882 -1
+run_unsigned=3 1
+run_llong=-3 -1
+run_identity=1
+END

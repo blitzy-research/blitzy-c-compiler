@@ -1,0 +1,202 @@
+# Expectation record for 05_pointers/007_casts_roundtrip.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 007_casts_roundtrip
+area               = 05_pointers
+description        = Object-pointer casts round-tripped through a sufficiently wide integer carrier, with restoration verified by pointer equality and every dereference, subscript and pointer difference guarded on that verification, and the implementation-defined conversion recorded
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+RESTORATION IS VERIFIED, NEVER ASSUMED, AND THAT IS WHAT KEEPS THIS PROGRAM FREE OF
+UNDEFINED BEHAVIOUR. Converting a pointer to an integer and back is implementation-defined
+in both directions, so the reconstructed pointer is NOT known in advance to designate the
+original object. The ground for treating it as usable is recorded in impl_defined_notes
+below rather than here, because it is the definition the four reference toolchains give
+those conversions and not any property of the carrier. After every round-trip the program
+compares the reconstructed pointer against the original and prints that comparison, and
+every dereference, every subscript and every pointer difference sits inside a branch
+guarded by that comparison. On an implementation whose mapping does not restore the
+pointer, each guarded line prints `unrestored` in place of a value: the divergence is
+reported as a difference in stdout, which is what the oracles compare, rather than
+performed as undefined behaviour. Not one line of this program is reached by reasoning from
+carrier width to "the round-trip is exact, therefore the dereference is defined"; that
+inference does not hold and the guards exist precisely because it does not.
+Inside a taken guard the dereference IS defined: C11 6.5.9p6 makes two object pointers
+compare equal only when they designate the same object, so `q == p` together with p
+designating a live object of the right type establishes that q designates it too.
+WIDTH IS A NECESSARY CONDITION AND NOTHING MORE, and two conversions here DO cross a width
+boundary, neither of which truncates. On i686 unsigned long long is 8 bytes while unsigned
+long and void * are 4, so the bridge back to a pointer, (unsigned long)carrier, narrows 8
+bytes to 4, and the widening that produced the carrier crossed the same boundary upward.
+Every carrier value in this file is produced by exactly the pattern
+(unsigned long long)(unsigned long)(void *)p -- (const void *) in the const case -- and is
+never arithmetically modified afterwards, so it is always the zero-extension of an unsigned
+long that is exactly pointer width: every bit above pointer width is zero, and the
+narrowing therefore discards only zero bits, which is why every pointer-equality line
+reports 1. Both conversions are between unsigned types in any case, so C11 6.3.1.3 makes
+even a truncating one defined modular reduction and not undefined behaviour. The two width
+relations are checked rather than assumed: they are asserted at translation time with
+_Static_assert and printed at run time on the first two output lines as
+carrier_wide_enough and bridge_is_pointer_width, both 1 on all four targets, so a target
+that broke either one would fail to translate rather than silently lose bits. Every other
+width crossing in this file is a widening, which cannot lose a value: each pointer
+difference is converted to long long before printing, and each char is read through
+unsigned char before being widened to int.
+The null pointer round-trip is compared twice and NEVER dereferenced, so it needs no guard:
+nothing is read through it. Every pointer that is dereferenced designates an element of its
+own array object: iarr has 8 elements indexed 0..7 and carr has 16 indexed 0..15, and every
+index reached lies inside those ranges, including the guarded q[-1] and q[2] taken from
+&iarr[3], which reach iarr[2] and iarr[5]. No pointer one past the end of an object is
+formed anywhere in this file, and every pointer difference is taken between two elements of
+one array object, established by the same guard. The char pointer formed over an int object
+is converted straight back to int * and is never dereferenced, so no object is read or
+written through an lvalue of the wrong type and no aliasing rule is engaged. A plain char
+lvalue is read only where the object read is itself an element of the char array, and every
+such value is converted to unsigned char before printing. The const object cobj is read
+through a const-qualified pointer and is never written.
+The three printed execution-character-set codes are pinned by _Static_assert rather than
+assumed, so a differing charset is a translation failure rather than a silent divergence.
+No signed integer overflow, no shift out of range, no aliasing violation, no read of
+uninitialized storage, no object modified twice between sequence points, at most one
+side-effecting argument per call, and no dependence on padding bytes or on the relative
+addresses of unrelated objects. The only external symbol is printf; no header is included,
+no file, socket, environment variable, clock or random source is touched, and every input
+is a literal in this source file.
+END
+impl_defined_notes <<END
+CLASSIFICATION, recorded here because it is what makes this record's oracles sound.
+POINTER-TO-INTEGER AND INTEGER-TO-POINTER CONVERSION IS THE IMPLEMENTATION-DEFINED PROPERTY
+UNDER TEST, and it is recorded as such rather than argued away. C11 6.3.2.3p6 makes the
+result of converting a pointer to an integer type implementation-defined, and undefined
+outright if the result cannot be represented in the integer type. C11 6.3.2.3p5 makes the
+reverse conversion implementation-defined and states how far that goes: the result "might
+not be correctly aligned, might not point to an entity of the referenced type, and might be
+a trap representation". C11 Annex J.3.13 lists both directions among the behaviours a
+conforming implementation must document and may choose freely. Only the round trip through
+void * is guaranteed by the standard, by 6.3.2.3p1, which is why the void_roundtrip block is
+the one block in this program that rests on no implementation definition at all; and the
+only round trip through an INTEGER that the standard guarantees compares equal is the one
+through intptr_t or uintptr_t of C11 7.20.1.4, both optional types that require stdint.h,
+which this program may not include. Equality of the reconstructed pointer, and the validity
+of dereferencing it, therefore rest on the definition recorded below.
+WIDTH IS NECESSARY BUT NOT SUFFICIENT, and treating it as sufficient would be an error:
+width alone establishes only that no value is lost. sizeof(void *) is 4 on i686 and 8 on x86-64, AArch64 and RISC-V 64. The carrier
+is unsigned long long, 8 bytes on all four targets and therefore always wide enough, and
+the conversion back to a pointer is bridged through unsigned long, exactly pointer width on
+all four targets (8 on x86-64, AArch64 and RISC-V 64; 4 on i686), so no direct cast between
+an 8-byte integer and a 4-byte pointer ever occurs. The bridge itself does cross a width
+boundary on i686 and cannot lose a value there either, for the provenance reason set out in
+ub_notes above. That reasoning rules out TRUNCATION and rules out nothing else. It says
+nothing about which mapping the implementation chooses and it does not establish that
+converting back yields a pointer to the original object, so it cannot license an unguarded
+dereference. uintptr_t would be the natural carrier and is deliberately NOT used: it is an
+optional typedef and would require stdint.h, and no header may be named in this area, so
+built-in integer types carry the value instead.
+THE DEFINITION, PER TARGET AND PER TOOLCHAIN. Each of the four targets is compiled by the
+reference driver this record names for it and each non-native target executes under that
+target's emulator; the toolchain of record is pinned in tests/conformance/README.md rather
+than restated here, so this field stays correct as that pinning moves. On each of the four
+the definition is the same one: converting a pointer to an integer type wide enough to
+represent it yields that pointer's address value unchanged, and converting such an integer
+back to a pointer yields the pointer designating that same address, correctly aligned for
+the referenced type and designating the same object. That is what makes the reconstructed
+pointer compare equal to the original and makes dereferencing it defined. The null pointer
+participates on the same terms: it converts to 0 and 0 converts back to a null pointer,
+which is why the null block may compare its result and must still never dereference it.
+THE MEASURED EVIDENCE for that definition, recorded because the definition is measured on
+these four toolchains rather than assumed of them. sizeof(unsigned long) equals
+sizeof(void *) on all four, so the pointer-width bridge back to a pointer cannot truncate;
+the program asserts this on its second output line. sizeof(unsigned long long) is 8 on all
+four, so the carrier always holds a pointer; the program asserts this on its first output
+line. Both lines print 1 on all four targets. All four targets were measured to use a flat
+address model in which the conversion is the identity on the address value, so every _eq
+line prints 1 and every guarded line prints its value; that is the recorded expected_stdout.
+The toolchain itself treats the whole chain as an identity rather than as an opaque
+conversion, and says so: a comparison between a pointer reconstructed through the full chain
+and the original is folded to a self-comparison and diagnosed as always true. This program's
+own thirty-eight output lines were then verified byte-identical on all four targets at -O0,
+-O1 and -O2, twelve configurations, each exiting 0.
+WHY NO TARGET RESTRICTION AND NO ORACLE EXCLUSION IS TAKEN. The definition above is the same
+on all four targets and the measured results agree with it, so the target list stays complete
+and all three oracles stay enabled. The program does not depend on that measurement being
+true, which is the other half of the reason the list is not narrowed: on an implementation
+with a different mapping the guards divert to `unrestored` and the run reports a stdout
+difference instead of executing undefined behaviour. The measurement fixes the golden record;
+the guards keep the program valid whether or not the measurement holds. Had the definitions
+differed, or had any target reconstructed a pointer that did not compare equal, that
+difference would be implementation-defined rather than a compiler defect, and the correct
+handling would be to narrow this record's target list or disable oracle (b) for this program
+and state the reason in this field: never to leave it to surface as a finding against a
+backend that did nothing wrong, and never to drop the conversion from the corpus, which
+would remove the feature requirement 2 asks this program to cover. Equally, it must not be
+resolved by deleting the dereferences and keeping only the equality lines -- reading the
+designated object is what distinguishes a pointer that merely compares equal from one that
+is genuinely usable, and that is the coverage this program exists to provide. The precedent
+for recording a dependency of this shape rather than removing the construct is the
+signed-narrowing case documented in tests/conformance/README.md.
+EXECUTION CHARACTER SET. Three printed values are the codes of 'a', 'f' and 'h', whose
+numeric values C11 5.2.1 leaves to the implementation. All four targets were measured to
+use ASCII (97, 102, 104) and the program pins those three codes with _Static_assert, so a
+differing execution character set fails to translate rather than producing numbers an
+oracle would have to attribute to a compiler defect.
+Neither a pointer nor a carrier value is ever printed; restoration is observed ONLY by
+comparing the reconstructed pointer with the original and by reading the object it
+designates.
+No address or pointer value is printed. Pointer facts appear only as differences,
+comparisons and alignment residues, and every pointer difference is cast to long long
+before printing, so the printed text is identical whether ptrdiff_t is 32 or 64 bits.
+Plain char is never printed in a signedness-dependent way. The only conversion
+specifiers used anywhere in this program are %d, %lld and fixed-precision %.3f, all of
+which are target-width independent.
+END
+expected_stdout    <<END
+carrier_wide_enough=1
+bridge_is_pointer_width=1
+int_roundtrip_eq=1
+int_roundtrip_value=7
+int_roundtrip_same_object=1
+double_roundtrip_eq=1
+double_roundtrip_value=2.500
+char_roundtrip_eq=1
+char_roundtrip_value=97
+char_interior_eq=1
+char_interior_value=102
+char_interior_offset=5
+struct_roundtrip_eq=1
+struct_roundtrip_values=3 4
+const_roundtrip_eq=1
+const_roundtrip_value=99
+interior_roundtrip_eq=1
+interior_value=40
+interior_offset=3
+interior_step_back=30
+interior_step_forward=60
+interior_diff_matches=3
+null_roundtrip_eq=1
+null_roundtrip_is_null=1
+void_roundtrip_eq=1
+void_roundtrip_value=70
+void_roundtrip_offset=6
+bytes_roundtrip_eq=1
+bytes_roundtrip_value=30
+runtime_roundtrip_eq=1
+runtime_roundtrip_value=50
+runtime_roundtrip_offset=4
+runtime_roundtrip_target=1
+runtime_char_eq=1
+runtime_char_value=104
+runtime_char_offset=7
+repeated_roundtrip_eq=1
+repeated_roundtrip_value=20
+END

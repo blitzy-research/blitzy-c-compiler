@@ -1,0 +1,80 @@
+# Expectation record for 01_integer_conversions/004_narrowing_conversions.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 004_narrowing_conversions
+area               = 01_integer_conversions
+description        = Narrowing integer conversions across signedness, folded and runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_audit_flags     = -Wall -Wextra -pedantic -Wshadow -Werror
+ub_notes           <<END
+This program contains no undefined behaviour, which is the property the differential oracle
+rests on. It deliberately does contain two implementation-defined conversions, and the
+distinction matters: an implementation-defined conversion has a definition the implementation
+must document and abide by, so a divergence between two compilers that both document the same
+definition is still evidence of a defect. Undefined behaviour would permit anything and would
+make a divergence prove nothing, which is why none is present.
+Conversion to an unsigned narrow type is fully defined by the standard as reduction modulo one
+plus the destination's maximum (C11 6.3.1.3p2), so (unsigned char)(-56) and (unsigned
+short)(-200) are not implementation-defined at all. Conversion of an out-of-range value to a
+SIGNED narrow type is implementation-defined -- C11 6.3.1.3p3 permits either an
+implementation-defined value or an implementation-defined signal -- and this program performs
+exactly two such conversions, both converting 200 to signed char: the folded (signed char)200
+and the runtime assignment of the volatile source holding 200. Neither is value-preserving and
+neither is claimed to be; all four supported targets yield a value by two's-complement
+truncation, printing -56, with no signal raised, and the target assumptions that make them
+comparable are recorded in impl_defined_notes below.
+Otherwise: no signed overflow, no shift out of range, no aliasing violation, no uninitialized
+read, no object modified twice between sequence points, no argument with a side effect, and no
+dependence on padding bytes or on the addresses of unrelated objects.
+END
+impl_defined_notes <<END
+Warning-gate deviation: -Wconversion and -Wsign-conversion are dropped for this program
+because a narrowing conversion is precisely the behaviour under test, so those two
+diagnostics fire on the feature itself rather than on a defect. Every other member of the
+default gate is retained -- -Wall, -Wextra, -pedantic, -Wshadow and -Werror -- so the
+diagnostics those flags enable stay in force even though they are not gate members
+themselves: -Wsign-compare is enabled by the retained -Wextra, and the out-of-range
+constant-conversion overflow diagnostic by the retained -pedantic (both measured on this
+program's exact shape), while -Werror still makes either one fatal.
+
+Plain char is not used as an arithmetic type -- every narrow type here is explicitly signed or
+unsigned -- so the measured plain-char signedness difference between the targets cannot reach
+this program; the format strings are character data whose bytes printf copies through
+unchanged, and no plain-char value is read as a number. Every type that carries a value here is
+target-invariant ACROSS THIS MATRIX rather than fixed-width in the C sense: char is one byte by
+definition, and short, int, unsigned short and unsigned int were measured at 2, 4, 2 and 4 bytes
+on all four targets. long and unsigned long are excluded precisely because they are not, being 4
+bytes on i686 and 8 on the other three. No pointer values are printed.
+Target assumption for the two implementation-defined conversions of 200 to signed char: each
+of the four reference toolchains documents this conversion as reduction of the value modulo
+two to the power of the destination width, with NO signal raised, which yields -56. That
+assumption was verified rather than assumed: the program was executed on all four targets at
+-O0, -O1 and -O2 -- twelve configurations -- and every one printed narrow_i8=-56 and
+runtime_i8=-56, byte-identically. Because the definition is the same on all four and the
+measured value agrees, cross-backend comparison of this program is sound and oracle (b)
+remains enabled for it.
+What would legitimately break that assumption, and how it must then be handled: a target whose
+implementation defined this conversion differently, or which raised a signal instead of
+producing a value, would be conforming, so the resulting difference would be an
+implementation-defined divergence rather than a compiler defect. It must in that case be
+recorded as an expected divergence with this record's target list narrowed and the reason
+stated here -- never left to surface as a finding against a backend that did nothing wrong,
+and never resolved by dropping the conversion from the corpus, which would remove the feature
+requirement 2 asks this program to cover.
+END
+expected_stdout    <<END
+narrow_u8=200 narrow_i8=-56 narrow_u16=65336
+runtime_u8=200 runtime_i8=-56 runtime_u16=65336
+END

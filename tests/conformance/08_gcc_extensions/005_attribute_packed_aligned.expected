@@ -1,0 +1,112 @@
+program            = 005_attribute_packed_aligned
+area               = 08_gcc_extensions
+description        = GCC __attribute__((packed)) and __attribute__((aligned)) and their observable effect on aggregate size, alignment and member offsets
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
+ub_notes           <<END
+UB-FREEDOM ARGUMENT. There is no signed overflow: the largest magnitude used is
+-2000000000, well inside the int range, and it is never negated, doubled or otherwise
+grown. No shift operator is used. There is no aliasing violation, because every member is
+read and written only through its own declared type. Every member of every object is
+assigned before it is read, and the two objects with static storage duration are
+zero-initialized before their explicit assignments in any case. No one-past-end pointer is
+formed. No object is modified twice between sequence points. Every printf call receives at
+most one side-effecting argument.
+
+NO PADDING BYTE IS EVER READ. Reading padding is unspecified, so the program inspects only
+members it has written and never examines the bytes between them. It also never depends on
+the addresses of unrelated objects.
+
+MEMBER OFFSETS COME EXCLUSIVELY FROM __builtin_offsetof, which is a compile-time constant
+and takes no address at run time. Measured rather than assumed: taking the address of a packed
+member produces "error: taking address of packed member of 'struct p' may result in an
+unaligned pointer value [-Werror=address-of-packed-member]", because
+-Waddress-of-packed-member is on by default and -Werror makes it fatal. The program
+therefore never forms a pointer to a packed member and never computes an offset by
+subtracting member addresses. __builtin_offsetof is also required because this program
+includes no header: the corpus's only sanctioned inclusion is area 07's <stdarg.h>, so
+offsetof from stddef.h is out of reach even though stddef.h is itself in bcc's bundled
+freestanding set.
+
+Every character-sized member is explicitly signed char, never plain char, and the
+round-trip prints it as int. char was measured as signed on x86_64 and i686 but unsigned
+on aarch64 and riscv64, so the negative value -7 would print as 249 on a target where
+plain char is unsigned. The explicit signedness avoids that trap.
+END
+impl_defined_notes <<END
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them, which is measured rather than asserted.
+
+Nothing target-restricting is observed, so all four targets are compared. The printed
+layout values are identical on x86_64, i686, aarch64 and riscv64 because on all four int
+is 4 bytes with 4-byte alignment, short is 2 with 2, and signed char is 1 with 1:
+
+  plain_s   { signed char; int; short }                     a@0, 3 bytes padding, b@4,
+            c@8, natural size 10 rounded up to the 4-byte alignment => size 12, align 4
+  packed_s  packed                                          no padding at all => a@0, b@1,
+            c@5, size 7, align 1. Packing is alignment-independent BY CONSTRUCTION, so
+            this layout is identical on every target.
+  aligned_s { signed char; int } aligned(16)                a@0, 3 bytes padding, b@4,
+            natural size 8 rounded up to 16 => size 16, align 16
+  both_s    packed + aligned(8)                             a@0, b@1, c@5, packed size 7
+            rounded up to 8 => size 8, align 8
+  attr_packed_saves = 12 - 7 = 5
+
+No address is ever printed. The alignment claim is expressed as a RESIDUE, addr % 16 ==
+0, printed as the boolean 1, because an address differs per build and per target and
+would destroy byte-exact comparison. A pointer fact is printed only as a difference, a
+comparison or an alignment residue, never as an address, because only those three are
+reproducible across builds, targets and optimization levels.
+
+The pointer cast is unsigned long, NOT unsigned long long. unsigned long is exactly
+pointer-width on all four targets: 4 bytes under ILP32 on i686 and 8 bytes under LP64 on
+x86_64, aarch64 and riscv64. This removes any possibility of a pointer-size cast
+diagnostic on i686, where casting a pointer to a wider integer is diagnosed as
+-Wpointer-to-int-cast and escalated to an error by this program's gate.
+
+Every sizeof and _Alignof result is cast to unsigned before being passed to %u, because
+size_t width differs across targets and an uncast size_t would be a genuine format
+mismatch on LP64 as well as a -Wformat error under -Werror. All the values are small, so
+no cast truncates anything.
+
+Both packed and aligned are documented as supported: the supported attribute set at
+docs/technical-specifications.md line 506 is packed, aligned, section, unused, deprecated,
+visibility, format. This program therefore tests documented functionality and carries NO
+expected-divergence marker.
+
+Output is identical on all four targets at all three optimization levels.
+END
+expected_stdout    <<END
+attr_plain_size=12
+attr_plain_align=4
+attr_plain_off=0 4 8
+attr_packed_size=7
+attr_packed_align=1
+attr_packed_off=0 1 5
+attr_aligned_size=16
+attr_aligned_align=16
+attr_aligned_off=0 4
+attr_both_size=8
+attr_both_align=8
+attr_both_off=0 1 5
+attr_packed_saves=5
+attr_packed_roundtrip=65 123456789 -321
+attr_plain_roundtrip=-7 -2000000000 32767
+attr_static_packed=1 2 3
+attr_var_align16=1
+attr_var_value=99
+END

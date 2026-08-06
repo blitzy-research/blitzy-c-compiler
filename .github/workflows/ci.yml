@@ -1,0 +1,666 @@
+# Continuous integration for bcc.
+#
+# This workflow adds ONE job, `differential-conformance`. It checks the suite's own formatting and
+# type-checking, installs the reference compilers and emulators the suite's oracles compare
+# against, proves that toolchain really is the one the corpus is judged against, establishes the
+# Cargo package every later command depends on, pre-flights the discovered oracle inventory, runs
+# the suite in strict mode, and publishes the evidence of the run.
+#
+# Both trees this job publishes are named here so neither is a surprise, and both go up on EVERY
+# run. The report tree carries a review copy of every finding the run recorded, so a divergence can
+# be inspected without reproducing the run locally even on a green automatic run. The raw generated
+# finding directories — the byte-exact, unreviewed ones — go up beside it as a separate, short-lived
+# artifact, because a finding is a DELIVERABLE and discarding its exact bytes with the runner would
+# lose the one verdict class the requirements call one. The upload steps at the end of the job set
+# out in full what each artifact is, and what review neither of them has had.
+#
+# ## One job, and why exactly one
+#
+# The project's action plan authorises a single added job for this suite and requires that every
+# other gate the repository already defines — build, unit tests, integration tests, clippy and
+# rustfmt over the whole crate — keep its own single definition and stay byte-identical. A second
+# job restating a subset of those gates would be a second answer to the same question, so there
+# is not one. The suite's two file-scoped static checks live here as STEPS of this job rather than
+# as a job of their own: nothing is dropped, and nothing is duplicated at job level.
+#
+# The job is purely additive: it depends on no other job and no other job depends on it.
+#
+# ## The Cargo precondition, and how this job handles it in one place
+#
+# `tests/conformance/README.md` §"The Cargo integration precondition" is explicit that every Cargo
+# command this suite is measured by presupposes the repository's own manifest, its `bcc` binary
+# target and its `src/**` tree — auto-discovery is what makes `cargo test --test conformance` work
+# without a manifest *change*, but auto-discovery still needs a manifest to be discovered from. The
+# suite must never add one: C1 makes `Cargo.toml` read-only, and creating one here would satisfy a
+# gate by violating the constraint the gate exists to protect.
+#
+# So the steps are ordered by what they need, and the precondition is asserted exactly once, in the
+# middle:
+#
+# - The three suite-scoped static gates — `rustfmt --check` over the driver and every harness
+#   module, a `rustc --test` type-check of the whole suite with warnings denied, and a `rustdoc`
+#   check that every doc link names an item that exists — need no manifest and therefore run
+#   first, on any checkout.
+# - The prerequisite step then establishes the manifest and the `bcc` binary target and FAILS the
+#   job when either is missing. An absent package is a failed prerequisite, never a skip, a warning
+#   or a fallback: this job exists to judge `bcc`, and a run that completed without judging it must
+#   not report success, because a green check that established nothing about the compiler is worse
+#   than a red one that says why.
+# - Everything after it — the pre-flight and the matrix — is Cargo-dependent and is reached only
+#   once the package is there.
+#
+# ## What this file is, and how it is written to be merged
+#
+# The action plan describes this path as an edit to the repository's existing workflow, adding one
+# job beside the build, unit, integration, lint, format and cross-architecture jobs and reusing
+# their action pins. This branch carries the project documentation and this suite; the compiler
+# crate, its manifest, its `src/**` tree and its existing continuous-integration definition live on
+# the project's open pull request, so there is no such workflow here to edit and this is a new file
+# rather than an edit to one.
+#
+# It is written so that merging it is purely additive: it declares exactly one job, restates no gate
+# another workflow owns, and pins every action by digest, so nothing about the jobs already present
+# changes. On a package-complete tree this single job belongs inside that workflow, adopting its pins
+# wherever they differ from the digests below.
+name: CI
+
+# WHY THERE IS NO `pull_request` TRIGGER, WHICH IS A DELIBERATE OMISSION RATHER THAN A GAP.
+# This workflow does not merely build the suite: it COMPILES AND EXECUTES the corpus. The suite's
+# own hermeticity is redirection of cooperating tools, not confinement — its regeneration script
+# says so in as many words, and a variable is only honoured by a program that reads it — so
+# nothing here stops a test program writing where it likes on the runner. Running the matrix over
+# a revision an unreviewed pull request controls would therefore execute contributor-authored C
+# and contributor-authored Rust directly on the runner, which is the one thing the suite's
+# documented limitations require an external sandbox for.
+#
+# So the executable work runs only from revisions that are already reviewed and merged, plus
+# manual dispatch by someone with write access. To exercise this matrix over a proposed change,
+# review it first and dispatch this workflow against the merge result, or run it inside a real
+# container or virtual machine that does provide the boundary the suite does not.
+on:
+  push:
+    branches: [ main ]
+  # Manual dispatch, and it takes no inputs. It exists so that this matrix can be exercised on
+  # demand — against a revision that has already been reviewed, per the paragraph above — rather
+  # than only when something lands on the default branch. There is nothing left to opt into: both
+  # artifacts this job publishes are published on every run, so the two upload steps at the end of
+  # the conformance job need nothing from whoever dispatched it.
+  #
+  # An input gating the finding directories was worse than redundant, which is why none is declared
+  # here. `inputs` is EMPTY on `push`, and `push` is the only automatic trigger this workflow has,
+  # so such a condition evaluates to null on every ordinary run — discarding with the runner exactly
+  # the evidence requirement 6 calls a deliverable, on precisely the runs nobody is watching.
+  workflow_dispatch:
+
+# Least privilege, declared rather than inherited. Every step below reads the checkout, compiles
+# it and uploads an artifact; none writes to the repository, opens an issue or publishes a
+# package, so read access to contents is the whole requirement. Stating it here also fixes the
+# scope against the repository or organisation default, which is what an undeclared permission
+# set silently follows.
+permissions:
+  contents: read
+
+# One run of this workflow per line of development, and never two at once.
+#
+# The job below compiles and executes 1,296 cells against four cross toolchains and three
+# emulators, and is allowed half an hour to do it. Without a concurrency group, three pushes
+# to the same branch in quick succession start three of those runs and all three finish, even
+# though the first two describe trees nobody will merge — paying full price for a verdict on
+# a commit that has already been superseded.
+#
+# The group key is exactly the workflow name plus the git ref. This workflow has only two
+# triggers: a push to `main`, which resolves to `CI-refs/heads/main`, and a manual dispatch,
+# which resolves to the branch or tag selected by the operator. Runs for the same selected ref
+# share a group and the newer one cancels the older one; runs for different refs never cancel
+# each other. There is no pull-request key or fallback because this workflow deliberately has
+# no `pull_request` trigger, as the execution-boundary explanation above records.
+#
+# Cancellation is safe here specifically because this suite is a FULL sweep rather than an
+# incremental one: every run compares the same 108 programs over the same matrix, so the run
+# that supersedes another re-establishes everything the cancelled run was in the middle of
+# establishing. A cancelled run is also reported as cancelled and never as passed, so it cannot
+# stand in for a verdict the tip of the branch has not actually earned.
+#
+# Deliberately absent: any cap on the test harness's own parallelism. The suite's fourteen area
+# tests are independent and the built-in harness sizes its worker pool to the machine it finds;
+# pinning that to a fixed number here would trade a real speed-up for no bound worth having,
+# since the resource this group exists to protect is the RUNNER COUNT, not the core count
+# inside one runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Judge bcc's observable program behaviour — stdout bytes and exit status, nothing else —
+  # against three independent oracles: (a) an external reference C compiler at the same target
+  # and optimization level, (b) bcc's own other backends against the x86-64 baseline, and
+  # (c) the stdout committed in each program's own `.expected` record. The matrix is the corpus
+  # under tests/conformance/ at -O0, -O1 and -O2 on all four supported targets.
+  differential-conformance:
+    name: Differential conformance suite
+    # A FIXED image label, not `ubuntu-latest`. `ubuntu-latest` moves between releases on
+    # GitHub's own schedule, and the release is what decides which compiler stands behind every
+    # package name below — most consequentially the language mode a reference driver compiles by
+    # default, which no flag in this suite can correct because no `-std` flag is ever passed. A
+    # moving image would therefore silently change the dialect the corpus is judged against. The
+    # package set installed below is the one that matches THIS image.
+    runs-on: ubuntu-24.04
+    # The matrix takes a few minutes. The bound is deliberately generous so that a slow runner
+    # reports a slow run rather than a spurious failure.
+    timeout-minutes: 30
+    env:
+      # Strict mode is what makes "everything other than a recorded divergence must pass" true
+      # here: every UNAVAILABLE oracle arm becomes a failure, because in continuous integration
+      # the toolchain is installed deliberately and a missing arm means a broken workflow rather
+      # than a modest machine. It is set for the whole job so that the pre-flight step below
+      # fails fast on a gap instead of merely reporting it.
+      BCC_CONFORMANCE_STRICT: "1"
+      # The four reference drivers, pinned by name in the job itself rather than left to the
+      # harness's unversioned probe order. The probe order cannot know which major version a
+      # distribution has put behind `gcc`, and the suite passes no standard-selection flag — the
+      # compiler under test has none to match — so the driver's own DEFAULT language mode is the
+      # language every oracle (a) comparison is judged against. These four are the gnu17 drivers
+      # on the pinned image; the step after the install proves it rather than assuming it.
+      BCC_REF_CC: gcc-13
+      BCC_REF_CC_I686: i686-linux-gnu-gcc-13
+      BCC_REF_CC_AARCH64: aarch64-linux-gnu-gcc-13
+      BCC_REF_CC_RISCV64: riscv64-linux-gnu-gcc-13
+    steps:
+      # The checkout credential is not persisted: no later step pushes, tags or otherwise talks
+      # back to the repository, so leaving a usable token in `.git/config` for the rest of the
+      # job would grant reach nothing here needs — and this job compiles and executes
+      # repository-controlled C and Rust.
+      - name: Check out the repository
+        # Pinned by digest, not by tag: a tag is mutable, so `@v4` is a promise the action's owner
+        # can rewrite under this workflow without any change to this file.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Pinned to the exact supported version rather than to a channel, and installed by invoking
+      # rustup directly rather than through a toolchain action. A channel such as `stable` moves
+      # without any change to this file, which makes a green run unreproducible and a red one hard
+      # to attribute; the repository builds against 1.93.1, so this installs that. Calling rustup
+      # itself also removes a third-party action from the trust surface of a job that already has
+      # rustup available to it. `rustfmt` and `clippy` are requested explicitly because the minimal
+      # profile does not carry them, and the formatting gate below invokes `rustfmt` directly.
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.93.1 --profile minimal --no-self-update --component rustfmt,clippy
+          rustup default 1.93.1
+          rustc --version
+          cargo --version
+          rustfmt --version
+
+      # The three suite-scoped static gates, placed here because they need NO manifest and can
+      # therefore be established before the package prerequisite below is asserted. All three
+      # commands are the ones tests/conformance/README.md documents for a manifest-less checkout,
+      # copied exactly — including the `CARGO_MANIFEST_DIR` the direct `rustc` and `rustdoc`
+      # invocations need, because `conformance_harness/mod.rs` resolves the package root through
+      # `env!` at compile time and the shorter form fails in a way that looks like the suite is
+      # broken when it is not.
+      #
+      # These are steps of this job rather than a job of their own, and they are scoped to this
+      # suite's own files rather than to the crate: the repository's own format and lint jobs keep
+      # their single definition over the whole crate, and this workflow adds no second one. They
+      # are not a substitute for the matrix and are not presented as one — they establish only that
+      # every file of the suite parses, type-checks with warnings denied, is correctly formatted,
+      # and documents itself in terms of items that exist, which is exactly the subset that does
+      # not depend on packaging.
+      - name: Check the formatting of the suite
+        run: rustfmt --edition 2021 --check tests/conformance.rs tests/conformance_harness/*.rs
+
+      - name: Type-check the whole suite with warnings denied
+        run: |
+          mkdir -p target/conformance-typecheck
+          CARGO_MANIFEST_DIR="$(pwd)" rustc --edition 2021 --test --emit=metadata \
+            -D warnings --out-dir target/conformance-typecheck tests/conformance.rs
+
+      # The third manifest-less gate, and the only one that can catch a doc comment naming an item
+      # that does not exist. No other gate in this workflow can: `broken_intra_doc_links` is a
+      # rustdoc lint rather than a rustc or clippy one, and `cargo doc` does not document
+      # integration-test targets at all, so the suite's own doc comments are invisible to
+      # `rustfmt`, to the `rustc` step above, and to the repository's clippy job alike. A link
+      # naming something that is not there therefore parses, type-checks, lints and formats
+      # cleanly while telling a reader to reach for a method the type does not have.
+      #
+      # `-D warnings` is deliberately NOT how this is gated. A doc build of an integration test
+      # cannot resolve every link a reader should still be given: a link to a `#[test]` function is
+      # unresolvable by construction, because `#[test]` items do not exist outside a `--test`
+      # build, and a cross-module short path resolves only in the module that imports the item.
+      # Denying every warning would therefore fail on links that are correct. What is gated is the
+      # DIFFERENCE against the inventory below, in both directions: an unresolved target that is
+      # not inventoried, and an inventoried name that now resolves. The first is the defect — a
+      # link naming an item that exists nowhere; the second is a stale inventory line. Both are
+      # one-line edits, and the diff printed by the step says which one it is.
+      #
+      # `--document-private-items` is required, not cosmetic: the harness is a private module tree,
+      # so without it most of these items are undocumented and the report is about visibility
+      # rather than about correctness. Output goes into the directory the step above already owns,
+      # so no new artifact root is introduced.
+      - name: Check every doc link in the suite names an item that exists
+        run: |
+          set -euo pipefail
+          mkdir -p target/conformance-typecheck/doc
+          CARGO_MANIFEST_DIR="$(pwd)" rustdoc --edition 2021 --crate-type lib \
+            --crate-name conformance --document-private-items \
+            -o target/conformance-typecheck/doc tests/conformance.rs 2>&1 \
+            | tee target/conformance-typecheck/rustdoc.log
+          sed -n "s/^warning: unresolved link to \`\(.*\)\`\$/\1/p" \
+            target/conformance-typecheck/rustdoc.log \
+            | sort -u > target/conformance-typecheck/doclinks-observed.txt
+          # Every name here is a link whose target EXISTS and was verified to exist; only the doc
+          # build cannot reach it. Two are `#[test]` functions in tests/conformance.rs, which no
+          # doc build can see. The other eleven are items defined in one harness module and named
+          # from the doc comment of another, which is a short path rather than a wrong name.
+          printf '%s\n' \
+            'CompileOutcome::provenance' \
+            'Finding::new' \
+            'MAX_CONTRACT_EXIT_CODE' \
+            'MarkerAuthority' \
+            'MarkerAuthority::permits' \
+            'Provenance' \
+            'UB_AUDIT_SOURCE_SUPPRESSIONS_SANCTIONED' \
+            'findings_root' \
+            'infra_expected_divergence_register' \
+            'infra_oracle_capability_report' \
+            'measure_tree' \
+            'posix_quote' \
+            'remove_entry' \
+            | sort -u > target/conformance-typecheck/doclinks-inventoried.txt
+          if diff -u target/conformance-typecheck/doclinks-inventoried.txt \
+                    target/conformance-typecheck/doclinks-observed.txt; then
+            echo "::notice::Doc links: every link in the suite resolves except the $(wc -l < target/conformance-typecheck/doclinks-inventoried.txt) inventoried in this step, each of which names an item that exists and is unreachable only from a doc build."
+            exit 0
+          fi
+          echo "::error::The suite doc links no longer match the inventory in this step. A leading + above is a link rustdoc could not resolve and this step did not expect: if the item exists somewhere in the suite the link is only a short path and the name belongs in the inventory, and if it exists nowhere the doc comment is wrong and is the defect this gate exists to catch. A leading - is an inventoried name that now resolves, so that line must be deleted. Both are test-only edits. Reproduce with the rustdoc command in this step."
+          exit 1
+
+      # Everything installed here serves the test oracles and nothing else. bcc invokes no
+      # external assembler, linker or compiler of its own: it preprocesses, analyses, generates
+      # code and links inside a single process, so none of these binaries takes any part in its
+      # compilation pipeline.
+      #
+      # Every name is EXPLICIT and VERSIONED where a version decides behaviour:
+      #
+      #   * `gcc-13` and the three `gcc-13-*-linux-gnu` cross drivers, never the unversioned
+      #     names. The unversioned driver is whichever major version the release made default,
+      #     and a later default mode (gnu23) changes the meaning of constructs this corpus
+      #     contains — a UTF-8 literal's type, and whether `bool`, `true` and `false` are
+      #     keywords. The harness refuses such a driver rather than judging the corpus with it,
+      #     which would cost oracle (a) on every arm.
+      #   * The three cross drivers are the only way to reach oracle (a)'s i686, AArch64 and
+      #     RISC-V 64 arms, because the reference compiler has no target-selection flag and
+      #     `-m32` is unusable where the multilib start files are absent.
+      #   * `libc6-dev-i386-cross`, NOT `libc6-dev-i386`. The `-cross` package installs
+      #     /usr/i686-linux-gnu/lib/{libc.a,crt1.o,crti.o,crtn.o}, which is what
+      #     `i686-linux-gnu-gcc-13 -static` actually resolves; `libc6-dev-i386` installs the
+      #     /usr/lib32 multilib set that only `gcc -m32` uses, so it would leave every i686 cell
+      #     failing at the link step.
+      #   * The emulator package name differs by release and is resolved by ASKING apt rather
+      #     than assumed: on releases where `qemu-user-static` is merely a virtual name with no
+      #     candidate, installing it resolves to a binfmt package that ships no
+      #     `qemu-<arch>-static` binaries at all, and the emulators come from `qemu-user`
+      #     instead. The harness accepts either spelling, so either package works once the right
+      #     one is installed.
+      #   * `--no-install-recommends`, because a Recommends is not a guarantee: the i686 static C
+      #     runtime is only *recommended* by its cross driver, and every runtime this suite needs
+      #     is named here outright instead.
+      #
+      # tests/conformance/README.md, under "Reference compilers, emulators and cross C runtimes",
+      # is the authoritative per-release package matrix and records why each of the three obvious
+      # alternatives installs cleanly while failing to deliver what the suite needs.
+      - name: Install the reference compilers, emulators and cross C runtimes for the oracles
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # Matched with the shell's own pattern test rather than through a pipe into `grep -q`:
+          # `grep -q` exits at its first match, and under `pipefail` the SIGPIPE it delivers to
+          # the writer would surface as the pipeline's status, so a match could be read as "no
+          # match". No text test in this workflow pipes into an early-exiting reader for that
+          # reason — this one uses `case`, and the two in the next step use a here-string.
+          policy=$(apt-cache policy qemu-user-static 2>/dev/null || true)
+          case $policy in
+          *'Candidate: (none)'*) emulator_package=qemu-user ;;
+          *) emulator_package=qemu-user-static ;;
+          esac
+          echo "emulator package for this release: $emulator_package"
+          sudo apt-get install -y --no-install-recommends \
+            gcc-13 \
+            gcc-13-i686-linux-gnu \
+            gcc-13-aarch64-linux-gnu \
+            gcc-13-riscv64-linux-gnu \
+            "$emulator_package" \
+            libc6-dev \
+            libc6-dev-i386-cross \
+            libc6-dev-arm64-cross \
+            libc6-dev-riscv64-cross
+
+      # Verified, not assumed — the discipline requirement 3 sets for flags, applied to the
+      # oracles themselves. A package name that installs proves only that something was
+      # installed: it does not prove which language the driver behind it compiles, and that is
+      # the property every oracle (a) verdict depends on. So each pinned driver is asked, exactly
+      # as tests/conformance_harness/env.rs asks it during discovery — `-dM -E -x c -` on empty
+      # input — and is required to predefine `__STDC_VERSION__` in the C11..C17 range with
+      # `__STRICT_ANSI__` absent, because the corpus is C11 material that also exercises GNU
+      # extensions. Each emulator is required to resolve under one of its two spellings.
+      #
+      # This fails the job before the matrix runs rather than after, and it fails loudly: under
+      # strict mode a refused driver would cost oracle (a) an entire arm, and a job that
+      # discovered that from a verdict table would be reporting a toolchain defect as a
+      # conformance result.
+      - name: Verify the oracle toolchain is the one the corpus is judged against
+        run: |
+          set -euo pipefail
+          status=0
+          for pin in \
+            "x86_64-linux-gnu:BCC_REF_CC:$BCC_REF_CC" \
+            "i686-linux-gnu:BCC_REF_CC_I686:$BCC_REF_CC_I686" \
+            "aarch64-linux-gnu:BCC_REF_CC_AARCH64:$BCC_REF_CC_AARCH64" \
+            "riscv64-linux-gnu:BCC_REF_CC_RISCV64:$BCC_REF_CC_RISCV64"
+          do
+            target=${pin%%:*}
+            rest=${pin#*:}
+            variable=${rest%%:*}
+            driver=${rest#*:}
+            if ! command -v "$driver" > /dev/null 2>&1; then
+              echo "::error::$variable names $driver, which is not an executable on PATH"
+              status=1
+              continue
+            fi
+            dump=$("$driver" -dM -E -x c - < /dev/null 2> /dev/null || true)
+            version=$(sed -n 's/^#define __STDC_VERSION__ \([0-9][0-9]*\)L\{0,1\}$/\1/p' <<< "$dump")
+            if [ -z "$version" ]; then
+              echo "::error::$driver ($target) stated no readable __STDC_VERSION__, so the language it compiles by default is unproven"
+              status=1
+              continue
+            fi
+            if [ "$version" -lt 201112 ] || [ "$version" -gt 201710 ]; then
+              echo "::error::$driver ($target) compiles __STDC_VERSION__ ${version}L by default; the corpus is C11/C17 material and no -std flag is ever passed, so this driver would judge a different language"
+              status=1
+              continue
+            fi
+            if grep -q '^#define __STRICT_ANSI__ ' <<< "$dump"; then
+              echo "::error::$driver ($target) predefines __STRICT_ANSI__, so its default mode rejects the GNU extensions this corpus exercises"
+              status=1
+              continue
+            fi
+            # Captured in full FIRST, then reduced to its first line by a reader that consumes all
+            # of its input, fed from a here-string rather than from a pipe. `--version | head -n 1`
+            # has `head` close the pipe after one line, which delivers SIGPIPE to the driver, and
+            # under `pipefail` that becomes the pipeline's status — so a driver which reported its
+            # version perfectly well could fail this step. `sed -n 1p` reads to end of input and
+            # never closes early, and a here-string is not a pipeline at all, so neither half of
+            # that failure mode exists here. Same rule as the previous step's `case` and this
+            # step's other two here-strings, which is why nothing in this workflow pipes into an
+            # early-exiting reader.
+            banner=$("$driver" --version 2> /dev/null || true)
+            banner=$(sed -n '1p' <<< "$banner")
+            echo "$target: $driver — $banner — __STDC_VERSION__ ${version}L, GNU extensions enabled"
+          done
+          for runner in qemu-i386 qemu-aarch64 qemu-riscv64; do
+            if command -v "$runner" > /dev/null 2>&1; then
+              echo "runner: $runner ($(command -v "$runner"))"
+            elif command -v "${runner}-static" > /dev/null 2>&1; then
+              echo "runner: ${runner}-static ($(command -v "${runner}-static"))"
+            else
+              echo "::error::neither $runner nor ${runner}-static is on PATH, so that target cannot execute for oracle (b)"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      # THE PREREQUISITE THIS JOB'S VERDICT RESTS ON. Every command below judges `bcc`, and every
+      # one of them presupposes the compiler's own Cargo package. Three conditions, because each
+      # failure is a different situation and all three are fatal to `cargo test --test conformance`:
+      # a manifest must exist, `cargo metadata` must be able to read it, and it must declare the
+      # `bcc` binary target the suite resolves through `CARGO_BIN_EXE_bcc`.
+      #
+      # An absent package FAILS this job. It is a failed prerequisite and not a skip, a warning or a
+      # fallback, and the reasoning is worth stating because the opposite shape is the tempting one:
+      # this job exists to establish something about the compiler, so a run that finished without
+      # establishing it must not report success. A green check that judged nothing is worse than a
+      # red one that says why, because the green one is what a reader trusts.
+      #
+      # The three manifest-less static gates ran BEFORE this step precisely so that they are
+      # established on any checkout and are unaffected by a failure here — which is why nothing is
+      # lost by refusing any fallback at this point. There is deliberately no `if:` guard and no
+      # alternative path below: either shape would let this job finish green while the matrix never
+      # ran, which is the one outcome this step exists to prevent.
+      #
+      # The suite adds no manifest and must never add one (C1 makes `Cargo.toml` read-only), so the
+      # remedy is never a change to this workflow or to the suite: it is to run this job on a
+      # checkout where the suite and the compiler tree are on one branch. See "The Cargo integration
+      # precondition" in tests/conformance/README.md.
+      - name: Require the compiler's Cargo package, which every check below depends on
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/cargo-metadata.json"
+          errors="$RUNNER_TEMP/cargo-metadata.err"
+          reason=""
+          if [ ! -f Cargo.toml ]; then
+            reason="there is no Cargo.toml at the repository root"
+          elif ! cargo metadata --no-deps --format-version 1 > "$metadata" 2> "$errors"; then
+            reason="cargo metadata could not read the manifest: $(head -n 1 "$errors")"
+          elif ! python3 -c 'import json, sys; metadata = json.load(open(sys.argv[1])); sys.exit(0 if any(target["name"] == "bcc" and "bin" in target["kind"] for package in metadata["packages"] for target in package["targets"]) else 1)' "$metadata"; then
+            reason="the manifest declares no bcc binary target"
+          fi
+          if [ -n "$reason" ]; then
+            echo "::error::The differential conformance suite cannot judge bcc in this checkout: $reason. cargo test --test conformance requires the compiler's Cargo package (a Cargo.toml declaring the bcc binary target, plus the src/** tree it builds from), which this suite deliberately does not supply and must never add. This is a failed prerequisite, not a skip: run this job on a checkout carrying the suite and the compiler tree together. See 'The Cargo integration precondition' in tests/conformance/README.md."
+            {
+              echo "### Differential conformance suite — PREREQUISITE NOT MET"
+              echo
+              echo "This checkout does not carry the compiler's Cargo package: $reason."
+              echo
+              echo "\`cargo test --test conformance\` presupposes a \`Cargo.toml\` declaring the \`bcc\`"
+              echo "binary target and the \`src/**\` tree it builds from. The suite adds no manifest and"
+              echo "must never add one, so **no oracle comparison was performed and nothing was"
+              echo "established about \`bcc\`** — which is why this job failed rather than passing."
+              echo
+              echo "The manifest-less subset — \`rustfmt --check\` on the driver and every harness"
+              echo "module, and a \`rustc --test\` type-check of the whole suite with warnings denied —"
+              echo "ran in the steps **before** this one and is therefore already established for this"
+              echo "checkout, unaffected by this failure."
+              echo
+              echo "See **The Cargo integration precondition** in \`tests/conformance/README.md\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "the Cargo package is present; the conformance suite will run"
+          {
+            echo "### Differential conformance suite"
+            echo
+            echo "The compiler's Cargo package is present in this checkout, so the suite was executed:"
+            echo "the oracle pre-flight followed by the full matrix, in strict mode."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # This step is the intended pre-flight. It prints the discovered oracle inventory and
+      # states exactly which arms of which oracles will run, so a misconfigured environment is
+      # diagnosed in seconds rather than after the whole matrix has executed against a silently
+      # reduced oracle set.
+      #
+      # No `if:` condition, here or below. The prerequisite step above fails the job when the
+      # package is absent, so reaching this step already means the package is there — and a
+      # condition would reintroduce the very path that let this job finish without running the
+      # matrix.
+      - name: Pre-flight the oracle inventory
+        run: cargo test --test conformance infra_oracle_capability_report -- --nocapture
+
+      # Each area accumulates every verdict before it asserts, so --nocapture puts the complete
+      # per-area verdict table and the deliverable summary in the job log without anyone having
+      # to download the artifact first.
+      - name: Run the differential conformance suite
+        run: cargo test --test conformance -- --nocapture
+
+      # `if: always()` is load-bearing rather than defensive. A failing run is precisely when
+      # these artifacts matter, and the harness writes the per-area reports and the run summary
+      # before an area test asserts, so a complete report exists even then; without this the
+      # evidence would be discarded exactly when it is needed.
+      #
+      # ## Both trees are published, and they are published differently
+      #
+      # Every free-text value that reaches a report row passes through the harness's secret
+      # redaction, root elision and report-safe rendering at the single point an outcome comes into
+      # existence. That guarantee is BOUNDED rather than absolute, and the bound is stated here
+      # because a workflow that published on the strength of an absolute claim would be publishing
+      # on a claim the harness itself does not make: `conformance_harness/mod.rs` documents, beside
+      # `BARE_REDACTION_MIN_CHARS` and `is_path_value`, exactly what the redactor leaves in place —
+      # a credential-bearing value shorter than the floor and appearing *bare*, without its variable
+      # name beside it, and a value recognised as an absolute filesystem path. It calls that a
+      # residual risk rather than an absence, and so does this workflow. What the report therefore
+      # is, precisely: sanitized by construction against the named forms, with a narrow residual
+      # class the module enumerates, which is why the step below states the bound in the run log
+      # where the artifact is produced.
+      #
+      # The durable evidence documents under `evidence/` are covered by the same three
+      # transformations, applied to the whole assembled document — which is what it takes, because the
+      # capture bodies they archive are verbatim workspace records naming this machine's roots in
+      # their own command lines.
+      #
+      # A generated finding directory is deliberately the opposite — it describes the machine that
+      # produced it as freely as it likes, because that is what makes it re-runnable there — and its
+      # own manifest says so, recording `disclosure_review = not-performed`.
+      #
+      # Both trees are nevertheless published on every run, and where `tests/conformance/FINDINGS.md`
+      # §5.3 actually applies is what makes the second one publishable. That section is titled
+      # "mandatory before committing", and what it governs is the promotion of a transient directory
+      # into `tests/conformance/findings/`: a commit is public, durable and cannot be undone, which is
+      # why a person must read every byte first. It does not govern the path from a run to its own
+      # evidence. A build artifact is neither committed nor durable — this one expires after a day —
+      # and its manifest still records `disclosure_review = not-performed`, so nothing here performs
+      # that review or stands in for it. Withholding the artifact would not enforce §5.3; it would
+      # destroy the evidence with the runner and leave the review nothing to be performed on.
+      #
+      # ## Why a finding nevertheless always reaches this artifact
+      #
+      # Naming a finding is not delivering one, and everything about this job's defaults conspires to
+      # name without delivering. A FINDING does not fail the run — requirement 6 makes it a deliverable
+      # rather than a defect — so a run carrying findings PASSES; the harness keeps that cell's
+      # workspace instead of publishing an evidence document for it; and `target/conformance-findings/`
+      # is not what the step below uploads. On its own, that combination would leave the report naming
+      # an identifier and a directory, this job finishing green, and the runner being destroyed with
+      # the reproducer, the expectation record, the exact commands, both sides' captures, the
+      # environment fingerprint and the computed diff inside it — the one verdict class the
+      # requirements call a deliverable would be the one class this job could lose.
+      #
+      # So the harness publishes a REVIEW COPY of every finding inside the report root —
+      # `conformance-report/findings/<finding-id>/`, all seven artifact classes plus a `BUNDLE.txt`
+      # that states what the copy is — and the unconditional upload below carries it. The two copies
+      # stay different things and neither replaces the other: the review copy is rendered to exactly
+      # the grade this artifact claims for itself (redacted, sanitized, bounded, and a capture that is
+      # not text described rather than transcribed), while the generated directory keeps the exact
+      # bytes and the runnable commands that `sh commands.sh` needs. Neither copy performs the §5.3
+      # review or stands in for it: both manifests record
+      # `disclosure_review = not-performed`, and only a person promoting a finding into
+      # `tests/conformance/findings/` can change that.
+      #
+      # So both go up on every run, without anyone asking: the report — which names every finding,
+      # its identifier and its directory, carries a review copy of each, and gives a sanitized
+      # account of each divergence — and, beside it, the byte-exact directories under the
+      # deliberately uninviting `conformance-findings-raw` name, announced by a `::warning::` that
+      # says what they are and expiring after a day.
+      #
+      # Evidence integrity is a separate, enforced gate rather than part of that prose-redaction
+      # claim. Before a captured stream can enter `conformance-report/evidence/`, the harness pins
+      # the cell workspace, opens the entry through that directory handle, verifies a plain regular
+      # file with exactly one hard link, and re-checks the workspace identity. Any refusal latches an
+      # infrastructure breach, and the area assertion fails the run. The always-upload policy may
+      # therefore publish a partial failing report for diagnosis, but it never turns an unverified
+      # symlink/hard-link/name substitution into ordinary report evidence.
+      - name: State the report's disclosure bound before publishing it
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "::notice::Every archived capture in conformance-report/evidence passed the harness's pinned-workspace, verified-regular-file, single-hard-link and parent-identity checks. Any integrity refusal is an infrastructure breach that fails the area rather than evidence that this upload step accepts."
+          echo "::notice::The conformance-report artifact is redacted by the harness at the point each outcome is created — secret redaction, root elision and report-safe rendering — but that guarantee is bounded, not absolute: conformance_harness/mod.rs documents that a bare credential shorter than its redaction floor, and a value recognised as an absolute filesystem path, are left in the text. Treat the report as sanitized against the named forms with a narrow residual class, and inspect it before republishing it outside this repository."
+          copies=0
+          if [ -d target/conformance-report/findings ]; then
+            copies=$(find target/conformance-report/findings -mindepth 1 -maxdepth 1 -type d | wc -l)
+          fi
+          echo "::notice::This artifact carries a review copy of ${copies} finding(s) under conformance-report/findings/, each holding all seven artifact classes — reproducer, expectation record, manifest, commands, captures, environment fingerprint and diff — plus a BUNDLE.txt stating that the copy is report-grade rather than the byte-exact evidence. A finding does not fail this job, so without these copies a green run would have named findings whose evidence went with the runner. The exact bytes and the runnable commands stay in target/conformance-findings/, published beside this artifact as conformance-findings-raw on every run — UNREVIEWED, unminimized, expiring after one day, and still recording disclosure_review = not-performed, because tests/conformance/FINDINGS.md §5.3 requires a person to read all of it before any of it is committed; the run summary's own accounting states how many copies were published and names any that were refused."
+
+      #
+      # Three measures keep that distinction honest rather than merely stated, and all three are
+      # below: the audit step reports how many generated directories exist and what each one's
+      # manifest says about its own review, and raises a `::warning::` naming the artifact as
+      # unreviewed and unminimized; the artifact is named `conformance-findings-raw` so nothing
+      # about it reads as curated; and its retention is one day, because it is evidence published
+      # for an investigation rather than a durable publication.
+      - name: Upload the conformance reports
+        if: always()
+        # Pinned by digest for the same reason as the checkout above.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: conformance-report
+          # A run that fails before any report is written must warn, not turn a missing
+          # directory into a second, misleading failure on top of the real one — including a run
+          # that failed on the package prerequisite above, where no report exists at all and that
+          # step has already said why.
+          if-no-files-found: warn
+          path: target/conformance-report/**
+
+      # The disclosure gate, made visible rather than assumed. It states how many generated
+      # finding directories exist and what each one's manifest says about its own review, so
+      # whoever downloads the artifact knows exactly what they have — and so a directory that
+      # somehow claimed to have been reviewed by a run is caught here instead of being believed.
+      #
+      # Its condition is the report upload's condition, deliberately: the audit must run on exactly
+      # the runs whose findings are published, and `always()` covers the run that failed, which is
+      # the run that produced findings in the first place.
+      - name: Audit the generated findings before releasing them
+        if: always()
+        run: |
+          set -euo pipefail
+          root=target/conformance-findings
+          if [ ! -d "$root" ]; then
+            echo "no generated finding directories in this run; nothing to release"
+            exit 0
+          fi
+          count=0
+          for manifest in "$root"/*/MANIFEST.txt; do
+            [ -e "$manifest" ] || continue
+            count=$((count + 1))
+            # Both curation attestations, because they answer different questions about what is
+            # being downloaded: disclosure_review says whether anything in it was vetted for
+            # publication, and minimization says whether the reproducer is a reduced case or a
+            # verbatim copy of the corpus program. A run writes `not-performed` for both, and the
+            # curated audit refuses both, so seeing either state anything else here means a
+            # directory beneath the generated root is claiming a judgement no run can make.
+            printf '%s:\n' "$(dirname "$manifest")"
+            printf '  %s\n' \
+              "$(grep -m1 '^disclosure_review' "$manifest" || echo 'disclosure_review = <ABSENT>')" \
+              "$(grep -m1 '^minimization' "$manifest" || echo 'minimization = <ABSENT>')"
+          done
+          # The annotation exists to flag UNREVIEWED evidence, so it is raised only when there is
+          # some. A run that found nothing is the ordinary and desired outcome, and the roots are
+          # created on every run whether or not anything is written beneath them, so warning at a
+          # count of zero would put a standing annotation on every green run — which is how a
+          # warning that means something becomes one nobody reads.
+          if [ "$count" -eq 0 ]; then
+            echo "no generated finding directories in this run; nothing to release"
+            exit 0
+          fi
+          echo "::warning::Releasing $count raw generated finding directory(ies) as the conformance-findings-raw artifact. Every one of them is UNREVIEWED and UNMINIMIZED evidence: each retains captured diagnostics, exact commands and absolute tool paths, and each reproducer is a verbatim copy of a corpus program rather than a reduced case. Perform the tests/conformance/FINDINGS.md §5.3 disclosure review on what you download before sharing it further, and the §5.1 minimization step before treating any of it as a filed finding."
+
+      - name: Upload the raw generated finding directories (UNREVIEWED evidence)
+        if: always()
+        # Pinned by digest for the same reason as the checkout above.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: conformance-findings-raw
+          # `ignore`, where the report above uses `warn`, and the asymmetry is the point. A missing
+          # report means a run that executed the matrix failed to record it, which is worth an
+          # annotation. An empty finding tree means the matrix found nothing to report, which is the
+          # outcome the suite exists to produce — and since the three roots are created on every run,
+          # `warn` here would annotate every green run with a notice about absent evidence that was
+          # never expected to exist. The audit step above states the count either way, so nothing is
+          # hidden by declining to raise it as a warning.
+          if-no-files-found: ignore
+          # Short-lived deliberately: this is unreviewed evidence released for a specific
+          # investigation, not a durable publication. The curated, reviewed finding set lives in
+          # the repository under tests/conformance/findings/ and is a committed deliverable that
+          # needs no artifact at all. One day is enough to open a red run and read its evidence,
+          # and short enough that unreviewed material does not accumulate.
+          retention-days: 1
+          path: target/conformance-findings/**

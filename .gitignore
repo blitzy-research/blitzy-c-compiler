@@ -1,0 +1,41 @@
+# Rust / Cargo build output
+/target
+
+# Differential conformance suite — transient run artifacts (never committed).
+# Per-cell workspaces, per-area reports, the run summary, and auto-generated
+# finding directories are all written beneath the build directory on every run.
+# The curated finding set under tests/conformance/findings/ is deliberately
+# NOT ignored — it is a committed deliverable.
+/target/conformance-work/
+/target/conformance-report/
+/target/conformance-findings/
+
+# Differential conformance suite — transient artifacts of the golden-record
+# regeneration tool, which are the only ones written INSIDE the corpus rather
+# than beneath the build directory.
+#
+# The lock directory is created before a regeneration run and removed by the
+# script's exit trap. It survives only a kill -9 or a power loss, and the script
+# reclaims a stale one on the next run and says so — but while it is there it
+# must not dirty `git status`, and it must never be committable.
+tests/conformance/.regen-lock/
+# A STALE lock is reclaimed by renaming it into an unpredictably named quarantine
+# directory beside it and then discarding both, because a single rename is the only
+# operation two contending runs cannot both win. That directory exists for the
+# moment between the rename and the removal, and is ignored for the same reason the
+# lock is: an interrupted run must not leave something a later `git add` could pick
+# up, and it must never dirty `git status` while it is there.
+tests/conformance/.regen-lock-stale.*/
+# A rewrite is staged beside the record it will replace and installed by a single
+# rename, so staging state exists only for the moment between building it and
+# installing it. Ignored for the same reason as the lock: an interrupted run must
+# not leave something a later `git add` could pick up.
+#
+# The script stages into an unpredictably named `.regen.XXXXXX` DIRECTORY created
+# by `mktemp -d` in the record's own directory — atomic creation is what makes the
+# name safe to use — so the directory form is the one the script produces today and
+# the one that must be ignored. The sibling file form is listed beside it to cover a
+# staging file written next to the record instead: ignoring both costs nothing, and
+# it means a change of staging shape cannot start dirtying `git status`.
+tests/conformance/**/.regen.*/
+tests/conformance/**/*.expected.regen.*

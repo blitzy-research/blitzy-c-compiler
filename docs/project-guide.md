@@ -29,7 +29,29 @@ pie title Project Completion — 92.4%
 
 - ✅ All **121+ AAP-required files** created — 100% file delivery rate
 - ✅ **145,788 lines** of Rust compiler source across 82 modules in 9 subsystems
-- ✅ **32,952 lines** of test code with **3,924 tests passing**, 0 failures
+- ✅ **32,952 lines** of test code with **3,924 tests passing**, 0 failures — a **pre-suite
+  baseline**: the figure counts the compiler package's own Rust unit and integration tests as they
+  stood before the differential conformance suite, and it has not been recomputed across the merge
+- ✅ **Differential conformance suite** added on top of that baseline and counted separately, across
+  **241 files** and **116,304 lines**. Its **18 integration tests are defined**; no package-complete
+  `bcc` run is admitted as evidence on this branch, so no pass count is claimed for them.
+  - **The inclusion rule, stated once and applied without exception:** every file the suite ships or
+    changes, and nothing of the compiler's. That is the **235 files under `tests/`** plus **6 outside
+    it** — one the suite adds, `docs/testing/differential-conformance.md`, and five it edits
+    additively: `.github/workflows/ci.yml`, `.gitignore`, `README.md`, `mkdocs.yml` and this guide.
+    The **line** total covers the suite's own material only, which is the six components below — the
+    235 files under `tests/` and that one added documentation page. The **five additively edited
+    files are counted in the file total and not in the line total**, because a line count of a file
+    the suite shares with the rest of the project would not be a figure about the suite.
+  - **The components:** 65,495 driver and harness Rust (`tests/conformance.rs` plus 12 modules) +
+    19,915 across 108 C programs + 16,126 across 108 expectation records + 7,056 of suite contract
+    and the two registers + 5,957 of maintenance script and fixture header + 1,755 of methodology
+    page. `tests/conformance/findings/.gitkeep` contributes 0 lines and is the 241st file; the file
+    accounting is reconciled against the plan's own 240-file arithmetic under *The file count,
+    reconciled against the plan's own arithmetic* in `tests/conformance/README.md`.
+  - **A measurement, not an invariant.** Every figure above is re-derivable from the tree, and any
+    later edit to a suite file moves it. Re-derive rather than trust, with the six commands below —
+    one per component, in the order the components are listed.
 - ✅ **Zero compilation errors**, zero warnings, clippy clean, rustfmt clean
 - ✅ **Four architecture backends** (x86-64, i686, AArch64, RISC-V 64) with runtime-verified correctness via QEMU
 - ✅ **Complete C11 frontend** with GCC extensions: preprocessor, lexer, recursive-descent parser
@@ -42,6 +64,18 @@ pie title Project Completion — 92.4%
 - ✅ **GCC-compatible CLI** with 14+ flags including `--target` and `--sysroot`
 - ✅ **SQLite benchmark**: 0.43s compile time (threshold: <60s), 180MB RSS (threshold: <2GB)
 - ✅ **CI/CD pipelines** with cross-architecture testing
+
+Re-deriving the differential conformance suite's line components:
+
+```bash
+cat tests/conformance.rs tests/conformance_harness/*.rs                  | wc -l   # 65,495
+cat $(find tests/conformance -name '*.c'        | sort)                   | wc -l   # 19,915
+cat $(find tests/conformance -name '*.expected' | sort)                   | wc -l   # 16,126
+cat tests/conformance/{README.md,EXPECTED_DIVERGENCES.md,FINDINGS.md}     | wc -l   #  7,056
+cat tests/conformance/tools/regenerate_expected.sh \
+    tests/conformance/support/include/probe_header.h                      | wc -l   #  5,957
+wc -l < docs/testing/differential-conformance.md                                    #  1,755
+```
 
 ### 1.4 Critical Unresolved Issues
 
@@ -108,7 +142,7 @@ pie title Project Completion — 92.4%
 | Real-World Validation Execution (SQLite/Lua/zlib/Redis) | 8 | High |
 | Shared Library (-shared) End-to-End Validation | 6 | High |
 | DWARF v4 Debugger Compatibility Testing (GDB/LLDB) | 6 | Medium |
-| C11 Standard Corner Case Compliance Testing | 5 | Medium |
+| C11 Standard Corner Case Compliance Testing — **the targeted testing this item asked for is delivered**: the differential conformance suite is committed and complete (14 feature areas, 108 UB-audited programs, 108 expectation records, 18 tests, 1,296 cells, three independent oracles), and it is rustfmt-clean, clippy-clean and type-checks with warnings denied. Exactly one step remains, with exactly one precondition — run `BCC_CONFORMANCE_STRICT=1 cargo test --test conformance` in a checkout that carries the compiler's own Cargo package, resolve every `FAIL` and `XPASS`, curate every `FINDING`, and record the measured result in Section 3. The item therefore **keeps all 5 hours**: a suite that has not yet judged `bcc` has established nothing about `bcc`, and the hours belong to the judging rather than to the authoring. Acceptance criterion in [Running the suite](testing/differential-conformance.md#running-the-suite) | 5 | Medium |
 | Cross-Compilation Sysroot Path Diversity Testing | 4 | Medium |
 | Performance Profiling on Large Codebases | 4 | Medium |
 | Production Packaging and Distribution | 4 | Low |
@@ -150,10 +184,18 @@ pie title Project Completion — 92.4%
 | Integration — CLI | Rust #[test] | 43 | 43 | 0 | N/A | Flag parsing, error exit codes, output naming |
 | Integration — Multi-arch | Rust #[test] | 24 | 24 | 0 | N/A | Cross-arch hello world and factorial on all 4 targets |
 | Integration — Hello World | Rust #[test] | 12 | 12 | 0 | N/A | End-to-end smoke tests on all 4 architectures |
+| Integration — Differential Conformance | Rust #[test] | 18 † | — | — | N/A | **Defined, not yet executed.** 14 feature-area tests + 4 infrastructure tests over 108 C programs × 4 targets × -O0/-O1/-O2, oracle-based differential/cross-backend/golden comparison. No package-complete `bcc` run is admitted as evidence, so no pass or fail count is claimed |
 | Validation — SQLite/Lua/zlib/Redis | Rust #[test] | 68 | 55 | 0 | N/A | 13 tests ignored (require external source download) |
-| **Totals** | | **3,937** | **3,924** | **0** | | **13 ignored by design** |
+| **Totals** | | **3,955 defined †** | **3,924 measured †** | **0** | | **13 ignored by design. The 18 differential conformance tests are counted in the defined total and deliberately not in the measured pass count** |
 
-All test results originate from Blitzy's autonomous validation execution. The 13 ignored tests are SQLite validation tests that require downloading the SQLite amalgamation from the internet — they are gated by the `#[ignore]` attribute by design.
+All test results originate from Blitzy's autonomous validation execution, with one deliberate exception: the Differential Conformance row is **structural**. Its 18 tests are defined and statically verified — the suite compiles as a Cargo integration target, is clippy-clean and rustfmt-clean, all 108 expectation records parse, its four infrastructure tests audit the corpus, the markers and the registers, and its whole 1,296-cell matrix has been driven end to end — but judging `bcc` with it requires the package-complete compiler tree, so the row records **no result** and the measured pass count above is unchanged by it. The matrix was driven against a **documented stand-in** compiler on a branch that carries the suite ahead of the compiler tree, and a stand-in that forwards to the reference toolchain compares one toolchain with itself: that is evidence about the environment, not about `bcc`. What has been established about `bcc` by this suite is therefore **nothing at all**, and the suite's own registers say the same. The 13 ignored tests are SQLite validation tests that download the SQLite amalgamation from the internet — gated by `#[ignore]` by design — and the suite adds no ignored test, so that count stays exactly 13.
+
+**Acceptance criterion for replacing this row with a measurement — the whole of it, in one place.** In a checkout carrying the compiler's own `Cargo.toml` and `src/**`, run `BCC_CONFORMANCE_STRICT=1 cargo test --test conformance` and then `cargo test --no-fail-fast`; the row may be filled in when, and only when, **every** `test result:` line reads `ok` with `0 failed`, the `ignored` counts sum to **exactly 13**, and the `passed` counts sum to **3,942** — 3,924 existing plus these 18 — against a **3,955** defined total. Any `FAIL` or `XPASS` must be resolved and any `FINDING` curated into `tests/conformance/FINDINGS.md` first, because both are outcomes the suite is designed to report rather than reasons to relax the criterion. Read `3,955 / 3,942 / 0 / 13` as *the figures a package-complete run must print*, never as figures this branch has printed; the three-condition gate is stated in full under [Running the suite](testing/differential-conformance.md#running-the-suite), and the packaging precondition under [Cargo integration without a manifest change](testing/differential-conformance.md#cargo-integration-without-a-manifest-change) and — with a per-check table of what each checkout shape can and cannot establish — in the suite's own contract at `tests/conformance/README.md` under "The Cargo integration precondition". That second reference is deliberately named rather than linked: this page is published as a documentation site rooted at `docs/`, so a relative link climbing out of it would resolve on a checkout and 404 on the site. The other 3,937 tests are unaffected: they are the compiler's own suites, measured by its own validation execution.
+
+**† The 18 differential-conformance figures are PLANNED and STATICALLY VALIDATED, not a measured `bcc` result, and the two totals carry the same qualification for as long as that holds.** The suite is committed complete — 108 programs, 108 expectation records, the harness, the registers — and what has been established about it is exactly this: it is rustfmt-clean, it type-checks with warnings denied, it is clippy-clean, and its whole 1,296-cell matrix has been driven end to end. But it was driven against a **documented stand-in** compiler on a branch that carries the suite ahead of the compiler tree, and a stand-in that forwards to the reference toolchain compares one toolchain with itself, which is evidence about the environment rather than about `bcc`. The suite's own registers state the same thing: what has been established about `bcc` is nothing at all. Read the `18` in the defined column as *the shape the suite will report*, and replace the row's empty result cells with a measurement once `cargo test --test conformance` has run against the real binary — the precondition for which is set out under "The Cargo integration precondition" in `tests/conformance/README.md`, named here rather than linked because `tests/` sits outside the documentation root and a relative link climbing out of `docs/` resolves to nothing once the site is published. The other 3,937 tests are unaffected: they are the compiler's own suites, measured by its own validation execution.
+
+**One further qualification on the two totals, and it predates this suite.** Summing the table's own columns gives 3,956 defined and 3,925 passed, one more in each case than the Totals row states. The discrepancy is inherited: at the pre-suite baseline the columns already summed to 3,938 and 3,925 against a recorded 3,937 and 3,924, and it lives in the compiler's own rows rather than in the differential-conformance row, which contributes exactly 18 to the defined column and nothing to the passed column. The recorded totals are left as they stand — they are the figures the project's own validation execution produced, and this suite's obligation is to add 18 to them rather than to restate a measurement it did not take — but the off-by-one is stated here so that a reader who adds the columns up is not left wondering which number to trust.
+
 
 ---
 
@@ -245,15 +287,15 @@ All test results originate from Blitzy's autonomous validation execution. The 13
 | Real-world codebase compilation failures (SQLite/Lua/zlib/Redis) | Technical | High | Medium | Validation suite scaffolding complete; requires execution with actual source downloads | Open — Requires human execution |
 | Shared library dynamic loader incompatibility | Technical | Medium | Medium | Code generation and linker support .dynamic/.dynsym/.plt/.got; needs runtime testing with dlopen | Open — Requires runtime validation |
 | DWARF v4 debugger parsing failures | Technical | Medium | Low | Structural tests pass; needs GDB/LLDB interactive debugging verification | Open — Requires manual testing |
-| C11 corner case non-compliance | Technical | Medium | Medium | Comprehensive parser and sema tests; edge cases in complex declarators and type conversions may remain | Open — Requires targeted testing |
+| C11 corner case non-compliance | Technical | Medium | Medium | Comprehensive parser and sema tests; edge cases in complex declarators and type conversions may remain. **The targeted testing this risk called for now exists**: the differential conformance suite judges integer conversions, constant expressions, initializers, bitfields, complex declarators and eight further areas against three independent oracles across four targets and three optimization levels. The mitigation is delivered; what is outstanding is its execution against a package-complete build, which is the single step recorded in §2.2 | Open — Mitigation delivered; awaiting the §2.2 execution step |
 | Cross-compilation sysroot path variance | Operational | Low | Medium | --sysroot implemented; different distros place CRT objects in different paths | Mitigated — sysroot flag available |
 | ELF section layout edge cases | Technical | Medium | Low | Relocation overflow checking implemented; complex section merging scenarios may have edge cases | Partially mitigated |
 | Performance degradation on very large inputs (>500K LOC) | Technical | Low | Low | SQLite (230K LOC) at 0.43s and 180MB is well within bounds; arena allocator manages memory | Mitigated |
 | Security hardening bypass on complex indirect branches | Security | Medium | Low | Retpoline and CET coverage verified in unit tests; complex control flow patterns may need additional testing | Partially mitigated |
 | Unsafe code memory safety violations | Security | High | Low | 15 unsafe blocks, 11 documented; all in controlled contexts (arena, interning) | Partially mitigated — 4 blocks need SAFETY docs |
-| CI/CD pipeline failures on different GitHub Actions runner versions | Operational | Low | Low | Workflows use pinned action versions (actions/checkout@v4, dtolnay/rust-toolchain@stable) | Mitigated |
+| CI/CD pipeline failures on different GitHub Actions runner versions | Operational | Low | Low | Workflows pin what a run depends on rather than tracking a moving reference: every third-party action is pinned **by commit digest** (`actions/checkout`, `actions/upload-artifact`), the runner image is named (`ubuntu-24.04`) rather than left on `ubuntu-latest`, and the Rust toolchain is installed at the exact supported version with `rustup toolchain install 1.93.1` rather than through a `stable` channel that moves without any change to the workflow | Mitigated |
 | Missing CRT objects on target system | Integration | Medium | Medium | Linker searches standard system paths; --sysroot and -L flags available for custom paths | Mitigated |
-| QEMU version incompatibility for cross-arch testing | Integration | Low | Low | CI installs qemu-user-static from Ubuntu repos; version pinning recommended for stability | Partially mitigated |
+| QEMU version incompatibility for cross-arch testing | Integration | Low | Low | CI selects the emulator package by asking apt which one has a candidate — qemu-user-static where it is a real package, qemu-user where it has become virtual — and verifies every emulator resolves and prints its version before the matrix runs; emulator version pinning is still recommended for stability | Partially mitigated |
 
 ---
 
@@ -299,7 +341,7 @@ The bcc (Blitzy C Compiler) project has been autonomously implemented to **92.4%
 - **189K lines of code** across 130 files created from a greenfield repository
 - **Complete 9-subsystem compiler pipeline**: preprocessor → lexer → parser → sema → IR → optimizer → codegen → linker → ELF
 - **Four architecture backends** (x86-64, i686, AArch64, RISC-V 64) all producing correct executables verified via QEMU
-- **3,924 tests passing** with zero failures — spanning unit, integration, and structural validation tests
+- **3,924 tests passing** with zero failures — spanning unit, integration, and structural validation tests — plus the 18 differential conformance tests the new suite **defines**, which take the defined total to 3,955 and are counted in no pass figure until they have been executed against a package-complete build (§3 states the acceptance criterion, §2.2 the single remaining step)
 - **Zero compilation errors**, zero warnings, and clean linting across the entire codebase
 - **Performance exceeding requirements**: SQLite benchmark at 0.43s (vs. 60s threshold) and 180MB RSS (vs. 2GB threshold)
 
@@ -308,7 +350,7 @@ The bcc (Blitzy C Compiler) project has been autonomously implemented to **92.4%
 The remaining **44 hours** (7.6% of total) focus on **validation and production hardening** rather than core implementation:
 
 1. **Real-world validation execution** (14h) — Running SQLite, Lua, zlib, and Redis through the compiler with actual source downloads, plus shared library validation with the dynamic loader
-2. **Debugger and compliance testing** (18h) — DWARF v4 interactive debugging verification, C11 corner case testing, ELF readelf validation, cross-compilation sysroot diversity, and performance profiling
+2. **Debugger and compliance testing** (18h) — DWARF v4 interactive debugging verification, C11 corner case testing (the differential conformance suite is written and committed; the 5 hours are its **execution** against a package-complete build, per §2.2), ELF readelf validation, cross-compilation sysroot diversity, and performance profiling
 3. **Production readiness** (12h) — Packaging, security edge case audit, and completing unsafe code SAFETY documentation
 
 ### Critical Path to Production
@@ -320,7 +362,7 @@ The remaining **44 hours** (7.6% of total) focus on **validation and production 
 
 ### Production Readiness Assessment
 
-The compiler is **feature-complete** for all AAP-specified capabilities. All source code compiles cleanly, all tests pass, and the runtime produces correct executables on all four target architectures. The remaining work is exclusively validation, testing, and packaging — no core implementation gaps exist. The project is ready for human developer review and targeted validation testing.
+The compiler is **feature-complete** for all AAP-specified capabilities. All source code compiles cleanly, every executed test passes, and the runtime produces correct executables on all four target architectures. One qualification belongs here rather than only in §3: the 18 differential conformance tests are **committed but not yet executed against a package-complete build**, so "every executed test passes" deliberately does not include them, and no claim about `bcc`'s C11 corner-case conformance rests on them yet. The remaining work is exclusively validation, testing, and packaging — no core implementation gaps exist. The project is ready for human developer review and targeted validation testing.
 
 ---
 
@@ -337,24 +379,53 @@ The compiler is **feature-complete** for all AAP-specified capabilities. All sou
 | libc6-dev-i386-cross | System package | i686 CRT objects (cross-compilation) |
 | libc6-dev-arm64-cross | System package | AArch64 CRT objects (cross-compilation) |
 | libc6-dev-riscv64-cross | System package | RISC-V 64 CRT objects (cross-compilation) |
-| qemu-user-static | System package | Cross-architecture binary execution |
+| qemu-user **or** qemu-user-static | System package | Cross-architecture binary execution. Which of the two exists is release-dependent — resolve it with `apt-cache policy qemu-user-static` rather than assuming, and see the note below |
 
 ### Environment Setup
 
 ```bash
-# Install Rust stable toolchain
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source $HOME/.cargo/env
+# Install the Rust stable toolchain. The installer is DOWNLOADED, AUTHENTICATED AND THEN RUN as
+# three separate steps: piping a network fetch straight into a shell executes whatever the endpoint
+# serves at that moment, and TLS authenticates the host, not a fixed revision of the script.
+# Substitute the SHA-256 published for the release being installed at
+# https://forge.rust-lang.org/infra/other-installation-methods.html
+RUSTUP_INIT_SHA256='<sha256-published-for-this-release>'   # substitute the published digest
+curl --proto '=https' --tlsv1.2 -fsSLo rustup-init \
+    https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+printf '%s  rustup-init\n' "$RUSTUP_INIT_SHA256" | sha256sum --check --strict
+chmod +x ./rustup-init
+./rustup-init -y --default-toolchain 1.93.1 --profile minimal
+rm -f ./rustup-init
+. "$HOME/.cargo/env"
 
-# Install cross-compilation system dependencies
+# A distribution-packaged toolchain is equally acceptable where one meeting the documented 1.70+
+# minimum is available (for example `apt-get install -y rustc cargo`), and needs no verification
+# step of its own because the package manager already authenticates what it installs.
+
+# Install cross-compilation system dependencies. The emulator package name is release-dependent, so
+# ASK apt rather than assuming: where `qemu-user-static` has no candidate — Ubuntu 25.10 and later —
+# the emulators come from `qemu-user` instead. `.github/workflows/ci.yml` resolves this with the same
+# `apt-cache policy` test, and tests/conformance/README.md, under "Reference compilers, emulators and
+# cross C runtimes", is the authoritative per-release package matrix.
 sudo apt-get update
+case $(apt-cache policy qemu-user-static 2>/dev/null) in
+*'Candidate: (none)'*) emulator_package=qemu-user ;;
+*)                     emulator_package=qemu-user-static ;;
+esac
 sudo apt-get install -y \
     libc6-dev \
     libc6-dev-i386-cross \
     libc6-dev-arm64-cross \
     libc6-dev-riscv64-cross \
-    qemu-user-static
+    "$emulator_package"
 ```
+
+Both packages provide the same three emulators, under **two different spellings**: `qemu-user`
+installs `qemu-i386`, `qemu-aarch64` and `qemu-riscv64`, while `qemu-user-static` installs
+`qemu-i386-static`, `qemu-aarch64-static` and `qemu-riscv64-static`. Either set works. The
+conformance harness probes both spellings for each architecture and accepts an explicit override
+through `BCC_QEMU_I386`, `BCC_QEMU_AARCH64` and `BCC_QEMU_RISCV64`; the examples below use the plain
+spelling, so append `-static` to each runner name on a host carrying that package instead.
 
 ### Build
 
@@ -399,6 +470,7 @@ cargo test --test optimization     # Optimization pass tests
 cargo test --test cli              # CLI integration tests
 cargo test --test multiarch        # Multi-architecture tests
 cargo test --test hello_world      # End-to-end smoke tests
+cargo test --test conformance      # Differential conformance suite
 
 # Run validation suite (requires internet for source download)
 cargo test --test validation -- --ignored
@@ -417,15 +489,15 @@ cargo fmt -- --check
 
 # Cross-compilation to AArch64
 ./target/release/bcc --target aarch64-linux-gnu hello.c -o hello_arm64
-qemu-aarch64-static ./hello_arm64
+qemu-aarch64 ./hello_arm64
 
 # Cross-compilation to i686
 ./target/release/bcc --target i686-linux-gnu hello.c -o hello_i686
-qemu-i386-static ./hello_i686
+qemu-i386 ./hello_i686
 
 # Cross-compilation to RISC-V 64
 ./target/release/bcc --target riscv64-linux-gnu hello.c -o hello_riscv64
-qemu-riscv64-static ./hello_riscv64
+qemu-riscv64 ./hello_riscv64
 
 # Cross-compilation with sysroot
 ./target/release/bcc --target aarch64-linux-gnu \
@@ -460,9 +532,32 @@ qemu-riscv64-static ./hello_riscv64
 cargo build --release 2>&1 | tail -1
 # Expected: Finished `release` profile [optimized] target(s) in ...
 
-# Verify all tests pass
-cargo test 2>&1 | grep "test result"
-# Expected: test result: ok. 3924 passed; 0 failed; 13 ignored; ...
+# Verify all tests pass, and FAIL when they do not. `cargo test` prints ONE "test result:" line
+# PER test binary -- the library's unit tests and each integration target separately -- so no
+# single line carries the repository-wide figure and the totals in Section 3 are the sum across
+# every binary. Aggregate them explicitly rather than reading one line as if it were the whole,
+# and let the aggregate decide the exit status: the block below is non-zero if either Cargo
+# failed or a count did not match. `pipefail` is what carries Cargo's own failure -- exit 101
+# when it cannot read a manifest -- past awk, which is the last element of the pipeline; the
+# subshell keeps the option out of your own shell. (`pipefail` is bash, not POSIX.)
+want_pass=3924   # the executed baseline; 3942 once the differential conformance suite's 18 tests run
+( set -o pipefail
+  cargo test --no-fail-fast 2>&1 | awk -v want_pass="$want_pass" '
+    /^test result:/ { lines++; if ($3 != "ok.") not_ok++; pass += $4; fail += $6; ignored += $8 }
+    END {
+      printf "aggregate: %d passed; %d failed; %d ignored, over %d result line(s)\n",
+             pass, fail, ignored, lines
+      if (lines == 0)        { print "gate FAILED: no test binary reported a result"; exit 1 }
+      if (not_ok != 0)       { print "gate FAILED: " not_ok " result line(s) do not read ok"; exit 1 }
+      if (fail != 0)         { print "gate FAILED: " fail " failed; 0 is required"; exit 1 }
+      if (ignored != 13)     { print "gate FAILED: " ignored " ignored; exactly 13 is required"; exit 1 }
+      if (pass != want_pass) { print "gate FAILED: " pass " passed; " want_pass " is required"; exit 1 }
+      print "every result line reads ok: 0 failed, exactly 13 ignored, " pass " passed"
+    }' )
+# Expected, executed baseline: aggregate: 3924 passed; 0 failed; 13 ignored, and exit status 0
+# The differential conformance suite contributes 18 more once it runs in this package; until a run
+# produces them, Section 3 counts them separately rather than folding them into this figure, so
+# raise want_pass to 3942 in the same step that fills in that row.
 
 # Verify binary exists and runs
 ./target/release/bcc --help 2>&1 | head -3
@@ -481,7 +576,7 @@ echo 'int main() { return 42; }' > /tmp/test.c
 |---|---|---|
 | `error: linker 'cc' not found` | Building bcc itself requires system C linker | `sudo apt-get install build-essential` |
 | `CRT object not found` | Missing cross-compilation sysroot | `sudo apt-get install libc6-dev-<arch>-cross` |
-| `QEMU: Exec format error` | QEMU not installed or wrong architecture | `sudo apt-get install qemu-user-static` |
+| `QEMU: Exec format error` | QEMU not installed or wrong architecture | Install whichever emulator package this release carries — `qemu-user-static` where `apt-cache policy` reports a candidate for it, `qemu-user` otherwise — then invoke the runner under the spelling that package installs |
 | `Permission denied` on binary | Output binary not marked executable | `chmod +x <binary>` (should be automatic) |
 | Validation tests skipped | Tests require internet for source download | Run with `cargo test -- --ignored` |
 | Stack overflow on deeply nested code | Parser has configurable nesting depth limit | Increase limit or simplify input |
@@ -498,6 +593,7 @@ echo 'int main() { return 42; }' > /tmp/test.c
 | `cargo build --release` | Build bcc compiler (optimized release mode) |
 | `cargo test` | Run all unit and integration tests |
 | `cargo test --test <name>` | Run specific integration test file |
+| `cargo test --test conformance` | Run the differential conformance suite |
 | `cargo test -- --ignored` | Run ignored tests (validation suite) |
 | `cargo clippy -- -D warnings` | Lint check with warnings as errors |
 | `cargo fmt -- --check` | Format verification |
@@ -565,7 +661,7 @@ This project is a command-line compiler and does not use any network ports.
 | readelf | `readelf -a <binary>` | ELF output inspection |
 | objdump | `objdump -d <binary>` | Disassembly inspection |
 | gdb | `gdb ./output` | Debugging (DWARF v4 verification) |
-| qemu-user | `qemu-<arch>-static ./binary` | Cross-architecture execution |
+| qemu-user | `qemu-<arch> ./binary`, or `qemu-<arch>-static ./binary` on a host carrying the `qemu-user-static` package | Cross-architecture execution |
 
 ### G. Glossary
 

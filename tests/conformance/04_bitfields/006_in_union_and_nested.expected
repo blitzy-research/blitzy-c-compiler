@@ -1,0 +1,144 @@
+# Expectation record for 04_bitfields/006_in_union_and_nested.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 006_in_union_and_nested
+area               = 04_bitfields
+description        = Bitfields declared inside unions and inside nested aggregates, with same-member union read-back, folded and volatile runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+The default undefined-behaviour warning gate applies unmodified, with no deviation:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror.  The program
+was verified to pass that gate and to run cleanly under
+-fsanitize=undefined,address -fno-sanitize-recover=all.
+
+Every union access reads back the member that was last written, and this is the program's
+central safety property.  Reading a union member other than the one last written would yield an
+unspecified value, so a divergence there would prove nothing about either compiler.  The union
+of three views has each view written completely and then read on its own, and the views are
+never mixed; the union of two single bitfields is written and read one member at a time; the
+union nested inside a struct has its flat member written and read, and then both members of its
+pair sub-struct written before either is read.  No read anywhere in the program follows a write
+to a different member.
+
+No padding is observed anywhere.  Several of these aggregates necessarily contain padding bits
+or padding bytes, whose values are unspecified even after every named field has been assigned,
+so the program prints no byte image at all and reads only named members.
+
+Every store is a constant inside the destination field's representable range, so no conversion
+can change a value.  No arithmetic is performed on any bitfield, so no signed overflow can
+occur, and no shift operator appears anywhere in the program.  No aliasing violation: no pointer
+is formed to any bitfield and no type-punning of any kind occurs.  No uninitialized read: every
+object has static storage duration, the one with nested aggregates carries an explicit constant
+initializer and the rest are zero-initialized, and in every case each member is written before
+it is read.  No object is modified twice between sequence points.  No pointer value, address,
+timestamp, random value or locale-dependent format is printed.
+
+The two-variant rule is applied to the properties this program OWNS, and this paragraph states
+exactly which those are rather than claiming the whole output twice.  Each of the four aggregates
+this program exists to test is read back a second time from volatile-qualified storage, so the
+constant folder's answer cannot stand in for the one the backend computes at run time for any of
+them: the three-view union (volatile_views_packed, volatile_views_halves), the nested struct of
+sub-structs and arrays of sub-structs (volatile_outer, which mirrors outer_head, outer_r,
+outer_tail0, outer_tail1 and outer_s in one line), and the struct holding a union whose body is
+either a flat field or a pair sub-struct (volatile_tagged_flat, volatile_tagged_pair).  That is the
+whole of what "bitfields in unions and in nested aggregates" means, which is this program's subject.
+
+Five of the printed lines are NOT mirrored, and none of the five could be.  size_views,
+size_onebit, size_inner, size_outer and size_tagged, with their alignments, are sizeof and
+_Alignof: constant expressions by definition, with no run-time form for a backend to compute
+differently.  Reading them through volatile storage would not produce a runtime variant of them,
+because the operand of sizeof is not evaluated.
+
+The remaining unmirrored lines are deliberately left to the programs that own them, so the area
+covers each property in both variants without every program duplicating every other.
+views_packed_after_c and views_halves_after_lo (truncation when an over-wide constant is assigned
+through a union view), views_whole (the whole storage unit read through the union's covering
+member) and tagged_flat_max (a flat union body at its maximum) are folded-only here;
+002_read_write.c carries the folded and volatile read/write pair, and 001_layout_and_size.c carries
+volatile_packed3_readback, volatile_oneword_readback, volatile_oneword_image,
+volatile_covered32_readback and volatile_covered32_image beside their folded twins.  The four
+onebit_* lines -- the two members of a union of one 5-bit unsigned and one 5-bit signed field, read
+at u5's maximum 31 and a mid value 17 and at s5's minimum -16 and maximum 15 -- are folded-only here
+because 004_signed_unsigned.c mirrors exactly those values in full, printing folded_smin s5=-16,
+folded_smax s5=15 and folded_umax u5=31 against runtime_smin, runtime_smax and runtime_umax over
+field widths from 1 to 32.  And
+outer_modified, the re-read after a second round of stores, is folded-only because
+003_compound_assignment.c is the program whose subject is modification, and it carries its own
+volatile mirror.
+
+No header is included and printf is declared by hand, so nothing here depends on a
+standard-library header bcc does not ship.
+END
+impl_defined_notes <<END
+Every bitfield is declared with an explicit signed int or unsigned int base type, at every
+nesting level, including the members of the sub-struct inside the nested union.  A plain int
+bitfield's signedness is implementation-defined, so using it would manufacture a spurious
+divergence; stating the signedness in the declaration removes that dependency entirely.
+
+Plain char is not used.  Plain char signedness was measured to differ across the four targets
+(signed on x86_64 and i686, unsigned on aarch64 and riscv64), so it is avoided entirely.
+
+No value whose width varies by target is printed.  sizeof(long) and sizeof(void *) differ on
+i686 (4) from the other three targets (8), so neither is printed, and no pointer value or
+address appears in the output.  Every bitfield is declared on an int base type, and int is four
+bytes on all four targets, which removes one variable; the allocation unit a bitfield sequence
+occupies is still implementation-defined, so the printed sizes and alignments are measured
+expectations for the four ABIs under test -- the inner struct four bytes, the outer struct
+twenty, the tagged struct twelve and both unions four -- rather than values derived from the
+base type.  Every bitfield read is cast explicitly to unsigned int or int before it is
+passed to printf, and the one non-bitfield value printed, the whole-word view of the first
+union, is already an unsigned int of a width the format specifier matches on every target.
+
+The distinctive assertion of this program is non-disturbance across nesting levels.  Four of the
+eight members of the nested aggregate are modified and the other four are asserted unchanged, and
+one three-bit field inside a union inside a struct is modified with its three neighbours asserted
+unchanged.  A bitfield insert that read, modified and wrote back too wide a storage unit would
+change one of those neighbours and be caught here.
+
+All four targets and all three oracles remain enabled.  Bitfield layout, size, alignment and
+read-back values were measured identical on all four targets, so a cross-backend divergence here
+is a genuine finding rather than an implementation-defined difference.
+END
+expected_stdout    <<END
+size_views=4 align_views=4
+size_onebit=4 align_onebit=4
+size_inner=4 align_inner=4
+size_outer=20 align_outer=4
+size_tagged=12 align_tagged=4
+views_packed a=5 b=21 c=300 d=20000
+views_packed_after_c a=5 b=21 c=511 d=20000
+views_halves lo=4660 hi=22136
+views_halves_after_lo lo=65535 hi=22136
+views_whole=3735928559
+onebit_u5=31
+onebit_u5_again=17
+onebit_s5=-16
+onebit_s5_again=15
+outer_head p=40 q=-300
+outer_r=9
+outer_tail0 p=1 q=2
+outer_tail1 p=63 q=-512
+outer_s=-2000
+outer_modified head_p=63 head_q=-300 r=9 t0_p=1 t0_q=-512 t1_p=0 t1_q=-512 s=2047
+tagged_flat tag=12 flat=100 trailer=21
+tagged_flat_max tag=12 flat=127 trailer=21
+tagged_pair tag=12 m=5 n=9 trailer=21
+tagged_pair_after_m tag=12 m=7 n=9 trailer=21
+volatile_views_packed a=5 b=21 c=300 d=20000
+volatile_views_halves lo=4660 hi=22136
+volatile_outer head_p=40 head_q=-300 r=9 t0_p=1 t0_q=2 t1_p=63 t1_q=-512 s=-2000
+volatile_tagged_flat tag=12 flat=100 trailer=21
+volatile_tagged_pair tag=12 m=5 n=9 trailer=21
+END

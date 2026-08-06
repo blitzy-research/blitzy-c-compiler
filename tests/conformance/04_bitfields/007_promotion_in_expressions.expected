@@ -1,0 +1,150 @@
+# Expectation record for 04_bitfields/007_promotion_in_expressions.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 007_promotion_in_expressions
+area               = 04_bitfields
+description        = Integer promotion of a bitfield used as an operand, including the narrow-unsigned-to-int and full-width-unsigned-to-unsigned split, folded and volatile runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+The default undefined-behaviour warning gate applies unmodified, with no deviation:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror.  The program
+was verified to pass that gate and to run cleanly under
+-fsanitize=undefined,address -fno-sanitize-recover=all.
+
+Every store into a bitfield is a constant that lies inside the destination field's
+representable range, so no conversion can change a value.  No compound assignment is applied to
+any bitfield anywhere in the program: all arithmetic is performed on promoted operands in
+expressions whose results are printed and never written back into a narrow field.  That is what
+allows the strict gate to pass with no deviation while promotion is still exercised exhaustively.
+
+No signed overflow occurs.  Every arithmetic expression is evaluated after integer promotion has
+already widened its operand to int, and each result was checked against the range of int, whose
+maximum is 2147483647 on every one of the four targets.  The largest magnitude any signed result
+reaches is 32505856, from thirty-one shifted left by twenty; the next largest is one hundred
+thousand in magnitude, from minus one thousand times one hundred; and no other signed result
+exceeds 10922 in magnitude.  The only two results that wrap, the full-width field minus one and
+the full-width maximum plus one, are computed in unsigned int, where wraparound is defined rather
+than undefined.
+
+The program performs exactly two shifts, and both are safe by inspection.  One is a left shift by
+twenty of an operand whose promoted type is int and whose value is thirty-one, so the count is
+strictly less than the width of the promoted type, the left operand is non-negative, and the
+result is representable in int.  The other is a right shift by eight of an operand whose promoted
+type is int and whose value is 65535, so that count is strictly in range and that left operand is
+non-negative too.  Division uses only the non-zero constant divisors three and two, neither
+division can be the one signed division that overflows, and no remainder operator appears at all.
+
+No aliasing violation: no pointer is formed to any bitfield, and no type-punning occurs.  No
+uninitialized read: the folded object has an explicit constant initializer for every member, the
+volatile object has static storage duration and so is zero-initialized, and every one of its
+fields is additionally written explicitly before it is read.  No object is modified twice between
+sequence points, and no printf call receives more than one side-effecting argument.  Where a
+single argument reads the same volatile field twice, which is the case only in the two squaring
+expressions, no write intervenes between the two reads, so both yield the same value and the
+result cannot depend on the order in which the reads occur.  No padding byte is ever observed and
+no byte image is printed.  No pointer value, address, timestamp, random value or locale-dependent
+format is printed.
+
+No unsigned expression is compared against less than zero anywhere; the promoted value is printed
+instead.  A comparison of that shape would be rejected by -Wtype-limits, which -Wextra enables.
+END
+impl_defined_notes <<END
+Every bitfield is declared with an explicit signed int or unsigned int base type.  A plain int
+bitfield's signedness is implementation-defined, so using it would manufacture a spurious
+divergence; stating the signedness in the declaration removes that dependency entirely.  This
+matters more in this program than anywhere else in the area, because the whole subject under test
+is what type a bitfield acquires when it is promoted.
+
+No plain char value is ever held, computed with, or printed.  Plain char signedness was measured
+to differ across the four targets (signed on x86_64 and i686, unsigned on aarch64 and riscv64), so
+the type appears only as const char *, the element type of printf's format string and of the tag
+string each reporting function forwards to it, and no char object is ever read as a number.
+
+No value whose width varies by target is printed.  sizeof(long) and sizeof(void *) differ on
+i686 (4) from the other three targets (8), so neither is printed, and no pointer value or address
+appears in the output.  Every numeric printf argument is explicitly cast to int or unsigned,
+except in the three nocast properties, each printed once from the folded object and once from the
+volatile object, which deliberately pass a bitfield with no cast at all in order to exercise
+default argument promotion at the call boundary.
+
+Every printed value is target-invariant by derivation rather than by coincidence.  Every bitfield
+is declared on an int base type, and int is four bytes on all four targets, so INT_MAX is
+2147483647 and UINT_MAX is 4294967295 everywhere.  Consequently the sizeof of every promoted
+bitfield expression is four on every target, a bitfield narrower than int always promotes to int,
+a thirty-one-bit unsigned bitfield still promotes to int because its maximum equals INT_MAX, and a
+thirty-two-bit-wide unsigned bitfield always promotes to unsigned int because int cannot represent
+all of its values.  That split is the program's central assertion and it is identical on every one
+of the four targets.
+
+All four targets and all three oracles remain enabled.  Bitfield layout, size, alignment and
+read-back values were measured identical on all four targets, and the promotion rules exercised
+here are fully specified by the standard with no implementation-defined latitude, so a
+cross-backend divergence in this program is a genuine finding rather than an implementation-defined
+difference.  This program's own twelve reference cells were measured byte-identical: the reference
+compiler at -O0, -O1 and -O2 for x86_64, i686, aarch64 and riscv64, executed natively or under the
+target's emulator, produced the same fifty lines and exit status zero in every one.
+END
+expected_stdout    <<END
+folded_sizeof_promoted_u5=4
+folded_sizeof_promoted_s5=4
+folded_u5_minus_one=-1
+folded_u16_minus_one=-1
+folded_u31_minus_one=-1
+folded_u32_minus_one=4294967295
+folded_not_u5=1
+folded_complement_u5=-1
+folded_negate_s5=16
+folded_s5_times_two=-32
+folded_s5_minus_one=-17
+folded_s16_times_hundred=-100000
+folded_max_u5_squared=961
+folded_max_u5_shifted=32505856
+folded_max_u16_squared=1020
+folded_max_u32_plus_one=0
+folded_max_s5_squared=225
+folded_max_s16_div=10922
+folded_signed_div=0
+folded_mixed_unsigned=2
+folded_conditional=10
+folded_conditional_zero=20
+folded_nocast_u5=21
+folded_nocast_s5=-11
+folded_nocast_u32=3000000000
+runtime_sizeof_promoted_u5=4
+runtime_sizeof_promoted_s5=4
+runtime_u5_minus_one=-1
+runtime_u16_minus_one=-1
+runtime_u31_minus_one=-1
+runtime_u32_minus_one=4294967295
+runtime_not_u5=1
+runtime_complement_u5=-1
+runtime_negate_s5=16
+runtime_s5_times_two=-32
+runtime_s5_minus_one=-17
+runtime_s16_times_hundred=-100000
+runtime_max_u5_squared=961
+runtime_max_u5_shifted=32505856
+runtime_max_u16_squared=1020
+runtime_max_u32_plus_one=0
+runtime_max_s5_squared=225
+runtime_max_s16_div=10922
+runtime_signed_div=0
+runtime_mixed_unsigned=2
+runtime_conditional=10
+runtime_conditional_zero=20
+runtime_nocast_u5=21
+runtime_nocast_s5=-11
+runtime_nocast_u32=3000000000
+END

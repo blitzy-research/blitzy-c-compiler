@@ -1,0 +1,135 @@
+# Expectation record for 12_preprocessor/002_conditional_compilation.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_conditional_compilation
+area               = 12_preprocessor
+description        = Nested conditional compilation with defined(), #ifdef/#ifndef, integer arithmetic in #if controlling expressions, and provably skipped groups
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction, which is the precondition that
+makes a divergence readable as evidence about a compiler at all: a program containing
+undefined behaviour licenses either compiler to do anything, so a difference between them
+would prove nothing about either.
+
+Preprocessor arithmetic. Every controlling expression is built from small integer constants
+that the preprocessor evaluates as though every signed type had the representation of intmax_t
+(C11 6.10.1p4), so no operation approaches overflow -- the largest value any of them computes
+is 42, and the largest literal operand anywhere in the file is 64. The single shift, 1 << 4,
+shifts a positive value by 4, a count strictly within range for every type in which it could
+be evaluated: intmax_t in the preprocessor, and the 32-bit int all four targets provide had it
+been translated. No negative value is ever shifted. The division -7 / 2 and the modulo 17 % 5
+both have non-zero divisors; they assert truncation toward zero and a dividend-signed remainder,
+which C99 onward mandates of every conforming implementation (C11 6.5.5p6), so the results are
+fixed by the language rather than by the target. Both are nevertheless identical on all four
+targets in fact as well as in principle, which is why no target is narrowed and all three
+oracles stay enabled.
+
+An undefined identifier in a #if is DEFINED behaviour, not undefined behaviour. C11 6.10.1p4
+requires that after macro expansion and the defined operator have been applied, every remaining
+identifier -- including one lexically identical to a keyword -- be replaced with the pp-number
+zero. The controlling expression NOT_DEFINED_ANYWHERE == 0 && !defined(NOT_DEFINED_ANYWHERE)
+therefore has a value the standard fixes, and pairing the arithmetic half with the defined()
+half proves both halves of the rule at once. -Wundef is deliberately not a member of the default
+warning gate, so the construct is gate-clean as written; it is also not a constraint violation,
+so no diagnostic is required of any conforming implementation.
+
+#undef of a macro that was never defined is legal. C11 6.10.3.5p2 states that such a directive
+is ignored rather than diagnosed, so the #undef FEATURE_B line must compile silently. It is
+present on purpose: it makes FEATURE_B undefined at every use below independently of anything
+that precedes it, so the #ifndef arm the program takes cannot be perturbed by an edit above.
+
+The one #error directive is unreachable by construction. It sits inside a #if 0 group, which a
+conforming preprocessor must skip without evaluating, so this program compiling at all is the
+assertion -- there is no output line for it to produce. No #error and no #warning appears on any
+live path, so nothing is written to standard error, which this suite captures into finding
+artifacts but never compares, because diagnostic wording legitimately differs between
+compilers.
+
+Runtime code. The single object, dead_marker, is initialised to 0 at its declaration and read
+in the final printf, so there is no uninitialised read and no unused object. Every other
+printed value is an integer macro resolved entirely at translation time. No pointer, array or
+aggregate exists, so there is no aliasing violation, no out-of-bounds access, no one-past-end
+pointer, and no dependence on padding bytes or on the addresses of unrelated objects. No object
+is modified twice between sequence points, and no argument of any call has a side effect, so
+nothing depends on unspecified evaluation order. No directive appears inside a function-call
+argument list; every conditional is resolved at file scope into a plain integer macro, which
+keeps each call a single well-formed expression. printf is hand-declared with a prototype
+matching its use and every %d receives an int.
+
+No header is included, and printf is hand-declared for that reason. bcc bundles only the
+required freestanding headers and ships no <stdio.h> -- a search for "stdio" across the two
+authoritative implementation documents, docs/project-guide.md and docs/technical-specifications.md,
+returns no match. The claim is scoped to those two on purpose: the term does appear elsewhere
+under docs/, in this suite's own methodology page docs/testing/differential-conformance.md,
+which states this very conclusion and so cannot be evidence for it. So an #include <stdio.h>
+would succeed under the reference compiler and fail under bcc, a spurious divergence caused by
+the test rather than by the compiler. The one sanctioned header exception in this area is program
+003, the dedicated bundled-header probe, and this is not it.
+
+Determinism. Output is a fixed seven-line sequence, one line per preprocessing property
+claimed, so a single divergent line localizes the defect to one construct. Only int values are
+printed and always with %d, so neither the measured plain-char signedness difference nor the
+measured i686 width difference can be observed. No address or pointer value is printed. No
+__DATE__, __TIME__ or __FILE__ reference appears. There is no randomness and no locale-dependent
+formatting, statement order is fixed throughout, and the exit status is 0, inside the permitted
+0-125 range. The program is hermetic: every input is a literal in this source, and nothing is
+opened, allocated or read from the environment.
+
+The strongest observable in the program asserts an ABSENCE. A skipped group containing a nested
+group whose own condition is true must leave dead_marker at 0; a preprocessor that failed to
+skip the outer group would leave it at 1 or 2 and dead_block_skipped would print 0. That is
+precisely the shape of defect a structural token-stream test is weakest at detecting and an
+output oracle is strongest at.
+
+No deviation from the default warning gate is requested, and none is sanctioned for this area.
+The default gate (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+produces zero diagnostics in the single native compile-only invocation the suite makes of it;
+the sanitizer gate (-fsanitize=undefined,address -fno-sanitize-recover=all) builds, runs to
+completion and exits 0 with nothing on standard error in its one instrumented native build;
+and all twelve cells of the declared matrix produce byte-identical stdout with exit status 0
+and an empty standard error.
+END
+impl_defined_notes <<END
+Every construct exercised here is documented as supported - docs/technical-specifications.md
+lines 93, 94 and 493 name #ifdef, #ifndef, #if, #elif, #else and #endif evaluation and the
+preprocessor constant-expression evaluator with integer arithmetic and defined(), and
+docs/project-guide.md's "C11 Frontend -- Preprocessor" row lists the same - so this program
+carries no
+expected-divergence marker and a divergence under any oracle is a genuine finding.
+
+The measured target differences are handled by construction, so this program needs no
+target restriction and no marker:
+
+1. sizeof(long) and sizeof(void *) are 4 on i686 and 8 on x86_64, aarch64 and riscv64
+   (docs/technical-specifications.md lines 457-462). No long, no size_t, no ptrdiff_t
+   and no pointer value is printed anywhere, and no length modifier for any of them is
+   used, so the difference cannot reach the output.
+2. Plain char signedness is implementation-defined and was measured signed on x86_64 and
+   i686 and unsigned on aarch64 and riscv64. No plain char value is printed.
+3. long double has three representations across the four targets (measured 16, 12, 16 and
+   16 bytes, x87 80-bit against IEEE binary128). No long double appears in this program;
+   that type is covered by 13_floating_point/004_long_double_target_restricted, which is
+   the only program permitted to narrow a comparison on its account.
+4. All four targets are little-endian, and no byte-order-sensitive value is printed.
+END
+expected_stdout    <<END
+nested_result=7
+feature_a_on=1
+feature_b_on=0
+pp_arith_ok=1
+undef_is_zero=1
+width_in_range=1
+dead_block_skipped=1
+END

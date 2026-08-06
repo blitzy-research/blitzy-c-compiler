@@ -1,0 +1,71 @@
+program            = 009_generic_selection
+area               = 10_declarations_and_types
+description        = _Generic selection across the type system with width-normalized int tags, promotion and conversion before selection, and a genuinely runtime-evaluated selected result
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every object is initialized at its declaration, and the one array is fully written element by
+element before its first element's address is taken. mutable_text has four elements and all
+four are assigned, including the terminating zero, so no element is read while indeterminate.
+Only the address of element 0 is taken, which is a valid address inside the array, and it is
+used solely as a generic selection controlling expression -- it is never dereferenced and
+never printed. const_text points at a string literal, which has static storage duration, and
+it is likewise only inspected for its type. No pointer is formed one past the end. The
+initializers are all value preserving: unsigned char uc holds 200, which is within the
+unsigned char range on every target; signed char sc holds -1, which is within the signed char
+range; and every other initializer is a small in-range value. All arithmetic is on small
+values far from any range edge, so there is no signed overflow: the largest value computed is
+21. The additions of zero in the promoted-tag expressions are exact. No shift is performed. No
+object is modified twice between sequence points, and no printf call receives a side-effecting
+argument -- the volatile read in the runtime arm is the single side effect in its call and
+occurs in exactly one argument. There is no aliasing violation: every object is accessed only
+through an lvalue of its own declared type, and no pointer is used to reinterpret storage. No
+padding byte is read, because the program declares no aggregate other than a char array.
+END
+impl_defined_notes <<END
+WIDTH NORMALIZATION BY TAG. The macro selects across the whole type system, deliberately
+including long, unsigned long and long long, whose widths genuinely differ between i686 (4-byte
+long) and x86_64, aarch64 and riscv64 (8-byte long). No feature is dropped for that reason.
+Instead every association yields a small int tag rather than a width: long selects the value 9
+and unsigned long selects 10 on all four targets alike. No association yields sizeof, _Alignof
+or anything derived from a type's width, so the i686 difference cannot reach stdout. The
+program prints no size, no alignment, no address and no pointer value at all.
+
+CHAR SIGNEDNESS IS NOT OBSERVED. Plain char is selected on as a type, yielding tag 2 and
+asserting that C treats plain char as distinct from both signed char (tag 3) and unsigned char
+(tag 4). The char object's value is never printed. The measured char signedness difference
+(signed on x86_64 and i686, unsigned on aarch64 and riscv64) therefore cannot affect the
+output. The only printf conversion specifier used in the program is %d.
+
+TWO-VARIANT RULE AND THE UNEVALUATED CONTROLLING EXPRESSION. C11 specifies that a generic
+selection's controlling expression is not evaluated -- only its type is used, at translation
+time. TYPE_TAG(vi + 0) therefore looks like a runtime variant but is not one: the volatile read
+never happens and the expression folds to a constant tag. It is retained because it usefully
+asserts that the type of a volatile int expression selects correctly, but it does not discharge
+the two-variant obligation. The genuine runtime arm is the selected_runtime value, where the
+volatile operand sits in the selected result expression rather than the controlling expression:
+_Generic(i, int: vi * 7, default: 0) selects the int association at translation time and then
+really evaluates vi * 7 at run time, because vi is volatile and must be read. vi is 3, so both
+the folded arm 3 * 7 and the runtime arm vi * 7 yield 21 and the equality of the two printed
+values is the assertion.
+
+KEYWORDS REQUIRE NO HEADER. _Generic and _Bool are C11 keywords, both documented as supported,
+so no header is included -- in particular not stdbool.h.
+END
+expected_stdout    <<END
+tags=1 2 3 4 5 6 7 8 9 10 11 12 13
+pointer_tags=14 15
+default_tag=0
+folded_tag=7 runtime_tag=7
+promoted_tags=7 7 13
+selected_values=100 200
+selected_folded=21 selected_runtime=21
+END

@@ -1,0 +1,219 @@
+# Expectation record for 03_initializers/010_compound_literals.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 010_compound_literals
+area               = 03_initializers
+description        = Compound literals in expression, argument, subscript, member-access and sizeof position -- ten forms including a designated literal, a literal nested inside another, by-value and by-address argument passing, an array literal decaying to a pointer, direct subscripting and direct member selection with no intervening variable, and sizeof applied to a literal -- plus a loop-body literal whose one unnamed object is reinitialized on each iteration, a block-scoped literal read only inside its own block, and the static-duration contrast of two file-scope literals
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined and no unspecified behaviour, which is the property both
+differential oracles rest on: undefined behaviour would license either compiler to do anything at
+all, so a divergence between two compilers over it would prove nothing about either one.
+LIFETIME IS THE HAZARD SPECIFIC TO THIS CONSTRUCT, and it is handled explicitly rather than assumed,
+because a compound literal is the one initializer form that creates an object in the middle of an
+expression. C11 6.5.2.5p5 gives a compound literal appearing at BLOCK scope automatic storage
+duration associated with the enclosing block, and one appearing at FILE scope static storage
+duration. Every use here respects that.
+  - The two literals whose address is taken inside a full expression -- `&(struct pair){ 5, 6 }` and
+    the `(int[]){ 10, 20, 30 }` that decays to a pointer in argument position -- are used only for
+    the duration of the call, which completes inside that same full expression. Neither pointer
+    outlives the object it designates and neither is stored anywhere.
+  - The two array literals that are subscripted DIRECTLY, with no intervening variable at all --
+    `(int[]){ 41, 42, 43 }` and `(int[4]){ [3] = 64 }` -- form an address too, because subscripting
+    an array decays it to a pointer to its first element. Each is established and read inside the one
+    full expression that contains it, so no pointer to it exists at any point where the object does
+    not, and none is retained. The directly member-selected `(struct pair){ 51, 52 }` is an lvalue
+    whose member is designated in place, and it is confined to its own full expression in the same
+    way. The literal inside sizeof is not evaluated at all -- it is not a variable-length array -- so
+    no object is created there and no lifetime question arises.
+  - The block-scope `(const int[]){ 71, 72, 73 }` is reached through a pointer DECLARED AND READ
+    ENTIRELY INSIDE its own braces, so the pointer never escapes the block the object's lifetime is
+    tied to. Hoisting that declaration out of the braces would be a genuine use after the object's
+    lifetime -- undefined behaviour that would invalidate the oracle rather than test it, and exactly
+    what the sanitizer gate is watching for here.
+  - Inside the loop, the compound literal's enclosing block is the loop body. The literal is one
+    source occurrence, so C11 6.5.2.5p5 gives it ONE unnamed object with that block's lifetime, and
+    each iteration REINITIALIZES that object from the current value of the counter rather than
+    creating a further one. Its value is copied immediately into the named object `fresh` and NO
+    ADDRESS IS TAKEN there, so the program observes the VALUE and never the object's identity --
+    which is what keeps the assertion independent of where the object lives and of how the
+    implementation materializes it on each trip round.
+  - The two file-scope literals have STATIC storage duration, so keeping their addresses and reading
+    them at the very end of main -- after every block-scope literal above has expired -- is well
+    defined for the whole run.
+NO READ TOUCHES UNINITIALIZED STORAGE. A member or element left unmentioned by a brace-enclosed
+initializer is initialized as an object of static storage duration would be, that is to zero, for
+automatic and static duration alike (C11 6.7.9p19 and p21), and that implicit zeroing applies inside
+a compound literal exactly as it does in a declaration: `(struct pair){ .q = 9 }` has p equal to 0
+and `(int[4]){ [3] = 64 }` has elements 0 through 2 equal to zero. Those are determinate values
+rather than indeterminate ones, and they are part of what is under test rather than merely relied
+upon.
+No signed overflow is possible. The largest value any expression yields is 506, from p * 100 + q with
+p equal to 5 and q equal to 6, and the loop accumulation reaches 9; INT_MAX is at least 2147483647 on
+every conforming target. There is no shift, no division and no remainder anywhere in the program.
+Every subscript is strictly in bounds, and every slot of every array literal is read rather than
+sampled: indices 0 through 2 of the three-element int literal subscripted directly, all four of
+indices 0 through 3 of the int[4] designated literal, indices 0 through 2 of the three-element
+block-scope and file-scope array literals, and indices 0 through 2 inside sum3, whose parameter
+always receives a three-element array literal. No one-past-the-end pointer is formed, and every
+pointer in the program is dereferenced rather than compared or advanced past its object. No address
+is printed, so nothing depends on where the implementation placed an unnamed object.
+There is no aliasing violation: every object is read through an lvalue of its own declared type,
+which is int in every case, reached by member selection, subscripting or dereference through a
+pointer to the matching type. No object representation is inspected, no union appears, no integer-to-
+pointer conversion occurs, and the only cast in the program is the `(int)` applied to a sizeof value
+of 12 -- a value conversion that cannot change the number. Nothing depends on padding bytes, whose
+contents are unspecified, or on the relative addresses of unrelated objects: no pointer difference is
+taken and no two addresses are compared.
+No object is modified twice between two sequence points, because EVERY assignment in the program is a
+full statement of its own, never embedded in a call, in an argument or in another assignment. There
+are exactly three kinds: `loop_total += fresh.p + fresh.q;`; the three statements that store one
+consumer's return value in `r_take_val`, `r_take_ptr` or `r_sum3` before it is printed; and the loop
+counter `i`, which is modified only by the controlling expressions of the three `for` statements,
+where the initialization, the test and the increment are separated from the body by sequence points,
+and which is never both read and modified inside one expression. Every printf call receives at most
+one loop counter and one already-computed int, and the three calls that construct a literal as an
+argument each pass exactly ONE argument whose evaluation has an effect, so the unspecified order in
+which a function call's arguments are evaluated cannot be observed.
+Every conversion specifier is %d and every corresponding argument has type int after the default
+argument promotions -- the one size is cast to int before reaching the variadic call -- so no
+variadic argument is read at the wrong width.
+main returns 0, inside the 0-125 range the suite requires so that no exit status is truncated by the
+operating system. Every input is a literal in this file: nothing is read from the environment, the
+clock, the file system or the network, and iteration order is fixed by literal loop bounds, so every
+cell is reproducible from this source and this record alone.
+No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
+bcc bundles the nine required freestanding headers plus a bonus stdatomic.h and ships no standard
+I/O header (docs/project-guide.md, "9 bundled freestanding headers"), so naming one would fail on the
+bcc side of oracle (a) while succeeding on the reference side -- a spurious divergence caused by the
+test rather than by a compiler. This area is granted no header exception; the corpus has exactly two,
+area 07's stdarg.h and the dedicated bundled-header probe in area 12. This record declares no
+warning-gate deviation, and area 03 sanctions none. The program is clean
+under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
+-Werror in the single native compile-only invocation the suite's warning gate makes, and it builds
+and runs clean under the sanitizer gate -fsanitize=undefined,address -fno-sanitize-recover=all. Both
+gates are reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag
+discipline is untouched.
+END
+impl_defined_notes <<END
+This record narrows nothing: all four targets, all three optimization levels and all three
+oracles are enabled, no expected-divergence marker is carried, and no `ub_audit_flags` key appears
+because the program passes the suite's full default warning gate unmodified.
+WIDTH NORMALIZATION. Only int is computed and only %d is printed, so nothing here depends on a type
+whose width differs between the four targets: a pointer and the wider integer types were MEASURED at
+four bytes on i686 and eight on x86_64, aarch64 and riscv64
+(docs/technical-specifications.md target table, lines 457-462), and none of them is declared,
+computed or printed. The one printed size, cl_sizeof, is sizeof applied to an int[3] rather than to a
+pointer, so it is 12 on all four targets, and it is cast to int first so that no size_t reaches the
+variadic call.
+NO ADDRESS IS EVER PRINTED. Every pointer in the program -- including the one formed by taking the
+address of a compound literal, the array literal that decays in argument position, the block-scoped
+pointer and the two file-scope pointers -- is dereferenced and its pointee reported instead, so where
+the implementation places an unnamed object is unobservable.
+PLAIN-CHAR SIGNEDNESS. The only character data is the format-string literals, whose bytes printf
+copies through unchanged; no plain-char value is read as a number, so the MEASURED split -- signed on
+x86_64 and i686, unsigned on aarch64 and riscv64 -- cannot arise.
+PADDING AND LAYOUT. Members are read individually by name and no object representation is inspected
+and no aggregate is printed whole, so padding, whose contents are unspecified, is never observed.
+EXECUTION CHARACTER SET. No character's numeric CODE is computed or printed, so C11 5.2.1 leaves
+nothing here to the implementation; the label bytes of each line are copied through printf from the
+same source on both sides of every comparison.
+THE TWO STORAGE DURATIONS ARE THIS PROGRAM'S VARIANT AXIS, AND THEY TRAVEL DIFFERENT PATHS THROUGH
+THE COMPILER FOR THE SAME SYNTAX. A file-scope compound literal has static storage duration and is
+resolved into the program's data image at translation time, whereas a block-scope one must be
+materialized by emitted code on entry to its block, and the per-iteration literal must be
+re-established on every trip round the loop with a value the compiler cannot fold into a single
+answer for all three iterations. All three paths are compiled at all three optimization levels.
+Passing a literal by value, by address and as an array argument then exercises three distinct ways
+the object can reach a callee, which is where a calling-convention difference between the four
+backends would surface.
+THE TWO-VARIANT STRUCTURE IS A CALL BOUNDARY RATHER THAN A VOLATILE OPERAND, and that choice is
+deliberate. take_val, take_ptr and sum3 hold one variant of the computation behind a call that cannot
+be folded through at -O0 and is typically inlined at -O2, while the values consumed directly in main
+are the other variant, so both the folded and the genuinely computed path are exercised. A volatile
+twin is NOT added: the subject here is what a compound literal produces and how long it lives rather
+than what an operator computes, the accumulation across the loop already forces real run-time work,
+and qualifying an operand would suppress exactly the optimizer behaviour this program exists to
+survive.
+THE ARGUMENT-PASSING FORMS ARE OBSERVED FROM INSIDE THE CONSUMER, so every member and element that
+crossed the parameter-passing boundary carries its own labelled line: take_val_p and take_val_q,
+take_ptr_p and take_ptr_q, and sum3_a0, sum3_a1 and sum3_a2. The encoded returns -- take_val_arg=304
+and take_ptr_arg=506, both p * 100 + q, and sum3_arg=60 -- remain only as ADDITIONAL cross-checks.
+Across forms 4 to 9 that is sixteen directly labelled values: two for each of the three pair-valued
+literals, three for each of the two three-element array literals and four for the one four-element
+designated array, so no initialized slot is represented only by a sum, an encoding or a sampled
+neighbour. That distinction is the point, because an encoding or a checksum can be reproduced by two
+compensating errors -- a swapped pair of members is the obvious one -- whereas a per-slot line
+cannot. Comparing take_val_arg against take_ptr_arg still separates a calling-convention defect from
+a lifetime defect: one changes and the other does not. Each consumer call is assigned to a local --
+r_take_val, r_take_ptr and r_sum3 -- before the value is printed, so no printf argument carries a
+side effect. The directly-subscripted and directly-member-selected forms, which have no intervening
+variable at all, are where a compiler that mishandles the unnamed object's address computation or
+lifetime shows up first.
+MEASURED EVIDENCE. The program was compiled with the reference driver for all four targets at -O0,
+-O1 and -O2 -- twelve configurations -- and every one produced these 42 lines byte-identically with
+exit status 0, which is why oracle (b) compares this program's targets against each other without any
+narrowing and why oracle (c) can hold these bytes as the golden record. Each of the ten forms is read
+back on lines of its own, and all sixteen slots of forms 4 to 9 are printed individually: the seven
+that cross a parameter boundary -- take_val_p and take_val_q, take_ptr_p and take_ptr_q, and sum3_a0,
+sum3_a1 and sum3_a2 -- are reported from INSIDE the consumer, where the value arrived through the
+passing path under test, and the other nine are read in main from a literal with no intervening
+variable at all. The three encodings named above are redundant cross-checks rather than substitutes,
+so a single divergent line localizes the defect to one form.
+END
+expected_stdout    <<END
+v_expr.p=1
+v_expr.q=2
+v_desig.p=0
+v_desig.q=9
+v_nested.tag=11
+v_nested.n.p=12
+v_nested.n.q=13
+take_val_p=3
+take_val_q=4
+take_val_arg=304
+take_ptr_p=5
+take_ptr_q=6
+take_ptr_arg=506
+sum3_a0=10
+sum3_a1=20
+sum3_a2=30
+sum3_arg=60
+cl_index0=41
+cl_index1=42
+cl_index2=43
+cl_member_p=51
+cl_member_q=52
+cl_desig_arr0=0
+cl_desig_arr1=0
+cl_desig_arr2=0
+cl_desig_arr3=64
+cl_sizeof=12
+loop[0].p=0
+loop[0].q=1
+loop[1].p=1
+loop[1].q=2
+loop[2].p=2
+loop[2].q=3
+loop_total=9
+scoped[0]=71
+scoped[1]=72
+scoped[2]=73
+g_file_cl.p=7
+g_file_cl.q=8
+g_file_arr_cl[0]=91
+g_file_arr_cl[1]=92
+g_file_arr_cl[2]=93
+END

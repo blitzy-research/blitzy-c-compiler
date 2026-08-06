@@ -1,0 +1,119 @@
+program            = 002_string_literal_handling
+area               = 11_literals_and_strings
+description        = String literal concatenation across adjacent and multi-line forms, individual element access, embedded and terminating nulls
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction:
+- NO STRING LITERAL IS EVER MODIFIED. Modifying a string literal is undefined
+  behaviour. Every aggregate in this program is declared static const char[] and
+  initialized from string literals as C11 6.7.9p14 permits, and the two literals
+  indexed directly are only read. No pointer to any literal is ever written through,
+  and literal_length takes a const char * parameter.
+- No signed integer overflow. Every printed value is either a small array size cast
+  to int, a length counter bounded by a short array, or an unsigned char element
+  (range 0..255) widened to int.
+- No shift operations of any kind, so no shift count can be out of range.
+- No out-of-bounds access. The loops over concatenated, across_lines and with_escapes
+  stop before the terminator, and the terminator of concatenated, of across_lines and
+  of the hello literal is then read on its own at index sizeof - 1, the last element
+  of the array. The loop over embedded_nul covers the whole array, so that both the
+  interior null and the terminating null are read, which is also within the array.
+  literal_length stops at the first null byte, which every array contains. No
+  one-past-end pointer is dereferenced.
+- No aliasing violation. Each array is declared char and each element is read and
+  converted through unsigned char, which is always permitted.
+- No uninitialized read. Every array has a static const initializer; zero has a
+  static initializer; the counter n in literal_length is initialized before use.
+- No object is modified twice between sequence points. At most one argument of any
+  call reads the volatile object zero, so no access to it is unsequenced with another
+  access to it. Nothing depends on padding bytes or on the addresses of unrelated
+  objects, and no address or pointer value is printed.
+- Verified empirically: the default strict warning gate (-Wall -Wextra -pedantic
+  -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero diagnostics, and
+  -fsanitize=undefined,address -fno-sanitize-recover=all runs to completion with no
+  output and exit status 0.
+END
+impl_defined_notes <<END
+Plain char is never printed directly. Every character element is converted through
+unsigned char before being widened to int, so the measured plain-char signedness
+difference (plain char is signed on x86_64 and i686 but unsigned on aarch64 and
+riscv64) cannot be observed in this program's output. Handled by construction, not by
+a marker.
+
+Only int-typed values are printed, always with %d. No long, no size_t and no pointer
+is printed, so the measured i686 width difference (sizeof(long) and sizeof(void *)
+are 4 on i686 and 8 on the other three targets) has no effect. The sizeof results
+that are printed are sizes of char arrays, which are counts of bytes with
+sizeof(char) fixed at 1 on every target, and each is cast to int before printing.
+
+Every character in every literal is a printable US-ASCII character or a control
+character below 128, so no execution-character-set difference can arise. The one
+control character among them, the tab in with_escapes, is reported as its decimal
+value rather than emitted literally, so the golden record below is printable ASCII
+throughout.
+
+String literal concatenation, element access and null termination were measured
+byte-identical across all four targets at every optimization level, so this program
+is fully cross-comparable and all three oracles are enabled.
+END
+expected_stdout    <<END
+concat_size=10
+concat_len=9
+concat[0]=97
+concat[1]=98
+concat[2]=99
+concat[3]=100
+concat[4]=101
+concat[5]=102
+concat[6]=103
+concat[7]=104
+concat[8]=105
+concat_terminator=0
+empty_size=4
+empty_len=3
+empty_bytes=120,121,122
+lines_size=14
+lines_len=13
+lines[0]=111
+lines[1]=110
+lines[2]=101
+lines[3]=45
+lines[4]=116
+lines[5]=119
+lines[6]=111
+lines[7]=45
+lines[8]=116
+lines[9]=104
+lines[10]=114
+lines[11]=101
+lines[12]=101
+lines_terminator=0
+escapes_size=6
+escapes[0]=65
+escapes[1]=9
+escapes[2]=66
+escapes[3]=67
+escapes[4]=68
+nul_size=6
+nul_len=2
+nul[0]=112
+nul[1]=113
+nul[2]=0
+nul[3]=114
+nul[4]=115
+nul[5]=0
+direct_index=101
+direct_size=6
+direct_terminator=0
+runtime_concat0=97
+runtime_concat_len=9
+END

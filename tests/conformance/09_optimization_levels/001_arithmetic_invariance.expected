@@ -1,0 +1,56 @@
+# Expectation record for 09_optimization_levels/001_arithmetic_invariance.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_arithmetic_invariance
+area               = 09_optimization_levels
+description        = Integer arithmetic results identical at -O0, -O1 and -O2, folded and volatile-runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour. No signed overflow: 1000+337, 2000-663 and
+191*7 are far inside int range, and 1234567891011LL+9876543210LL is far inside long long
+range. Negation operand is 1337, not INT_MIN. Shift counts are 3 and 2 on 32-bit unsigned
+operands, so strictly in range and with no signed-shift question. Division and modulo use
+divisor 7, so no division by zero and no INT_MIN/-1 case. No pointer arithmetic, no
+aliasing violation, no read of uninitialized storage, no object modified twice between
+sequence points, and no dependence on padding bytes or on relative addresses.
+Several volatile objects are read within a single expression; their relative order is
+unspecified, but no volatile object is modified anywhere in the program, so every read of
+a given object yields the same value and the printed output does not depend on the
+ordering.
+END
+impl_defined_notes <<END
+No implementation-defined behaviour is observed. Widths are normalized: only int, unsigned
+int and long long are used, and long is never used because sizeof(long) is 4 on i686 and 8
+on the other three targets. Plain char is not used, so the measured plain-char signedness
+difference (signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64) cannot be
+observed. No address, pointer value, sizeof or _Alignof result is printed. No floating
+point is used. Unsigned results are printed with %u and long long with %lld, both of fixed
+width on all four targets.
+END
+expected_stdout    <<END
+add folded=1337 runtime=1337 equal=1
+sub folded=1337 runtime=1337 equal=1
+mul folded=1337 runtime=1337 equal=1
+div folded=1337 runtime=1337 equal=1
+mod folded=3 runtime=3 equal=1
+neg folded=-1337 runtime=-1337 equal=1
+shl folded=1336 runtime=1336 equal=1
+shr folded=1337 runtime=1337 equal=1
+and folded=15728880 runtime=15728880 equal=1
+or  folded=4293984240 runtime=4293984240 equal=1
+xor folded=4278255360 runtime=4278255360 equal=1
+not folded=4294901760 runtime=4294901760 equal=1
+wide folded=1244444434221 runtime=1244444434221 equal=1
+END

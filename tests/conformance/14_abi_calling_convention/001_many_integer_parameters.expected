@@ -1,0 +1,250 @@
+# Expectation record for 14_abi_calling_convention/001_many_integer_parameters.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_many_integer_parameters
+area               = 14_abi_calling_convention
+description        = Integer parameter lists long enough to exhaust every target's argument registers and force stack spill: two lists of fifteen integer-class parameters each -- fifteen int values in the first, and fourteen long long values plus one trailing int variant tag in the second -- with the first list's fifteenth int likewise serving as its variant tag, so each list carries fourteen observed data values; each list is called in a folded and a volatile-runtime variant through a volatile function pointer, with every one of the fourteen data parameters printed individually
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction. Only int, long long and
+const char * appear in this program: there is no floating type, no aggregate, no union, no
+bit-field, no unsigned type and no plain char used as a value, so whole classes of
+undefined behaviour cannot arise here rather than merely being avoided.
+
+- Fifteen integer-class parameters are passed to each callee -- FOURTEEN DATA VALUES plus a
+  trailing int that selects the variant tag -- which exceeds the widest integer argument
+  register file of the four supported ABIs, so every target marshals part of the argument
+  list on the stack. Every parameter is declared and passed with a type that matches its
+  argument exactly, and every one of the fourteen DATA parameters is printed back
+  individually and in order; the fifteenth is the tag, and it appears in the output as the
+  variant name every line carries rather than as a value of its own, so a tag delivered to
+  the wrong slot renames every line of the group and is equally visible. No value is ever
+  summarised into a checksum, because a checksum can mask two compensating errors while one
+  argument delivered to the wrong slot and another delivered to its place is exactly the
+  defect this program exists to catch.
+- Only int and long long are passed or printed, both of which are the same width on all four
+  targets.
+- No signed integer overflow: no arithmetic whatever is performed on any parameter. Every
+  integer value passed or printed is either a literal or a value read from statically
+  initialised storage, and every one is far inside the range of its type -- the int values
+  lie between -1014 and 1013, and the long long values within +/-5000000014, against a
+  guaranteed long long range of at least +/-9223372036854775807.
+- The single conversion in the program is well defined and value-preserving: the trailing
+  argument of the runtime long long call is the explicit cast (int)plain_llong[14], applied
+  to the value 1, which is representable in int. It is written as an explicit cast rather
+  than left implicit so the narrowing is visible in the source and the strict warning gate
+  has nothing to diagnose.
+- No shift operator, no division and no remainder operator appears anywhere, so no shift
+  count can be out of range and no division by zero is possible.
+- No read of uninitialised storage: both volatile source arrays have static initialisers,
+  and each plain staging array is filled completely by a bounded loop over all fifteen
+  elements before any element of it is read.
+- No object is modified twice between sequence points, and no argument list contains a side
+  effect at all.
+- Nothing depends on padding bytes or on alignment: sizeof never appears in the program, no
+  object is inspected byte-wise, and no aggregate exists to have padding.
+- Nothing depends on the relative addresses of unrelated objects, and no address or pointer
+  value is printed. The only pointer values in the program are the two function pointers,
+  which are called rather than printed, and the const char * variant tag, which is printed
+  as the string it designates and never as an address.
+- No default argument promotion is relied upon at any call: both callees are declared with
+  full prototypes before use, so every argument is converted to its declared parameter type.
+  The only variadic calls are to printf, and each conversion specification matches its
+  argument's type exactly after promotion -- %d for int, %lld for long long, %s for
+  const char *.
+- printf is declared by hand as `int printf(const char *, ...);` and no header is included,
+  because the compiler under test ships no stdio.h; an #include <stdio.h> would fail against
+  it while succeeding against the reference compiler and would manufacture a divergence
+  caused by the test rather than by the compiler.
+- The two-variant rule is applied throughout: a folded variant whose arguments are
+  compile-time constants, and a runtime variant whose arguments are read from volatile
+  storage so the values are genuinely materialised and marshalled rather than folded into the
+  callee. Without the second variant, optimisation would substitute the folder's answer for
+  the backend's at -O1 and -O2 and an argument-marshalling defect would escape entirely.
+- Nothing is allocated, nothing outside the translation unit is read, and main returns 0,
+  which is inside the permitted 0-125 range for an expected exit status. No socket, no file,
+  no environment variable, no clock and no random source is touched: every input to the
+  program is a literal in its own source.
+
+- NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and it is enforced structurally rather
+  than argued. An access to a volatile object is an observable side effect, and C11
+  6.5.2.2p10 leaves the order of evaluation of a call's function designator, of its
+  arguments, and of subexpressions within those arguments unspecified. So the runtime
+  variants STAGE every volatile datum before any call: each element of vint and vllong is
+  copied into plain array storage in a bounded loop, one volatile read per iteration and per
+  full expression, and the calls then pass only those plain elements. The one remaining
+  volatile access in a call expression is the call-boundary function pointer itself, which
+  is a single access and therefore has no order to be unspecified. Staging costs no
+  discriminating power: a value that arrived through a volatile load stays opaque to the
+  optimizer, so every argument is still materialised at run time and marshalled through the
+  ABI.
+
+- THE CALL BOUNDARY IS MADE HARD TO OPTIMIZE AWAY, WHICH IS NOT THE SAME AS BEING GUARANTEED
+  BY THE LANGUAGE, and the two are stated apart here because conflating them would overclaim
+  what this program proves. Each callee is reached through a volatile-qualified function
+  pointer. WHAT ISO C REQUIRES of that: an access to a volatile object is a side effect and
+  part of the observable behaviour an implementation must reproduce (C11 5.1.2.3p2 and p6),
+  and C11 6.7.3p7 requires an expression referring to a volatile-qualified object to be
+  evaluated strictly according to the abstract machine's rules -- so the pointer must be
+  RE-READ at each point of call and control must be transferred to whatever function that
+  particular load produced. WHAT ISO C DOES NOT REQUIRE: that the transfer reaches the
+  callee's original entry point. An implementation may legally introduce a specialised clone,
+  scalarise a copy of the body, or perform guarded devirtualization -- compare the loaded
+  pointer against a known function and call a specialised entry on the matching path -- and
+  still honour the loaded value, because the observable behaviour is unchanged. So the
+  indirection must NOT be described as making the signature uncloneable or unscalarisable:
+  that would claim more than anything the standard says.
+- SO THE BOUNDARY IS AN OPTIMIZATION OBSTACLE, VERIFIED ON NAMED ARTIFACTS RATHER THAN
+  ASSERTED AS A LANGUAGE RULE. Measured on the committed source with gcc 13.4.0 at -O2 on all
+  four reference drivers: both callees are still emitted out of line under their own labels;
+  no specialised clone appears anywhere -- zero symbols carrying .constprop, .isra or .part.
+  -- and each variant reaches its callee through a genuine indirect transfer, four such sites
+  per target (call *%reg on x86_64 and i686, blr on aarch64, jalr on riscv64). Without the
+  indirection the obstacle is absent: an ordinary static callee is free to be inlined at -O1
+  and -O2, and a callee that is inlined marshals nothing at all, so the parameter passing this
+  program claims to exercise would not happen.
+- THE RESIDUAL RISK IS RECORDED RATHER THAN PAPERED OVER. Those measurements are evidence
+  about the reference compiler's artifacts, not a property every compiler under test must have.
+  A compiler that devirtualizes through a specialised entry could route a cell past the
+  register assignments argued above while still printing the same bytes, and this program would
+  not detect that. Closing it would take a per-cell STATIC check of the artifact the compiler
+  under test emitted -- an indirect transfer present, no specialised clone of either callee --
+  which is a harness capability this suite does not have and which no oracle here substitutes
+  for. Until it exists, the honest statement is that the indirection makes the boundary very
+  likely on any optimizing compiler and is verified for the reference toolchain.
+- THE MECHANISM IS DELIBERATELY PURE ISO C -- a volatile function pointer and nothing more --
+  rather than a function attribute, because the documented attribute set of the compiler under
+  test is packed, aligned, section, unused, deprecated, visibility and format
+  (docs/technical-specifications.md line 506), so an inlining attribute would risk a divergence
+  caused by the test and would import an extension into an area whose subject is the calling
+  convention.
+
+Verified rather than asserted: the default strict warning gate (-Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror) produces zero diagnostics in the single
+native compile-only invocation the suite makes of it; the sanitizer gate
+(-fsanitize=undefined,address -fno-sanitize-recover=all) runs to completion in its one
+instrumented native build with no diagnostic and exit status 0; and all twelve cells of the
+declared matrix produce byte-identical stdout of 1400 bytes over 56 lines with exit status 0
+and an empty standard error.
+END
+impl_defined_notes <<END
+This area exists because the four backends implement four different application binary
+interfaces, and it is the densest concentration of cross-backend divergence surface in the
+corpus. The parameter counts are sized against the WIDEST register file rather than the
+narrowest - eight integer registers on AAPCS64 (x0-x7) and LP64D (a0-a7), six on System V
+AMD64 (rdi, rsi, rdx, rcx, r8, r9), and none on System V i386 cdecl, which marshals
+everything on the stack - so every target genuinely spills and no target is left exercising
+only its register path. Confirmed at instruction level in the reference compiler's -O2
+assembly: x86_64 passes six arguments in registers and pushes the remaining nine, i686
+pushes all fifteen, and
+aarch64 and riscv64 each fill their eight argument registers and store the remaining seven
+to the outgoing argument area. The same inspection confirms the enforced call boundary
+holds on every target - four indirect calls per target, through `call *%rax` on x86_64,
+`call *%eax` on i686, `blr` on aarch64 and `jalr` on riscv64, with both callee bodies still
+present as real functions rather than inlined away.
+
+The measured target differences are handled by construction, so no target restriction and no
+marker is needed:
+
+1. sizeof(long) and sizeof(void *) are 4 on i686 and 8 on x86_64, aarch64 and riscv64
+   (docs/technical-specifications.md lines 457-462). Width normalisation is therefore
+   absolute here: only int and long long are passed or printed, and both were measured at 4
+   and 8 bytes respectively on all four targets. No long, no size_t, no ptrdiff_t and no
+   pointer value appears in the output, and the conversion specifications are exactly %d,
+   %lld and %s - %ld, %lu, %zu and %p never appear. The long long values deliberately exceed
+   the 32-bit range, so i686 must marshal each of them as a register or stack pair rather
+   than as a single word, which is the divergence surface that type is here to cover.
+2. Plain char signedness is implementation-defined and was measured signed on x86_64 and
+   i686 and unsigned on aarch64 and riscv64. No plain char is passed or printed as a value:
+   char occurs in this program only as const char *, for the printf format string and for
+   the variant tag, and a tag is printed as the string it designates, so the signedness
+   difference cannot reach the output.
+3. long double has three representations across the four targets (measured 16, 12, 16 and 16
+   bytes). No floating type of any width is used here - the program contains no float, no
+   double and no long double - so neither the representation difference nor i686's x87
+   evaluation of intermediates can affect this program. long double belongs to
+   13_floating_point/004_long_double_target_restricted, which is where it is compared.
+4. Aggregate size, layout and padding cannot affect this program, because it declares no
+   struct and no union at all and never applies sizeof. Aggregate parameter passing is
+   covered by 004_small_and_large_struct_passing and 005_struct_return_by_value, where the
+   layout differences are handled with their own recorded reasons.
+5. All four targets are little-endian, and in any case no byte-order-sensitive value is
+   printed: every value reaches stdout through a conversion specification rather than through
+   a byte-wise inspection of its storage.
+
+Because every printed value is width-independent and representation-independent, cross-target
+output identity holds by construction rather than by coincidence; it was then confirmed by
+measurement over all twelve cells. Oracle (b) therefore stays enabled for this program, and a
+cross-backend divergence here would be a genuine finding rather than an implementation-defined
+difference.
+END
+expected_stdout    <<END
+int_folded_a01=1001
+int_folded_a02=-1002
+int_folded_a03=1003
+int_folded_a04=-1004
+int_folded_a05=1005
+int_folded_a06=-1006
+int_folded_a07=1007
+int_folded_a08=-1008
+int_folded_a09=1009
+int_folded_a10=-1010
+int_folded_a11=1011
+int_folded_a12=-1012
+int_folded_a13=1013
+int_folded_a14=-1014
+llong_folded_b01=5000000001
+llong_folded_b02=-5000000002
+llong_folded_b03=5000000003
+llong_folded_b04=-5000000004
+llong_folded_b05=5000000005
+llong_folded_b06=-5000000006
+llong_folded_b07=5000000007
+llong_folded_b08=-5000000008
+llong_folded_b09=5000000009
+llong_folded_b10=-5000000010
+llong_folded_b11=5000000011
+llong_folded_b12=-5000000012
+llong_folded_b13=5000000013
+llong_folded_b14=-5000000014
+int_runtime_a01=1001
+int_runtime_a02=-1002
+int_runtime_a03=1003
+int_runtime_a04=-1004
+int_runtime_a05=1005
+int_runtime_a06=-1006
+int_runtime_a07=1007
+int_runtime_a08=-1008
+int_runtime_a09=1009
+int_runtime_a10=-1010
+int_runtime_a11=1011
+int_runtime_a12=-1012
+int_runtime_a13=1013
+int_runtime_a14=-1014
+llong_runtime_b01=5000000001
+llong_runtime_b02=-5000000002
+llong_runtime_b03=5000000003
+llong_runtime_b04=-5000000004
+llong_runtime_b05=5000000005
+llong_runtime_b06=-5000000006
+llong_runtime_b07=5000000007
+llong_runtime_b08=-5000000008
+llong_runtime_b09=5000000009
+llong_runtime_b10=-5000000010
+llong_runtime_b11=5000000011
+llong_runtime_b12=-5000000012
+llong_runtime_b13=5000000013
+llong_runtime_b14=-5000000014
+END

@@ -1,0 +1,68 @@
+# Expectation record for 06_control_flow/003_switch_basic_fallthrough.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 003_switch_basic_fallthrough
+area               = 06_control_flow
+description        = Deliberate switch fallthrough: stacked labels, statement-carrying labels flowing on, fallthrough into and out of a non-final default, negative labels, and break out of a switch from a nested block
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Every controlling value is a small literal, staged through the volatile int vin
+in the runtime variant, and every case label is an ordinary integer constant
+expression with no duplicates. The largest accumulated value anywhere is 1000
+and the largest label magnitude is 99, so no signed overflow is possible on any
+plain int. There is no shift, no division and no remainder. The only pointer
+arithmetic is the arithmetic the language performs for a subscript: every index
+into the static const input tables and out is a literal or a loop counter
+provably inside its bound, and no pointer value is printed, converted to an
+integer or compared. Every object is written before it is read: r is initialised
+in each
+helper that accumulates and assigned on every reachable path in each helper that
+selects, the static const input tables have initialisers, vin is assigned before
+each read, and out[] elements are written before being printed. The statement
+after the break inside the nested block of break_from_nested_block is
+unreachable at run time but is well formed and reads no uninitialised storage.
+No object is modified twice between sequence points; each volatile write and
+each volatile read stands in its own statement. There is no aliasing, no address
+is taken, no uninitialised storage is read, and nothing depends on padding bytes
+or on the relative addresses of unrelated objects. No evaluation order is relied
+upon: the helper calls appearing together in one printf argument list are pure.
+The fall-through comments are removed by the preprocessor and cannot affect
+semantics; they exist solely so the reference compiler recognises each
+fallthrough as deliberate under its default diagnostic set.
+END
+impl_defined_notes <<END
+Nothing implementation-defined is printed. Plain char is never used as a value,
+which matters because char signedness was measured to differ across the four
+targets: signed on x86_64 and i686, unsigned on aarch64 and riscv64. Every
+printed value has type int, which is 32 bits on all four targets, so no value
+depends on the measured pointer and long width difference (4 bytes on i686,
+8 bytes on the other three). No address, no pointer value, no sizeof result and
+no floating-point value is printed. The label sets here are small and contiguous
+enough that no target's choice of switch lowering strategy can alter the
+observable result. All 12 cells are therefore expected to produce byte-identical
+stdout, and no target restriction is needed.
+END
+expected_stdout    <<END
+const_stacked=10 10 10 20 20 30
+runtime_stacked=10 10 10 20 20 30
+const_accumulate=15 14 12 8 16 32
+runtime_accumulate=15 14 12 8 16 32
+const_through_default=7 4 8 6
+runtime_through_default=7 4 8 6
+const_signed_labels=100 200 300 400
+runtime_signed_labels=100 200 300 400
+const_break_from_nested_block=1 1000 7
+runtime_break_from_nested_block=1 1000 7
+END

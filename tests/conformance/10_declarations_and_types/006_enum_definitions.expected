@@ -1,0 +1,91 @@
+program            = 006_enum_definitions
+area               = 10_declarations_and_types
+description        = Enumerator value assignment, gaps, negative enumerators and the int range edges, with switch lowering over a sparse label set
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+No signed overflow occurs anywhere, including at the int range edges. B_LOW is written as
+-2147483647 - 1 rather than as -2147483648 precisely so that every intermediate value is an
+int-typed constant within int range: the literal 2147483648 would not fit in int and would
+acquire a wider type, whereas 2147483647 fits and subtracting 1 from its negation reaches the
+int minimum with no step outside the range. B_HIGH is the int maximum written directly. Both
+edge values are only printed, never used as arithmetic operands, so no computation approaches
+either edge. The arithmetic that is performed uses only small enumerators: COLOR_BLUE plus S_B
+is 13 and S_D minus S_A is 11, both far from the range edges. The cast (enum sparse)selector
+converts the value 20, which is exactly the enumerator S_C and therefore within the
+enumeration's value range, so the conversion is value preserving. classify handles all four
+enumerators with case labels and additionally returns -1 after the switch, so its control flow
+is well defined for any argument value and control can never fall off the end of the function.
+Every object read is initialized: selector has an initializer and folded, runtime and arith are
+all assigned at their declarations. No shift and no pointer arithmetic is performed. No object
+is modified twice between sequence points, and no printf call receives a side-effecting
+argument -- both classify results are assigned to locals on separate statements first, so
+unspecified evaluation order cannot affect the output. There is no aliasing violation and no
+padding byte is read.
+END
+impl_defined_notes <<END
+EVERY ENUMERATOR IS REPRESENTABLE AS INT, WHICH THE STANDARD REQUIRES RATHER THAN MERELY
+FAVOURS. C11 6.7.2.2p2 constrains the expression defining an enumeration constant to an integer
+constant expression whose value is representable as an int, so an enumerator outside that range
+is a constraint violation and not a portability preference: a conforming implementation must
+diagnose it, and a program containing one is outside what a differential oracle can compare
+because the two sides are free to differ on what they do after diagnosing. Every enumerator in
+this program is therefore inside int range by construction. The extremes are exactly the int
+minimum (B_LOW) and the int maximum (B_HIGH), and no other enumerator comes near either, so the
+constraint is satisfied at both edges rather than merely somewhere in the middle.
+
+THE ONE IMPLEMENTATION-DEFINED RELATION THAT IS PRINTED, AND WHY PRINTING IT IS SOUND. No raw
+enum size ever reaches stdout: the program prints sizeof(enum color) == sizeof(int) as a 0 or 1
+value only. Even so, C11 6.7.2.2p4 leaves an enumerated type's compatible type
+implementation-defined -- for values within int range exactly as much as beyond it -- so that
+relation is an implementation-defined observation rather than a language guarantee, and printing it
+needs a justification instead of an assumption.
+
+Three things together supply one. First, it is a RELATION and not a width, so no byte count
+enters the golden record and the measured i686 width difference cannot surface through it.
+Second, it was MEASURED rather than assumed: compiling and running this comparison with each
+target's own reference cross driver yields 1 on all four targets at all three optimization
+levels -- twelve configurations, all agreeing, with sizeof(enum color) four bytes in every one.
+Third, on these four targets the choice is not free in practice. Each is a hosted ELF target
+whose objects must interoperate with a system C library built by that same reference compiler,
+so the compatible type is fixed by the platform's established ABI rather than chosen afresh by
+each compiler. Agreeing with the reference compiler on the same target is therefore an ABI
+requirement and not a convention, and a disagreement would be an ABI incompatibility -- exactly
+the class of defect this suite exists to surface.
+
+This line is consequently treated as a MEASURED NON-DIFFERENCE, on the same footing as bitfield
+layout, negative right shift, and division and remainder signs; see
+tests/conformance/EXPECTED_DIVERGENCES.md section 5.4. A divergence on it is a genuine finding
+rather than an expected implementation-defined difference, and no marker covers it.
+
+Should a future backend or a newly supported target ever legitimately choose a different
+compatible type, the correct response is to delete this printed relation or to restrict this
+program's target list with a recorded reason -- never to mint a marker and never to weaken an
+oracle. Independently of all of the above, every enumerator is explicitly cast to int before
+printing, which normalizes the printed values and keeps the %d conversion correct on every
+target whatever compatible type is chosen.
+
+REMAINING WIDTH NORMALIZATION. No sizeof of long, pointer, double, long long or any aggregate
+containing them is printed, so the measured i686 difference (4-byte long and pointer versus 8
+bytes on x86_64, aarch64 and riscv64) cannot surface. No address or pointer value is printed.
+Plain char is not used, so the measured char signedness difference (signed on x86_64 and i686,
+unsigned on aarch64 and riscv64) is irrelevant. The only printf conversion specifier used in
+the program is %d.
+END
+expected_stdout    <<END
+color=0 1 2
+sparse=10 11 20 21
+signed=-5 0 7 8
+bounded_low_high=-2147483648 2147483647
+arith=13 11
+classify_folded=300 classify_runtime=300
+enum_size_eq_int=1
+END

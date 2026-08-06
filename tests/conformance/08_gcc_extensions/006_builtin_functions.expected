@@ -1,0 +1,133 @@
+program            = 006_builtin_functions
+area               = 08_gcc_extensions
+description        = GCC __builtin_* intrinsics restricted to deterministic target-independent results, folded and volatile-runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
+ub_notes           <<END
+UB-FREEDOM ARGUMENT. There is no signed overflow: the only signed values are -12345 and
+small counts, and __builtin_abs is applied to -12345, which is far from INT_MIN, so the
+absolute value is representable. All bit manipulation is on unsigned types, where
+wraparound is modular and defined.
+
+Every shift count is strictly in range: the only shift is 1ULL << 40, and 40 is less than
+the 64-bit width of unsigned long long on every target.
+
+EVERY clz AND ctz ARGUMENT IS STRICTLY NON-ZERO, because __builtin_clz(0), __builtin_ctz(0),
+__builtin_clzll(0) and __builtin_ctzll(0) are UNDEFINED. The arguments used are the
+literals 1u, 0x80000000u, 8u, 1ULL and 1ULL << 40, and at run time the volatile value
+0xF0F0F0F0, all provably non-zero.
+
+NO UNINITIALIZED READ OCCURS. __builtin_memset zeroes all 16 bytes of dst before
+__builtin_memcpy writes the first 8, so reading dst[8] and dst[15] is well defined; src is
+fully written by its loop before it is read. The memcpy copies exactly 8 bytes from an
+8-byte source into a 16-byte destination, so no one-past-end access occurs. The sanitizer
+gate confirms both.
+
+There is no aliasing violation: the char arrays are accessed only as char, and every other
+object only through its declared type. No object is modified twice between sequence points.
+Every printf call receives at most one side-effecting argument. Nothing depends on padding
+bytes: the program prints offsetof values, which are specified, and never reads the padding
+they imply. Nothing depends on the addresses of unrelated objects, and no address is
+printed.
+
+No char value is ever printed. char was measured as signed on x86_64 and i686 but unsigned
+on aarch64 and riscv64; the char arrays here are only compared byte-wise or tested against
+zero, so the signedness difference cannot be observed.
+END
+impl_defined_notes <<END
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them, which is measured rather than asserted.
+
+Nothing implementation-defined is observed, so no target restriction is needed and all
+four targets are compared. Achieving that required three deliberate exclusions and one
+normalization.
+
+EXCLUDED: __builtin_constant_p. Its result reflects the OPTIMIZER'S decisions and so
+legitimately differs between -O0 and -O2. Including it would break this program's own
+optimization-invariance requirement and produce a divergence caused by the test.
+
+EXCLUDED: __builtin_return_address, __builtin_frame_address, __builtin_FILE,
+__builtin_LINE, __builtin_trap, __builtin_unreachable, __builtin_alloca. Addresses and
+file paths are not deterministic across builds or targets, and trap and unreachable
+deliberately produce undefined or abnormal termination, which would destroy the UB-freedom
+precondition that makes the oracle sound.
+
+EXCLUDED: every l-suffixed bit builtin such as __builtin_popcountl, __builtin_clzl and
+__builtin_ctzl. They take unsigned long, which is 32-bit on i686 and 64-bit on the other
+three targets, so __builtin_clzl(1ul) would print 31 on i686 and 63 elsewhere. Only
+unsuffixed forms, which take 32-bit unsigned int, and ll-suffixed forms, which take 64-bit
+unsigned long long, are used; both are fixed-width on every target.
+
+NORMALIZED: the __builtin_strcmp results. Only the SIGN of a strcmp result is specified;
+its magnitude is implementation-defined. Each result is reduced to exactly -1, 0 or 1
+before printing.
+
+bi_offsetof is target-independent by careful member ordering. In struct off_s { int x;
+int y; double z; } the two ints already place z at offset 8, and 8 is a multiple of BOTH 4,
+which is i686's default struct alignment for double with -malign-double off, AND 8, which
+is the alignment on x86_64, aarch64 and riscv64. So z lands at offset 8 on every target
+with no padding inserted before it. Reordering these members, for instance putting the
+double first or a single int before it, would expose the i686 versus LP64 double-alignment
+difference and manufacture a divergence.
+
+Cast discipline for the strict gate: bswap16 and bswap32 results are cast to unsigned,
+bswap64 to unsigned long long, strlen and offsetof to unsigned because they return size_t
+whose width varies, and __builtin_expect to int because it takes and returns long, where
+the value 5 fits on every target including i686.
+
+The __builtin_ forms of memset, memcpy, memcmp, strcmp, strlen and offsetof are used
+rather than the library names precisely because they REQUIRE NO HEADER, and this program
+includes none: the corpus's only sanctioned inclusion is area 07's <stdarg.h>, string.h
+is not in bcc's bundled set at all, and stddef.h is bundled but not sanctioned here.
+
+The builtin selection deliberately favours the most universally-implemented, deterministic
+builtins over exotic coverage, because the documentation supports __builtin_* only
+generically at docs/technical-specifications.md lines 13, 107 and 761 and
+docs/project-guide.md's "C11 Frontend -- Parser" and "C11 frontend with GCC extensions"
+rows, with no enumerated list of individual builtins
+anywhere. Breadth of safety was preferred so that one unimplemented builtin cannot block
+the program. Because no documentation enumerates individual builtins, there is no
+documented basis to cite and this program carries NO expected-divergence marker: an
+unimplemented builtin would be an undocumented divergence and therefore a FINDING.
+
+Output is identical on all four targets at all three optimization levels.
+END
+expected_stdout    <<END
+bi_popcount32=16
+bi_popcount64=13
+bi_clz_one=31
+bi_clz_top=0
+bi_ctz_eight=3
+bi_clzll_one=63
+bi_ctzll_bit40=40
+bi_bswap16=13330
+bi_bswap32=1144201745
+bi_bswap64=578437695752307201
+bi_abs=12345
+bi_strlen=11
+bi_strcmp_sign=-1 1 0
+bi_mem_roundtrip=1
+bi_offsetof=0 4 8
+bi_expect_taken=7
+bi_expect_value=5
+bi_runtime_popcount32=16
+bi_runtime_popcount64=13
+bi_runtime_clz=0
+bi_runtime_ctz=4
+bi_runtime_bswap32=4042322160
+bi_runtime_abs=12345
+END

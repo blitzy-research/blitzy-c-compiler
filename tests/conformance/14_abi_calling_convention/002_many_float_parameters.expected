@@ -1,0 +1,265 @@
+# Expectation record for 14_abi_calling_convention/002_many_float_parameters.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_many_float_parameters
+area               = 14_abi_calling_convention
+description        = Fourteen floating parameters plus a trailing integer tag per call, double and float, sized to exhaust the floating argument registers of every supported ABI; folded and volatile-runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction, which is the precondition that
+makes a divergence here evidence about the compiler rather than about the test.
+
+WHAT IS PASSED, AND WHY THE COUNT IS FOURTEEN. Each of the two callees takes fourteen floating
+parameters plus a trailing int tag, and each is called twice -- once over literal arguments and
+once over arguments staged out of volatile storage. The widest floating argument file across the
+four supported ABIs is eight (System V AMD64 xmm0-xmm7, AAPCS64 v0-v7, LP64D fa0-fa7), and
+System V i386 cdecl has no argument registers at all, so fourteen clears eight by six and no
+target can satisfy either call from its floating registers alone. Every one of the fourteen
+parameters is printed back individually and in declaration order, never summed and never
+checksummed, so a transposed pair or a single mishandled slot names itself instead of
+cancelling out. The fifteenth parameter is the int tag; it is consumed through variant_tag and
+appears as the variant name that every line of a group carries, so a tag delivered to the wrong
+slot renames a whole group and is just as visible as a wrong value would be.
+
+- No arithmetic can overflow, trap or lose a value, because there is almost none: beyond the one
+  equality comparison inside variant_tag and the two loop counters that drive the staging
+  copies, every floating value is copied from a literal or from an initialised volatile object
+  into a parameter and then printed. So there is no signed integer overflow, no division, no
+  remainder, no shift of any kind, and no operation that could produce a not-a-number or an
+  infinity.
+- Every literal is a dyadic rational with a denominator of at most 16, hence exactly
+  representable in binary32 and in binary64 alike. No conversion in this program loses a value
+  and %.4f never meets a rounding tie.
+- Each float is widened to double by an explicit cast at the printf call site. The widening is
+  exact in every case because binary32 is a subset of binary64, and writing the conversion out
+  rather than leaving it to the default argument promotion is also what keeps the program clean
+  under the audit gate's -Wconversion, from which this area sanctions no deviation.
+- No index is out of range and no pointer past the end of an object is formed. Both staging
+  loops run from 0 to 13 over arrays of fourteen elements, and every one of the four arrays --
+  vdbl, vflt, plain_d and plain_f -- is subscripted only within that range. Those subscripts are
+  the program's pointer arithmetic, and they are counted rather than denied: E[k] is defined as
+  *(E + k), so each one decays its array to a pointer to the first element and adds an index the
+  loop has already bounded below the declared extent of fourteen, which means every derived
+  pointer points at an element of the array it came from and is dereferenced only there. The
+  program's other pointers are the format strings, the const char * returned by variant_tag --
+  which points into a string literal of static storage duration and therefore stays valid for the
+  lifetime of the program -- and the two volatile function pointers take_double15_p and
+  take_float15_p, which are objects of static storage duration initialised to the addresses of
+  two functions defined in this same translation unit and never reassigned, so each is re-read at
+  the point of call and always designates the function it was initialised with. No pointer
+  representation is ever printed and no pointer is converted to an integer.
+- No read of uninitialised storage. Every element of both volatile arrays and the volatile tag
+  are initialised in their own declarations and written nowhere afterwards, and every plain
+  staging destination is written by its loop or its assignment before it is ever read.
+- No aliasing violation: every object is read through its own declared type, and no storage is
+  reinterpreted as another type.
+- No object is modified twice between sequence points, no argument to any call has a side
+  effect, and nothing depends on padding bytes or on the relative addresses of unrelated
+  objects.
+
+NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and that is enforced structurally rather than
+merely argued. An access to a volatile object is an observable side effect, and C11 6.5.2.2p10
+leaves the order of evaluation of a call's function designator, of its arguments, and of
+subexpressions within those arguments unspecified, so reading fourteen volatile elements inside
+one argument list would make the order of fourteen side effects unspecified. The runtime
+variants therefore STAGE every volatile datum before any call: the tag is copied into a plain
+int in a statement of its own, and each element of vdbl and vflt is copied into plain array
+storage in a bounded loop, one volatile read per iteration and so one per full expression. The
+calls then pass plain objects only, and neither argument list contains a side effect at all.
+Staging costs the test nothing, which is why it is the right answer rather than a compromise: a
+value that arrived through a volatile load stays opaque to the optimizer, so every argument is
+still materialised at run time and still marshalled through the ABI.
+
+THE CALL BOUNDARY IS MADE HARD TO OPTIMIZE AWAY, IN PURE ISO C -- WHICH IS NOT THE SAME AS BEING
+GUARANTEED BY ISO C, and the difference is stated rather than glossed. Both callees are reached
+through a volatile-qualified function pointer instead of by name, because a fixed-arity static
+callee may legally be inlined at -O1 and -O2 and an inlined callee marshals nothing at all --
+the floating argument path this program exists to exercise would then never be crossed, and the
+register assignments argued above would be claims about code that was never emitted.
+What the standard does require of the volatile pointer: an access to a volatile object is a side
+effect belonging to the observable behaviour an implementation must reproduce (C11 5.1.2.3p2 and
+p6), and C11 6.7.3p7 requires an expression referring to such an object to be evaluated strictly
+according to the abstract machine's rules -- so the pointer is RE-READ at each point of call and
+control goes to whatever function that load produced. What the standard does NOT require: that
+the transfer arrives at the callee's original entry. A conforming implementation may introduce a
+specialised clone, scalarise a copy of the body, or guard-devirtualize -- test the loaded pointer
+against a known function and take a specialised path when it matches -- and still honour the
+loaded value, since the observable behaviour is identical. So the indirection must NOT be described
+as making the signature uncloneable or unscalarisable: that would claim more than the standard
+allows. It is an optimization OBSTACLE whose effect is measured on named artifacts, never a language
+guarantee.
+WHAT IS ACTUALLY VERIFIED, ON NAMED ARTIFACTS. Measured on the committed source with gcc 13.4.0
+at -O2 on all four reference drivers: take_double15 and take_float15 are each still emitted out
+of line under their own labels; no specialised clone appears anywhere, zero symbols carrying
+.constprop, .isra or .part.; and each of the four call sites per target is a genuine indirect
+transfer -- call *%reg on x86_64 and i686, blr on aarch64, jalr on riscv64. That is evidence
+about the reference compiler's output, not a property every compiler under test must have: one
+that devirtualized through a specialised entry could print the same bytes without crossing the
+boundary argued above, and this program would not detect it. Closing that gap would take a
+per-cell STATIC check of the artifact the compiler under test emitted, which is a harness
+capability this suite does not have; until then the claim is exactly what the measurement
+supports and no more.
+An inlining attribute would have been shorter, but the documented attribute set for the compiler
+under test is packed, aligned, section, unused, deprecated, visibility and format
+(docs/technical-specifications.md line 506), so an attribute would risk a divergence caused by
+the test and would import an extension into an area whose subject is the calling convention.
+
+No header is included. bcc ships no stdio.h -- its bundled set is the nine required freestanding
+headers plus a bonus stdatomic.h (docs/technical-specifications.md line 19 and lines 202-214) --
+so an include would fail against bcc while succeeding against the reference compiler,
+manufacturing a divergence caused by the test rather than by the compiler. printf is therefore
+hand-declared, and float.h is not included either, no macro from it being needed. Area 14 takes
+neither of the suite's two sanctioned header exceptions. main returns 0, inside the permitted
+0-125 range. Nothing is allocated; no socket, file, environment variable, clock or random source
+is touched; and every input is a literal in the source.
+
+Verified rather than asserted: the default seven-flag warning gate (-Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror) produces zero diagnostics in the single native
+compile-only invocation the suite makes of it; the sanitizer gate (-fsanitize=undefined,address
+-fno-sanitize-recover=all) runs to completion with empty output and exit status 0 in its one
+instrumented native build; and all twelve reference cells of the declared matrix produce
+byte-identical stdout with exit status 0 and an empty standard error.
+END
+impl_defined_notes <<END
+This area exists because the four backends implement four different application binary
+interfaces, and it is the densest concentration of cross-backend divergence surface in the
+corpus. This program's subject is the FLOATING argument register file specifically, and its
+parameter count is sized against the widest such file rather than the narrowest: eight on System
+V AMD64 (xmm0-xmm7), AAPCS64 (v0-v7) and LP64D (fa0-fa7), and none at all on System V i386
+cdecl, which marshals every argument on the stack. Fourteen floating parameters therefore clear
+the widest file by six on every target, so no target is left exercising only its register path.
+Where the six excess values go was read out of the reference compiler's own assembly for this
+exact program rather than assumed, and checked against the documented ABI rows at
+docs/technical-specifications.md line 546 (x86-64), line 553 (i686 cdecl), line 559 (AAPCS64)
+and line 565 (LP64D):
+
+  x86-64   System V AMD64  eight in xmm0-xmm7  six on the stack      tag in edi
+  i686     System V cdecl  no argument registers at all, all fifteen on the stack
+  AArch64  AAPCS64         eight in d0-d7      six on the stack      tag in w0
+  RISC-V   LP64D           eight in fa0-fa7    six in INTEGER a0-a5  tag in a6
+
+The RISC-V row is why the trailing tag must stay last. Three of the four ABIs spill the excess
+floating values to the stack; LP64D instead passes a floating argument that no longer fits the
+floating file in an INTEGER argument register before resorting to the stack, so six doubles
+cross into a0-a5 as raw bit patterns and the tag is pushed along to a6. The two register files
+are therefore deliberately COUPLED there and independent on x86-64 and AAPCS64, where the tag
+takes the first integer register while the floating file is already full. One trailing parameter
+thus discriminates between two opposite allocator errors on three targets and exercises the
+plain stack path on the fourth.
+
+All of that is a difference between the calling conventions, and the calling conventions
+differing is exactly what is under test. The OBSERVABLE RESULTS must nevertheless agree, so this
+record carries no target restriction, no oracle exclusion, no warning-gate deviation and no
+expected-divergence marker: a cross-backend difference here is a genuine finding rather than an
+implementation-defined one. The measured target differences that could otherwise reach the
+output are handled by construction instead:
+
+1. Width normalisation. sizeof(long) and sizeof(void *) are 4 on i686 and 8 on x86_64, aarch64
+   and riscv64. The only types this program passes are double, float and int, and the only
+   types it prints are double and const char *; no long, no long long, no size_t and no pointer
+   value appears anywhere in the output.
+2. Plain char signedness is implementation-defined and was measured signed on x86_64 and i686
+   and unsigned on aarch64 and riscv64. No plain char is passed or printed: char occurs only as
+   const char *, for the format strings and for the variant name.
+3. long double is deliberately absent. Its representation was measured to differ across the four
+   targets (16, 12, 16 and 16 bytes; x87 80-bit extended versus IEEE binary128), so using it
+   here would import a divergence that has nothing to do with argument passing. That type
+   belongs to 13_floating_point/004_long_double_target_restricted, which keeps it under test
+   with a recorded oracle (b) exclusion carrying its measured reason.
+4. Floating values are printed at fixed precision with margin, and every literal is a dyadic
+   rational with a denominator of at most 16, so each is exactly representable in both binary32
+   and binary64 and prints exactly at four decimal places with no rounding tie. That is what
+   keeps the output byte-identical even on i686, whose reference compiler evaluates with x87
+   80-bit intermediates (FLT_EVAL_METHOD == 2), where double rounding would otherwise be the
+   hazard.
+5. The format set is exactly %s and %.4f. Every float reaching the variadic printf carries an
+   explicit (double) cast, so each conversion specification matches its argument's type after
+   the default argument promotions; %d, %ld, %lu, %zu and %p never appear.
+6. No struct or union is declared, passed or returned, so no record layout, member offset or
+   padding difference between the targets can affect this program at all, and no member is read
+   back. The four array objects vdbl, vflt, plain_d and plain_f are aggregates in C's own
+   terminology, and they are named here rather than glossed over: an array of a single scalar type
+   has no padding and no member offsets to differ, its element type is one of the two the program
+   is about, and no array is passed to or returned from any function -- each is only subscripted,
+   element by element, so what crosses a call boundary is always a scalar double or float.
+   Aggregate argument passing belongs to 004_small_and_large_struct_passing and aggregate
+   return to 005_struct_return_by_value.
+7. All four targets are little-endian and no byte-order-sensitive value is printed. sizeof is
+   never printed, no object is compared byte-wise, and no address or pointer representation is
+   printed: the program observes parameter VALUES and nothing else.
+
+Cross-target identity is therefore engineered by construction and then measured, not assumed.
+The golden record below is byte-identical across all twelve reference cells -- x86_64 natively
+and i686, aarch64 and riscv64 under emulation, each at -O0, -O1 and -O2 -- every one exiting 0
+with an empty standard error.
+END
+expected_stdout    <<END
+dbl_folded_d01=1.5000
+dbl_folded_d02=-2.2500
+dbl_folded_d03=3.1250
+dbl_folded_d04=-4.0625
+dbl_folded_d05=5.5000
+dbl_folded_d06=-6.7500
+dbl_folded_d07=7.8750
+dbl_folded_d08=-8.1875
+dbl_folded_d09=9.2500
+dbl_folded_d10=-10.5000
+dbl_folded_d11=11.1250
+dbl_folded_d12=-12.3125
+dbl_folded_d13=13.7500
+dbl_folded_d14=-14.9375
+flt_folded_f01=0.5000
+flt_folded_f02=-1.2500
+flt_folded_f03=2.3750
+flt_folded_f04=-3.0625
+flt_folded_f05=4.5000
+flt_folded_f06=-5.7500
+flt_folded_f07=6.8750
+flt_folded_f08=-7.1875
+flt_folded_f09=8.2500
+flt_folded_f10=-9.5000
+flt_folded_f11=10.1250
+flt_folded_f12=-11.3125
+flt_folded_f13=12.7500
+flt_folded_f14=-13.9375
+dbl_runtime_d01=1.5000
+dbl_runtime_d02=-2.2500
+dbl_runtime_d03=3.1250
+dbl_runtime_d04=-4.0625
+dbl_runtime_d05=5.5000
+dbl_runtime_d06=-6.7500
+dbl_runtime_d07=7.8750
+dbl_runtime_d08=-8.1875
+dbl_runtime_d09=9.2500
+dbl_runtime_d10=-10.5000
+dbl_runtime_d11=11.1250
+dbl_runtime_d12=-12.3125
+dbl_runtime_d13=13.7500
+dbl_runtime_d14=-14.9375
+flt_runtime_f01=0.5000
+flt_runtime_f02=-1.2500
+flt_runtime_f03=2.3750
+flt_runtime_f04=-3.0625
+flt_runtime_f05=4.5000
+flt_runtime_f06=-5.7500
+flt_runtime_f07=6.8750
+flt_runtime_f08=-7.1875
+flt_runtime_f09=8.2500
+flt_runtime_f10=-9.5000
+flt_runtime_f11=10.1250
+flt_runtime_f12=-11.3125
+flt_runtime_f13=12.7500
+flt_runtime_f14=-13.9375
+END

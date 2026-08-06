@@ -1,0 +1,177 @@
+# Expectation record for 03_initializers/005_designated_struct.c
+#
+# Designated struct member initializers: declaration order, reverse order, omitted
+# members, nested-member designators, designator-then-positional continuation, and
+# designators descending into an array member.
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 005_designated_struct
+area               = 03_initializers
+description        = Designated struct member initializers -- in declaration order, in reverse member order, with members omitted, with nested-member designators, with designator-then-positional continuation exercising the C11 current-object rule, and with designators descending into an array member -- for static and automatic storage duration, every member read back individually
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined and no unspecified behaviour.
+
+THERE IS NO READ OF UNINITIALIZED STORAGE, even though several initializers omit
+members. Every object here that is printed has an initializer, and C11 6.7.9p19
+and p21 require members not explicitly initialized to be initialized implicitly
+as an object with static storage duration would be -- that is, to zero for the int
+members used here. This covers g_omitted's nested in.p and in.q, g_nested_mem's
+in.p and trailer, g_then_pos's tag, g_arr_elem's unnamed array elements and
+trailer, l_omitted's tag, in.q and trailer, and l_arr_elem's unnamed array
+elements, tag and trailer.
+
+NO INITIALIZER SUPPLIES A SECOND VALUE FOR ANY MEMBER. Each designated initializer
+in this program names each member at most once, and where a designator is followed
+by a positional initializer the positional one lands on the NEXT member rather
+than on one already set. Specifically, in g_then_pos the initializer
+{ .in = { 42, 43 }, 44 } sets in.p and in.q through the member designator, after
+which C11 6.7.9p17 and p18 make the current object advance to the member following
+in, so the bare 44 initializes trailer; tag is never named and is therefore
+implicitly zero. There is consequently no overlapping or overriding initializer
+anywhere in this program, and the result is fully determined by the standard.
+
+No arithmetic is performed on any initialized value, so signed overflow is
+impossible. The only run-time arithmetic is on the loop counter i, bounded i < 4
+over the array member a[4], so every subscript is in bounds; no one-past-end
+pointer is formed and none is dereferenced. That counter is the one object in the
+file declared without an initializer, and it is assigned in each for statement's
+initial clause before any read of it, so it too is never read uninitialized. The
+array-member designators .a[0], .a[2] and .a[3] are all within the declared bound
+of 4.
+
+No shifts, no pointer casts, no aliasing -- each object is read only through its
+own declared type. Nothing is modified twice between two sequence points. The
+seven initialized structures are never modified after their initializers at all,
+so every value printed is the value its initializer gave it; the only object that
+is modified is the loop counter i, assigned in the initial clause of each of the
+three for statements at 005_designated_struct.c lines 116, 121 and 138 and
+incremented in each of their controlling expressions. Every one of those
+assignments and increments is a full expression of its own, so each is separated
+from every other access to i by a sequence point, and the bound i < 4 is a literal
+equal to the extent of the array member it walks, so i neither overflows nor
+leaves an array. Each printf call has at most one argument with a side effect, and
+none has one.
+
+NO PADDING BYTE IS READ OR COMPARED. Only named members are accessed; no struct is
+printed as a whole and no object representation is inspected. Padding contents are
+unspecified, so this is essential to the soundness of the byte-exact comparison.
+All three struct types are composed exclusively of int members and an int array,
+so on every supported target they have no internal padding in any case.
+
+EVERY PARTIAL INITIALIZER LIST IN THIS PROGRAM IS INTRODUCED BY A DESIGNATOR, AND
+THAT IS DELIBERATE. Under the mandated authoring gate, -Wextra enables
+-Wmissing-field-initializers and -Werror promotes it to a hard error. Measurement
+with the reference compiler established that in C this diagnostic does NOT fire for
+a list whose members are named by designators, nor for the { 0 } idiom, but DOES
+fire for a positional partial struct such as `struct outer v = { 1 };`. Omitting
+members is therefore safe here precisely because no list omits a member without a
+designator naming where the values it does supply belong.
+
+The rule is stated that way rather than as "every initializer is designated",
+because two spellings in this program are positional on purpose and the precise
+rule is what makes both of them safe. Every nested brace list is written
+POSITIONALLY and is COMPLETE -- { 2, 3 } and { 12, 13 } and { 42, 43 } fill both
+members of struct inner, and { 62, 63, 64, 65 } fills all four elements of a[4] --
+so nothing is omitted for the diagnostic to fire on. And g_then_pos is the
+deliberate designator-to-positional continuation the program exists to test:
+{ .in = { 42, 43 }, 44 } supplies its trailing value POSITIONALLY, continuing from
+the member the designator selected, which is exactly the construct described above
+and the one whose lowering a compiler can get wrong. It is a partial list -- tag is
+never named -- and it draws no diagnostic because the designator .in establishes
+where the continuation begins. What may not be done in this program is to convert
+one of the DESIGNATED partial lists into a purely positional partial list. The
+positional-partial-struct spelling is exercised nowhere in area 03, and that
+exclusion together with its reason is recorded in 003_partial_zero_fill.expected,
+which is the program whose subject is implicit zero fill.
+END
+impl_defined_notes <<END
+All printed values are int and are printed with %d only. The program contains no
+long, size_t, ptrdiff_t, intptr_t, float, double or long double, so the measured
+width difference between i686 (4-byte long and pointer) and the other three
+targets (8-byte) cannot affect the output.
+
+The only character data is the format-string literals, whose bytes printf copies
+through unchanged. No plain-char value is read as a number, converted, compared or
+formatted numerically, so the measured plain-char signedness difference (signed on
+x86_64 and i686, unsigned on aarch64 and riscv64) cannot arise.
+
+No address or pointer value is printed, and no struct is printed as a whole, so
+padding bytes -- whose contents are unspecified -- are never observed.
+
+Two line groups carry disproportionate diagnostic value. g_then_pos must read
+tag=0, in.p=42, in.q=43, trailer=44: a compiler that resets the current object to
+the first member after a designator, or that fails to advance past the nested
+struct, produces a visibly different four-line group. g_reordered and l_reordered
+supply their designators OUT of member order -- g_reordered exactly reversed, and
+l_reordered permuted differently so that the two are not the same case twice --
+yet must produce ascending values, so a defect in designator resolution appears as
+transposed values rather than as a crash.
+
+Output is byte-identical on all four targets at all three optimization levels,
+verified by measurement.
+END
+expected_stdout    <<END
+g_in_order.tag=1
+g_in_order.in.p=2
+g_in_order.in.q=3
+g_in_order.trailer=4
+g_reordered.tag=11
+g_reordered.in.p=12
+g_reordered.in.q=13
+g_reordered.trailer=14
+g_omitted.tag=21
+g_omitted.in.p=0
+g_omitted.in.q=0
+g_omitted.trailer=24
+g_nested_mem.tag=31
+g_nested_mem.in.p=0
+g_nested_mem.in.q=33
+g_nested_mem.trailer=0
+g_then_pos.tag=0
+g_then_pos.in.p=42
+g_then_pos.in.q=43
+g_then_pos.trailer=44
+g_arr_elem.tag=51
+g_arr_elem.a[0]=0
+g_arr_elem.a[1]=0
+g_arr_elem.a[2]=55
+g_arr_elem.a[3]=0
+g_arr_elem.trailer=0
+g_arr_whole.tag=61
+g_arr_whole.a[0]=62
+g_arr_whole.a[1]=63
+g_arr_whole.a[2]=64
+g_arr_whole.a[3]=65
+g_arr_whole.trailer=66
+l_in_order.tag=71
+l_in_order.in.p=72
+l_in_order.in.q=73
+l_in_order.trailer=74
+l_reordered.tag=81
+l_reordered.in.p=82
+l_reordered.in.q=83
+l_reordered.trailer=84
+l_omitted.tag=0
+l_omitted.in.p=92
+l_omitted.in.q=0
+l_omitted.trailer=0
+l_arr_elem.tag=0
+l_arr_elem.a[0]=101
+l_arr_elem.a[1]=0
+l_arr_elem.a[2]=0
+l_arr_elem.a[3]=104
+l_arr_elem.trailer=0
+END

@@ -1,0 +1,138 @@
+program            = 003_struct_and_pointer_args
+area               = 07_variadics
+description        = Aggregates and pointers through the variadic path, sized around the aggregate by-register versus by-memory boundary on the three register-passing targets and contrasted against i686's all-stack convention, folded and volatile-runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Header exception: this program includes stdarg.h. The corpus sanctions two header exception
+classes and only two, and this is the first of them: the programs in area 07 may include
+<stdarg.h> and nothing else. The second class is the dedicated bundled-header probe
+12_preprocessor/003_bundled_header_inclusion.c, which may include the nine required bundled
+freestanding headers; it does not apply here, and no program may take both. The exception is
+needed because a variadic function cannot be written at all without
+va_list, va_start, va_arg and va_end. stdarg.h belongs to bcc's own bundled freestanding
+set (docs/technical-specifications.md line 208, the row that also lists va_copy) and is a
+freestanding header the reference compiler supplies, so it resolves the same way under
+both oracles and the program stays a single-file reproducer. No other header is included;
+in particular stdio.h is not, because bcc ships none, so including it would manufacture a
+divergence caused by the test rather than by the compiler. printf is hand-declared as
+int printf(const char *, ...); and no other library function is declared at all.
+Pointer type compatibility: int * and const int * are not compatible types, and va_arg
+requires the retrieval type to be compatible with the type of the argument actually
+supplied. sum_via_pointers retrieves with va_arg(ap_pt, const int *), so every pointer
+argument is written at the call site with an explicit (const int *) cast. A bare address
+of an int object would supply an int * where a const int * is retrieved, which is
+undefined behaviour and would silently invalidate both differential oracles.
+Aggregates are not promoted: an aggregate passed through an ellipsis undergoes no default
+argument promotion, so va_arg(ap_sm, struct small), va_arg(ap_md, struct mid) and
+va_arg(ap_lg, struct large) retrieve exactly the types the caller supplied.
+Variadic discipline: va_start names count, the last named parameter, in all four helpers.
+Each helper retrieves exactly count arguments and each call site supplies exactly that
+many, so no va_list is ever read past its arguments. Each va_start has exactly one
+matching va_end in the same function. No va_copy and no va_list forwarding appear here;
+those belong to 004_va_copy_multiple_passes and 005_va_list_forwarding.
+Object lifetime and initialization: every folded struct object names every member, and
+every runtime struct object has every member assigned from volatile storage before it is
+passed, so there is no read of uninitialized storage and no missing field initializer.
+Every element of both volatile source arrays is written before any of them is read. Every
+index into the eight-element array member stays within 0 to 7. All pointed-to objects are
+locals of main whose lifetime spans the entire call, so no dangling pointer is formed.
+Arithmetic: every value and every partial sum is a small integer far inside the 32-bit int
+range - the largest printed is 3672 - so no signed overflow is possible. There is no
+shift, no division, no aliasing violation, no object modified twice between sequence
+points, and no dependence on padding bytes or on the addresses of unrelated objects.
+Evaluation order: main stores each helper's return value in a named temporary before
+printing it, so no call carries more than one side-effecting argument and the print order
+is fixed however the arguments are evaluated. In the runtime variants the volatile source
+is read into plain objects by statements that precede the call, so the arguments of each
+call expression are pure reads of plain objects and the unspecified order in which they
+are evaluated is unobservable.
+Warning gate: this program passes the full default gate - -Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror - with no diagnostic, which is why no
+ub_audit_flags key appears above. That key exists to declare a deviation, a deviation is
+modelled as a removal from the fixed gate, and a value naming the entire gate would
+deviate in nothing; omitting the key is therefore how a program that satisfies the gate in
+full records that it does. Area 07 sanctions no deviation and none is needed.
+END
+impl_defined_notes <<END
+Aggregate sizes, and why they are identical on every target: every member of every struct
+is an int, and int is 4 bytes on all four targets - measured with each target's own
+reference driver rather than assumed. sizeof(struct small) is therefore 8, sizeof(struct
+mid) is 16 and sizeof(struct large) is 32 on x86-64, i686, AArch64 and RISC-V 64 alike,
+which was measured on all four as well. No struct contains a pointer, a long, a double or
+a bitfield: the documented target table (docs/technical-specifications.md lines 457 to
+462) records a pointer and long width of 4 bytes on i686 against 8 on the other three, so
+a pointer or long member would make one declaration a different size on i686 and the
+retrieved values could no longer be compared across backends.
+Why these three sizes, and why the claim is made per target rather than universally. They
+are chosen to sit below, at, and above the aggregate by-register versus by-memory boundary
+on the three targets that have such a boundary, and the reasoning leans only on the ABI
+inventories the repository actually documents. x86-64 System V AMD64
+(docs/technical-specifications.md line 546) classifies each argument INTEGER, SSE or MEMORY
+and lists six integer argument registers together with eight SSE registers, so an aggregate
+classified INTEGER travels in registers and one classified MEMORY travels on the stack.
+AArch64 AAPCS64 (line 559) documents eight integer argument registers x0 to x7, and
+RISC-V 64 LP64D (line 565) documents eight, a0 to a7; each therefore has a register path an
+aggregate can occupy and a memory path it falls back to.
+i686 has no such boundary at all, and that is part of the coverage rather than a gap in it.
+cdecl (line 553) passes every argument on the stack, right to left, with caller cleanup, so
+all three aggregates travel the same way on i686 whatever their size. That makes i686 the
+control arm of this program: three sizes routed three different ways on the register-passing
+targets are routed identically here, and the retrieved values must still agree with all
+three. A divergence between i686 and the baseline consequently cannot be an aggregate
+classification-threshold difference, which narrows the diagnosis considerably.
+Where each of the three sizes actually lands on each register-passing target is that ABI's
+decision, and this record deliberately does not predict it: the repository documents register
+inventories rather than aggregate classification rules, and the suite is a black-box oracle
+that compares only the retrieved values. A correct backend agrees with the other three
+however it routes the arguments.
+No addresses printed: the pointer group prints only the dereferenced value. No address, no
+pointer value, no sizeof result and no signedness-dependent plain char value reaches
+stdout, so nothing width-dependent or signedness-dependent can enter the golden record. The
+only printf conversions used are %s and %d, and every %s argument is an ASCII string
+literal whose bytes are identical on every target.
+Nothing here narrows coverage: all four targets, all three optimization levels and all
+three oracles are declared, and no expected-divergence marker applies, area 07 having
+none. These notes therefore record why the comparison is sound rather than an exclusion
+from it. A cross-backend difference in this program is a genuine ABI-level finding rather
+than a documented implementation-defined difference, which is exactly why the
+cross-backend oracle is enabled here.
+END
+expected_stdout    <<END
+fsmall[0]=1,2
+fsmall[1]=30,40
+fsmall[2]=500,600
+fsmall_sum=1173
+rsmall[0]=7,8
+rsmall[1]=90,100
+rsmall[2]=1100,1200
+rsmall_sum=2505
+fmid[0]=1,2,3,4
+fmid[1]=10,20,30,40
+fmid_sum=110
+rmid[0]=5,6,7,8
+rmid[1]=50,60,70,80
+rmid_sum=286
+flarge[0]=1,2,3,4,5,6,7,8
+flarge[1]=10,20,30,40,50,60,70,80
+flarge_sum=396
+rlarge[0]=2,4,6,8,10,12,14,16
+rlarge[1]=100,200,300,400,500,600,700,800
+rlarge_sum=3672
+fptr[0]=11
+fptr[1]=22
+fptr[2]=33
+fptr_sum=66
+rptr[0]=111
+rptr[1]=222
+rptr[2]=333
+rptr_sum=666
+END

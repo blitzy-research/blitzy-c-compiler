@@ -1,0 +1,233 @@
+# Expectation record for 14_abi_calling_convention/006_nested_calls_callee_saved.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 006_nested_calls_callee_saved
+area               = 14_abi_calling_convention
+description        = A nine-frame chain of genuinely out-of-line calls -- eight pressure frames above one leaf -- in which each pressure frame keeps ten independent values live across its nested call and prints them only after that call returns, so that a callee-saved register the callee failed to restore shows up in the output of each frame it affects -- and where a wrong value propagates down the chain, in the first frame whose line differs and in every later frame that reads it
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction:
+- THE SHAPE OF THE CHAIN, stated exactly, because every claim below rests on it. Nine
+  frames: level1 through level8, then leaf_mix. The EIGHT levels are the pressure frames --
+  each reads its own row of the volatile tables, makes its nested call, and prints all ten
+  values afterwards. leaf_mix is the ninth frame and is NOT a pressure frame: it makes no
+  call, so it holds nothing across one, and it owns no table row. The tables are therefore
+  eight rows deep, matching what is consumed rather than the frame count.
+- No signed integer overflow, and the arithmetic is small and enumerable. The seed enters at
+  100 and grows by 10 per level, reaching 180 at leaf_mix, whose result is
+  180 + (int)(9.0 * 4.0) = 216. Each pressure frame returns its callee's result plus the six
+  integers of its own row, and every row sums to -3 (for example 3101 - 3102 + 3103 - 3104 +
+  3105 - 3106), so the chain returns 216 - 8 * 3 = 192 and every intermediate value lies
+  between 192 and 216. The largest magnitude anywhere in the program is the table entry
+  3806 -- more than five orders of magnitude short of INT_MAX, which is 2147483647 even on
+  i686's 32-bit int.
+- The printed values are NOT derived from the seed. Each pressure frame's ten values are read
+  from static volatile tables: six ints from vlive_i (3101 through 3806, alternating sign),
+  three doubles from vlive_d (1.25 through 24.75), and one pointer from vlive_p designating
+  an entry of plive_target (5101 through 5808). All forty-eight integers, all twenty-four
+  doubles and all eight pointed-to integers are distinct, which is what makes a value
+  restored from the wrong slot name both the frame and the position it came from. Deriving
+  them from the seed instead would let the optimizer rematerialize them after the call and
+  hold nothing across it, which would leave the program asserting ten values while requiring
+  none to survive.
+- Every floating value is a dyadic rational -- a whole number of quarters -- so it is exactly
+  representable in binary64, and every printed value carries an explicit precision with room
+  to spare, so no rounding decision is taken and i686's x87 extended intermediate precision
+  cannot perturb a result. No non-finite value, no negative zero and no division appears. The
+  one floating-to-integer conversion multiplies by 4.0 first, so its integral part is exact
+  and small.
+- No shift operator appears, so no shift count can be out of range.
+- THE ONLY INDEXING IS INTO THE PROGRAM'S OWN STATIC TABLES, with constant subscripts written
+  literally at each use -- vlive_i[6][3] and the like -- so the pointer arithmetic the language
+  performs for each subscript stays inside the object by inspection and no computed index
+  exists. The only pointer values are the address of a string literal threaded through the chain
+  as a tag, and the eight addresses of plive_target elements formed once by &plive_target[k]
+  with literal k and held in vlive_p; a pointer is dereferenced only to print the int it
+  designates, and none is printed, converted to an integer, compared against a pointer into a
+  different object, or modified. No pointer arithmetic beyond those in-bounds subscripts is
+  performed anywhere, and no one-past-the-end pointer is formed.
+- No read of uninitialized storage. Every local of all nine chain functions is initialized at
+  its declaration, and every volatile object has a static initializer. main's five locals are
+  the one deliberate exception to the declaration form: they are declared and then assigned,
+  each before its first read, because the runtime entry has to stage its three volatile
+  operands one read per full statement, which an initializer list of declarations could not
+  express. Assignment-before-read is the property that matters, and it holds for all five.
+- No object is modified twice between sequence points.
+- Recursion is absent: every level calls a DIFFERENT function and the depth is a fixed nine
+  frames plus main, so termination is structural. There is no iteration statement anywhere
+  in the program either -- no for, no while, no do -- and no goto and no switch, so control
+  flow is straight-line through a fixed chain of calls and cannot fail to terminate. The
+  runtime entry point likewise stages its three volatile operands with three straight-line
+  statements rather than a loop.
+- NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and this is enforced structurally
+  rather than argued. An access to a volatile object IS an observable side effect and the
+  order in which a call's arguments are evaluated is unspecified, so every volatile datum
+  is read exactly once, in a statement of its own, and only the resulting plain locals are
+  passed. Machine-checked: flattening the program into statements and
+  counting references to its volatile objects finds NO statement with more than one. The
+  snapshots cost nothing in coverage, because each is itself a load from volatile storage
+  that the optimizer may neither fold nor elide, so every value the callee receives was
+  genuinely materialised at run time and marshalled through the ABI; what changed is only
+  that the loads are now SEQUENCED rather than unordered.
+- Hermetic, as constraint C4 requires: every input is a literal in the source. Nothing is
+  opened, no socket is created, no environment variable and no program argument is read,
+  and no storage is obtained from the heap.
+- main returns 0, inside the 0-125 range the suite requires.
+- Verified rather than asserted: the default strict warning gate
+  (-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero
+  diagnostics in the single native compile-only invocation the suite makes of it, and
+  -fsanitize=undefined,address -fno-sanitize-recover=all runs to completion with empty
+  stderr and exit status 0 in its one instrumented native build.
+END
+impl_defined_notes <<END
+THE PRESERVED REGISTER SETS, STATED IN FULL. What follows is what each ABI REQUIRES a
+callee to preserve. It is not a claim about how any compiler chooses to allocate, which is
+the compiler's business and not something a test may assume.
+  System V AMD64  rbx, rbp, r12, r13, r14, r15 (and rsp). There is NO callee-saved SSE or
+                  x87 DATA register at all; the x87 control word and the mxcsr control bits
+                  are preserved, but no data register is.
+  System V i386   ebx, esi, edi and EBP (and esp) -- four, the narrowest set of the four,
+                  and likewise no callee-saved floating-point data register.
+  AAPCS64         x19-x28, plus x29 as the frame pointer (x30 is the link register, saved by
+                  the caller's own prologue). For the SIMD/FP file the obligation is PARTIAL
+                  and precise: only the LOW 64 BITS of v8-v15, that is d8-d15, are
+                  preserved; the upper bits of those registers, like the whole of v0-v7 and
+                  v16-v31, are not.
+  LP64D           s0-s11 integer, where s0 doubles as the frame pointer, and fs0-fs11
+                  floating.
+
+WHAT THE PROGRAM ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. Each of the EIGHT pressure
+frames keeps six ints, three doubles and one pointer live ACROSS its nested call and prints
+them only after that call returns; the ninth frame, the leaf, makes no call and so holds
+nothing across one. Ten live values is more than the narrowest of those preserved sets can
+hold, so on every target some of them must survive the call somewhere other than a preserved
+register -- but which value goes where is the compiler's choice, and this program does not
+assert it. What it asserts is the OBSERVABLE consequence: if any of the ten fails to survive
+the call, the printed line for that frame changes, so the divergence is localised to the frames it
+actually reaches rather than summarised -- one frame where a single register is clobbered, and every
+affected frame where the failure is systemic. Eighty values are held across a call in total, ten in
+each of eight frames, and every one of the eighty reaches its frame's own printed line, so every one
+is detected there. The chain's returned total of 192 is printed as well, and it is a SECOND, partial
+witness rather than a duplicate of the first: each frame returns inner + a + b + c + d + e + f, so
+only the SIX INTS of a frame feed the total. A lost int therefore shows up twice, once in its
+frame's line and once in the total; a lost double or a lost pointer shows up once, in its frame's
+line alone, because neither x, y, z nor *p is summed into the return value. Both are caught; only the
+redundancy differs. The total therefore covers six of a frame's ten live values, not all ten, and
+saying otherwise would overstate what the second witness establishes.
+
+THE TWO LIVE POINTERS, AND WHY THEIR WIDTH IS THE ONE THING ABOUT THEM THAT DIFFERS. Each
+pressure frame holds two pointers across its nested call: the const char *tag it was handed,
+which it needs again for the %s of the line it prints afterwards, and the const int *p it read
+from vlive_p, which is one of its ten independent values. These are the only live values whose
+storage size is not the same on all four targets -- sizeof(void *) was measured as 4 on i686
+and 8 on x86_64, aarch64 and riscv64 -- so whichever preserved register or spill slot each
+pointer occupies is half as wide on i686 as elsewhere, which is exactly why a pointer is worth
+carrying live here rather than only integers and doubles. Neither pointer's VALUE reaches the
+output. The tag is printed with %s, which emits the string it designates; p is dereferenced and
+printed with %d, which emits the int it designates. So the printed text cannot depend on where
+anything was placed, while the callee-saved obligation is still exercised at whatever pointer
+width the target defines.
+
+THE CALL BARRIER, AND WHAT IT IS AND IS NOT. Every call this program makes to the function
+whose ABI boundary is under test goes through a FILE-SCOPE volatile FUNCTION POINTER, and
+that is load-bearing rather than stylistic. WHAT ISO C REQUIRES: an access to a volatile
+object is a side effect belonging to the observable behaviour an implementation must
+reproduce (C11 5.1.2.3p2 and p6), and C11 6.7.3p7 requires an expression referring to a
+volatile-qualified object to be evaluated strictly according to the abstract machine's rules
+-- so the pointer must be RE-READ at each point of call, no conforming compiler may establish
+at translation time which function it designates, and control must be transferred to whatever
+function that particular load produced. WHAT ISO C DOES NOT REQUIRE: that the transfer reaches
+the callee's original entry point, nor that a frame survives as a frame. A conforming
+implementation may introduce a specialised clone or perform guarded devirtualization that
+elides a frame on the matching path, and still honour the loaded value, because the observable
+behaviour is unchanged. So the barrier must NOT be described as making the callee "neither
+inlinable nor cloneable": that claims more than anything the standard says. It is an optimization
+OBSTACLE whose effect is measured on named artifacts, never a language guarantee, and the residual
+risk that leaves is real: a compiler under test
+that devirtualized through a specialised entry could collapse a frame while still printing the
+same bytes, and this program would not detect it. Closing that would take a per-cell STATIC
+check of the artifact the compiler under test emitted -- nine frames present, ten indirect
+transfers, no .constprop, .isra or .part. clone -- which is a harness capability this suite does
+not have and which no oracle here substitutes for, so the chain depth claimed for a compiler
+under test extends exactly as far as that artifact inspection.
+001_many_integer_parameters.expected carries the same statement for this whole area. This is
+plain standard C rather than a compiler attribute, so both sides of oracle (a) honour it for
+the same reason and neither needs to support an extension for the barrier to hold. It also
+makes the function-pointer load the ONLY volatile access in each call expression, which is what
+keeps the one-side-effecting-argument rule satisfied.
+
+MEASURED IN BOTH DIRECTIONS, on the reference drivers' own artifacts. WITHOUT the
+barrier, called by name, the reference compiler at -O2 leaves only level1 standing -- levels 2
+through 8 and the leaf are all inlined into it, so the nine frames would collapse to one and
+the property under test would not exist at that optimization level. WITH it, all nine
+functions are emitted unmodified at -O0, -O1 and -O2 on all four targets, with no .constprop
+and no .isra clone anywhere.
+
+MEASURED STACK USE, not estimated. From the reference compiler's -O0 prologues on each
+target: x86_64 eight 96-byte frames plus one 48 and one 32, with ten 8-byte return-address
+and frame-pointer saves, about 1.0 KiB; i686 eight 84-byte frames plus one 36 and one 32,
+with ten 4-byte saves, about 0.8 KiB; aarch64 eight 128-byte frames plus one 64 and one 48,
+about 1.1 KiB; riscv64 eight 160-byte frames plus one 64 and one 48, about 1.4 KiB -- the
+deepest of the four, and the one whose figure is easiest to guess wrong from the scalar count.
+On aarch64 and riscv64 the return-address and frame-pointer saves sit inside the figure
+quoted, because the prologue stores them within the frame it has just allocated; on x86_64 and
+i686 they sit outside it, which is why those two carry the saves as a separate term. The C
+library's own printf frame sits on top of all four and is not counted. So the honest figure is
+one to two kibibytes rather than a few hundred bytes, which the ten-scalar count alone would
+have suggested and which the measurement contradicts. It stays roughly three orders of
+magnitude below the 8 MiB default stack these binaries run under, both natively (ulimit -s
+reports 8192 KiB) and under QEMU user-mode emulation (QEMU_STACK_SIZE defaults to 8388608
+bytes).
+
+Plain char signedness is implementation-defined and was measured as signed on x86_64 and
+i686 and unsigned on aarch64 and riscv64; no plain-char value is printed. sizeof(long) and
+sizeof(void *) were measured as 4 on i686 and 8 on x86_64, aarch64 and riscv64
+(docs/technical-specifications.md lines 457-462); no long, size_t, ptrdiff_t, intptr_t or
+pointer value is printed and no long or pointer conversion specification is used. long
+double has three different representations across the four targets (measured 16, 12, 16 and
+16 bytes; x87 80-bit versus IEEE binary128) and is absent from this program entirely --
+using it would import a difference that has nothing to do with parameter passing. That
+type is covered by 13_floating_point/004_long_double_target_restricted, whose record
+disables oracle (b) alone, with the measured reason recorded and the expected-divergence
+marker XD-TYPE-LONGDOUBLE-001 scoping that oracle.
+
+No target is dropped, no oracle is disabled and this record carries no expected-divergence
+marker: a cross-backend divergence here is a GENUINE FINDING rather than an
+implementation-defined difference, because nothing implementation-defined reaches the
+output. Measured rather than assumed: stdout is byte-identical and the exit status is 0 in all
+twelve target-and-optimization-level cells.
+END
+expected_stdout    <<END
+nest_folded_L9 seed=180 fseed=9.0000 r=216
+nest_folded_L8 a=3801 b=-3802 c=3803 d=-3804 e=3805 f=-3806 x=22.2500 y=-23.5000 z=24.7500 p=5808 inner=216
+nest_folded_L7 a=3701 b=-3702 c=3703 d=-3704 e=3705 f=-3706 x=19.2500 y=-20.5000 z=21.7500 p=5707 inner=213
+nest_folded_L6 a=3601 b=-3602 c=3603 d=-3604 e=3605 f=-3606 x=16.2500 y=-17.5000 z=18.7500 p=5606 inner=210
+nest_folded_L5 a=3501 b=-3502 c=3503 d=-3504 e=3505 f=-3506 x=13.2500 y=-14.5000 z=15.7500 p=5505 inner=207
+nest_folded_L4 a=3401 b=-3402 c=3403 d=-3404 e=3405 f=-3406 x=10.2500 y=-11.5000 z=12.7500 p=5404 inner=204
+nest_folded_L3 a=3301 b=-3302 c=3303 d=-3304 e=3305 f=-3306 x=7.2500 y=-8.5000 z=9.7500 p=5303 inner=201
+nest_folded_L2 a=3201 b=-3202 c=3203 d=-3204 e=3205 f=-3206 x=4.2500 y=-5.5000 z=6.7500 p=5202 inner=198
+nest_folded_L1 a=3101 b=-3102 c=3103 d=-3104 e=3105 f=-3106 x=1.2500 y=-2.5000 z=3.7500 p=5101 inner=195
+nest_folded_total=192
+nest_runtime_L9 seed=180 fseed=9.0000 r=216
+nest_runtime_L8 a=3801 b=-3802 c=3803 d=-3804 e=3805 f=-3806 x=22.2500 y=-23.5000 z=24.7500 p=5808 inner=216
+nest_runtime_L7 a=3701 b=-3702 c=3703 d=-3704 e=3705 f=-3706 x=19.2500 y=-20.5000 z=21.7500 p=5707 inner=213
+nest_runtime_L6 a=3601 b=-3602 c=3603 d=-3604 e=3605 f=-3606 x=16.2500 y=-17.5000 z=18.7500 p=5606 inner=210
+nest_runtime_L5 a=3501 b=-3502 c=3503 d=-3504 e=3505 f=-3506 x=13.2500 y=-14.5000 z=15.7500 p=5505 inner=207
+nest_runtime_L4 a=3401 b=-3402 c=3403 d=-3404 e=3405 f=-3406 x=10.2500 y=-11.5000 z=12.7500 p=5404 inner=204
+nest_runtime_L3 a=3301 b=-3302 c=3303 d=-3304 e=3305 f=-3306 x=7.2500 y=-8.5000 z=9.7500 p=5303 inner=201
+nest_runtime_L2 a=3201 b=-3202 c=3203 d=-3204 e=3205 f=-3206 x=4.2500 y=-5.5000 z=6.7500 p=5202 inner=198
+nest_runtime_L1 a=3101 b=-3102 c=3103 d=-3104 e=3105 f=-3106 x=1.2500 y=-2.5000 z=3.7500 p=5101 inner=195
+nest_runtime_total=192
+END

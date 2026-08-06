@@ -1,0 +1,81 @@
+# Expectation record for 09_optimization_levels/006_switch_lowering_invariance.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 006_switch_lowering_invariance
+area               = 09_optimization_levels
+description        = Switch results unchanged across dense and sparse lowering strategies at -O0, -O1 and -O2
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour. No signed overflow: the largest value computed
+is base + 1000000 with base equal to 0, and the largest case label is 1000000, well inside
+32-bit int range on every target. The accumulator acc in grouped is initialized to 0 before
+the switch, so every arm and the default read an initialized value. Every arm of dense and
+sparse returns a value, and grouped returns after the switch, so no control path falls off
+the end of a non-void function. There is no shift, no division, no pointer arithmetic, no
+aliasing violation, and no object modified twice between sequence points. The printf calls
+take a function call as an argument, but dense, sparse and grouped are all pure, read no
+volatile object and modify nothing outside their own frame, so there are zero side-effecting
+argument expressions. No dependence on padding bytes or on relative addresses.
+The single volatile object v_zero is read once into a plain local and is never modified
+anywhere in the program, so no ordering question arises between volatile accesses.
+END
+impl_defined_notes <<END
+No implementation-defined behaviour is observed. Widths are normalized: only int is used,
+which is 32 bits on all four targets, and long is never used because sizeof(long) is 4 on
+i686 and 8 on the other three targets. Plain char is not used, so the measured plain-char
+signedness difference (signed on x86-64 and i686, unsigned on AArch64 and RISC-V 64) cannot
+be observed. No address, pointer value, jump-table address, sizeof or _Alignof result is
+printed. No floating point is used. The choice of lowering strategy is deliberately left
+free: a dense contiguous label set invites a jump table while a widely separated sparse set
+invites a comparison chain or a binary search, and each compiler and each backend may pick a
+different strategy and a different density threshold. That choice has no observable effect,
+so the printed values are identical on every target at every optimization level. Selectors
+are derived from volatile storage so no switch can be folded to a single constant return.
+END
+expected_stdout    <<END
+dense[0]=100
+dense[1]=101
+dense[2]=102
+dense[3]=103
+dense[4]=104
+dense[5]=105
+dense[6]=106
+dense[7]=107
+dense[8]=108
+dense[9]=109
+dense[10]=110
+dense[11]=111
+dense[12]=112
+dense[13]=113
+dense[14]=114
+dense[15]=115
+dense[16]=-1
+dense[neg]=-1
+sparse[-1000]=1
+sparse[0]=2
+sparse[7]=3
+sparse[100]=4
+sparse[1000]=5
+sparse[65536]=6
+sparse[1000000]=7
+sparse[42]=0
+grouped[0]=80
+grouped[1]=30
+grouped[2]=30
+grouped[3]=30
+grouped[4]=20
+grouped[5]=40
+grouped[6]=80
+END

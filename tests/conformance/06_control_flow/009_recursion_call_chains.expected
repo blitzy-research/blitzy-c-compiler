@@ -1,0 +1,109 @@
+# Expectation record for 06_control_flow/009_recursion_call_chains.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 009_recursion_call_chains
+area               = 06_control_flow
+description        = Direct recursion, a branching call tree, two mutual-recursion pairs, a recursion keeping values live across the call, a recursion holding a local array live across the call, and a recursion dispatching through a switch, all at bounded shallow depth
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour, and bounded by design.
+
+The recursion bound is 31 frames. The deepest chain is sum_to(30), which
+occupies 31 frames counting the base case. Every other chain is shallower:
+is_odd(21) reaches 22 frames, is_even(20) reaches 21, fib(15) reaches depth 15,
+ping(10) and pong(10) reach 11, fact(10) reaches 10, and switched(10) and
+frames(5) each reach 6.
+
+What this program asserts is the RESULT of each bounded recursion and each call
+chain, and nothing about how the calls are implemented. No frame, no prologue or
+epilogue, no argument register, no spill and no symbol is required to exist: a
+backend is free to inline every helper, fold a whole recursion to a constant,
+turn self-recursion into a loop, or discard a function's symbol entirely, and
+every line below is still expected to be identical. This suite's oracles compare
+stdout bytes and exit status, so a transformation that changes the call structure
+while preserving the values is not a divergence at all.
+The depths were nevertheless chosen deliberately, as motivation for the shapes
+rather than as a claim about generated code. A depth of 31 is large enough that a
+backend which does emit frames has to pass arguments, propagate return values and
+keep live state across a call; chain keeps two values live across its recursive
+call and frames keeps a fully written eight-element local array live across its
+own, which is the shape that would exercise callee-saved preservation on such a
+backend. The depths are also small enough that every cell completes promptly
+inside the per-cell time budget -- fib stops at 15, so its tree of 1973 calls
+finishes instantly under emulation -- and small enough to be unremarkable for any
+plausible execution environment whether or not the recursion survives
+translation. The repository's own runtime-verified recursion depths are single
+digit (factorial(5) and fib(7)), so these bounds stay in the same order of
+magnitude.
+
+No signed overflow is possible. Every bound was chosen against the 32-bit int
+range that all four targets share: the largest value produced anywhere is
+3628800, which is 10 factorial. fib stops at 15 so the tree of 1973 calls
+completes instantly under emulation and inside the per-cell time budget. Every
+recursion has a reachable base case for every argument actually passed, and no
+negative argument is ever passed. The local array in frames is fully written by
+a loop before the early return and before any element is read, so no
+indeterminate storage is ever read; it is automatic storage, never dynamically
+allocated. There are no shifts and no type punning, therefore no aliasing violation and no
+dependence on padding bytes. The only pointer arithmetic is the arithmetic the language
+performs for a subscript: every index into local is a loop counter provably inside its
+bound, and no pointer value is printed, converted to an integer or compared. No object is
+modified twice between sequence points. The multi-argument printf calls pass
+only calls to pure helper functions that read no mutable global, write no global
+and touch no volatile object, so although their relative evaluation order is
+unspecified it is unobservable and no dependence on unspecified order exists.
+Each volatile object is read exactly once per use.
+END
+impl_defined_notes <<END
+Nothing implementation-defined is observed. Only int values are printed, so the
+measured plain-char signedness difference (signed on x86_64 and i686, unsigned
+on aarch64 and riscv64) cannot affect the output, and the measured width
+difference for long and pointers (4 bytes on i686, 8 elsewhere) is never exposed
+because no long, pointer, size_t or ptrdiff_t value is printed and no sizeof
+result appears in the output. int is 32 bits on all four targets, and every
+computed value including the negative intermediate in chain lies far inside that
+range. No address is printed. No floating point is used. The four backends
+implement four different application binary interfaces, and chain and frames are
+shaped to keep values live across a recursive call, which is the shape that would
+exercise callee-saved preservation on any backend that emits frames for them.
+What is compared is the resulting values, not the mechanism: a backend that
+inlines the recursion away is as acceptable as one that spills, and either way a
+difference in the printed values would be a genuine defect rather than an
+implementation-defined difference. All four targets and all three optimization
+levels are therefore compared, and all three oracles are enabled.
+END
+expected_stdout    <<END
+const_fact=1 120 3628800
+runtime_fact_one=1
+runtime_fact_ten=3628800
+const_fib=0 1 13 610
+runtime_fib_seven=13
+runtime_fib_fifteen=610
+const_sum_to=0 55 465
+runtime_sum_to_zero=0
+runtime_sum_to_thirty=465
+const_mutual_parity=1 1 0 1
+runtime_is_even_twenty=1
+runtime_is_odd_twentyone=1
+const_ping_pong=0 15 15
+runtime_ping_ten=15
+runtime_pong_ten=15
+const_chain=0 -4 5
+runtime_chain_ten=5
+const_frames=0 260
+runtime_frames_five=260
+const_switched=0 1 30
+runtime_switched_ten=30
+END

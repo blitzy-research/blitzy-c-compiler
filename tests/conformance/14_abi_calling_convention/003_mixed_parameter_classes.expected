@@ -1,0 +1,234 @@
+# Expectation record for 14_abi_calling_convention/003_mixed_parameter_classes.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 003_mixed_parameter_classes
+area               = 14_abi_calling_convention
+description        = Twenty-six interleaved parameters -- five repetitions of (int, double, double, pointer, 8-byte two-int aggregate) followed by an int variant tag, giving sixteen integer-class and ten floating-class consumers -- so that both register files are exhausted and each target's classification rules are exercised together rather than one class at a time, in a folded and a volatile-runtime variant
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction:
+- NO ARITHMETIC REACHES THE OUTPUT. Every one of the twenty-six parameters is only printed,
+  never combined, so no signed integer overflow is possible on any printed value. The only
+  arithmetic in the program is the loop counter's increment, bounded at five. Every integer
+  literal is small -- the largest magnitude is 3005, in the array the pointers designate --
+  and every one is representable in int on all four targets.
+- Every floating value is a dyadic rational with a denominator of at most sixteen, so it is
+  exactly representable in binary64, and its exact decimal expansion terminates at or before
+  the fourth decimal place, which is the precision the program prints with. The printed text
+  is therefore exact: no rounding decision is taken and i686's x87 extended intermediate
+  precision cannot perturb a result. No non-finite value, no negative zero and no division
+  appears.
+- No shift operator appears, so no shift count can be out of range.
+- POINTER DISCIPLINE. The five pointers passed are addresses of elements of a static const
+  int array of five elements, formed with constant indices strictly inside its bounds: the
+  folded call takes them as &ptgt[0] through &ptgt[4], and the runtime call reads those same
+  five addresses back out of a volatile array initialised with them. Each is dereferenced in
+  the callee and only the pointed-to int is printed. No pointer value is printed, no
+  one-past-end pointer is formed, and no pointer is converted to an integer.
+- AGGREGATE DISCIPLINE. Only named members are read back. No padding byte is printed,
+  compared or memcmp'd, and no aggregate is inspected byte-wise, so the fact that a
+  two-int aggregate's layout is the compiler's business cannot reach the output. The
+  aggregate has no padding to carry in the first place: measured on all four targets, it is
+  8 bytes with 4-byte alignment, exactly two ints' worth, so a by-value copy of it moves no
+  indeterminate byte either.
+- No read of uninitialized storage: each of the five runtime aggregates has BOTH of its
+  members assigned before it is passed, one volatile read per statement.
+- No object is modified twice between sequence points.
+- NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, and this is enforced structurally
+  rather than argued. An access to a volatile object IS an observable side effect and the
+  order in which a call's arguments are evaluated is unspecified, so every volatile datum
+  is read once per statement, in a statement of its own, and only the resulting plain
+  locals are passed. Machine-checked on this branch by flattening main into statements and
+  counting references to its volatile objects: there are SEVENTEEN SYNTACTIC ACCESS SITES
+  -- four in the loop body, the tag, ten aggregate members and the two function-pointer
+  loads -- and NO statement holds more than one. The two counts are distinguished because
+  the property under test is a statement-level one and the site count alone would misstate
+  the run: the four loop-body sites each execute five times, so the same seventeen sites
+  perform THIRTY-THREE DYNAMIC ACCESSES (4 x 5 + 1 + 10 + 2). That changes nothing about
+  the argument, and saying so is the point of separating them -- each of the twenty accesses
+  the loop performs is still one access in one statement, separated from the next by a
+  sequence point, so no two volatile accesses ever share an expression whatever the trip
+  count is. The snapshots cost nothing in coverage, because
+  each is itself a load from volatile storage that the optimizer may neither fold nor
+  elide, so every value the callee receives was genuinely materialised at run time and
+  marshalled through the ABI; what changed is only that the loads are now SEQUENCED rather
+  than unordered.
+- Hermetic, as constraint C4 requires: every input is a literal in the source. Nothing is
+  opened, no socket is created, no environment variable and no program argument is read, no
+  clock and no random source is consulted, and no storage is obtained from the heap.
+- main returns 0, inside the 0-125 range the suite requires.
+- Verified rather than asserted, which is why this record sanctions no gate deviation and
+  omits ub_audit_flags: the default strict warning gate (-Wall -Wextra -pedantic
+  -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero diagnostics in the single
+  native compile-only invocation the suite makes of it; and the sanitizer gate
+  (-fsanitize=undefined,address -fno-sanitize-recover=all, native and dynamically linked)
+  builds and then runs to completion in its one instrumented build with empty stderr, exit
+  status 0, and stdout byte-identical to the golden record below.
+END
+impl_defined_notes <<END
+WHICH REGISTER FILES ARE EXHAUSTED. Twenty-six parameters arranged as five repetitions of
+(int, double, double, pointer, 8-byte aggregate) followed by an integer tag: sixteen
+integer-class consumers -- five ints, five pointers, five aggregates and the tag, each 8-byte
+aggregate taking a single integer slot -- and ten floating-class consumers, so BOTH files are
+exhausted on System V AMD64 (six integer registers, eight SSE), AAPCS64 (x0-x7, v0-v7) and
+LP64D (a0-a7, fa0-fa7), while System V i386 cdecl marshals all twenty-six on the stack. The
+documented rows are docs/technical-specifications.md line 546 (x86-64), line 553 (i686
+cdecl), line 559 (AAPCS64) and line 565 (LP64D). The interleaving is the point -- it forces
+each ABI to advance BOTH of its allocators through one parameter list, in step, until both
+files are spent, which is exactly where the four conventions disagree.
+
+HOW THE TWO ALLOCATORS ARE RELATED, WHICH IS NOT THE SAME ON ALL FOUR ABIs. On System V
+AMD64 and AAPCS64 they advance INDEPENDENTLY: spending the floating file has no effect on
+which integer register comes next, and the reverse. LP64D is COUPLED, in one direction only:
+once fa0-fa7 are spent, a further floating argument is passed in an INTEGER argument register
+if one is still free and falls to the stack only when none is -- so on RISC-V 64 a floating
+parameter can consume an integer slot that a later integer parameter then does not get. That
+crossover is exercised by 002_many_float_parameters, which deliberately leaves integer
+registers free so that six excess doubles cross into a0-a5 with the trailing tag pushed on to
+a6. THIS program does something different and complementary: its sixteen integer-class
+consumers exhaust a0-a7 -- eight in registers and the other eight on the stack -- while its ten
+floating consumers exhaust fa0-fa7, so BOTH files are already spent by the time the ninth and
+tenth doubles are allocated, and those two therefore arrive on the stack rather than crossing
+into an integer register, because there is no free integer register left to cross into. Measured
+rather than assumed -- riscv64-linux-gnu-gcc -O0 -S, reading take_mixed26's prologue: all eight
+of fa0-fa7 are stored, all of a0-a7 are consumed, and the prologue contains no fmv.d.x at all.
+So 003 covers interleaved dual-file EXHAUSTION and 002 covers the float-to-integer CROSSOVER;
+neither substitutes for the other, and a backend that advanced one counter for both, or crossed
+over one slot early, prints a wrong value here rather than merely emitting different
+instructions.
+
+THE CALL BARRIER, AND WHAT IT IS AND IS NOT. Every call this program makes to the function
+whose ABI boundary is under test goes through a FILE-SCOPE volatile FUNCTION POINTER, and
+that is load-bearing rather than stylistic. WHAT ISO C REQUIRES: an access to a volatile
+object is a side effect belonging to the observable behaviour an implementation must
+reproduce (C11 5.1.2.3p2 and p6), and C11 6.7.3p7 requires an expression referring to a
+volatile-qualified object to be evaluated strictly according to the abstract machine's
+rules -- so the pointer must be RE-READ at each point of call, no conforming compiler may
+establish at translation time which function it designates, and control must be transferred
+to whatever function that particular load produced. WHAT ISO C DOES NOT REQUIRE: that the
+transfer reaches the callee's original entry point. A conforming implementation may
+introduce a specialised clone, scalarise a copy of the body, or perform guarded
+devirtualization -- compare the loaded pointer against a known function and take a
+specialised path when it matches -- and still honour the loaded value, because the
+observable behaviour is unchanged. So the barrier must NOT be described as making the callee
+"neither inlinable nor cloneable": that claims more than anything the standard says. It is an
+optimization OBSTACLE whose effect is measured on named artifacts, never a language guarantee. This is plain standard C rather than a compiler
+attribute, so both sides of oracle (a) honour it for the same reason and neither needs to
+support an extension for the barrier to hold. It also makes the function-pointer load the
+ONLY volatile access in each call expression, which is what keeps the
+one-side-effecting-argument rule satisfied.
+
+THE RESIDUAL RISK IS RECORDED RATHER THAN PAPERED OVER. Every figure in the paragraph below
+is evidence about the REFERENCE compiler's artifacts, not a property every compiler under
+test must have. A compiler that devirtualized through a specialised entry could route a cell
+past the interleaved allocator advance argued above while still printing the same bytes, and
+this program would not detect that. Closing it would take a per-cell STATIC check of the
+artifact the compiler under test emitted -- an indirect transfer present, no specialised clone
+of take_mixed26 -- which is a harness capability this suite does not have and which no oracle
+here substitutes for. Until it does, the boundary coverage claimed for a compiler under test
+extends exactly as far as that artifact inspection, and no further;
+001_many_integer_parameters.expected carries the same statement for this whole area.
+
+WHY THE BARRIER EXISTS, MEASURED IN BOTH DIRECTIONS. Take it away, call the function by name,
+and the documented boundary stops being crossed at the two
+optimization levels where it matters most. With the constant call site alone, no
+take_mixed26 is emitted at all at -O1 or -O2 on any of the four targets: a static function
+reached from one caller is inlined into it whatever its size, and twenty-six parameters are
+then classified by nobody. With two call sites whose arguments are all compile-time
+constants, -O2 emits only take_mixed26.constprop.0 -- a clone with the constants folded in --
+on all four targets, so the boundary that does get crossed is not the documented one. With
+the barrier in place the committed program measures clean: take_mixed26 is emitted unmodified
+at -O0, -O1 and -O2 on all four targets, with no .constprop and no .isra clone in any of the
+twelve objects, and each call site is a genuine indirect call (call *%rax through the loaded
+pointer on x86-64, blr x8 on AArch64).
+
+WHAT IS KEPT OFF STDOUT, AND WHY. Width normalisation first: only int and double are passed
+as scalars and the aggregate holds two ints, so nothing whose width differs by target can
+reach the output. sizeof(long) and sizeof(void *) are 4 on i686 and 8 on x86_64, aarch64 and
+riscv64 (docs/technical-specifications.md lines 457-462); no long,
+size_t, ptrdiff_t, intptr_t or pointer value is printed, and the conversion specifications
+used are exactly %d for int, %.4f for double and %s for char * -- %ld, %lu, %zu and %p
+appear nowhere. Pointers are passed but never printed: only the pointed-to int is, in
+accordance with the corpus rule that pointer facts may appear only as differences,
+comparisons and alignment residues. No sizeof and no _Alignof result is printed either,
+which is what keeps the aggregate's size, alignment and padding off stdout altogether: they
+are the compiler's business, and the program is written to depend on none of them. Plain
+char signedness is implementation-defined and was measured as signed on x86_64 and i686 and
+unsigned on aarch64 and riscv64; no plain-char value is printed, and char appears only as
+const char *. long double has three different representations across the four targets
+(measured 16, 12, 16 and 16 bytes; x87 80-bit versus IEEE binary128) and is absent from this
+program entirely -- using it would import a difference that has nothing to do with parameter
+passing. That type is covered by 13_floating_point/004_long_double_target_restricted, whose
+record disables oracle (b) alone, with the measured reason recorded and the
+expected-divergence marker XD-TYPE-LONGDOUBLE-001 scoping that oracle.
+
+NOTHING IS NARROWED. No target is dropped, no oracle is disabled and this record carries no
+expected-divergence marker: a cross-backend divergence here is a GENUINE FINDING rather than
+an implementation-defined difference, because nothing implementation-defined reaches the
+output. Measured rather than assumed: stdout is byte-identical and the exit status is 0 in all
+twelve target-and-optimization-level cells.
+END
+expected_stdout    <<END
+mix_folded_i1=201
+mix_folded_d1=1.5000
+mix_folded_e1=-6.7500
+mix_folded_p1_deref=3001
+mix_folded_s1_lo=41 s1_hi=-42
+mix_folded_i2=-202
+mix_folded_d2=-2.2500
+mix_folded_e2=7.8750
+mix_folded_p2_deref=-3002
+mix_folded_s2_lo=43 s2_hi=-44
+mix_folded_i3=203
+mix_folded_d3=3.1250
+mix_folded_e3=-8.1875
+mix_folded_p3_deref=3003
+mix_folded_s3_lo=45 s3_hi=-46
+mix_folded_i4=-204
+mix_folded_d4=-4.0625
+mix_folded_e4=9.2500
+mix_folded_p4_deref=-3004
+mix_folded_s4_lo=47 s4_hi=-48
+mix_folded_i5=205
+mix_folded_d5=5.5000
+mix_folded_e5=-10.5000
+mix_folded_p5_deref=3005
+mix_folded_s5_lo=49 s5_hi=-50
+mix_runtime_i1=201
+mix_runtime_d1=1.5000
+mix_runtime_e1=-6.7500
+mix_runtime_p1_deref=3001
+mix_runtime_s1_lo=41 s1_hi=-42
+mix_runtime_i2=-202
+mix_runtime_d2=-2.2500
+mix_runtime_e2=7.8750
+mix_runtime_p2_deref=-3002
+mix_runtime_s2_lo=43 s2_hi=-44
+mix_runtime_i3=203
+mix_runtime_d3=3.1250
+mix_runtime_e3=-8.1875
+mix_runtime_p3_deref=3003
+mix_runtime_s3_lo=45 s3_hi=-46
+mix_runtime_i4=-204
+mix_runtime_d4=-4.0625
+mix_runtime_e4=9.2500
+mix_runtime_p4_deref=-3004
+mix_runtime_s4_lo=47 s4_hi=-48
+mix_runtime_i5=205
+mix_runtime_d5=5.5000
+mix_runtime_e5=-10.5000
+mix_runtime_p5_deref=3005
+mix_runtime_s5_lo=49 s5_hi=-50
+END

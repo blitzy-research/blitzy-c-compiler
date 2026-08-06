@@ -1,0 +1,143 @@
+program            = 005_va_list_forwarding
+area               = 07_variadics
+description        = Variadic argument list forwarded by value to v-style consumers, including a two-level outer to middle to innermost chain, folded and volatile-runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Header exception: this program includes <stdarg.h>. The corpus sanctions two header
+exception classes and only two, and this is the first of them: the programs in area 07 may
+include <stdarg.h> and nothing else. The second class is the dedicated bundled-header probe
+12_preprocessor/003_bundled_header_inclusion.c, which may include the nine required bundled
+freestanding headers; it does not apply here, and no program may take both. The exception is
+needed because variadic functions cannot be written at all without
+va_list, va_start, va_arg and va_end, and because the v-style consumers here
+declare a va_list parameter, which cannot be spelled without the header at all. No va_copy
+appears in this program: multi-pass traversal is 004's subject, and a forwarded list is read
+once by exactly one frame. stdarg.h
+is in bcc's own bundled freestanding set (docs/technical-specifications.md line 208) and
+is also a freestanding header supplied by the reference compiler, so it compiles
+identically under both oracles and the program remains a single-file reproducer. No other
+header is included; in particular stdio.h is not included, because bcc ships none. printf
+is hand-declared.
+Warning gate: this program passes the full default gate -Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror unchanged, which was verified by running
+that gate over this program on the reference compiler. Area 07 sanctions no deviation, and
+this record therefore carries no ub_audit_flags key: the record layer expresses "no
+deviation" by omitting the key rather than by restating the gate, because a value naming
+the whole gate would be declaring a deviation that deviates in nothing. The sanitizer half
+of the audit was run too - a native build with -fsanitize=undefined,address
+-fno-sanitize-recover=all executes to completion with no diagnostic - so the
+undefined-behaviour-freedom argument below is machine-checked as well as written down.
+The sequencing argument for va_list forwarding, which is the central correctness rule of
+this program. C11 provides that the object ap may be passed as an argument to another
+function, and that if that function invokes the va_arg macro with parameter ap then the
+value of ap in the calling function is indeterminate and shall be passed to the va_end
+macro prior to any further reference to ap. This program obeys that rule exactly, as
+follows. Each of the three variadic wrappers calls va_start on its own list, naming the
+last named parameter, which is count in fwd_ints and fwd_doubles and n_dbl in fwd_mixed.
+Each wrapper then passes that list by value to a v-style callee, assigns the callee's
+return value to a named local, and calls va_end on the list. No wrapper calls va_arg at
+any point, either before or after forwarding, so there are exactly zero va_arg
+invocations in the three wrappers and the caller's indeterminate list is never read. The
+va_end call after forwarding is not merely permitted but required, and it is the only
+operation performed on the list after the callee returns.
+The v-style consumers read the forwarded list with va_arg only. None of them calls
+va_start, va_copy or va_end, because C11 requires va_end to be invoked by the same
+function that invoked va_start or va_copy for that list, and a consumer neither creates
+nor destroys the list. No consumer assigns to its va_list parameter and none takes its
+address.
+Two-level forwarding is exercised deliberately. fwd_doubles forwards its list to
+vmid_doubles, which forwards the same list by value a second time to vsum_doubles, which
+is the only function in that chain that calls va_arg. After vsum_doubles returns, the
+list is indeterminate in vmid_doubles, which does nothing further with it and simply
+returns, and it is indeterminate in fwd_doubles, which calls va_end and nothing else.
+This is the conforming way to build a chain of v-style helpers.
+No list is ever read past the number of arguments actually supplied at its call site.
+Each consumer retrieves exactly as many arguments as its count parameters specify, and
+each call site supplies exactly that many, so there is no over-read.
+Retrieval types: int and double arguments are not subject to the default argument
+promotions, so va_arg(ap, int) and va_arg(ap, double) retrieve exactly the types
+supplied. The floating arguments are written as double literals with no f suffix, so no
+promotion is involved and va_arg(ap, float) never appears.
+Arithmetic: no signed overflow is possible. The integer totals are 9, 21, -1 and -1, all
+far inside the 32-bit int range, and floating addition is on dyadic rationals only. No int
+is ever added to a double accumulator or the reverse. There is no shift, no division, no
+aliasing violation, no read of uninitialized storage, no object modified twice between
+sequence points, and no dependence on padding or on the addresses of unrelated objects.
+Evaluation order: main stores each wrapper's return value in a named temporary before
+printing it, so no call has more than one side-effecting argument. In the runtime variants
+each volatile object is read by a single simple assignment into a plain local of the same
+type before the call, so the arguments in the call expression are pure reads of plain
+locals and the unspecified argument-evaluation order is unobservable.
+END
+impl_defined_notes <<END
+Why va_list forwarding is a genuine cross-backend test rather than a portability hazard.
+The representation of va_list differs by target. On x86-64 System V it is an array type
+whose element describes a register save area plus an overflow area, so passing it by value
+decays to passing a pointer and the callee's va_arg mutates the caller's state. On i686
+cdecl every argument is pushed on the stack and va_list is effectively a plain pointer
+passed genuinely by value, so the callee's va_arg does not mutate the caller's state.
+AArch64 AAPCS64 and RISC-V 64 LP64D each use their own register save area layouts. The
+relevant ABI facts are recorded at docs/technical-specifications.md lines 546, 553, 559
+and 565. This divergence in representation is precisely why the C standard declares the
+caller's list indeterminate after forwarding, and because this program never reads a
+forwarded list again it is fully conforming on all four targets and must produce identical
+output on all four. Any cross-backend difference here is therefore a genuine finding
+rather than a documented implementation-defined difference.
+Width normalization: the types long and unsigned long are never used, because sizeof(long)
+and sizeof(void *) are 4 on i686 and 8 on x86-64, AArch64 and RISC-V 64
+(docs/technical-specifications.md lines 457 to 462). Only int and double appear, and the
+printf conversions are limited to %s, %d and %.6f. No address, no pointer value, no
+sizeof result and no plain char value is printed, and nothing derived from a va_list
+object itself is printed.
+Floating determinism: every floating literal is a dyadic rational exactly representable in
+IEEE binary64 (1.5, 2.25, 4.125, 0.25, 8.5, 3.0625, 0.125, 2.5), and all floating output
+is printed at fixed precision with %.6f, so the rendered text is byte-identical on all
+four backends.
+Output ordering in the mixed cases: the v-style consumer prints its integer lines, then
+its floating lines, then its own floating sum line, and main prints the integer sum line
+after the wrapper returns. The golden record reflects that order exactly.
+Cross-backend comparability: integer and double variadic argument passing was measured to
+produce byte-identical results on all four targets at all three optimization levels, so no
+target is restricted and all three oracles are enabled.
+END
+expected_stdout    <<END
+ffwd_int[0]=6
+ffwd_int[1]=-4
+ffwd_int[2]=15
+ffwd_int[3]=-8
+ffwd_int_sum=9
+rfwd_int[0]=12
+rfwd_int[1]=-5
+rfwd_int[2]=30
+rfwd_int[3]=-16
+rfwd_int_sum=21
+ffwd_dbl[0]=1.500000
+ffwd_dbl[1]=2.250000
+ffwd_dbl[2]=4.125000
+ffwd_dbl_sum=7.875000
+rfwd_dbl[0]=0.250000
+rfwd_dbl[1]=8.500000
+rfwd_dbl[2]=3.062500
+rfwd_dbl_sum=11.812500
+fmix_i[0]=3
+fmix_i[1]=-4
+fmix_d[0]=1.500000
+fmix_d[1]=0.250000
+fmix_dsum=1.750000
+fmix_isum=-1
+rmix_i[0]=9
+rmix_i[1]=-10
+rmix_d[0]=2.500000
+rmix_d[1]=0.125000
+rmix_dsum=2.625000
+rmix_isum=-1
+END

@@ -1,0 +1,182 @@
+program            = 008_inline_asm_per_target
+area               = 08_gcc_extensions
+description        = GCC inline assembly with operand constraints, guarded per architecture, every branch performing the same 32-bit integer operation
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
+ub_notes           <<END
+UB-FREEDOM ARGUMENT. There is no signed overflow: the computations are 1000+37, 1000-37,
+37-1000, 1000 xor 37 and -1000 xor 37, all far from INT_MIN and INT_MAX. No shift operator
+is used. No pointer, array or aggregate is used, so there is no aliasing violation and no
+one-past-end pointer. No uninitialized read occurs: each result variable is either
+initialized from the first operand before a read-write "+r" operand is applied, or written
+by the assembly through a "=r" output operand before it is returned. No object is modified
+twice between sequence points. Every printf call receives at most one side-effecting
+argument. Nothing depends on padding bytes or on the addresses of unrelated objects.
+
+NOTHING DEPENDS ON UNSPECIFIED EVALUATION ORDER, AND THIS IS ENFORCED STRUCTURALLY RATHER
+THAN ARGUED. An access to a volatile object is an observable side effect, and the relative
+order of side effects within a single argument list is unspecified, so a call that reads two
+volatile operands directly has an unspecified order of observable accesses even when the
+values it computes are stable. This program therefore reads each volatile object exactly
+once, in a statement of its own -- sa = va; sb = vb; sc = vc; -- and passes only those
+snapshots to the assembly wrappers. No argument list anywhere in the program contains more
+than one volatile access, and asm_chain is computed in three separate statements rather than
+as nested call arguments, so the two inner results are sequenced before the outer call
+instead of being evaluated in an unspecified order relative to each other. The snapshots do
+not weaken the runtime variant: they are themselves loads from volatile storage, so the
+backend must still emit genuine instructions and cannot substitute a folded constant.
+
+NO REGISTER IS CLOBBERED WITHOUT BEING DECLARED. On x86_64 and i386 the addl, subl and
+xorl instructions write the condition flags, so those branches declare the "cc" clobber;
+omitting it would let the compiler assume the flags survive across the asm and could
+produce wrong code. On aarch64 the plain add, sub and eor forms do NOT set flags, only the
+adds and subs forms do, and riscv64 has no flags register at all, so neither of those
+branches declares "cc", because declaring it there would be incorrect. No general-purpose
+register outside the declared operands is touched by any branch.
+
+Every asm carries __volatile__. Each has an output operand, so without __volatile__ the
+compiler would be free to delete or hoist the instruction once it proved the result unused
+or invariant, which would silently stop the program from testing code generation.
+END
+impl_defined_notes <<END
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them, which is measured rather than asserted.
+
+PER-TARGET ASSEMBLY DESIGN. All four branches perform the SAME logical 32-bit integer
+operation and assign the result to int, so every printed value is identical on every
+target. Only register constraints are used -- "r", "=r", "+r" and the matching "0" -- and
+never an immediate-letter constraint, because immediate constraint letters differ per
+architecture and would not port.
+
+  x86_64 and i386   add  "addl %1, %0"          "+r" (r) : "r" (b) : "cc"
+                    sub  "subl %2, %0"          "=r" (r) : "0" (a), "r" (b) : "cc"
+                    xor  "xorl %1, %0"          "+r" (r) : "r" (b) : "cc"
+                    The l mnemonic suffix with an int operand makes %0 expand to the
+                    32-bit register name. These instructions write the flags, hence "cc".
+                    The sub form uses the MATCHING constraint "0", which ties input a to
+                    the same register as output 0; verified in the emitted assembly as
+                    subl %eax, %ecx with %ecx serving as both output and matching input.
+                    This is the only matching-constraint coverage in the corpus.
+
+  aarch64           add  "add %w0, %w1, %w2"    "=r" (r) : "r" (a), "r" (b)
+                    sub  "sub %w0, %w1, %w2"    "=r" (r) : "r" (a), "r" (b)
+                    xor  "eor %w0, %w1, %w2"    "=r" (r) : "r" (a), "r" (b)
+                    The %w modifier is REQUIRED to name the 32-bit views of the registers;
+                    plain %0 would name the 64-bit register and give int-incorrect
+                    semantics. No "cc" clobber, because these forms do not set flags.
+
+  riscv64           add  "addw %0, %1, %2"      "=r" (r) : "r" (a), "r" (b)
+                    sub  "subw %0, %1, %2"      "=r" (r) : "r" (a), "r" (b)
+                    xor  "xor %0, %1, %2"       "=r" (r) : "r" (a), "r" (b)
+                    addw and subw are REQUIRED for 32-bit int semantics with correct sign
+                    extension into the 64-bit register. xor is deliberately NOT xorw: no
+                    such instruction exists, and full-width xor is correct here, because
+                    if both operands are sign-extended 32-bit values then the upper 32
+                    bits of the result equal sign_a xor sign_b, which is exactly the
+                    replicated sign of the low word, so the result is already correctly
+                    sign-extended. No "cc" clobber, because riscv64 has no flags register.
+
+NOTHING TARGET-SPECIFIC IS EVER PRINTED. This is the property that keeps oracle b sound.
+Oracle b compares each backend's stdout against the x86_64 baseline, so if any branch
+computed a different value, or if the program printed the architecture name, a register
+name or any other target-varying fact, oracle b would report a divergence caused by the
+TEST rather than by the compiler -- which would look exactly like a real defect. The line
+asm_branch_selected therefore prints the constant 1, meaning only that exactly one branch
+was selected, which the if/elif/else structure guarantees.
+
+Every operand and result is int, which is 4 bytes on all four targets. long is
+deliberately avoided: it was measured as 4 bytes on i686 and 8 bytes on x86_64, aarch64
+and riscv64. No plain-char value the program computes is printed as a number or compared --
+the only plain-char objects are the format-string literals, copied through printf unchanged
+-- so the measured char-signedness difference cannot be reached: char is signed on x86_64
+and i686 but unsigned on aarch64 and riscv64. No address
+or pointer value is printed.
+
+THE ELSE BRANCH DELIBERATELY RAISES A LOUD #error AND MUST NEVER BECOME A PORTABLE-C
+FALLBACK. The repository documentation contains zero mentions of predefined architecture
+macros: the documentation nowhere requires or enumerates __x86_64__, __i386__, __aarch64__,
+__riscv, __STDC__ or _LP64, so whether bcc defines them is not established by it. A
+portable-C fallback would silently substitute plain C arithmetic for the assembly, every
+value would still be correct, every oracle would report PASS, and the program would have
+stopped testing inline assembly entirely, invisibly and permanently. The loud #error
+instead diagnoses PREDEFINED-MACRO SUPPORT, which is itself worth knowing, and it makes
+the failure impossible to miss, and that is verified rather than assumed: compiling with
+-U__x86_64__ -U__amd64__ fires the #error as intended. Each guard also accepts alternate
+spellings -- __x86_64__ or __amd64__, __i386__ or __i386, __aarch64__ or __arm64__, __riscv or
+__riscv__ -- as resilience against a compiler that defines only one spelling of a pair. A
+dedicated predefined-macro program belongs to area 12, so the suite already relies on
+these macros being defined; this guard is what turns that reliance into a diagnosable
+condition rather than a silent assumption.
+
+asm_matches_c IS A GENUINE INDEPENDENT CROSS-CHECK, not decoration. It compares every
+assembly result against the same computation written in plain C inside the SAME binary,
+which catches the one case the three oracles cannot: if bcc and the reference compiler
+mis-assembled identically, oracle a would report agreement and oracle c would match a
+golden record captured from the same bug. If that line ever prints 0, the assembly
+disagrees with plain C in the same binary and there is a real defect regardless of what the
+other oracles say.
+
+The two variants, stated precisely, because asm volatile changes what "folded" can mean here.
+Every helper's assembly is __asm__ __volatile__, so no optimizer at any level may delete it,
+reorder it across another volatile operation, or substitute an equivalent computation: the
+instruction is emitted in all twelve cells. Neither group is therefore a folded variant in the
+ordinary sense, and the two are not distinguished by whether the assembly survives.
+
+What the two groups actually vary is the ORIGIN OF THE ASM OPERANDS, which is what changes the
+work the backend must do. The literal-input group -- asm_add(1000, 37) and its siblings -- passes
+compile-time constants, so the compiler may propagate those constants into the operands and
+materialize them ahead of the instruction, exercising constant propagation INTO an asm operand
+together with the "r" and "+r" constraint machinery on constant-derived inputs. The
+volatile-input group -- asm_add(sa, sb) and its siblings -- takes its operands from snapshots of
+volatile int objects, so each load must actually occur and the backend must place a genuine
+runtime value into a constraint-satisfying register. asm_chain drives three asm bodies -- a
+subtract and an exclusive-or whose results both feed an add -- so two intermediate results are
+live across the second and third asm, which is what exercises register allocation between them.
+The three calls are written as three sequenced statements rather than nested arguments, for the
+evaluation-order reason recorded in the UB-freedom argument above; chaining, not nesting, is what
+creates the register pressure, so making the order well defined costs the test nothing.
+
+Genuinely foldable arithmetic does appear in this program, on the C side of asm_matches_c: the
+comparisons against 1000 + 37, 1000 - 37 and 1000 ^ 37 are ordinary constant expressions the
+optimizer folds, and asserting the assembly results equal them is the independent cross-check
+described above. The program therefore contains both a foldable and an unfoldable computation of
+the same values; it places the foldable one on the C side of the comparison rather than inside the
+assembly, which is the only place asm volatile permits it to be.
+
+Inline assembly with operand constraints is documented as supported at
+docs/technical-specifications.md lines 13, 107 and 761, with the spellings asm and
+__asm__, and at docs/project-guide.md's "C11 Frontend -- Parser" and "C11 frontend with
+GCC extensions" rows. This program therefore tests
+documented functionality and carries NO expected-divergence marker.
+
+Output is identical on all four targets at all three optimization levels.
+END
+expected_stdout    <<END
+asm_branch_selected=1
+asm_folded_add=1037
+asm_folded_sub=963
+asm_folded_xor=973
+asm_folded_sub_neg=-963
+asm_folded_xor_neg=-963
+asm_runtime_add=1037
+asm_runtime_sub=963
+asm_runtime_xor=973
+asm_runtime_sub_neg=-963
+asm_runtime_xor_neg=-963
+asm_chain=1936
+asm_matches_c=1
+END

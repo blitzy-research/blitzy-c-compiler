@@ -1,0 +1,90 @@
+# Expectation record for 06_control_flow/010_comma_operator_sequencing.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 010_comma_operator_sequencing
+area               = 06_control_flow
+description        = Comma operator sequencing with observable side effects in defined order, covering chains, nesting, precedence against assignment, argument position, for and while and do-while clauses, both conditional branches, sequenced volatile writes, and switch and if controlling expressions
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour. The property under test is an
+evaluation ORDER, so the observation must not be removable: the trace length is
+held in a volatile counter and a volatile tick is incremented on every side
+effect. Every access to a volatile object is an observable side effect the
+compiler may not remove, so no optimization level may elide the appends, whereas
+plain counters could legally be removed by dead-code elimination.
+
+No object is modified twice between sequence points. The expression that writes
+the same volatile object three times is legal precisely because the comma
+operator interposes a sequence point between each pair of operands, which fully
+determines both the final stored value and the value of the whole expression.
+Every other volatile access stands alone in its own full expression or is read
+once into a plain local.
+
+The trace array holds sixteen ints and every write goes through an explicit
+range check, so no out-of-range write is ever performed; the longest trace in the
+program is four entries, so the guard never fires but the bound is nevertheless
+enforced. The array has static storage duration and is therefore zero
+initialised, and reset_trace rewrites all sixteen elements before each traced
+case, so no indeterminate storage is ever read. Every trace identifier is a
+single decimal digit from 1 to 9, so the printed run of digits is unambiguous;
+identifier 0 is never used because it could not be distinguished from an
+unwritten slot.
+
+All arithmetic is on int values of small magnitude, so no signed overflow is
+possible. There are no shifts and no type punning, therefore no aliasing violation and no
+dependence on padding bytes. The only pointer arithmetic is the arithmetic the language
+performs for a subscript: every index into trace is a counter provably inside its bound,
+and no pointer value is printed, converted to an integer or compared. The only
+character data is a string literal label passed as const char *; no character
+value is ever printed as a number. The for loop converges at i equal to j equal
+to five, and the while and do-while loops are bounded by i less than three with
+an increment in the body, so every loop terminates.
+END
+impl_defined_notes <<END
+Nothing implementation-defined is observed. Only int values and one string label
+are printed, so the measured plain-char signedness difference (signed on x86_64
+and i686, unsigned on aarch64 and riscv64) cannot affect the output, and the
+measured width difference for long and pointers (4 bytes on i686, 8 elsewhere)
+is never exposed because no long, pointer, size_t or ptrdiff_t value is printed
+and no sizeof result appears in the output. No address is printed. No floating
+point is used. Every ordering asserted here is fixed by the C sequence-point
+rules rather than left to the implementation, so it is identical on every target.
+All four targets and all three optimization levels are therefore compared, and
+all three oracles are enabled.
+END
+expected_stdout    <<END
+comma_chain order=123 len=3 tick=3
+comma_chain_value=3
+comma_nested order=1234 len=4 tick=4
+comma_nested_value=4
+comma_precedence order=12 len=2 tick=2
+comma_precedence_value=1
+comma_in_argument order=45 len=2 tick=2
+comma_in_argument_value=5
+for_comma i=5 j=5 iterations=5
+while_comma_condition order=6666 len=4 tick=4
+while_comma_condition_i=3
+comma_in_ternary_true order=7 len=1 tick=1
+comma_in_ternary_true_value=70
+comma_in_ternary_false order=8 len=1 tick=1
+comma_in_ternary_false_value=80
+comma_volatile_writes r=2 vsel=2
+comma_in_switch_control order=9 len=1 tick=1
+comma_in_switch_control_value=20
+comma_in_if_control order=12 len=2 tick=2
+comma_in_if_control_value=2
+comma_in_do_while order=555 len=3 tick=3
+comma_in_do_while_i=3
+END

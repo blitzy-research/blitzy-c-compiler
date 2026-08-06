@@ -1,0 +1,129 @@
+# Expectation record for 12_preprocessor/001_macro_expansion_stringize.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 001_macro_expansion_stringize
+area               = 12_preprocessor
+description        = Function-like macro expansion with stringize (#) and token paste (##), asserted by printing the resulting strings and values
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction, which is the precondition that
+makes a divergence here evidence about a compiler at all: a program containing undefined
+behaviour licenses every implementation to do anything, so a difference between two of them
+would prove nothing about either.
+
+Arithmetic: every value computed and printed is a small non-negative int, and the largest
+intermediate anywhere in the program is 25, so no signed overflow can arise on any target. No
+shift operator appears, so no shift count can be negative or at or above the promoted operand's
+width. Neither division nor remainder is performed anywhere, so neither a zero divisor nor the
+one signed division that overflows can occur.
+
+Objects: every object read is initialised at its own declaration, or is one of the two
+file-scope static const int objects with an explicit initialiser, so no uninitialised storage
+is ever read. The volatile int source is initialised to 4 and read exactly once, into a plain
+int local, in a statement of its own; the function-like macro under test then expands that
+plain local twice, so both of its reads are pure and identical and no unsequenced volatile
+access can arise. No object is modified twice between sequence points.
+
+Pointers and aggregates: the only pointer in the program is the const char * parameter of the
+local slen helper, which reads a string literal from index 0 up to and including the test of
+its terminating null character and stops there. The one-past-the-end position is formed by no
+expression and read by none, no pointer arithmetic crosses an object boundary, and no aliasing
+violation is possible because the sole object read through a pointer is an array of char read
+as char. No string literal is written to. No aggregate, union or bitfield is read, so nothing
+depends on a padding byte or on the relative addresses of unrelated objects.
+
+Calls: no argument expression of any call has a side effect, so nothing depends on unspecified
+evaluation order and the rule of at most one side-effecting argument per call holds trivially.
+printf is declared with a prototype that matches every use, and each conversion specification
+matches the type of its argument after the default argument promotions: %s takes a string
+literal and %d takes an int. Those two specifiers are the only ones used.
+
+Determinism, which byte-exact comparison requires: the output is a fixed 13-line sequence
+of name=value pairs, exactly one line per preprocessing property claimed, so a single
+divergent line localises a defect to one construct. No address or pointer value is printed.
+No plain char value is printed, so the measured plain-char signedness difference between the
+targets cannot be observed. Only int and string values are printed, so the measured i686
+width difference cannot reach the compared bytes either. No translation-date,
+translation-time or source-file-name predefined macro is referenced, no floating type
+appears, there is no randomness and no locale-dependent formatting, and nothing outside the
+program is read: every value printed comes from a literal in its own source, so execution is
+hermetic. main returns 0, inside the 0-125 range the suite requires.
+
+The two-variant rule: the funclike_folded and funclike_runtime lines apply the SAME
+function-like macro twice, once to a literal, where the constant folder answers, and once to an
+operand sourced from volatile storage, which the optimiser may not fold. Without the second
+variant, optimisation would substitute the folder's answer for the backend's at -O1 and -O2 and
+a code-generation defect would escape detection entirely. That the volatile variant really does
+reach the backend was verified rather than assumed: at -O2 the native build materialises the
+multiply as a genuine instruction rather than folding it to an immediate.
+
+No header is included, and printf is hand-declared for that reason: the compiler under test
+bundles freestanding headers only and ships no stdio.h, so an include of it would succeed on
+the reference side and fail on the compiler-under-test side, manufacturing a divergence caused
+by the test rather than by the compiler.
+
+No deviation from the default warning gate is requested, and none is needed. The full default
+gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror produces zero
+diagnostics in the single native compile-only invocation the suite makes of it; the sanitizer
+gate -fsanitize=undefined,address -fno-sanitize-recover=all builds, runs to completion and
+exits 0 with no diagnostic in its one instrumented native build; and all twelve cells of the
+declared matrix produce byte-identical stdout with exit status 0 and an empty standard error.
+END
+impl_defined_notes <<END
+This record narrows nothing. It declares all four targets, all three optimization levels, all
+three oracles and the default warning gate, so it excuses no exclusion and no comparison is
+withheld. What follows is the other thing this field is for: the implementation-defined
+properties the program was written to keep out of its output, which is what makes the full
+four-way cross-backend comparison sound rather than merely permitted.
+
+1. Pointer and long width. sizeof(long) and sizeof(void *) are 4 bytes on i686 and 8 bytes on
+   x86_64, aarch64 and riscv64, i686 being the one ELF32 target
+   (docs/technical-specifications.md lines 457-462). No long, no pointer value, no size_t and
+   no ptrdiff_t is printed anywhere, and no length modifier for any of them is used, so the
+   difference cannot reach the compared bytes.
+2. Plain char signedness. It is implementation-defined, and was measured signed on x86_64 and
+   i686 and unsigned on aarch64 and riscv64. No plain char value is printed. The only char
+   objects here are string literals, consumed either as whole strings by %s or by comparison
+   against the null character inside slen, and neither observes signedness.
+3. long double representation. It differs across the four targets, measured at 16, 12, 16 and
+   16 bytes, x87 80-bit against IEEE binary128. No floating type of any kind appears in this
+   program; that property belongs to 13_floating_point/004_long_double_target_restricted,
+   which is the one program permitted to narrow a comparison on its account.
+4. Byte order. All four targets are little-endian (docs/technical-specifications.md lines
+   457-462) and no byte-order-sensitive value is printed, so nothing here depends on it.
+
+Every construct the program exercises is documented as supported: object-like and
+function-like macro expansion with stringification and token pasting at
+docs/technical-specifications.md line 92, the same two operators plus the recursive expansion
+guard at line 491, and the same list in docs/project-guide.md's "C11 Frontend -- Preprocessor"
+row. This record therefore
+carries no expected-divergence marker, and a divergence under any of its three oracles is a
+genuine finding rather than an expected one.
+END
+expected_stdout    <<END
+stringize_direct=WIDTH
+stringize_expanded=32
+stringize_expression=a + b * 2
+stringize_length=5
+paste_identifier=55
+paste_both_expanded=55
+paste_number=12
+stringize_of_paste=32
+funclike_folded=25
+funclike_runtime=16
+funclike_nested=14
+empty_object_macro=8
+self_reference_guard=9
+END

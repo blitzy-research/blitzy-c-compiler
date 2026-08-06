@@ -1,0 +1,366 @@
+# Expectation record for 02_constant_expressions/007_string_literal_constants.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 007_string_literal_constants
+area               = 02_constant_expressions
+description        = String-literal constants -- size as an integer constant expression, phase-2 splicing, phase-5 escape conversion, phase-6 concatenation, indexing and decay -- each folded property paired with a volatile-operand runtime twin
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined behaviour and depends on no unspecified behaviour, which is the
+precondition both differential oracles rest on rather than a stylistic preference: undefined
+behaviour would license either compiler to do anything at all, so a divergence between them would
+prove nothing about either. The paragraphs below are the written argument required of every program
+in this suite; the warning gate and the sanitizer gate are its machine half.
+NO STRING LITERAL IS EVER WRITTEN THROUGH. Attempting to modify a string literal is undefined, so
+every literal in this program is reached only through a const-qualified type. Where a mutable array
+is needed -- bound_table, whose bound is sizeof of a literal -- it is a SEPARATE object, filled at
+run time element by element from a literal, so the literal itself is only ever read.
+EVERY SUBSCRIPT IS PROVABLY WITHIN BOUNDS, including the deliberate reads of a terminator index.
+"abcdef" is an array of seven chars, so indices 0, 3, 5 and 6 are all valid and index 6 is the
+terminating null byte rather than one past the end. escape_bytes has nine elements and is read at
+indices 0 through 7, with its sweep loop running to sizeof escape_bytes - 1. bound_table has
+sizeof "abcdefgh" == 9 elements and is written and read at indices 0 through 8, the last being the
+terminator copied from the literal. Every runtime index is a volatile-sourced copy of exactly the
+constant the folded line used, so the two paths address the same element. The two length helpers stop
+at the first null byte, and every array they are given is null-terminated within its own bounds --
+including the empty literal, which is an array of exactly one null byte -- so neither helper can read
+past the end of an object. Pointer arithmetic is confined to a single array object in every case, and
+no one-past-the-end pointer is ever dereferenced.
+ONE ARRAY DELIBERATELY LACKS A TERMINATOR, AND ITS EXEMPTION IS EXPLICIT. C11 6.7.9p14 permits an
+initializing literal exactly one element longer than the array, in which case the terminator is
+dropped, so exact_fit -- declared char[4] and initialized from "text" -- is NOT a C string. It is
+therefore never printed with %s and never walked for a terminator: a walk would run past the end of
+the array, which is precisely the undefined behaviour this program exists not to commit. Its
+run-time observation is an element-by-element dump across exactly its four elements, driven by its
+own sizeof, and that is why it is the one object whose size carries no walked-length twin. The
+exemption is stated at the declaration, with its reason, rather than left as a silent gap.
+THE ADDRESSES OF TWO LITERALS ARE NEVER COMPARED. Whether identical string literals share storage is
+UNSPECIFIED, so a program that compared two literal addresses would depend on unspecified behaviour
+and its divergence would prove nothing. No literal address is printed, compared for equality with
+another literal's, or subtracted from another literal's.
+SEQUENCING IS EXPLICIT. Each volatile object is read exactly once, into a local, in a statement of
+its own, so no call ever receives more than one side-effecting argument and no printed value depends
+on the unspecified order in which arguments are evaluated: every argument is a literal subscript, a
+dereference of const data, or a plain local snapshotted beforehand. No object is modified twice
+between sequence points.
+THERE IS NO SIGNED OVERFLOW, NO SHIFT, NO ALIASING VIOLATION AND NO READ OF UNINITIALIZED STORAGE.
+Every arithmetic value is a small length, index or byte value and the largest printed number is 120.
+Each fold_len line computes sizeof arr - 1u in the unsigned type sizeof yields, where the array size
+is at least 1, so the subtraction cannot wrap and the narrowing cast to int is applied to a value at
+most 11. The only division is an array's element count, whose divisor is a sizeof of a complete
+object type and therefore non-zero by the standard's own guarantee, and no remainder operator
+appears. Each array is accessed through its own element type -- the unsigned-char array only through
+unsigned char -- so no object representation is punned; the mutable array is fully written before it
+is read, every static object has an initializer, every local is assigned before its first use
+including the agree accumulators, and nothing depends on padding bytes or on the addresses of
+unrelated objects.
+EVERY _Static_assert IS SATISFIED and uses the two-argument form, because the message-less spelling
+is C23 and the default gate's -pedantic -Werror rejects it. They pin the sizing and encoding facts
+before the program runs -- that a literal carries its terminator, that adjacent literals concatenate
+before sizing, that a character constant has type int, and that the escapes name the values the
+lines then print -- so a mis-sized literal or a shifted character code is a translation failure
+rather than a wrong number. That every one of them holds is a soundness requirement rather than a
+preference: both mandated oracles compare the observable behaviour of a binary that built
+successfully.
+NO HEADER IS NAMED ANYWHERE and the single libc prototype the program needs, printf, is declared by
+hand as `int printf(const char *, ...);`. bcc bundles the nine required freestanding headers plus a
+bonus stdatomic.h and ships no standard I/O header (docs/project-guide.md, "9 bundled freestanding
+headers"), so a directive naming that header would fail on the bcc side of oracle (a) while
+succeeding on the reference side -- a spurious divergence caused by the test rather than by the
+compiler under test. Nothing in the file is a GCC extension, so no include exception and no gate
+deviation is available to area 02 and none is needed; the corpus has exactly two header exceptions,
+area 07's stdarg.h and the dedicated bundled-header probe in area 12. string.h is absent from that
+set entirely, so strlen is unavailable and every length here is computed by a bounded walk written in
+the file -- which is an advantage rather than a restriction, because the walk is the runtime twin
+that sizeof itself cannot have. Only ordinary narrow literals appear: the wide and Unicode forms
+belong to area 11, which is where their support is investigated. The source is pure US-ASCII.
+THIS RECORD DECLARES NO WARNING-GATE DEVIATION: no ub_audit_flags key appears above, so the program
+is audited under the suite's full default gate. It is clean under -Wall -Wextra -pedantic
+-Wconversion -Wsign-conversion -Wshadow -Werror in the single native compile-only invocation the
+suite's warning gate makes, and it builds and runs clean under the sanitizer gate
+-fsanitize=undefined,address -fno-sanitize-recover=all run natively to completion. Both gates are
+reference-compiler-only and are never applied to bcc, so requirement 3's shared-flag discipline is
+untouched.
+END
+impl_defined_notes <<END
+This record narrows nothing. All four targets, all three optimization levels and all three
+oracles are enabled, and no expected-divergence marker is attached. These notes exist to
+record how that was achieved, because a program in this area could easily have had to narrow:
+constant evaluation reaches straight into the type system, which is where the four supported
+targets differ.
+THE TWO-VARIANT RULE AND WHY BOTH HALVES ARE NEEDED. Every property is printed twice: once
+from a constant expression, so the answer comes from the constant evaluator, and once from
+volatile-qualified operands, which no implementation may read at translation time, so that
+answer comes from the code generator. The mechanism rests on the language rather than on any
+compiler's habits: an access to a volatile object is an observable side effect, so no implementation
+may satisfy the runtime half by folding the value at translation time, and it must load the operand
+and compute. Without that half, optimization substitutes the folder's answer for the backend's and a
+code-generation defect escapes detection entirely while the suite still reports a pass. With it, a
+divergent fold_ line accuses the constant evaluator, a divergent runtime_ line accuses the backend,
+and a pair that disagrees with itself accuses one of the two.
+The one construct with no possible run-time counterpart is sizeof itself, which every conforming
+implementation evaluates at translation time for a non-variable type. Its twin is therefore the
+WALKED LENGTH: every fold_size_ line is matched by a fold_len_ / runtime_len_ / len_agree_
+triple over the same object, where the folded length is sizeof minus one and the runtime length
+is a bounded walk to the terminator. Exactly one object is exempt, for the reason recorded in
+the ub_notes above.
+WIDTH NORMALIZATION. sizeof(long) and sizeof(void *) were MEASURED at 4 bytes on i686 and 8
+bytes on x86-64, AArch64 and RISC-V 64 (docs/technical-specifications.md target table, lines
+457-462), so no plain long, no size_t, no ptrdiff_t and no pointer value is printed anywhere,
+and no floating-point value is printed. Every printed size was measured identical on all four
+supported targets -- the literal array sizes 1, 4, 5, 6, 7, 9, 11 and 12 and the sizeof-derived
+bound 9 -- because sizeof(char) is 1 by definition, so none of them depends on a target's integer
+widths at all.
+sizeof yields a size_t, so every size in this program is cast to int before it is printed, and
+sizeof is only ever applied to a literal or to an array -- never to one of the named pointers,
+because sizeof a pointer would print a target-dependent width and manufacture a divergence out
+of nothing. Where the source may place a string literal, and whether two identical literals share
+storage, is left entirely free: the program never prints an address and never compares two
+pointers for identity, so neither choice is observable.
+PLAIN-char SIGNEDNESS. Plain char was MEASURED as signed on x86-64 and i686 and unsigned on
+AArch64 and RISC-V 64. No plain-char value is printed and no printed line depends on that
+choice, and that matters here more than anywhere else in the area, because a program about
+character data is exactly where the difference would otherwise surface. Two mechanisms keep it
+out of the output, applied together so the rule holds by construction rather than by inspection:
+every character this program handles lies inside the 0x00-0x7F range, so its numeric value is
+identical under either signedness choice, and every numeric print goes through an explicit
+(int)(unsigned char) conversion in any case -- with the bytes carrying the escape sequences held
+in an unsigned char array. Characters printed as characters go through %c, whose argument is
+promoted to int and whose output is the byte either way, and the %c lines print only members of
+the basic execution character set with positive values under both signings.
+AREA SCOPING, AND THE SECOND SIGNEDNESS DIFFERENCE IT KEEPS OUT. Only ordinary narrow literals
+appear here; the wide, UTF-8, 16-bit and 32-bit forms are investigated by
+11_literals_and_strings/003_wide_and_unicode_literals.c. No wchar_t, char16_t or char32_t is
+named in this program, which keeps a SECOND measured signedness difference out of its output:
+wchar_t was MEASURED as signed on x86-64, i686 and RISC-V 64 and unsigned on AArch64, four bytes
+wide on all four, so a wide element printed as a number would have needed exactly the
+normalization the narrow bytes get here. No header naming those types is available in any case
+-- wchar.h and uchar.h are outside bcc's bundled set and outside the corpus's two sanctioned
+header exceptions -- so this scoping costs the suite no coverage; it places that coverage in the
+record that owns it.
+THE EXECUTION CHARACTER SET IS THIS PROGRAM'S PRINCIPAL IMPLEMENTATION-DEFINED PROPERTY, AND IT
+IS PINNED RATHER THAN ASSUMED. Signedness and the character set are two different properties,
+and the (int)(unsigned char) conversion above settles only the first: C11 5.2.1 leaves the
+members of the execution character set and their codes implementation-defined, so the numeric
+code of a letter is not fixed by the standard. This program observes a great deal of that set.
+bound_table dumps the codes of a through h, giving 97 to 104. The terminator-free array dumps
+all four of its elements t, e, x and t, giving 116, 101, 120 and 116 -- four values from three
+distinct codes, because its initializer repeats a letter. fold_index_values and its twin print
+97, 100 and 102 for a, d and f, and fold_char_digit_nine and its twin print 57 for the digit 9.
+Six lines render whole literals as bytes -- text, onetwo, abcd, onetwothree, gamma and the
+escape rendering -- four further observations render single characters through %c, and eight
+escape codes are printed as numbers, each of those twelve appearing twice, once folded and once
+recomputed at run time.
+EVERY ONE OF THOSE CODES IS PINNED BY A _Static_assert IN THE SOURCE, grouped into three
+assertions -- letters, digits, escapes -- so the accounting reads as three facts rather than
+twenty-four. The letters pinned are a, b, c, d, e, f, g, h, m, n, o, r, t, w and x at 97, 98,
+99, 100, 101, 102, 103, 104, 109, 110, 111, 114, 116, 119 and 120; the digits are 0, 7 and 9 at
+48, 55 and 57; and the escapes are backslash, double quote, single quote, newline, carriage
+return and question mark at 92, 34, 39, 10, 13 and 63, with the horizontal tab pinned at 9 by an
+assertion that was already present. A, at 65, was already pinned too.
+TWO OF THE NINE ESCAPE SPELLINGS NEED NO ASSERTION, and the distinction is worth stating because
+it is a standard guarantee rather than a measurement. C11 6.4.4.4p7 fixes the value of an
+octal-escape or hexadecimal-escape character constant NUMERICALLY -- the escape denotes the value
+its digits spell, whatever the character set -- so the octal escape 101 and the hexadecimal
+escape 41 are 65 by the standard rather than by the environment, and the two assertions relating
+them to the letter A exist to prove the relation, not to establish their codes. The remaining
+seven escapes are a different matter: 6.4.4.4p4 makes every SIMPLE escape sequence denote a
+member of the execution character set whose value is implementation-defined, so all seven need
+pinning and all seven have it. The null character is fixed at zero by 6.4.4.4p6 and needs no
+assertion either.
+ALL FOUR ENABLED TARGETS WERE MEASURED TO USE THE SAME ASCII-FAMILY BASIC EXECUTION CHARACTER
+SET, so every pinned condition holds on every cell of this matrix. The assertions are what keep
+the two oracles honest: on an implementation whose character set differed -- EBCDIC, say -- the
+cell would FAIL TO TRANSLATE naming the reason -- accusing the environment, which is where the
+difference actually lives -- instead of printing different numbers and different rendered bytes
+that oracle (a) or oracle (b) would charge to the compiler under test. A future target that
+disagreed would announce itself at the build, and the correct response would be to narrow this
+record's target list with the reason recorded here, never to delete the assertions or the lines
+they protect, and never to stop exercising string literals because their bytes are
+implementation-defined. The same holds for a target on which sizeof(int) differed, which would
+change char_constant_is_int's premise.
+ONE ARRAY EXCLUDES EVERY CONTROL CHARACTER, AND THE REASON IS THE RECORD FORMAT ITSELF RATHER
+THAN TASTE. Exactly one array in this program is rendered as BYTES on a line of its own -- the
+escape rendering -- and it deliberately contains none. Excluding the newline and the carriage
+return is obvious: either would move the output cursor and destroy the line structure a
+byte-exact comparison depends on. The horizontal tab is excluded for a second and stricter
+reason: the suite's expectation-record format FORBIDS a literal tab in any field, because every
+recorded field is written verbatim into a report row, into a tab-separated summary column and
+into a findings manifest, where a tab forges a column boundary and makes the record say
+something other than what was measured. The line feed is the only control character the format
+admits, and there it is the format's own joiner. A program whose stdout carried a tab therefore
+could not have a conforming record at all, which is why no rendered byte this program prints is a
+tab and why the array below carries the question-mark escape in the tab's place.
+THE QUESTION-MARK ESCAPE STANDS IN THE TAB'S PLACE THERE, so the rendered array still holds six
+escape-produced bytes and its size and length lines are unaffected -- sizeof reads 7 and the
+walked length 6 -- and the substitution ADDS a spelling to the coverage rather than removing
+one: \? is a simple escape sequence whose value 6.4.4.4p4 leaves implementation-defined, so it is
+pinned at 63 alongside the other five in the escapes assertion, exactly as a rendered byte must
+be. Nothing else is given up by the exclusion. The tab remains fully under test four times over:
+its numeric code is printed from the escape array's first element folded, and again through a
+volatile-derived index, printed again as fold_char_tab and runtime_char_tab, and pinned at
+translation time by _Static_assert('\t' == 9). The newline and the carriage return are covered
+the same way, through the fold_escape_newline and fold_escape_return lines and their runtime
+twins. Only the RENDERING of a control byte is dropped, no escape sequence is dropped from
+coverage by this arrangement, and rendering control bytes is not what this program is for. The
+same convention is followed by 11_literals_and_strings/001_character_escapes.c, which owns escape
+coverage in breadth and prints every escape it handles as a number and never as a byte. A sweep of
+the goldens completed at this checkpoint -- 107 of the corpus's 108 programs, one golden each --
+confirms this program was the only one ever affected, and that no golden the sweep covered carries
+any control byte other than the line feed. The one record outside that sweep is named rather than
+quietly counted into it: 13_floating_point/004_long_double_target_restricted.expected was still
+being finalized when this note was written, so nothing is claimed here about its golden. The
+property does not rest on the sweep in any case, which is why the count above is stated as evidence
+rather than as the authority. require_report_safe_value in tests/conformance_harness/manifest.rs
+refuses, at parse time and in every field of every record the parser reads, any character that
+cannot appear literally in a report -- admitting the line feed alone, and only inside a heredoc,
+where it is the format's own line joiner. A control byte in any golden, including one written after
+this note, is therefore a hard parse error rather than a fact this paragraph has to keep up with.
+A NOTE ON POINTER-ARITHMETIC SPELLING, since it looks like an omission and is not. C11 6.5.2.1p2
+defines E1[E2] as identical to (*((E1)+(E2))), so subscripting a literal already exercises
+pointer arithmetic on it. The explicit *(p + n) form is exercised as well, but through a named
+pointer and through a decayed array rather than written directly on a literal, because both
+reference compilers this suite supports must accept the program unchanged: one of them diagnoses
+"literal" + n by default as a suspected concatenation mistake, and the default gate's -Werror
+would turn that suggestion into a failure. Nothing is given up -- the same access is exercised
+three ways instead of one -- and nothing is silenced: no pragma, no dropped warning flag and no
+gate deviation, none of which area 02 sanctions in any case.
+HERMETIC AND DETERMINISTIC. Every input is a literal in the source: nothing is read from the
+clock, the environment, the command line, a file or a socket, and nothing is written anywhere.
+Output is one line per semantic property claimed, in a fixed order, so a single divergent line
+names the construct that produced it. No address or pointer value is printed, there is no
+randomness, no locale-dependent formatting and no data-dependent iteration order, and the
+program returns 0 -- well inside the 0-125 range the suite requires so that no exit status is
+truncated by the operating system.
+WHY ALL THREE ORACLES ARE ENABLED WITH NO NARROWING. Every line printed below is target-invariant
+by the normalization argued above, so the same bytes are the right answer on each of the four
+backends; that is what makes cross-backend comparison sound and lets oracle (c) hold these bytes as
+the golden record.
+END
+expected_stdout    <<END
+fold_size_empty=1
+fold_size_abc=4
+fold_size_abcdef=7
+fold_size_two_pieces=7
+fold_size_four_pieces=5
+fold_size_sized_from_literal=5
+fold_size_exact_fit=4
+fold_size_joined_pieces=12
+fold_size_spliced_literal=6
+fold_size_escape_bytes=9
+fold_size_escape_render=7
+fold_size_digit_table=11
+render_sized_from_literal=text
+render_inline_two_pieces=onetwo
+render_inline_four_pieces=abcd
+render_joined_pieces=onetwothree
+render_spliced_literal=gamma
+render_escape_render=?\"'AA
+exact_fit[0]=116
+exact_fit[1]=101
+exact_fit[2]=120
+exact_fit[3]=116
+fold_len_empty=0
+runtime_len_empty=0
+len_agree_empty=1
+fold_len_abc=3
+runtime_len_abc=3
+len_agree_abc=1
+fold_len_abcdef=6
+runtime_len_abcdef=6
+len_agree_abcdef=1
+fold_len_two_pieces=6
+runtime_len_two_pieces=6
+len_agree_two_pieces=1
+fold_len_four_pieces=4
+runtime_len_four_pieces=4
+len_agree_four_pieces=1
+fold_len_sized_from_literal=4
+runtime_len_sized_from_literal=4
+len_agree_sized_from_literal=1
+fold_len_joined_pieces=11
+runtime_len_joined_pieces=11
+len_agree_joined_pieces=1
+fold_len_spliced_literal=5
+runtime_len_spliced_literal=5
+len_agree_spliced_literal=1
+fold_len_escape_bytes=8
+runtime_len_escape_bytes=8
+len_agree_escape_bytes=1
+fold_len_escape_render=6
+runtime_len_escape_render=6
+len_agree_escape_render=1
+fold_len_digit_table=10
+runtime_len_digit_table=10
+len_agree_digit_table=1
+fold_index_chars=adf
+runtime_index_chars=adf
+fold_index_values=97,100,102
+runtime_index_values=97,100,102
+index_agree=1
+fold_pointer_deref=d
+runtime_pointer_deref=d
+fold_decayed_deref=t
+runtime_decayed_deref=t
+pointer_deref_agree=1
+fold_terminator=0
+runtime_terminator=0
+terminator_agree=1
+fold_digit_pick=079
+runtime_digit_pick=079
+digit_agree=1
+fold_escape_tab=9
+fold_escape_backslash=92
+fold_escape_dquote=34
+fold_escape_squote=39
+fold_escape_newline=10
+fold_escape_return=13
+fold_escape_octal_101=65
+fold_escape_hex_41=65
+runtime_escape_tab=9
+runtime_escape_backslash=92
+runtime_escape_dquote=34
+runtime_escape_squote=39
+runtime_escape_newline=10
+runtime_escape_return=13
+runtime_escape_octal_101=65
+runtime_escape_hex_41=65
+escape_agree=1
+octal_hex_agree=1
+fold_char_capital_a=65
+runtime_char_capital_a=65
+fold_char_tab=9
+runtime_char_tab=9
+fold_char_octal_101=65
+runtime_char_octal_101=65
+fold_char_hex_41=65
+runtime_char_hex_41=65
+fold_char_digit_nine=57
+runtime_char_digit_nine=57
+char_constant_is_int=1
+char_const_agree=1
+fold_bound_count=9
+runtime_bound_count=9
+bound_count_agree=1
+bound_table[0]=97
+bound_table[1]=98
+bound_table[2]=99
+bound_table[3]=100
+bound_table[4]=101
+bound_table[5]=102
+bound_table[6]=103
+bound_table[7]=104
+bound_table[8]=0
+END

@@ -1,0 +1,63 @@
+program            = 001_statement_expressions
+area               = 08_gcc_extensions
+description        = GCC statement expressions in value position including inside macros, folded and volatile-runtime variants
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_audit_flags     = -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Werror
+ub_notes           <<END
+UB-FREEDOM ARGUMENT. Every value is a small int; no computation approaches INT_MIN or
+INT_MAX, so there is no signed overflow. No shift operator is used. No pointer, array or
+aggregate is used, so there is no aliasing violation and no one-past-end pointer. Every
+object is initialized before it is read, including every statement-expression local. No
+object is modified twice between sequence points: the compound assignments inside the
+sequencing statement expression are separate full statements. Every printf call receives
+at most one side-effecting argument. Nothing depends on padding bytes or on the addresses
+of unrelated objects. The for loop in SE_TRIANGLE has a fixed bound and always terminates.
+Statement-expression macro locals are uniquely prefixed (mx_, sq_, tr_, and per-use letter
+prefixes) and no macro is ever nested inside itself, so -Wshadow is not tripped; the
+nesting that does occur, SE_MAX(SE_SQUARE(3), SE_TRIANGLE(4)), combines different macros
+with disjoint local names.
+END
+impl_defined_notes <<END
+UB-GATE DEVIATION AND ITS REASON. Every program in area 08_gcc_extensions drops
+-pedantic from the default warning gate. Reason: the constructs under test are
+non-standard GCC extensions by definition, and -pedantic exists precisely to reject
+them; retaining it would fail every program in the area for doing exactly what it is
+meant to do. This is the only area-wide deviation in the corpus. No other warning is
+relaxed: -Wall, -Wextra, -Wconversion, -Wsign-conversion, -Wshadow and -Werror are all
+retained, and this program is clean under them, which is measured rather than asserted.
+
+Nothing implementation-defined is observed, so no target restriction is needed and all
+four targets are compared. Only int-typed values are used, so the measured width
+differences cannot be reached: sizeof(long) and sizeof(void *) are 4 on i686 and 8 on
+x86_64, aarch64 and riscv64. No plain-char value the program computes is printed as a
+number or compared -- the only plain-char objects are the format-string literals, copied
+through printf unchanged -- so the measured char-signedness difference cannot be reached
+either: char is signed on x86_64 and i686 but unsigned on aarch64 and riscv64. No address
+or pointer value is printed. Output is therefore identical on all four targets at all
+three optimization levels.
+END
+expected_stdout    <<END
+se_folded_max=12
+se_folded_square=81
+se_folded_triangle=55
+se_folded_nested=10
+se_folded_direct=6
+se_folded_seq=7
+se_folded_arg=5
+se_runtime_max=12
+se_runtime_square=81
+se_runtime_triangle=55
+se_runtime_nested=10
+se_runtime_direct=6
+se_runtime_seq=7
+se_runtime_arg=8
+END

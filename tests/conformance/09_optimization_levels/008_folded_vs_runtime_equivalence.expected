@@ -1,0 +1,59 @@
+# Expectation record for 09_optimization_levels/008_folded_vs_runtime_equivalence.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 008_folded_vs_runtime_equivalence
+area               = 09_optimization_levels
+description        = Keystone: the same computation folded from literals and computed from volatile operands must agree at -O0, -O1 and -O2
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour. No signed overflow: 191 * 7 is 1337, 13 << 2 is
+52 on a positive signed operand well inside range, 100 / 3 is 33, and the sum 1356 is then
+reduced modulo 97. In MIX_WIDE both literals carry the LL suffix so 1234567 * 89101 is
+performed in long long, giving 110001154267, far inside 64-bit range. Shift counts are 2 and
+3, strictly in range, and the right shift operates on an unsigned operand so no
+implementation-defined signed-shift question arises. The only divisor is 3 and the only
+modulus is 97, so there is no division by zero and no INT_MIN over -1 case. The addition
+inside MIX_UNS wraps modulo 2 to the 32, which is well defined for unsigned int and is not
+overflow. No aliasing violation, no read of uninitialized storage, no pointer arithmetic, and
+no object modified twice between sequence points. Every macro parameter appears exactly once
+in every macro body, so each argument is evaluated exactly once and no operand is duplicated.
+No macro argument has a side effect, so there are zero side-effecting argument expressions.
+No dependence on padding bytes or on relative addresses.
+Several volatile objects are read within a single expression; their relative order is
+unspecified, but no volatile object is modified anywhere in the program, so every read of a
+given object yields the same value and the printed output does not depend on the ordering.
+END
+impl_defined_notes <<END
+No implementation-defined behaviour is observed. Widths are normalized: only int, unsigned int
+and long long are used, all of fixed width on all four targets, and long is never used because
+sizeof(long) is 4 on i686 and 8 on the other three targets. The wide values carry LL suffixes
+and are printed with %lld because 109013499946 exceeds 32 bits. Plain char is not used, so the
+measured plain-char signedness difference (signed on x86-64 and i686, unsigned on AArch64 and
+RISC-V 64) cannot be observed. No address, pointer value, sizeof or _Alignof result is printed.
+No floating point is used. The modular wraparound inside MIX_UNS is required behaviour for
+unsigned int, not an implementation-defined property, so it is identical on every target.
+Each computation is written exactly once as a macro and instantiated twice, once from literal
+constants and once from volatile operands, which guarantees by construction that the two
+variants are the same computation. How much of the folded variant each compiler evaluates at
+compile time is at its discretion; the two printed columns must agree regardless.
+END
+expected_stdout    <<END
+int  folded=95 runtime=95 equal=1
+uns  folded=8043744 runtime=8043744 equal=1
+wide folded=109013499946 runtime=109013499946 equal=1
+rel  folded=20 runtime=20 equal=1
+cond folded=24 runtime=24 equal=1
+all_equal=1
+END

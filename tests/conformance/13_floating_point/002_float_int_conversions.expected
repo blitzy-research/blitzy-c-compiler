@@ -1,0 +1,261 @@
+# Expectation record for 13_floating_point/002_float_int_conversions.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 002_float_int_conversions
+area               = 13_floating_point
+description        = Floating-to-integer and integer-to-floating conversions strictly inside the representable ranges, with truncation toward zero, in a folded and a volatile-runtime variant, plus four round trips
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour. The conversion rules ARE the subject of this program,
+so the argument below is made site by site against a stated range table rather than in general,
+and a reader can check every claim in it without opening the source a second time.
+
+THE ONE RULE THIS PROGRAM LIVES OR DIES BY. C11 6.3.1.4p1: when a finite value of real floating
+type is converted to an integer type the fractional part is discarded -- the value is truncated
+TOWARD ZERO -- and the behaviour is undefined only if THE VALUE OF THE INTEGRAL PART, the value
+that survives that truncation, cannot be represented in the destination. Nothing is reduced
+modulo anything. Undefined behaviour here would not merely weaken the differential oracle, it
+would destroy it: with undefined behaviour present both compilers are permitted to do anything,
+so a divergence between them would be evidence about neither. Every destination type used here
+has the same width on all four supported targets, so ONE range table holds everywhere, and it is
+the table every claim below is checked against:
+
+    int                         -2147483648 .. 2147483647
+    unsigned int                          0 .. 4294967295
+    short                            -32768 .. 32767
+    unsigned short                        0 .. 65535
+    signed char                        -128 .. 127
+    unsigned char                         0 .. 255
+    long long          -9223372036854775808 .. 9223372036854775807
+    unsigned long long                    0 .. 18446744073709551615
+
+FLOATING -> INTEGER, EVERY SITE. Each row is one conversion the program performs twice, once
+folded over constants and once through a volatile operand, so the constant folder and the backend
+are held to the same answer. The margin column is the distance from the truncated value to the
+NEARER bound of its destination, and the whole point of printing it is that it is never negative
+and never crossed:
+
+    source            format  destination         truncates to  margin
+    1000000.5         double  int                      1000000  vast
+    -1000000.5        double  int                     -1000000  vast
+    0.75              double  int                            0  vast
+    -0.75             double  int                            0  vast
+    2147480000.0      double  int                   2147480000  3647 below the maximum
+    -2147480000.0     double  int                  -2147480000  3648 above the minimum
+    1234567890123.5   double  long long          1234567890123  vast
+    4000000000000.75  double  unsigned long long 4000000000000  vast
+    4000000000.0      double  unsigned int          4000000000  294967295 below the maximum
+    32000.5           double  short                      32000  767 below the maximum
+    65000.5           double  unsigned short             65000  535 below the maximum
+    100.75            double  signed char                  100  27 below the maximum
+    200.25            double  unsigned char                200  55 below the maximum
+    16777216.0f       float   int                     16777216  vast
+    3.75f             float   int                            3  vast
+    1000000.0f        float   unsigned int             1000000  vast
+    -32000.0f         float   short                     -32000  768 above the minimum
+    250.75f           float   unsigned char                250  5 below the maximum
+    -0.75             double  unsigned int                   0  at the minimum, and defined
+    -0.5f             float   unsigned char                  0  at the minimum, and defined
+    -0.25             double  unsigned long long             0  at the minimum, and defined
+
+The four round trips add four more conversions in this direction on their inward leg, each as far
+inside its destination as the rows above: 12345.0 as a double to int, 1024.0 as a float to int,
+1234567890123.0 as a double to long long, and 4000000000.0 as a double to unsigned int, the last
+being the same conversion the ninth row already records. THE NARROWEST NON-ZERO MARGIN ANYWHERE IN
+THE PROGRAM IS THEREFORE 5, separating 250 from unsigned char's maximum, and the narrowest on a
+signed destination is the 27 separating 100 from signed char's.
+
+THE NEGATIVE-TO-UNSIGNED QUESTION, ANSWERED RATHER THAN AVOIDED, because it is the one a reader
+will want to check and the one most easily got wrong. THREE NEGATIVE SOURCES ARE CONVERTED TO
+UNSIGNED DESTINATIONS, DELIBERATELY -- the last three rows above -- and every one of them is fully
+defined rather than borderline. 6.3.1.4p1 turns on the representability of the INTEGRAL PART, and
+a value strictly between -1 and 0 has integral part 0, which every unsigned type represents. The
+footnote attached to that paragraph says so directly: it fixes the range of portable real floating
+values for an unsigned destination at (-1, destination maximum + 1), and records that the modular
+remaindering of the INTEGER-to-unsigned rule (6.3.1.3p2) need not be performed for a floating
+source. So -0.75, -0.5f and -0.25 must each convert to 0, and the case earns its place precisely
+because it is where an implementation is likeliest to substitute something else for truncation
+toward zero: a saturating conversion would print the destination maximum, the modular integer rule
+reached for by mistake would print it too, and rounding away from zero would print 1.
+THE DANGEROUS REGION IS "INTEGRAL PART OUT OF RANGE", NOT "SOURCE NEGATIVE", and that region is
+ABSENT FROM THIS PROGRAM ON BOTH SIDES. No negative source of magnitude one or more reaches any
+unsigned destination: such a source has a negative integral part, which lies outside every
+unsigned range and would be undefined. And no source of either sign has an integral part beyond
+its destination's bounds, which is undefined for a signed and an unsigned destination alike. Every
+other source feeding unsigned int, unsigned short, unsigned char or unsigned long long above is
+non-negative.
+
+NO NON-FINITE VALUE EXISTS ANYWHERE IN THE PROGRAM, which matters because converting a
+not-a-number or an infinity to an integer type is undefined outright, no integral part of either
+being representable in anything. No not-a-number, no infinity, no negative zero and no subnormal
+is produced, converted or assumed; there is no division at all, floating or integer, so none can
+arise that way either; and every floating value in the program is written as a terminating decimal
+literal in the source.
+
+INTEGER -> FLOATING is the safer direction and still carries one hazard of its own: an integer not
+exactly representable in the destination format is converted with IMPLEMENTATION-DEFINED rounding
+(C11 6.3.1.4p2), which permits either adjacent value, so two conforming targets could legitimately
+disagree. Every integer converted here is therefore EXACTLY representable in the format it is
+converted to, and NO ROUNDING DECISION IS EVER TAKEN. binary32 carries 24 significand bits and
+binary64 carries 53, and what has to fit is the width of the value's ODD PART, because trailing
+factors of two are absorbed by the exponent and cost no significand at all:
+
+    12345, 1024, 250, -125       well under 24 bits   exact in binary32 and binary64
+    16777216 = 2^24              1 bit                exact in both
+    4000000000 = 2^11 * 5^9      21 bits, from 5^9    exact in both
+    9007199254740992 = 2^53      1 bit                exact in binary64
+    4000000000000 = 2^14 * 5^12  28 bits, from 5^12   exact in binary64 only
+    1234567890123, odd           41 bits              exact in binary64 only
+
+The last two exceed binary32's 24 bits, and precisely for that reason neither is ever converted to
+float -- each goes only to double.
+
+NO ROUNDING OCCURS AT ANY STEP, IN EITHER DIRECTION, and that single fact is what defeats the one
+target difference that could otherwise reach this program. i686 evaluates floating expressions in
+x87 extended precision -- FLT_EVAL_METHOD 2, measured -- while the other three targets do not, so
+an inexact intermediate could legitimately differ there. Every floating value here is a dyadic
+rational, an integer or an integer plus 1/4, 1/2 or 3/4, exactly representable in binary32 and
+binary64 alike, and excess precision cannot perturb a value that is already exact in every format
+involved. The per-target measurement behind this is recorded in impl_defined_notes below.
+
+EVERY CONVERSION SITE CARRIES AN EXPLICIT CAST, which is what keeps this program inside the active
+audit gate rather than exempt from it. Area 13 sanctions no deviation, so this record declares
+no `ub_audit_flags` key at all and the full default gate applies:
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror. An implicit narrowing or
+an implicit sign change would be diagnosed and, under -Werror, fatal, so a conversion left
+implicit would fail the gate rather than being tested. Every value of a type narrower than int is
+widened with an explicit (int) before it is printed and every float with an explicit (double), so
+each default argument promotion at the variadic call is stated in the source rather than performed
+silently, and no length modifier is needed.
+
+THE REMAINING RULEBOOK, each item argued for what this program actually does rather than for a
+stricter shape it does not have. No signed integer overflow: no arithmetic is performed on any
+integer at all, only conversion and equality comparison. No shift operator appears, so no shift
+count can be out of range. No aliasing violation and no type punning: nothing is inspected
+byte-wise, through a union, or through a pointer to another type, so nothing depends on a
+representation or on padding bytes. No read of uninitialized storage: every object, the volatile
+ones among them, is initialized at its declaration. No object is modified twice between sequence
+points, nothing being assigned after its initializer. NOTHING DEPENDS ON UNSPECIFIED EVALUATION
+ORDER: each volatile object is read EXACTLY ONCE, in a statement of its own, into a plain local of
+its own type before any conversion touches it, so no expression in this program pairs two volatile
+reads and no argument list carries more than one side-effecting argument -- every printf argument
+is a plain local holding an already-computed result. No address of any object is taken, so nothing
+depends on the relative addresses of unrelated objects. Every comparison in the agreement summary
+is between two values of the same type, so no usual arithmetic conversion arises there and no
+comparison mixes signedness.
+
+NO HEADER IS NAMED and no preprocessor directive appears. bcc ships no stdio.h -- its bundled set
+is the nine required freestanding headers plus a bonus stdatomic.h, ten files in all
+(docs/project-guide.md, "9 bundled freestanding headers") -- so naming it would fail against bcc
+while succeeding against the reference compiler, a divergence caused by the test rather than by
+the compiler. float.h and limits.h are bundled and are still not named: every boundary value in
+the tables above is written out as a literal in the source, and the bundled set is exercised by
+12_preprocessor/003_bundled_header_inclusion.c, whose subject that is. The single libc prototype
+this program needs, int printf(const char *, ...);, is hand-declared.
+
+HERMETIC, as constraint C4 requires: every input is a literal in the source. main is declared
+int main(void) and returns 0, inside the 0-125 range the suite requires; nothing is opened, no
+socket is created, no environment variable and no program argument is read, and no storage is
+obtained from the heap.
+
+BOTH GATES ARE CLEAN, and neither claim is merely asserted. The default warning gate named above
+produces zero diagnostics in the single native compile-only invocation the suite makes of it, which
+is why no deviation is declared. The sanitizer gate -fsanitize=undefined,address
+-fno-sanitize-recover=all compiles, links and RUNS to completion with empty stderr and exit status 0
+in its one instrumented native build; its float-cast-overflow check is precisely the check a breach
+of the range table above would trip, and it reports nothing. That check runs only on the native
+execution, so for the three cross targets it is the written argument above -- not the sanitizer --
+that carries the claim.
+END
+impl_defined_notes <<END
+FLOATING-POINT DETERMINISM rests on three deliberate choices, each verified by measurement rather
+than assumed:
+1. Every floating value in the program is a DYADIC RATIONAL -- an integer, or an integer plus 1/4,
+   1/2 or 3/4 -- so it is exactly representable in binary32 and binary64 alike and no rounding
+   decision is ever taken, in either direction of conversion.
+2. Every printed floating value carries an explicit %.6f, so no default precision is relied on and
+   no printed digit is at the mercy of a rounding mode. The largest value printed that way,
+   9007199254740992.000000, is exactly 2^53 and needs no rounding to render.
+3. Excess intermediate precision cannot perturb an exact value. This matters because i686
+   evaluates floating expressions in x87 extended precision while the other three targets do not
+   -- FLT_EVAL_METHOD was measured as 2 on i686 and 0 on x86_64, aarch64 and riscv64 -- and the
+   exactness established in point 1 is what makes the difference unobservable here.
+No not-a-number, no infinity, no negative zero, no subnormal and no division by zero is produced
+or assumed anywhere.
+
+TRUNCATION IS TOWARD ZERO, not toward negative infinity, and three groups of fields pin that down:
+-1000000.5 gives -1000000 rather than -1000001, -0.75 gives 0 rather than -1, and the three
+negative-to-unsigned sites give 0 rather than a destination maximum or a 1. A backend that rounded
+instead of truncating, or that truncated the wrong way, changes exactly those fields and nothing
+else, which is what localizes the defect to the conversion rather than to the program.
+
+THE TWO-VARIANT RULE. Every conversion is performed twice, once over constants that the folder
+evaluates at translation time and once through volatile-qualified operands that must be re-read
+from memory at run time and so cannot be folded away. Without the runtime half the backend would
+never be asked to convert anything and a conversion defect would escape entirely, the suite
+reporting a pass on the strength of the folder's answer alone. The mirrored fold_X and rt_X fields
+are printed on mirrored lines and the final folded_matches_runtime line reports one flag per
+mirrored pair of lines, so a divergence surfaces on its own field first and in that summary
+second.
+
+TYPE WIDTHS ARE NORMALIZED, and that is what lets ONE golden record hold on all four targets.
+sizeof(long) and sizeof(void *) were measured as 4 on i686 and 8 on the other three
+(docs/technical-specifications.md lines 457-462), so a destination whose range differed per target
+could not carry a single expectation: long, unsigned long, size_t, ptrdiff_t and intptr_t are
+therefore never named. The eight integer destinations that do appear -- int, unsigned int, short,
+unsigned short, signed char, unsigned char, long long and unsigned long long -- are each the same
+width on all four targets, which is exactly what makes the single range table in ub_notes sound.
+Only %d, %u, %lld, %llu and %.6f are used: no %ld, %lu, %zu, %td or %p appears, and no address or
+pointer value is printed.
+
+NO PLAIN-CHAR VALUE IS COMPUTED OR PRINTED. Plain char signedness is implementation-defined and
+was measured as signed on x86_64 and i686 and unsigned on aarch64 and riscv64, so the two character
+conversions here name signed char and unsigned char explicitly and that measured difference cannot
+reach this program. The only plain-char objects are the format-string literals, copied through
+printf unchanged; no plain-char value is read as a number or compared.
+
+LONG DOUBLE IS ABSENT, its representation having been measured at 16, 12, 16 and 16 bytes across
+the four targets, with the two x86 targets carrying the x87 80-bit extended format inside that
+storage and the other two carrying IEEE binary128. It belongs to
+004_long_double_target_restricted in this area, which is the only record in the corpus that
+disables an oracle: that record disables oracle (b) alone, keeps oracles (a) and (c) enabled on
+all four targets at all three optimization levels, and carries the marker XD-TYPE-LONGDOUBLE-001
+with the measured representation difference as its recorded reason.
+
+NOTHING IS NARROWED HERE. No target is dropped, no oracle is disabled, no warning-gate deviation
+is declared, and this record carries no expected-divergence marker, so a divergence in any cell of
+this program is a genuine finding. Stdout is byte-identical and the exit status is 0 in all twelve
+target-and-optimization-level cells, which is what lets oracle (b) compare the four backends with no
+narrowing and oracle (c) hold these bytes as the golden record.
+END
+expected_stdout    <<END
+d2i_pos=1000000 d2i_neg=-1000000 d2i_trunc_pos=0 d2i_trunc_neg=0
+d2i_bound_pos=2147480000 d2i_bound_neg=-2147480000 d2ll=1234567890123 d2ull=4000000000000
+d2u=4000000000 d2short=32000 d2ushort=65000 d2schar=100 d2uchar=200
+negfrac2u=0 negfrac2uchar=0 negfrac2ull=0
+f2i=16777216 f2i_trunc=3 f2u=1000000 f2short=-32000 f2uchar=250
+i2f=12345.000000 i2d=-12345.000000 u2d=4000000000.000000 ll2d=9007199254740992.000000
+i2f_pow2=16777216.000000 sc2d=-125.000000 uc2f=250.000000 ull2d=4000000000000.000000
+roundtrip_i_d_i=12345 roundtrip_i_f_i=1024 roundtrip_ll_d_ll=1234567890123 roundtrip_u_d_u=4000000000
+rt_d2i_pos=1000000 rt_d2i_neg=-1000000 rt_d2i_trunc_pos=0 rt_d2i_trunc_neg=0
+rt_d2i_bound_pos=2147480000 rt_d2i_bound_neg=-2147480000 rt_d2ll=1234567890123 rt_d2ull=4000000000000
+rt_d2u=4000000000 rt_d2short=32000 rt_d2ushort=65000 rt_d2schar=100 rt_d2uchar=200
+rt_negfrac2u=0 rt_negfrac2uchar=0 rt_negfrac2ull=0
+rt_f2i=16777216 rt_f2i_trunc=3 rt_f2u=1000000 rt_f2short=-32000 rt_f2uchar=250
+rt_i2f=12345.000000 rt_i2d=-12345.000000 rt_u2d=4000000000.000000 rt_ll2d=9007199254740992.000000
+rt_i2f_pow2=16777216.000000 rt_sc2d=-125.000000 rt_uc2f=250.000000 rt_ull2d=4000000000000.000000
+rt_roundtrip_i_d_i=12345 rt_roundtrip_i_f_i=1024 rt_roundtrip_ll_d_ll=1234567890123 rt_roundtrip_u_d_u=4000000000
+folded_matches_runtime=1 1 1 1 1 1 1 1
+END

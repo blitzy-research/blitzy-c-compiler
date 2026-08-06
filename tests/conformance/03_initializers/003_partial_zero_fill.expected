@@ -1,0 +1,246 @@
+# Expectation record for 03_initializers/003_partial_zero_fill.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 003_partial_zero_fill
+area               = 03_initializers
+description        = Implicit zero fill of every member and element left unmentioned by an initializer and of every static object declared without one, across nine partial and designated situations plus automatic-duration twins, each slot read back individually; the positional partial STRUCT spelling is excluded, narrowly and with its reason recorded in impl_defined_notes, because the frozen warning gate rejects every spelling of it
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined and no unspecified behaviour, which is the precondition that
+makes both differential oracles sound: undefined behaviour would license either compiler to do
+anything at all, so a divergence over it would prove nothing about either one.
+THE ZERO GUARANTEE IS THE SUBJECT OF THIS PROGRAM RATHER THAN AN INCIDENTAL PROPERTY, so it is
+stated first, and it is also the point this program looks most likely to violate, because it
+prints values nothing in the source ever stores. NOTHING HERE READS UNINITIALIZED STORAGE.
+g_noinit and the two unmentioned elements of g_ptrs have STATIC storage duration, and C11
+6.7.9p10 defines the contents of an object of static storage duration with no initializer as zero
+for an arithmetic type and a null pointer for a pointer type -- definite values, not indeterminate
+ones. The elements and members left unmentioned by a partial initializer are likewise defined as
+initialized to zero by C11 6.7.9p19 and 6.7.9p21, and that applies to the automatic-duration
+objects exactly as it does to the static ones, because an object with ANY initializer is fully
+initialized. Every automatic object in main -- l_arr, l_all_zero, l_zero_struct, l_part, l_arr_st
+and l_matrix -- carries an initializer, so none of them holds
+an indeterminate value at any point. The program asserts an OMISSION rather than a store: nothing
+here writes the zeros it prints, so a slot that came back non-zero would mean the compiler failed
+to supply a guarantee the source never spelled out. The guarantee is the standard's, not an
+assumption of the test's.
+No arithmetic is performed on the data, so no signed overflow is reachable; the only arithmetic is
+the loop counters' increments, bounded by the literals 6, 4, 3 and 2. Nothing is shifted, divided
+or remaindered. Nothing is modified after its initialization, so no object is modified twice
+between two sequence points.
+Every subscript stays strictly inside its array bound, and each bound is a literal matching the
+declared extent: g_arr and l_arr are int[6] read at 0 through 5, g_all_zero, l_all_zero and g_uarr
+are 4 elements read at 0 through 3, g_arr_st and l_arr_st are struct inner[3] read at 0 through 2,
+g_matrix and l_matrix are int[2][3] read at [0..1][0..2], g_noinit is int[3] read at 0 through 2,
+and g_ptrs is 3 elements read at 0 through 2. No one-past-the-end pointer is formed.
+The pointer array is the only place a pointer appears. g_ptrs[0] points at the string literal
+"first", whose array has 6 elements, and only index 0 of it is read; no string literal is written
+through. g_ptrs[1] and g_ptrs[2] are compared against 0 as a null-or-not predicate and are NEVER
+dereferenced. No pointer VALUE is printed, no pointer difference is taken and no pointer arithmetic
+beyond that in-bounds read is performed.
+There is no aliasing violation: every value is read through an lvalue of its own declared type --
+int through int, unsigned through unsigned, and the string literal's element through char, narrowed
+by an explicit (unsigned char) cast which is a value conversion rather than a reinterpretation. No
+object representation is examined, no union appears, and no pointer is cast to a different object
+pointer type. Only named members and elements are read, never a padding byte: the { 0 } idiom
+guarantees each MEMBER is zero and says nothing about padding, whose contents are unspecified, and
+this program never inspects a representation, so that distinction cannot bite. Nothing depends on
+the relative addresses of unrelated objects.
+Every initializer value is small and positive -- the largest is 82 and the widest is 7u -- so each
+is representable in the type it initializes and no implicit conversion changes a value.
+Each printf call receives at most one loop counter and one datum, neither of which has a side
+effect, so the unspecified order in which a function call's arguments are evaluated cannot be
+observed. Every conversion specifier matches its argument after the default argument promotions:
+%d takes int -- including the two ?: expressions, whose operands are the int constants 1 and 0, and
+the (int)(unsigned char) narrowing -- and %u takes unsigned int. Both types are four bytes on all
+four targets, so no variadic argument is read at the wrong width.
+main returns 0, inside the 0-125 range the suite requires so that no exit status is truncated by
+the operating system. Nothing outside this file is read: every input is a literal here, no file,
+socket, environment variable, clock, random source or locale is consulted, and iteration order is
+fixed by literal loop bounds, so every cell is reproducible from this source and this record alone.
+No header is included anywhere and printf is declared by hand as `int printf(const char *, ...);`.
+That is the corpus-wide rule stated in tests/conformance/README.md, whose two sanctioned exceptions
+are area 07's stdarg.h and area 12's bundled-header probe; area 03 takes neither.
+This record declares no warning-gate deviation, and area 03 sanctions none. The program is clean
+under the full default gate -Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow
+-Werror in the single native compile-only invocation the suite's warning gate makes, with no
+diagnostic of any kind and no source-level diagnostic suppression anywhere in the translation unit,
+and it builds and runs clean under the sanitizer gate -fsanitize=undefined,address
+-fno-sanitize-recover=all. Both gates are reference-compiler-only and are never applied to bcc, so
+requirement 3's shared-flag discipline is untouched. One initializer spelling is excluded to reach
+that clean audit rather than suppressed inside it, and the exclusion, its measured reason and what
+the zero guarantee retains regardless are recorded in impl_defined_notes below.
+END
+impl_defined_notes <<END
+This record narrows nothing that the harness reads: all four targets, all three optimization
+levels and all three oracles are enabled, no expected-divergence marker is carried, no gate
+deviation is claimed under the ub_audit_flags key, and no implementation-defined value reaches
+this program's output. One initializer SPELLING is nevertheless excluded from the source, and the
+paragraph below states which, why, and what the zero guarantee retains regardless.
+CONSTRAINT-C3 EXCLUSION -- THE POSITIONAL PARTIAL STRUCT SPELLING. `struct outer v = { 1 };`,
+which supplies the leading members POSITIONALLY and leaves the rest to the zero guarantee, is
+well-defined C11 (6.7.9p19 and p21), and it is a materially different route through the
+initializer walker than `{ .tag = 1 }`: the designated form repositions the cursor explicitly,
+whereas the positional form relies on the cursor stopping where the list runs out. GCC
+nevertheless reports it under -Wmissing-field-initializers, which -Wextra enables and which the
+audit gate's -Werror makes fatal -- the diagnostic reports the very guarantee under test.
+Sixteen spellings were MEASURED against that gate with the reference compiler, and the positional
+partial STRUCT is the only shape it rejects; it rejects every variant of that shape, so no
+spelling of that particular route exists that the unmodified gate accepts. No admissible deviation
+exists either: the gate's removable members are exactly -pedantic, for the GCC-extensions area, and
+-Wconversion with -Wsign-conversion, for the deliberate narrowing program, so -Wextra is not
+removable and area 03 is granted no deviation at all. A source-level diagnostic-suppression
+directive is not an alternative to that here: it would neutralize a gate member for a spelling this
+program does not need, and the area reserves that mechanism for the one construct it is required to
+carry and cannot otherwise obtain -- the overlapping designators in 004_designated_array.c, whose
+record declares its directives and their verified scope explicitly. The spelling is therefore dropped from the source, and
+constraint C3 is satisfied the way it asks to be -- the exclusion is narrow, it is scoped to one
+spelling, it changes no target, no optimization level and no oracle, and its reason is recorded here
+and in the program's own header comment. The specific loss is the positional-cursor route through a
+STRUCT, at the three descent depths and in the array-of-struct-element form the excluded spelling
+would cover; that loss is stated rather than left to be inferred.
+THE ZERO GUARANTEE ITSELF LOSES NOTHING, which is what keeps the exclusion narrow.
+-Wmissing-field-initializers does NOT fire for a designated initializer, nor for the `= { 0 }`
+idiom, nor for a partial ARRAY, nor for a partial array-of-struct, nor for partial two-dimensional
+rows -- GCC treats the all-zero idiom as
+intentional and treats element omission as unremarkable -- so all nine zero-fill situations, which
+are the whole of this program's mandate, are written plainly and all remain under test. Positional
+exhaustion is itself still exercised here: g_arr and l_arr are int[6] = { 1, 2 }, which the gate
+accepts unaided because -Wmissing-field-initializers is about members rather than elements, so the
+cursor-runs-out path is covered for elements even though it is no longer covered for members. The
+nearest gate-clean relative of the excluded spelling, a designator followed by positional
+continuation, is covered in 006_designated_mixed_nested.c, which spells { 1, { .q = 3 }, 4 } and
+{ .tag = 11, { .p = 12, .q = 13 }, 14 }.
+EXECUTION CHARACTER SET, PINNED AT TRANSLATION TIME. One printed value is the numeric code of the
+'f' in "first", and C11 5.2.1 leaves the values of the execution character set to the
+implementation. The source asserts `'f' == 102` with _Static_assert, so an implementation with a
+different execution character set fails to TRANSLATE rather than printing a different number that
+an oracle would have to attribute to a compiler defect. All four supported targets were measured
+to use ASCII. Verified by negative test: changing the asserted value makes translation fail.
+WIDTH NORMALIZATION. Only int, unsigned int and const char * appear, and the pointers are never
+printed as values -- only as a null-or-not predicate and as a character read through them -- so
+nothing depends on a width that differs across the targets: a pointer and the integer type that
+matches it are four bytes on i686 where the other three targets make them eight
+(docs/technical-specifications.md target table, lines 457-462), a difference also MEASURED on all
+four targets in this environment. No long, size_t, ptrdiff_t or floating value reaches a format
+string, no sizeof and no _Alignof result is printed, and no address is printed. Where the
+implementation places these objects, and whether two identical string literals share storage, is
+left entirely free: no address is printed and no two pointers are compared for identity.
+PLAIN-CHAR SIGNEDNESS. The one character read from a string literal is normalized through
+(int)(unsigned char), so the MEASURED signedness of plain char -- signed on x86-64 and i686,
+unsigned on AArch64 and RISC-V 64 -- cannot reach the output.
+PADDING. Only named members are read: the { 0 } idiom guarantees each member is zero and says
+nothing about padding bytes, and this program never inspects a representation, so the distinction
+cannot bite.
+THE DISCRIMINATING VARIANT. Nine distinct zero-fill situations are read back slot by slot, and the
+automatic-duration twins carry the most weight in this program, which is why all three optimization
+levels matter. A static object's zeros come from the image the linker emits -- the wholly zero
+objects g_all_zero, g_zero_struct and g_noinit reach BSS while the partially initialized ones carry
+literal zero bytes in the data section, both placements confirmed at -O0 on all four targets --
+whereas an automatic object's zeros must be produced by instructions the backend emits on entry to
+the block. A compiler can implement one correctly and the other incorrectly, and only holding both
+forms side by side distinguishes the two. The level is named because the placement is a property of
+that one level rather than of all three: at -O1 and -O2, on all four targets, the reference compiler
+was measured to prove that nothing writes any of these objects and to act on it -- only g_arr and
+g_arr_st survive, moved to READ-ONLY data and still read from there through their loops, while every
+other one of them is eliminated outright with its reads folded to immediates. A reader who
+reproduces the section placement at -O2 therefore will not find the -O0 answer, and that is the
+implementation's freedom rather than this record being wrong. It is also exactly why the sweep covers
+-O0, -O1 and -O2 rather than one level: the VALUES read back may not change however the
+initialization is realized, and those values are the only thing the three oracles compare.
+WHY ALL THREE ORACLES ARE ENABLED WITH NO NARROWING. Every line printed below is target-invariant
+by the normalization argued above -- only int values, no representation and no character code -- so
+the same bytes are the right answer on each of the four backends. That is what makes cross-backend
+comparison sound and lets oracle (c) hold these bytes as the golden record. The output is a fixed
+sequence of 75 key=value lines, one per property claimed and nothing summarized, so one divergent
+line localizes the defect to one zero-fill situation.
+END
+expected_stdout    <<END
+g_arr[0]=1
+g_arr[1]=2
+g_arr[2]=0
+g_arr[3]=0
+g_arr[4]=0
+g_arr[5]=0
+g_all_zero[0]=0
+g_all_zero[1]=0
+g_all_zero[2]=0
+g_all_zero[3]=0
+g_zero_struct.tag=0
+g_zero_struct.in.p=0
+g_zero_struct.in.q=0
+g_zero_struct.trailer=0
+g_part.tag=1
+g_part.in.p=0
+g_part.in.q=0
+g_part.trailer=0
+g_part_mid.tag=1
+g_part_mid.in.p=2
+g_part_mid.in.q=0
+g_part_mid.trailer=0
+g_arr_st[0].p=11
+g_arr_st[0].q=12
+g_arr_st[1].p=0
+g_arr_st[1].q=0
+g_arr_st[2].p=0
+g_arr_st[2].q=0
+g_matrix[0][0]=1
+g_matrix[0][1]=0
+g_matrix[0][2]=0
+g_matrix[1][0]=0
+g_matrix[1][1]=0
+g_matrix[1][2]=0
+g_noinit[0]=0
+g_noinit[1]=0
+g_noinit[2]=0
+g_ptrs0_null=0
+g_ptrs0_first=102
+g_ptrs1_null=1
+g_ptrs2_null=1
+g_uarr[0]=7
+g_uarr[1]=0
+g_uarr[2]=0
+g_uarr[3]=0
+l_arr[0]=1
+l_arr[1]=2
+l_arr[2]=0
+l_arr[3]=0
+l_arr[4]=0
+l_arr[5]=0
+l_all_zero[0]=0
+l_all_zero[1]=0
+l_all_zero[2]=0
+l_all_zero[3]=0
+l_zero_struct.tag=0
+l_zero_struct.in.p=0
+l_zero_struct.in.q=0
+l_zero_struct.trailer=0
+l_part.tag=71
+l_part.in.p=0
+l_part.in.q=0
+l_part.trailer=0
+l_arr_st[0].p=81
+l_arr_st[0].q=82
+l_arr_st[1].p=0
+l_arr_st[1].q=0
+l_arr_st[2].p=0
+l_arr_st[2].q=0
+l_matrix[0][0]=1
+l_matrix[0][1]=0
+l_matrix[0][2]=0
+l_matrix[1][0]=0
+l_matrix[1][1]=0
+l_matrix[1][2]=0
+END

@@ -1,0 +1,257 @@
+program            = 006_many_args_stack_spill
+area               = 07_variadics
+description        = Variadic calls sized to exhaust every argument register on every target and force stack spill, including an interleaved integer and floating case that spills both register classes
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Header exception: this program includes <stdarg.h>. The corpus sanctions two header
+exception classes and only two, and this is the first of them: the programs in area 07 may
+include <stdarg.h> and nothing else. The second class is the dedicated bundled-header probe
+12_preprocessor/003_bundled_header_inclusion.c, which may include the nine required bundled
+freestanding headers; it does not apply here, and no program may take both. The exception is
+needed because variadic functions cannot be written at all without
+va_list, va_start, va_arg and va_end. This program uses exactly those four; va_copy sits
+on the same documented row but is not needed here, because no list is copied and none is
+traversed twice. stdarg.h is in bcc's own bundled
+freestanding set (docs/technical-specifications.md line 208) and is also a freestanding
+header supplied by the reference compiler, so it compiles identically under both oracles
+and the program remains a single-file reproducer. No other header is included; in
+particular stdio.h is not included, because bcc ships none. printf is hand-declared.
+Argument counts match retrieval counts exactly, which is the critical precondition here
+because the calls are large. The int group declares count 20 and supplies exactly 20 int
+arguments. The long long group declares count 12 and supplies exactly 12 long long
+arguments, each written with the LL suffix. The double group declares count 16 and
+supplies exactly 16 double arguments. The interleaved group declares pairs 10 and supplies
+exactly 20 arguments, strictly alternating int then double and beginning with an int, and
+the consumer retrieves an int then a double in that same order in each of its 10
+iterations. No va_list is ever read past the number of arguments actually supplied.
+Variadic discipline: va_start names count in the three homogeneous helpers and pairs in
+the interleaved helper, in each case the last named parameter. Each va_start has exactly
+one matching va_end in the same function. There is no va_copy and no va_list forwarding in
+this program.
+Retrieval types: int, long long and double are not subject to the default argument
+promotions, so va_arg(ap, int), va_arg(ap, long long) and va_arg(ap, double) retrieve
+exactly the types supplied. va_arg(ap, float) and va_arg(ap, long) never appear.
+Arithmetic: no signed overflow is possible anywhere. The int group is accumulated into a
+long long, which is a widening same-signedness conversion needing no cast, and its totals
+are 20190 and 40190. The long long totals are 12000000000066 and 36000000000066, far
+inside the 64-bit range. Floating addition is on dyadic rationals only. No int is added to
+a double accumulator or the reverse. Every implicit conversion that -Wconversion could
+flag is written as an explicit cast, specifically (long long)k in the long long generator
+and (double)k and (double)(k + 1) in the two floating generators. There is no shift, no
+division, no aliasing violation, no object modified twice between sequence points, and no
+dependence on padding or on the addresses of unrelated objects.
+No uninitialized reads: every element of every volatile source array is written by a first
+loop before a second loop reads it back into plain storage, and every array index stays
+inside its declared bound of 20, 12, 16 or 10.
+Evaluation order: main stores each returning helper's result in a named temporary before
+printing it, so no call has more than one side-effecting argument. In the runtime variants
+the volatile source arrays are written and then read back into plain arrays before the
+call, so the twenty arguments in the call expression are pure reads of a plain array and
+the unspecified argument-evaluation order is unobservable. This is also what prevents an
+optimizer from constant-propagating the arguments and hiding a spill-slot addressing
+defect, which is the whole reason the runtime variant exists.
+Warning gate: this program carries no ub_audit_flags key, and that absence is a positive
+statement rather than an omission. It passes the full default gate
+-Wall -Wextra -pedantic -Wconversion -Wsign-conversion -Wshadow -Werror unmodified, which
+was verified by running that gate over this source, and area 07 sanctions no deviation.
+The key exists only to record a deviation, so restating the full gate would claim a
+narrowing that was never made and would demand a recorded reason for it.
+END
+impl_defined_notes <<END
+Why these argument counts, stated per target rather than as a single universal model. The
+repository documents each backend's argument-register inventory and nothing beyond it, so the
+reasoning below is confined to those inventories plus the counts this program actually passes.
+x86-64 System V AMD64 (docs/technical-specifications.md line 546) classifies each argument
+INTEGER, SSE or MEMORY and lists six integer argument registers rdi, rsi, rdx, rcx, r8 and r9
+together with eight SSE argument registers xmm0 to xmm7. i686 cdecl (line 553) documents no
+argument registers at all: every argument is pushed on the stack, right to left, with caller
+cleanup, so on i686 the stack is the only path and there is no register file to exhaust.
+AArch64 AAPCS64 (line 559) documents eight integer argument registers x0 to x7 and eight SIMD
+and floating-point argument registers v0 to v7. RISC-V 64 LP64D (line 565) documents eight
+integer argument registers a0 to a7 and eight floating-point argument registers fa0 to fa7.
+Across the three register-passing targets the largest documented integer inventory is
+therefore eight and the largest documented floating inventory is eight. Each helper declares
+two named parameters ahead of its ellipsis, and each group passes more variadic arguments of
+a single class than any target documents registers for: twenty int arguments, twelve long
+long arguments, sixteen double arguments, and ten interleaved int and double pairs, which is
+ten of each class in one call. On every register-passing target at least one argument of the
+class under test must therefore reach the callee through memory, and on i686 all of them do -
+the sharpest contrast in the matrix, and the reason i686 is kept in the target list rather
+than dismissed as uninteresting.
+The interleaved group is the decisive case, because it overflows both classes in the same
+call: ten integers against a documented maximum of eight, and ten floating values against a
+documented maximum of eight, on all three register-passing targets simultaneously. That is
+the condition under which a variadic argument-area defect is most likely to surface.
+How each argument is actually routed - which register, which stack slot, in what order, and
+what additional bookkeeping a particular target's variadic sequence may require - is the
+ABI's decision and each backend's implementation detail. This record makes no claim about it,
+for two reasons: the repository documents register inventories rather than variadic routing
+rules, so any such claim would exceed its cited basis; and the suite is a black-box oracle in
+which only the retrieved values reach stdout. A correct backend agrees with the other three
+however it routes the arguments, and one line per retrieved argument means a divergent line
+names the exact argument slot that was mishandled without this record having to predict where
+that slot lives.
+Width normalization: the types long and unsigned long are never used, because sizeof(long)
+and sizeof(void *) are 4 on i686 and 8 on x86-64, AArch64 and RISC-V 64
+(docs/technical-specifications.md lines 457 to 462). long long is 64 bits on all four targets
+and is used in its place. Only int, long long and double appear, and the printf
+conversions are limited to %s, %d, %lld and %.6f. No address, no pointer value, no sizeof
+result and no plain char value is printed.
+Floating determinism: every floating value is a multiple of 0.25 or 0.5 and is therefore a
+dyadic rational exactly representable in IEEE binary64, and all floating output is printed
+at fixed precision with %.6f, so the rendered text is byte-identical on all four backends.
+Line count and structure of the golden record: twenty int lines plus one sum, twenty
+runtime int lines plus one sum, twelve long long lines plus one sum, twelve runtime long
+long lines plus one sum, sixteen double lines plus one sum, sixteen runtime double lines
+plus one sum, ten interleaved lines plus two sums, and ten runtime interleaved lines plus
+two sums, for exactly 126 lines. One line per retrieved argument or pair is what makes a
+spill defect diagnosable rather than merely detectable, because a single divergent line
+identifies the exact argument slot the backend mishandled.
+Cross-backend comparability: integer and double variadic argument passing was measured to
+produce byte-identical results on all four targets at all three optimization levels, so no
+target is restricted and all three oracles are enabled. Any cross-backend difference in
+this program is a genuine ABI-level finding rather than a documented implementation-defined
+difference, and it must be reported as a finding rather than patched: a verbatim reproducer,
+a byte-for-byte copy of this program, together with the captured per-compiler and per-backend
+outputs, an environment fingerprint, its recorded minimization status and the exact
+reproduction commands. Reduction is never
+performed during a run; it is a supervised activity carried out on the copy before a finding
+is promoted to the curated set.
+END
+expected_stdout    <<END
+fint[0]=1000
+fint[1]=1001
+fint[2]=1002
+fint[3]=1003
+fint[4]=1004
+fint[5]=1005
+fint[6]=1006
+fint[7]=1007
+fint[8]=1008
+fint[9]=1009
+fint[10]=1010
+fint[11]=1011
+fint[12]=1012
+fint[13]=1013
+fint[14]=1014
+fint[15]=1015
+fint[16]=1016
+fint[17]=1017
+fint[18]=1018
+fint[19]=1019
+fint_sum=20190
+rint[0]=2000
+rint[1]=2001
+rint[2]=2002
+rint[3]=2003
+rint[4]=2004
+rint[5]=2005
+rint[6]=2006
+rint[7]=2007
+rint[8]=2008
+rint[9]=2009
+rint[10]=2010
+rint[11]=2011
+rint[12]=2012
+rint[13]=2013
+rint[14]=2014
+rint[15]=2015
+rint[16]=2016
+rint[17]=2017
+rint[18]=2018
+rint[19]=2019
+rint_sum=40190
+fll[0]=1000000000000
+fll[1]=1000000000001
+fll[2]=1000000000002
+fll[3]=1000000000003
+fll[4]=1000000000004
+fll[5]=1000000000005
+fll[6]=1000000000006
+fll[7]=1000000000007
+fll[8]=1000000000008
+fll[9]=1000000000009
+fll[10]=1000000000010
+fll[11]=1000000000011
+fll_sum=12000000000066
+rll[0]=3000000000000
+rll[1]=3000000000001
+rll[2]=3000000000002
+rll[3]=3000000000003
+rll[4]=3000000000004
+rll[5]=3000000000005
+rll[6]=3000000000006
+rll[7]=3000000000007
+rll[8]=3000000000008
+rll[9]=3000000000009
+rll[10]=3000000000010
+rll[11]=3000000000011
+rll_sum=36000000000066
+fdbl[0]=1.000000
+fdbl[1]=1.500000
+fdbl[2]=2.000000
+fdbl[3]=2.500000
+fdbl[4]=3.000000
+fdbl[5]=3.500000
+fdbl[6]=4.000000
+fdbl[7]=4.500000
+fdbl[8]=5.000000
+fdbl[9]=5.500000
+fdbl[10]=6.000000
+fdbl[11]=6.500000
+fdbl[12]=7.000000
+fdbl[13]=7.500000
+fdbl[14]=8.000000
+fdbl[15]=8.500000
+fdbl_sum=76.000000
+rdbl[0]=100.000000
+rdbl[1]=100.500000
+rdbl[2]=101.000000
+rdbl[3]=101.500000
+rdbl[4]=102.000000
+rdbl[5]=102.500000
+rdbl[6]=103.000000
+rdbl[7]=103.500000
+rdbl[8]=104.000000
+rdbl[9]=104.500000
+rdbl[10]=105.000000
+rdbl[11]=105.500000
+rdbl[12]=106.000000
+rdbl[13]=106.500000
+rdbl[14]=107.000000
+rdbl[15]=107.500000
+rdbl_sum=1660.000000
+fmix[0]=10,0.250000
+fmix[1]=11,0.500000
+fmix[2]=12,0.750000
+fmix[3]=13,1.000000
+fmix[4]=14,1.250000
+fmix[5]=15,1.500000
+fmix[6]=16,1.750000
+fmix[7]=17,2.000000
+fmix[8]=18,2.250000
+fmix[9]=19,2.500000
+fmix_isum=145
+fmix_dsum=13.750000
+rmix[0]=50,0.500000
+rmix[1]=51,1.000000
+rmix[2]=52,1.500000
+rmix[3]=53,2.000000
+rmix[4]=54,2.500000
+rmix[5]=55,3.000000
+rmix[6]=56,3.500000
+rmix[7]=57,4.000000
+rmix[8]=58,4.500000
+rmix[9]=59,5.000000
+rmix_isum=545
+rmix_dsum=27.500000
+END

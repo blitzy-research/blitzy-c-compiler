@@ -1,0 +1,225 @@
+program            = 003_wide_and_unicode_literals
+area               = 11_literals_and_strings
+description        = Wide, UTF-8, 16-bit and 32-bit string and character literals, indexed in place with every element cast explicitly
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+Free of undefined and unspecified behaviour by construction:
+- No string literal is ever modified. Every literal is read only, through indexing.
+- No signed integer overflow. Every code point is at most 0x7FFF and every element is
+  widened to long long or unsigned long long, both 64-bit on all four targets, before
+  being printed. Loop counters are int and bounded by a literal element count.
+- No shift operations of any kind, so no shift count can be out of range.
+- No out-of-bounds access. Each loop bound is the literal's own element count,
+  computed as sizeof literal divided by sizeof of its first element, so the loop
+  visits exactly the elements including the terminating null and never one past it.
+  The explicit terminator reads index count-1, which is the last valid element.
+- No aliasing violation. The UTF-8 literal's elements are read and converted through
+  unsigned char, which is always permitted; the other literals are read through their
+  own element type by indexing the literal directly.
+- No uninitialized read. Every value read is an element of a string literal, and zero
+  has a static initializer.
+- Every universal-character-name obeys C11 6.4.3p2: no UCN specifies a short
+  identifier below 00A0 other than 0024. Plain ASCII characters are written directly
+  rather than as UCNs, because a UCN for them would be ill-formed.
+- No object is modified twice between sequence points; no argument to any call has a
+  side effect; nothing depends on padding bytes or on the addresses of unrelated
+  objects; no address or pointer value is printed.
+- Verified empirically: the default strict warning gate (-Wall -Wextra -pedantic
+  -Wconversion -Wsign-conversion -Wshadow -Werror) produces zero diagnostics, and
+  -fsanitize=undefined,address -fno-sanitize-recover=all runs to completion with no
+  output and exit status 0. -pedantic is retained deliberately: the four literal
+  prefixes are standard C11, not GNU extensions.
+END
+impl_defined_notes <<END
+The three C11 character type names are never written anywhere in the program, not
+even in a comment, and the hazards they represent are handled by construction rather
+than by a divergence marker:
+
+1. The wide character type's signedness and width are implementation-defined, and
+   this repository fixes them for no supported target: recursive, case-insensitive
+   searches of the two authoritative implementation documents, docs/project-guide.md
+   and docs/technical-specifications.md, for wchar, char16, char32 and unicode return
+   zero matches in either file. Scoped to those two, because two of the four terms do
+   occur elsewhere under docs/, in this suite's own methodology page, which cannot be
+   evidence for a conclusion it states. No
+   per-target table is given here, and that omission is deliberate. One measured on
+   this machine would describe the reference toolchain installed today rather than
+   any contract bcc documents, and citing it would make this program depend on a
+   property no repository artifact settles. The dependence is removed instead: every
+   wide element is indexed in place and cast explicitly to long long before
+   printing, which is correct whichever underlying type the implementation chose.
+   tests/conformance/EXPECTED_DIVERGENCES.md section 5.3 records the same decision
+   and the same reason.
+2. The 16-bit and 32-bit character type names cannot be named in THIS program at
+   all: they are uchar.h typedefs, and neither uchar.h nor wchar.h is among bcc's
+   nine required bundled freestanding headers (stddef.h, stdint.h, stdarg.h,
+   stdbool.h, limits.h, float.h, stdalign.h, stdnoreturn.h, iso646.h). Two header
+   exception classes are sanctioned in the corpus and only two, and neither reaches
+   those headers: the programs in area 07_variadics may include stdarg.h and nothing
+   else, and the dedicated bundled-header probe
+   12_preprocessor/003_bundled_header_inclusion.c may include exactly those nine,
+   with the bonus stdatomic.h excluded from both. This program takes neither
+   exception and includes no header at all, which is the corpus default, so the two
+   type names are simply unavailable to it. Every 16-bit and 32-bit element is
+   therefore indexed in place and cast explicitly to unsigned long long.
+3. All code point values are restricted to the range 0x00 to 0x7FFF, so no printed
+   value can be affected by the signedness difference in point 1: every value is
+   positive in every candidate element type.
+4. The UTF-8 literal's element type is plain char, whose signedness is itself
+   implementation-defined (signed on x86_64 and i686, unsigned on aarch64 and
+   riscv64), so each UTF-8 code unit is converted through unsigned char before being
+   widened.
+5. Array extents are printed as element counts, computed as sizeof literal divided by
+   sizeof of its first element, never as byte counts, so no element-width assumption
+   reaches the output. long long and unsigned long long are 64-bit on all four
+   targets, and no long, size_t or pointer is printed, so the i686 width difference
+   (sizeof(long) and sizeof(void *) are 4 on i686 and 8 elsewhere) has no effect.
+6. THE MAPPING OF A UNIVERSAL-CHARACTER-NAME TO THE EXTENDED EXECUTION CHARACTER SET is
+   implementation-defined under C11, and it is what every wide (L) value printed by this
+   program is. This is the one implementation-defined property the output genuinely
+   depends on, and it is the reason a conforming backend could otherwise be mislabelled:
+   an implementation that mapped U+00A9 to anything but 0xA9 would still be conforming,
+   yet a cross-backend comparison against a target that maps it to 0xA9 would report a
+   divergence that is not a defect. The program therefore does not assume the mapping --
+   it PINS it with _Static_assert on every wide value it uses (0x41, 0x24, 0xA9, 0x100,
+   0x7FF, 0x7FFF and 0x7A), so an implementation whose mapping differs is refused at
+   compile time with a message naming the expected value, instead of silently producing a
+   number the oracles would then have to attribute. Verified as a negative control:
+   changing one asserted value makes the translation fail with "static assertion failed:
+   wide execution character set: U+00A9 must map to 0xA9". The 16-bit and 32-bit values
+   are pinned the same way; those are SPECIFIED by C11 6.4.5 as UTF-16 and UTF-32 rather
+   than implementation-defined, and are asserted only so that an incorrect encoding is
+   also refused at compile time rather than after the fact.
+
+MEASURED WIDE EXECUTION CHARACTER SET, per target, with the suite's toolchain of record,
+which is what makes cross-backend comparison of the wide values sound:
+
+  target    __STDC_ISO_10646__   sizeof(wchar_t)   wchar_t signedness   U+00A9 -> value
+  x86_64    201706               4                 signed               169
+  i686      201706               4                 signed               169
+  aarch64   201706               4                 unsigned             169
+  riscv64   201706               4                 signed               169
+
+All four define __STDC_ISO_10646__, which is the standard's own way for an implementation
+to document that wchar_t values are Unicode code points, and all four map every universal
+character name in this program to its code point. Because the mapping agrees on all four
+and is pinned by the asserts, oracle (b) remains ENABLED for this program rather than
+restricted. The wchar_t signedness difference on aarch64 is real but cannot reach the
+output, for the reason given in point 3.
+
+__STDC_ISO_10646__ IS DELIBERATELY NOT USED AS A COMPILE-TIME GATE. Requiring it was
+tried and rejected on measurement: the alternate reference compiler maps every
+universal-character-name in this program to its correct code point while defining no such
+macro at all, so gating on
+the advertisement rather than on the behaviour would refuse a compiler that is doing
+exactly the right thing -- and would refuse the compiler under test for a property the
+suite never needed it to announce. The macro is recorded above as corroborating evidence;
+the asserts are the gate, because they test the property the printed values actually
+depend on.
+
+Documentation note, recorded for reference only. Support for the u8, u, U and L
+literal prefixes is not enumerated in the documented literal inventory.
+docs/technical-specifications.md line 99 and line 498 list numeric and string or
+character literal parsing with escape sequences and the u, l, ll and f suffixes, but
+none of the four prefixes; line 497's 44-keyword C11 list contains neither the
+16-bit nor the 32-bit character type name; and recursive, case-insensitive searches
+of the two authoritative implementation documents -- docs/project-guide.md and
+docs/technical-specifications.md -- for unicode, char16, char32 and wchar return zero
+matches in either file. As EXPECTED_DIVERGENCES.md says of the same searches, the
+claim is scoped to those two on purpose: two of those four terms do appear elsewhere
+under docs/, in this suite's own methodology page
+docs/testing/differential-conformance.md, which discusses this very question and so
+cannot be evidence for its own conclusion.
+
+That is an INVENTORY OMISSION, and an inventory omission is not a documented
+limitation. No marker is attached, and none may be minted on this basis alone, for
+two independent reasons. First, this program does not diverge, and a marker on a
+program that does not diverge yields an unexpected success, which fails the run.
+Second, and the binding reason, a marker's basis must be an artifact that EXPLICITLY
+documents the limitation: silence about a feature is not a statement about it, so an
+omission can never serve as a basis however many inventories omit it.
+
+Two conditions must therefore BOTH hold before a marker could exist here. A
+repository artifact must explicitly document the limitation, AND a real divergence
+must have been observed and reproduced. Until both hold, any divergence in this
+program is classified as a FINDING: kept as a verbatim reproducer with the captured
+outputs from every compiler and backend, an environment fingerprint and the exact
+reproduction commands, and reported rather than patched. If a marker ever does become
+valid it must be minted in both places at once, here and in
+tests/conformance/EXPECTED_DIVERGENCES.md, whose consistency is checked in both
+directions. That register's section 4.3 records this same analysis and reaches the
+same conclusion.
+
+The source file is pure US-ASCII: every non-ASCII character appears only as a
+universal-character-name escape.
+END
+expected_stdout    <<END
+wide_count=8
+wide[0]=65
+wide[1]=36
+wide[2]=169
+wide[3]=256
+wide[4]=2047
+wide[5]=32767
+wide[6]=122
+wide[7]=0
+u8_count=13
+u8[0]=65
+u8[1]=36
+u8[2]=194
+u8[3]=169
+u8[4]=196
+u8[5]=128
+u8[6]=223
+u8[7]=191
+u8[8]=231
+u8[9]=191
+u8[10]=191
+u8[11]=122
+u8[12]=0
+u16_count=8
+u16[0]=65
+u16[1]=36
+u16[2]=169
+u16[3]=256
+u16[4]=2047
+u16[5]=32767
+u16[6]=122
+u16[7]=0
+u32_count=8
+u32[0]=65
+u32[1]=36
+u32[2]=169
+u32[3]=256
+u32[4]=2047
+u32[5]=32767
+u32[6]=122
+u32[7]=0
+wide_char_A=65
+wide_char_dollar=36
+wide_char_copy=169
+wide_char_high=32767
+u16_char_A=65
+u16_char_copy=169
+u16_char_high=32767
+u32_char_A=65
+u32_char_copy=169
+u32_char_high=32767
+wide_terminator=0
+u16_terminator=0
+u32_terminator=0
+u8_terminator=0
+runtime_wide0=65
+runtime_u16_0=65
+runtime_u32_0=65
+runtime_u8_0=65
+END

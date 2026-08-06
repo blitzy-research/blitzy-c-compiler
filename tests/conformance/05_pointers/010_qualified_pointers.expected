@@ -1,0 +1,108 @@
+# Expectation record for 05_pointers/010_qualified_pointers.c
+#
+# Reproduce one cell by hand with no harness: render the three command templates
+# below, substituting the target triple, the optimization level, the source path,
+# the output path, and the target's runner (empty on the natively executing target).
+
+program            = 010_qualified_pointers
+area               = 05_pointers
+description        = const and volatile qualified pointers and qualified pointed-to types, with volatile reads forcing genuine loads
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+const is NEVER cast away and then written through. Every write goes to an object that is
+not itself const: plain, mpair and the volatile objects vval, varr, vcounter and vsink are
+all declared without const. The genuinely const objects cval, carr, cvval and cpair are
+only ever read, through const-qualified pointers. Adding a qualifier to a pointer type is
+an implicit, legal conversion and is used in that direction only, never the reverse. Every
+index is inside bounds: carr and varr have 5 elements indexed 0..4. The volatile counter
+arithmetic stays far inside int range. Writing through a const-qualified POINTER to a
+non-const object, as in int *const, is legal and is what the bump helper does.
+No signed integer overflow, no shift out of range, no aliasing violation, no read of
+uninitialized storage, no object modified twice between sequence points, at most one
+side-effecting argument per call, and no dependence on padding bytes or on the relative
+addresses of unrelated objects. The only external symbol is printf; no header is included,
+no file, socket, environment variable, clock or random source is touched, and every input
+is a literal in this source file.
+END
+impl_defined_notes <<END
+volatile only constrains how accesses are performed, never what values result, so a
+compiler that emits more or fewer loads still produces identical output. Every volatile
+read and write in this program is to an object whose value is fully determined by earlier
+statements in the same program, so the printed values are deterministic.
+No address or pointer value is printed. Pointer facts appear only as differences,
+comparisons and alignment residues, and every pointer difference is cast to long long
+before printing, so the printed text is identical whether ptrdiff_t is 32 or 64 bits.
+Plain char is never printed in a signedness-dependent way. The only conversion
+specifiers used anywhere in this program are %d and %lld, both of which are
+target-width independent.
+END
+expected_stdout    <<END
+read_pointer_to_const=11
+pointer_to_const_identity=1
+const_array_first=1
+const_array_index=4
+const_array_stepped=2
+const_array_offset=1
+const_array_span=5
+const_pointer_read=44
+const_pointer_write=45
+const_pointer_reread=45
+const_pointer_identity=1
+const_pointer_param_bump=50
+const_pointer_param_bump2=60
+const_pointer_to_const=11
+const_pointer_to_const_identity=1
+volatile_read=22
+volatile_after_write=23
+volatile_object=23
+volatile_identity=1
+volatile_array_first=10
+volatile_array_index=50
+volatile_array_stepped=30
+volatile_array_offset=2
+volatile_array_written=31
+const_volatile_read=33
+const_volatile_reread=33
+const_volatile_identity=1
+qual_added_read=60
+qual_added_same_object=1
+qual_added_sees_write=71
+volatile_added_read=71
+volatile_added_write_seen=72
+both_added_read=72
+const_struct=6 7
+const_struct_identity=1
+mutable_struct=8 9
+mutable_struct_written=80 90
+const_view_of_mutable=80 90
+sum_const_array=15
+sum_const_partial=6
+sum_const_interior=12
+sum_volatile_array=151
+sum_volatile_partial=30
+sum_const_of_mutable=72
+volatile_counter=7
+volatile_counter_doubled=14
+volatile_sink_total=12
+runtime_const_index=4
+runtime_volatile_index=40
+runtime_const_ptr_read=4
+runtime_const_ptr_offset=3
+runtime_volatile_ptr_read=40
+runtime_volatile_ptr_written=41
+runtime_volatile_ptr_offset=3
+runtime_sum_const=15
+runtime_sum_volatile=152
+runtime_const_volatile_read=31
+runtime_const_volatile_offset=2
+runtime_bump=74
+END

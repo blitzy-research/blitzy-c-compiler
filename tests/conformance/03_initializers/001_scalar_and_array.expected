@@ -1,0 +1,91 @@
+# Expectation record for tests/conformance/03_initializers/001_scalar_and_array.c
+# Area 03 baseline: scalar and array initialization, every element read back individually.
+
+program            = 001_scalar_and_array
+area               = 03_initializers
+description        = Baseline scalar and array initialization for static and automatic storage duration, with every array element and every struct member read back and printed individually
+targets            = x86_64, i686, aarch64, riscv64
+opt_levels         = -O0, -O1, -O2
+shared_flags       = -static
+bcc_command        = $BCC --target <triple> <opt> -static <src> -o <out>
+ref_command        = $REF_CC_<TRIPLE> <opt> -static <src> -o <out>
+run_command        = <runner> <out>
+expect_exit        = 0
+oracle_a           = enabled
+oracle_b           = enabled
+oracle_c           = enabled
+ub_notes           <<END
+This program contains no undefined and no unspecified behaviour.
+
+Every object is fully initialized by its initializer before any read: g_scalar,
+g_arr, g_u_arr and g_pt have static storage duration with explicit initializers;
+l_scalar, l_arr and l_pt are automatic with explicit initializers. There is no
+read of uninitialized storage anywhere.
+
+No arithmetic is performed on any initialized value, so no signed overflow is
+possible. The only arithmetic is the loop counter i, which runs 0..4 and 0..2 over
+arrays of 5 and 3 elements respectively, so every subscript is strictly in bounds
+and no one-past-end pointer is ever formed, let alone dereferenced.
+
+No shifts. No pointer casts, and no pointer value printed, compared or converted to an
+integer: the pointer arithmetic the language performs for a subscript, and the decay of
+each format-string literal at its printf call, are the only pointer operations present. No
+aliasing: each object is read only through its own declared type. No object is modified twice
+between sequence points
+initialized test data -- g_scalar, g_arr, g_u_arr, g_pt, l_scalar, l_arr and
+l_pt -- is never modified after its initializer at all, so every value the
+program prints is the value its initializer gave it. The one object that is
+modified is the loop counter i: it is assigned in the initial clause of each of
+the three for statements at 001_scalar_and_array.c lines 43, 46 and 53 and
+incremented in each of their controlling expressions, and every one of those
+assignments and increments is a full expression of its own, so each is separated
+from every other access to i by a sequence point. Its range is bounded by a
+literal in each case -- i < 5, i < 3 and i < 5 over arrays of 5, 3 and 5
+elements -- so it neither overflows nor leaves an array. Each printf call takes
+at most one argument with a side effect (none do). No padding byte is read or
+printed: only named members g_pt.x, g_pt.y, l_pt.x, l_pt.y are accessed, never
+the struct as a whole and never its representation.
+
+4294967295u is exactly UINT_MAX for a 32-bit unsigned int and is written with the
+u suffix, so it is representable without conversion on every target and no
+implementation-defined narrowing occurs.
+END
+impl_defined_notes <<END
+All values are int or unsigned int, which are 4 bytes on all four supported
+targets, and are printed with %d and %u only. The program contains no long,
+size_t, ptrdiff_t, intptr_t, float, double or long double, so the measured width
+differences between i686 (4-byte long and pointer) and the other three targets
+(8-byte) cannot affect the output.
+
+The only character data is the format-string literals, whose bytes printf copies
+through unchanged. No plain-char value is read as a number, converted, compared or
+formatted numerically, so the measured plain-char signedness difference (signed on
+x86_64 and i686, unsigned on aarch64 and riscv64) cannot arise.
+
+No address or pointer value is printed. No struct is printed as a whole, so
+padding bytes -- whose contents are unspecified -- are never observed.
+
+Output is therefore byte-identical on all four targets at all three optimization
+levels, which was verified by measurement.
+END
+expected_stdout    <<END
+g_scalar=42
+g_arr[0]=10
+g_arr[1]=20
+g_arr[2]=30
+g_arr[3]=40
+g_arr[4]=50
+g_u_arr[0]=0
+g_u_arr[1]=1
+g_u_arr[2]=4294967295
+g_pt.x=7
+g_pt.y=-9
+l_scalar=42
+l_arr[0]=10
+l_arr[1]=20
+l_arr[2]=30
+l_arr[3]=40
+l_arr[4]=50
+l_pt.x=7
+l_pt.y=-9
+END
